@@ -1,0 +1,5 @@
+{
+  "name": "Resource Scheduling App",
+  "description": "An application for managing resource scheduling, profiles, requests, staffing, and utilization.",
+  "requestFramePermissions": []
+}
