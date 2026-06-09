@@ -1,0 +1,922 @@
+import { Assignment, Resource, ResourceRequest, Order, OrderLine, FinancialItem, TimeEntry, BillingPlanItem, Contract, Customer, Milestone, ChangeRequest, Project, FxRate, BASE_CURRENCY } from './api.service';
+
+/** All raw data needed to compute financial rollups. */
+export interface FinanceData {
+  requests: ResourceRequest[];
+  assignments: Assignment[];
+  resources: Resource[];
+  orders: Order[];
+  orderLines: OrderLine[];
+  financials: FinancialItem[];
+  timeEntries?: TimeEntry[];
+  billingItems?: BillingPlanItem[];
+  contracts?: Contract[];
+  customers?: Customer[];
+  milestones?: Milestone[];
+  /** Approved change requests adjust the effective project budget (see effectiveBudgetForProject). */
+  changeRequests?: ChangeRequest[];
+  /** Optional project master data; used only to label portfolio-level alert rows. */
+  projects?: Project[];
+  /**
+   * Optional FX rate table (base-currency value of 1 unit of each currency).
+   * When supplied, monetary amounts that carry a currency (order lines via their
+   * order currency, billing items via their own currency) are normalised to
+   * BASE_CURRENCY before being summed, so rollups that span currencies are
+   * comparable. When ABSENT, every amount is summed as-is (no conversion) and
+   * all helpers reduce exactly to their single-currency behaviour. See
+   * convertToBase for the conversion semantics.
+   */
+  fxRates?: FxRate[];
+}
+
+export interface ProjectFinancials {
+  revenue: number;       // committed customer-order revenue imputed to the project
+  invoiced: number;      // revenue from Invoiced/Paid customer orders
+  backlog: number;       // revenue not yet invoiced
+  plannedLaborCost: number; // Σ booked assignment hours × resource costRate
+  actualLaborCost: number;  // Σ approved time-entry hours × resource costRate
+  laborCost: number;     // actual labor when available, otherwise planned fallback
+  externalCost: number;  // Σ purchase-order lines imputed to the project
+  actualCost: number;    // laborCost + externalCost
+  budget: number;        // effective budget: Σ financial-plan budget + Σ approved CR impactBudget
+  margin: number;        // revenue − actualCost
+  marginPct: number;     // margin / revenue (0 when no revenue)
+  burnPct: number;       // actualCost / effective budget (0 when no budget)
+  etc: number;           // estimated cost to complete
+  eac: number;           // estimate at completion (actualCost + ETC; CR-independent)
+  varianceAtCompletion: number; // effective budget − EAC
+}
+
+const finite = (v: number) => Number.isFinite(v) ? v : 0;
+const sum = (xs: number[]) => xs.reduce((a, b) => a + finite(b), 0);
+
+// --- Currency conversion (multi-currency rollups) ----------------------------
+//
+// All monetary rollups normalise to a single reporting/base currency
+// (BASE_CURRENCY = 'EUR'). An FxRate carries `rateToBase`: the base-currency
+// value of 1 unit of that currency (so the base currency itself has
+// rateToBase = 1). To express an amount given in `currency` in terms of `base`:
+//
+//     amountInBase = amount * (rateToBase[currency] / rateToBase[base])
+//
+// Conversion is deliberately CONSERVATIVE and total:
+//   • A missing/zero/non-finite rate is treated as 1 (a no-op), so an unknown
+//     currency contributes its raw amount rather than being dropped or turned
+//     into NaN. The same item never silently disappears from a rollup.
+//   • A non-finite amount contributes 0.
+// When the rate table is empty/undefined the result therefore equals the input
+// amount — which is what keeps per-project / per-item rollups byte-for-byte
+// identical to the pre-FX behaviour.
+
+/** Look up the base-currency value of 1 unit of `currency`; 1 when unknown/invalid. */
+function rateToBaseOf(currency: string | undefined, rates: readonly FxRate[] | undefined): number {
+  if (!currency || !rates) return 1;
+  const found = rates.find(r => r.currency === currency);
+  const rate = found?.rateToBase;
+  return Number.isFinite(rate) && (rate as number) > 0 ? (rate as number) : 1;
+}
+
+/**
+ * Convert `amount` (expressed in `currency`) into `base` using `rates`.
+ *
+ * Semantics: amount × (rateToBase(currency) / rateToBase(base)). The base
+ * currency defaults to BASE_CURRENCY ('EUR'). A missing or invalid rate is
+ * treated as 1 (no-op) so the function never returns NaN and never drops the
+ * amount; a non-finite amount contributes 0. With no `rates` supplied this is
+ * an identity on `amount`, preserving single-currency behaviour exactly.
+ */
+export function convertToBase(
+  amount: number,
+  currency: string | undefined,
+  rates: readonly FxRate[] | undefined,
+  base: string = BASE_CURRENCY,
+): number {
+  const value = finite(amount);
+  const from = rateToBaseOf(currency, rates);
+  const to = rateToBaseOf(base, rates);
+  // `to` is guaranteed > 0 (rateToBaseOf never returns 0), so this is finite.
+  return finite(value * (from / to));
+}
+
+export function plannedLaborCostForProject(projectId: string, d: FinanceData): number {
+  const reqIds = new Set(d.requests.filter(r => r.projectId === projectId).map(r => r.id));
+  return sum(
+    d.assignments
+      .filter(a => reqIds.has(a.requestId))
+      .map(a => a.assignedHours * (d.resources.find(r => r.id === a.resourceId)?.costRate ?? 0)),
+  );
+}
+
+export function actualLaborCostForProject(projectId: string, d: FinanceData): number {
+  const approved = (d.timeEntries ?? []).filter(t => t.projectId === projectId && t.status === 'Approved');
+  return sum(approved.map(t => t.hours * (d.resources.find(r => r.id === t.resourceId)?.costRate ?? 0)));
+}
+
+export function laborCostForProject(projectId: string, d: FinanceData): number {
+  const actual = actualLaborCostForProject(projectId, d);
+  return actual > 0 ? actual : plannedLaborCostForProject(projectId, d);
+}
+
+/**
+ * Σ of order-line amounts imputed to a project, restricted to orders of the
+ * given type/status. Each line's amount is denominated in its parent ORDER's
+ * currency (lines carry no currency of their own); when d.fxRates is present
+ * the amount is converted to base before summing, otherwise it is summed as-is
+ * (single-currency / pre-FX behaviour). Lines whose order is missing contribute
+ * their raw amount (unknown currency => no-op conversion).
+ */
+function lineSum(projectId: string, d: FinanceData, orderType: Order['type'], statuses?: Order['status'][]): number {
+  const orderCurrency = new Map(d.orders.map(o => [o.id, o.currency]));
+  const orderIds = new Set(
+    d.orders
+      .filter(o => o.type === orderType && (!statuses || statuses.includes(o.status)))
+      .map(o => o.id),
+  );
+  return sum(
+    d.orderLines
+      .filter(l => l.projectId === projectId && orderIds.has(l.orderId))
+      .map(l => convertToBase(l.amount, orderCurrency.get(l.orderId), d.fxRates)),
+  );
+}
+
+export function customerRevenueForProject(projectId: string, d: FinanceData): number {
+  return lineSum(projectId, d, 'Customer');
+}
+
+export function invoicedRevenueForProject(projectId: string, d: FinanceData): number {
+  return lineSum(projectId, d, 'Customer', ['Invoiced', 'Paid']);
+}
+
+export function externalCostForProject(projectId: string, d: FinanceData): number {
+  return lineSum(projectId, d, 'Purchase');
+}
+
+export function budgetForProject(projectId: string, d: FinanceData): number {
+  return sum(d.financials.filter(f => f.projectId === projectId).map(f => f.budget));
+}
+
+/** Σ impactBudget of APPROVED change requests for a project (0 when none / changeRequests absent). */
+export function approvedChangeBudgetForProject(projectId: string, d: FinanceData): number {
+  return sum(
+    (d.changeRequests ?? [])
+      .filter(c => c.projectId === projectId && c.status === 'Approved')
+      .map(c => c.impactBudget),
+  );
+}
+
+/**
+ * Effective (CR-adjusted) budget: the base financial-plan budget plus the sum of
+ * approved change-request budget impacts for the project. Identical to the base
+ * budget when no change requests are supplied or none are approved.
+ */
+export function effectiveBudgetForProject(projectId: string, d: FinanceData): number {
+  return budgetForProject(projectId, d) + approvedChangeBudgetForProject(projectId, d);
+}
+
+export function computeProjectFinancials(projectId: string, d: FinanceData): ProjectFinancials {
+  const revenue = customerRevenueForProject(projectId, d);
+  const invoiced = invoicedRevenueForProject(projectId, d);
+  const plannedLaborCost = plannedLaborCostForProject(projectId, d);
+  const actualLaborCost = actualLaborCostForProject(projectId, d);
+  const laborCost = laborCostForProject(projectId, d);
+  const externalCost = externalCostForProject(projectId, d);
+  const actualCost = laborCost + externalCost;
+  // CR-adjusted budget drives budget/burn/VAC; EAC is independent (actualCost + ETC).
+  const budget = effectiveBudgetForProject(projectId, d);
+  const margin = revenue - actualCost;
+  const etc = Math.max(0, plannedLaborCost - actualLaborCost);
+  const eac = actualCost + etc;
+  return {
+    revenue,
+    invoiced,
+    backlog: revenue - invoiced,
+    plannedLaborCost,
+    actualLaborCost,
+    laborCost,
+    externalCost,
+    actualCost,
+    budget,
+    margin,
+    marginPct: revenue > 0 ? (margin / revenue) * 100 : 0,
+    burnPct: budget > 0 ? (actualCost / budget) * 100 : 0,
+    etc,
+    eac,
+    varianceAtCompletion: budget - eac,
+  };
+}
+
+/** Company-wide billability: billable value (hours × billRate) vs cost (hours × costRate). */
+export function resourceBillability(resourceId: string, d: FinanceData): { cost: number; billable: number; hours: number } {
+  const res = d.resources.find(r => r.id === resourceId);
+  const costRate = res?.costRate ?? 0;
+  const billRate = res?.billRate ?? 0;
+  const hours = sum(d.assignments.filter(a => a.resourceId === resourceId).map(a => a.assignedHours));
+  return { hours, cost: hours * costRate, billable: hours * billRate };
+}
+
+// --- Billing-plan rollups (revenue recognition, A/R hygiene) -----------------
+
+/** Statuses on a BillingPlanItem that represent money actually billed to the customer. */
+const BILLED_STATUSES: ReadonlySet<BillingPlanItem['status']> = new Set<BillingPlanItem['status']>(['Invoiced', 'Paid']);
+
+/** Items belonging to a project (optionally filtered). Items with no projectId are ignored for project rollups. */
+function billingItemsForProject(projectId: string, d: FinanceData): BillingPlanItem[] {
+  return (d.billingItems ?? []).filter(i => i.projectId === projectId);
+}
+
+/** Whole-number day delta between two ISO date strings (floored, never negative). 0 when either is unparseable. */
+function daysBetween(fromIso: string | undefined, toIso: string | undefined): number {
+  if (!fromIso || !toIso) return 0;
+  const from = Date.parse(fromIso);
+  const to = Date.parse(toIso);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return 0;
+  return Math.max(0, Math.floor((to - from) / 86_400_000));
+}
+
+/**
+ * Σ amount of billing items already Invoiced or Paid for a project. Each item's
+ * amount is in its own currency; converted to base when d.fxRates is present
+ * (no-op otherwise, so single-currency rollups are unchanged).
+ */
+export function billedToDate(projectId: string, d: FinanceData): number {
+  return sum(
+    billingItemsForProject(projectId, d)
+      .filter(i => BILLED_STATUSES.has(i.status))
+      .map(i => convertToBase(i.amount, i.currency, d.fxRates)),
+  );
+}
+
+/**
+ * Customer revenue recognized to date for a project, via percentage-of-completion / EAC.
+ * Progress items recognize amount × progressPct/100. Advance (down payment) recognizes nothing
+ * on its own — it is billed ahead of delivery and surfaces as deferred revenue. Every other type
+ * recognizes its full amount once realized (Ready/Invoiced/Paid); Planned/Blocked recognize nothing.
+ */
+export function recognizedRevenue(projectId: string, d: FinanceData): number {
+  return sum(
+    billingItemsForProject(projectId, d).map(i => {
+      // Each item's recognized amount is in its own currency; convert to base
+      // (no-op when d.fxRates is absent) so mixed-currency projects reconcile.
+      if (i.type === 'Progress') {
+        const pct = Number.isFinite(i.progressPct) ? (i.progressPct as number) : 0;
+        return convertToBase(i.amount * (pct / 100), i.currency, d.fxRates);
+      }
+      if (i.type === 'Advance') return 0;
+      return BILLED_STATUSES.has(i.status) || i.status === 'Ready'
+        ? convertToBase(i.amount, i.currency, d.fxRates)
+        : 0;
+    }),
+  );
+}
+
+/** Unbilled / work-in-progress: revenue recognized (POC/EAC) but not yet billed. Floored at 0. */
+export function unbilledWip(projectId: string, d: FinanceData): number {
+  return Math.max(0, finite(recognizedRevenue(projectId, d)) - finite(billedToDate(projectId, d)));
+}
+
+/** Deferred revenue: amounts billed (Invoiced/Paid) in advance of what has been recognized. Floored at 0. */
+export function deferredRevenue(projectId: string, d: FinanceData): number {
+  return Math.max(0, finite(billedToDate(projectId, d)) - finite(recognizedRevenue(projectId, d)));
+}
+
+/** Σ retention (amount × retentionPct/100) held back on items not yet Paid (converted to base when d.fxRates is present). */
+export function retentionHeld(projectId: string, d: FinanceData): number {
+  return sum(
+    billingItemsForProject(projectId, d)
+      .filter(i => i.status !== 'Paid')
+      .map(i => {
+        const pct = Number.isFinite(i.retentionPct) ? (i.retentionPct as number) : 0;
+        return convertToBase(i.amount * (pct / 100), i.currency, d.fxRates);
+      }),
+  );
+}
+
+/** Σ tax (amount × taxRatePct/100) on items that have been Invoiced or Paid (converted to base when d.fxRates is present). */
+export function taxTotal(projectId: string, d: FinanceData): number {
+  return sum(
+    billingItemsForProject(projectId, d)
+      .filter(i => BILLED_STATUSES.has(i.status))
+      .map(i => {
+        const pct = Number.isFinite(i.taxRatePct) ? (i.taxRatePct as number) : 0;
+        return convertToBase(i.amount * (pct / 100), i.currency, d.fxRates);
+      }),
+  );
+}
+
+/**
+ * Simple DSO (days sales outstanding) proxy for a project, as of `asOfIso` (defaults to now).
+ * For each invoiced item: if Paid, days from issued→paid; otherwise days from issued→asOf.
+ * Items never issued, or not Invoiced/Paid, are excluded. Returns 0 when there is nothing to measure.
+ */
+export function dsoProxy(projectId: string, d: FinanceData, asOfIso?: string): number {
+  const asOf = asOfIso ?? new Date().toISOString();
+  const days = billingItemsForProject(projectId, d)
+    .filter(i => BILLED_STATUSES.has(i.status) && !!i.issuedDate)
+    .map(i => (i.status === 'Paid' ? daysBetween(i.issuedDate, i.paidDate) : daysBetween(i.issuedDate, asOf)));
+  if (days.length === 0) return 0;
+  return finite(sum(days) / days.length);
+}
+
+// --- A/R aging ---------------------------------------------------------------
+//
+// An item is OUTSTANDING when it has been issued to the customer but not yet
+// collected — i.e. status === 'Invoiced' (Paid items are already collected,
+// everything earlier than Invoiced has not been billed). Outstanding items are
+// bucketed by how many days they are overdue relative to their due date.
+
+/** A/R aging bucket keys, ordered oldest-debt-last. */
+export const AR_AGING_BUCKETS = ['0-30', '31-60', '61-90', '90+'] as const;
+export type ArAgingBucket = (typeof AR_AGING_BUCKETS)[number];
+
+/** Add a whole number of days to an ISO date, returning a YYYY-MM-DD string. Empty string when unparseable. */
+function addDaysIso(iso: string | undefined, days: number): string {
+  if (!iso) return '';
+  const base = Date.parse(iso);
+  if (!Number.isFinite(base)) return '';
+  const shifted = base + finite(days) * 86_400_000;
+  return new Date(shifted).toISOString().slice(0, 10);
+}
+
+/**
+ * Effective due date for a billing item: the explicit `dueDate` when present,
+ * otherwise `issuedDate` + `paymentTermsDays` (terms default to 0). Returns
+ * undefined when no due date can be derived (no dueDate and no issuedDate).
+ */
+export function effectiveDueDate(item: BillingPlanItem): string | undefined {
+  if (item.dueDate) return item.dueDate;
+  if (!item.issuedDate) return undefined;
+  const terms = Number.isFinite(item.paymentTermsDays) ? (item.paymentTermsDays as number) : 0;
+  return addDaysIso(item.issuedDate, terms) || undefined;
+}
+
+/** True when an item is outstanding (issued to the customer, not yet collected). */
+export function isOutstanding(item: BillingPlanItem): boolean {
+  return item.status === 'Invoiced';
+}
+
+/** Whole days an item is overdue as of `today` (0 when not yet due or no due date). */
+export function daysOverdue(item: BillingPlanItem, today: string): number {
+  return daysBetween(effectiveDueDate(item), today);
+}
+
+/** Map a days-overdue count onto an aging bucket. */
+export function bucketForDaysOverdue(days: number): ArAgingBucket {
+  const d = finite(days);
+  if (d <= 30) return '0-30';
+  if (d <= 60) return '31-60';
+  if (d <= 90) return '61-90';
+  return '90+';
+}
+
+export interface ArAgingBucketTotal {
+  count: number;
+  amount: number;
+}
+
+export interface ArAgingResult {
+  /** Per-bucket count + outstanding amount. Every bucket key is always present. */
+  buckets: Record<ArAgingBucket, ArAgingBucketTotal>;
+  /** Σ amount of all outstanding (Invoiced) items. */
+  totalOutstanding: number;
+  /** Σ amount of outstanding items that are at least 1 day past due. */
+  overdue: number;
+}
+
+function emptyBuckets(): Record<ArAgingBucket, ArAgingBucketTotal> {
+  return {
+    '0-30': { count: 0, amount: 0 },
+    '31-60': { count: 0, amount: 0 },
+    '61-90': { count: 0, amount: 0 },
+    '90+': { count: 0, amount: 0 },
+  };
+}
+
+/**
+ * Age a set of billing items as of `today`. Only outstanding (Invoiced) items
+ * are considered; each is placed in a bucket by days overdue from its due date.
+ * `totalOutstanding` is the full outstanding balance; `overdue` is the portion
+ * past due (days overdue > 0, i.e. everything outside the leading not-yet-due
+ * part of the 0-30 bucket).
+ *
+ * Bucketed amounts are denominated in each item's own currency. Pass `rates` to
+ * normalise every amount to base before bucketing so a cross-currency book is
+ * comparable; omit it and amounts are summed as-is (single-currency behaviour).
+ */
+export function arAging(items: readonly BillingPlanItem[], today: string, rates?: readonly FxRate[]): ArAgingResult {
+  const buckets = emptyBuckets();
+  let totalOutstanding = 0;
+  let overdue = 0;
+  for (const item of items) {
+    if (!isOutstanding(item)) continue;
+    const amount = convertToBase(item.amount, item.currency, rates);
+    const days = daysOverdue(item, today);
+    const bucket = buckets[bucketForDaysOverdue(days)];
+    bucket.count += 1;
+    bucket.amount += amount;
+    totalOutstanding += amount;
+    if (days > 0) overdue += amount;
+  }
+  return { buckets, totalOutstanding, overdue };
+}
+
+export interface ArAgingCustomerRow extends ArAgingResult {
+  customerId: string;
+  customerName: string;
+}
+
+/**
+ * A/R aging grouped by customer. Billing items are joined to their contract
+ * (via `contractId`) and then to the customer (via `Contract.customerId`).
+ * Items whose contract or customer cannot be resolved are grouped under a
+ * synthetic 'unknown' customer so no outstanding balance is silently dropped.
+ * Rows are returned sorted by descending outstanding balance.
+ *
+ * Pass `rates` to normalise per-item amounts to base before aging/sorting so
+ * customers billed in different currencies sort on a like-for-like balance;
+ * omit it for single-currency (pre-FX) behaviour.
+ */
+export function arAgingByCustomer(
+  items: readonly BillingPlanItem[],
+  contracts: readonly Contract[],
+  customers: readonly Customer[],
+  today: string,
+  rates?: readonly FxRate[],
+): ArAgingCustomerRow[] {
+  const contractToCustomer = new Map(contracts.map(c => [c.id, c.customerId]));
+  const customerName = new Map(customers.map(c => [c.id, c.name]));
+
+  const byCustomer = new Map<string, BillingPlanItem[]>();
+  for (const item of items) {
+    if (!isOutstanding(item)) continue;
+    const customerId = contractToCustomer.get(item.contractId) ?? 'unknown';
+    const list = byCustomer.get(customerId);
+    if (list) list.push(item);
+    else byCustomer.set(customerId, [item]);
+  }
+
+  return [...byCustomer.entries()]
+    .map(([customerId, group]) => ({
+      customerId,
+      customerName: customerName.get(customerId) ?? (customerId === 'unknown' ? 'Unknown' : customerId),
+      ...arAging(group, today, rates),
+    }))
+    .sort((a, b) => b.totalOutstanding - a.totalOutstanding);
+}
+
+/**
+ * Refined DSO over a set of outstanding billing items as of `today`:
+ * amount-weighted average age (issued→today) of the outstanding balance.
+ * Larger invoices and older invoices pull the number up, which tracks the
+ * collection-risk intuition better than the unweighted issued→asOf proxy.
+ * Returns 0 when there is no outstanding, dated balance.
+ *
+ * Pass `rates` to weight by base-normalised amounts (so larger invoices in any
+ * currency are compared like-for-like); omit it for single-currency behaviour.
+ * The result is a duration in days and is unaffected by a uniform currency
+ * rescaling — it only matters when the book mixes currencies.
+ */
+export function dsoOutstanding(items: readonly BillingPlanItem[], today: string, rates?: readonly FxRate[]): number {
+  let weighted = 0;
+  let total = 0;
+  for (const item of items) {
+    if (!isOutstanding(item) || !item.issuedDate) continue;
+    const amount = convertToBase(item.amount, item.currency, rates);
+    weighted += amount * daysBetween(item.issuedDate, today);
+    total += amount;
+  }
+  return total > 0 ? finite(weighted / total) : 0;
+}
+
+// --- Dated revenue recognition (ASC 606 / IFRS 15, simplified) ---------------
+//
+// Recognition is spread across calendar months (YYYY-MM) per the performance
+// obligation pattern, deterministically and without reference to "now":
+//   • Fixed Price (Milestone / Progress)  -> percentage-of-completion (POC)
+//   • Recurring                            -> straight-line over the periods
+//   • TimeAndMaterials / Capped / Expense  -> as-incurred (approved time × billRate)
+//   • Advance                              -> deferred; recognized as work progresses
+//   • CreditNote                           -> recognized (negative) in its period
+// Output rows cover exactly the requested `periods`; amounts that fall outside
+// the window are clamped to the first/last period so cumulative + deferred stay
+// reconcilable end-to-end.
+
+export interface RecognitionPeriod {
+  period: string;      // YYYY-MM
+  recognized: number;  // revenue recognized in this period
+  cumulative: number;  // running Σ recognized through this period
+  deferred: number;    // Σ billed-as-Advance to date − cumulative recognized (floored at 0)
+}
+
+/** YYYY-MM for an ISO date, or '' when unparseable. */
+function periodOf(iso: string | undefined): string {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  return new Date(t).toISOString().slice(0, 7);
+}
+
+/** Generate the inclusive list of YYYY-MM periods between two YYYY-MM bounds. */
+function periodRange(fromYm: string, toYm: string): string[] {
+  const parse = (ym: string): [number, number] | null => {
+    const [y, m] = ym.split('-').map(Number);
+    return Number.isFinite(y) && Number.isFinite(m) ? [y, m] : null;
+  };
+  const a = parse(fromYm);
+  const b = parse(toYm);
+  if (!a || !b) return [];
+  const out: string[] = [];
+  let [y, m] = a;
+  const [ey, em] = b;
+  // guard against inverted/huge ranges
+  let guard = 0;
+  while ((y < ey || (y === ey && m <= em)) && guard < 1200) {
+    out.push(`${y}-${String(m).padStart(2, '0')}`);
+    m += 1;
+    if (m > 12) { m = 1; y += 1; }
+    guard += 1;
+  }
+  return out;
+}
+
+/** Clamp a period into [first,last]; '' (undated) clamps to the first period. */
+function clampPeriod(p: string, periods: string[]): string {
+  if (periods.length === 0) return '';
+  const first = periods[0];
+  const last = periods[periods.length - 1];
+  if (!p || p < first) return first;
+  if (p > last) return last;
+  return p;
+}
+
+/** Recognized amount for a single item under its obligation pattern (period-agnostic total). */
+function itemRecognizedTotal(item: BillingPlanItem): number {
+  switch (item.type) {
+    case 'Progress': {
+      const pct = Number.isFinite(item.progressPct) ? (item.progressPct as number) : 0;
+      return finite(item.amount) * (pct / 100);
+    }
+    case 'Advance':
+      // recognized via work progress, never on its own line
+      return 0;
+    default:
+      return BILLED_STATUSES.has(item.status) || item.status === 'Ready' ? finite(item.amount) : 0;
+  }
+}
+
+/**
+ * The single period in which a non-recurring item's recognition lands. Prefers
+ * the most decision-relevant available date: issued → paid → milestone date →
+ * expected → due. Recurring items are handled separately (straight-line).
+ */
+function recognitionPeriodFor(item: BillingPlanItem, d: FinanceData): string {
+  if (item.type === 'Milestone' && item.milestoneId) {
+    const ms = (d.milestones ?? []).find(m => m.id === item.milestoneId);
+    const p = periodOf(ms?.date);
+    if (p) return p;
+  }
+  return (
+    periodOf(item.issuedDate) ||
+    periodOf(item.paidDate) ||
+    periodOf(item.expectedDate) ||
+    periodOf(item.dueDate)
+  );
+}
+
+/** Number of months a recurrence spans. */
+function recurrenceMonths(rec: BillingPlanItem['recurrence']): number {
+  switch (rec) {
+    case 'Quarterly': return 3;
+    case 'Annual': return 12;
+    default: return 1; // Monthly / undefined
+  }
+}
+
+interface ScheduleOpts {
+  /** Filter billing items to a single project. */
+  projectId?: string;
+  /** Filter billing items to a single contract. */
+  contractId?: string;
+}
+
+/**
+ * Build a dated revenue-recognition schedule across the supplied `periods`
+ * (an explicit list of YYYY-MM, or a [from,to] pair which is expanded).
+ *
+ * Per-pattern placement:
+ *   • Recurring: straight-line — amount split evenly across the recurrence
+ *     window starting at its anchor period, with each slice clamped into range.
+ *   • TimeAndMaterials / Capped / Expense: as-incurred — approved time entries
+ *     (hours × resource billRate) booked in the entry's month, Capped to capAmount.
+ *   • Everything else (Milestone, Progress, CreditNote, ...): the item's
+ *     recognized total lands in its single recognition period.
+ *   • Advance: never recognized directly; it inflates deferred revenue until
+ *     cumulative recognition catches up.
+ */
+export function recognitionSchedule(
+  data: FinanceData,
+  periods: readonly string[] | { from: string; to: string },
+  opts: ScheduleOpts = {},
+): RecognitionPeriod[] {
+  const periodList = Array.isArray(periods)
+    ? [...periods]
+    : periodRange((periods as { from: string; to: string }).from, (periods as { from: string; to: string }).to);
+  if (periodList.length === 0) return [];
+
+  const index = new Map(periodList.map((p, i) => [p, i]));
+  const recognizedByPeriod = new Array<number>(periodList.length).fill(0);
+
+  const matches = (i: BillingPlanItem) =>
+    (opts.projectId === undefined || i.projectId === opts.projectId) &&
+    (opts.contractId === undefined || i.contractId === opts.contractId);
+
+  const items = (data.billingItems ?? []).filter(matches);
+
+  const addAt = (period: string, amount: number) => {
+    const i = index.get(clampPeriod(period, periodList));
+    if (i !== undefined) recognizedByPeriod[i] += finite(amount);
+  };
+
+  // Track advances billed-to-date per period for deferral roll-forward.
+  const advanceBilledByPeriod = new Array<number>(periodList.length).fill(0);
+
+  for (const item of items) {
+    if (item.type === 'Advance') {
+      if (BILLED_STATUSES.has(item.status)) {
+        const p = clampPeriod(recognitionPeriodFor(item, data), periodList);
+        const i = index.get(p);
+        if (i !== undefined) advanceBilledByPeriod[i] += finite(item.amount);
+      }
+      continue; // not recognized directly
+    }
+
+    if (item.type === 'Recurring') {
+      const total = itemRecognizedTotal(item);
+      if (total === 0) continue;
+      const months = recurrenceMonths(item.recurrence);
+      const slice = total / months;
+      const anchor = clampPeriod(recognitionPeriodFor(item, data), periodList);
+      const anchorIdx = index.get(anchor) ?? 0;
+      for (let k = 0; k < months; k++) {
+        const idx = Math.min(anchorIdx + k, periodList.length - 1); // clamp tail into window
+        recognizedByPeriod[idx] += slice;
+      }
+      continue;
+    }
+
+    if (item.type === 'TimeAndMaterials' || item.type === 'Capped' || item.type === 'Expense') {
+      // As-incurred: approved time entries for the obligation's project × billRate.
+      const projectId = item.projectId;
+      const entries = (data.timeEntries ?? []).filter(
+        t => t.status === 'Approved' && (projectId === undefined || t.projectId === projectId),
+      );
+      let booked = 0;
+      const cap = Number.isFinite(item.capAmount) ? (item.capAmount as number) : Infinity;
+      for (const t of entries) {
+        const rate = data.resources.find(r => r.id === t.resourceId)?.billRate ?? 0;
+        let value = finite(t.hours) * rate;
+        if (booked + value > cap) value = Math.max(0, cap - booked);
+        if (value <= 0) continue;
+        booked += value;
+        addAt(periodOf(t.date), value);
+      }
+      continue;
+    }
+
+    // Milestone / Progress / CreditNote / fallback: single-period recognition.
+    const total = itemRecognizedTotal(item);
+    if (total !== 0) addAt(recognitionPeriodFor(item, data), total);
+  }
+
+  // Roll forward cumulative recognition + deferred (advances billed but unearned).
+  const rows: RecognitionPeriod[] = [];
+  let cumulative = 0;
+  let advanceBilledCum = 0;
+  for (let i = 0; i < periodList.length; i++) {
+    cumulative += recognizedByPeriod[i];
+    advanceBilledCum += advanceBilledByPeriod[i];
+    rows.push({
+      period: periodList[i],
+      recognized: finite(recognizedByPeriod[i]),
+      cumulative: finite(cumulative),
+      deferred: Math.max(0, finite(advanceBilledCum) - finite(cumulative)),
+    });
+  }
+  return rows;
+}
+
+// --- Margin drivers ----------------------------------------------------------
+//
+// Decomposes project margin into its three cost drivers so a P&L view can show
+// where the money goes. Cost dimensions are mutually exclusive:
+//   • laborCost    — people cost (actual approved time, else planned bookings)
+//   • externalCost — purchase-order lines imputed to the project
+//   • expenseCost  — other actual spend tracked on the financial plan
+// Margin is revenue minus the three drivers; marginPct is margin / revenue.
+
+/** Σ actual spend recorded on the project's financial-plan items (non-labor, non-PO expenses). */
+export function expenseCostForProject(projectId: string, d: FinanceData): number {
+  return sum(d.financials.filter(f => f.projectId === projectId).map(f => f.actual));
+}
+
+export interface MarginDrivers {
+  revenue: number;
+  laborCost: number;
+  externalCost: number;
+  expenseCost: number;
+  margin: number;     // revenue − (labor + external + expense)
+  marginPct: number;  // margin / revenue (0 when no revenue)
+}
+
+/** Break a project's margin into revenue and its labor / external / expense cost drivers. */
+export function marginDrivers(projectId: string, d: FinanceData): MarginDrivers {
+  const revenue = finite(customerRevenueForProject(projectId, d));
+  const laborCost = finite(laborCostForProject(projectId, d));
+  const externalCost = finite(externalCostForProject(projectId, d));
+  const expenseCost = finite(expenseCostForProject(projectId, d));
+  const margin = revenue - (laborCost + externalCost + expenseCost);
+  return {
+    revenue,
+    laborCost,
+    externalCost,
+    expenseCost,
+    margin,
+    marginPct: revenue > 0 ? (margin / revenue) * 100 : 0,
+  };
+}
+
+// --- Project / portfolio alerts ----------------------------------------------
+//
+// Threshold-based health flags driven off computeProjectFinancials. A project
+// is flagged when margin falls below target, when burn exceeds the warn level,
+// or when EAC overruns the (CR-adjusted) budget. `items` carries human-readable
+// reasons for whatever flags fired.
+
+export interface AlertThresholds {
+  /** Margin % at or below which marginBelowTarget fires. */
+  marginTargetPct: number;
+  /** Burn % at or above which burnOver fires. */
+  burnWarnPct: number;
+}
+
+export const DEFAULT_ALERT_THRESHOLDS: AlertThresholds = { marginTargetPct: 15, burnWarnPct: 90 };
+
+export interface ProjectAlerts {
+  marginBelowTarget: boolean;
+  burnOver: boolean;
+  eacOverBudget: boolean;
+  items: string[];
+}
+
+/** True when any flag on the result is raised. */
+export function hasAnyAlert(a: ProjectAlerts): boolean {
+  return a.marginBelowTarget || a.burnOver || a.eacOverBudget;
+}
+
+/**
+ * Evaluate health thresholds for a single project.
+ *   • marginBelowTarget: there is revenue and marginPct ≤ marginTargetPct
+ *   • burnOver:          there is a budget and burnPct ≥ burnWarnPct
+ *   • eacOverBudget:     there is a budget and EAC > effective budget
+ *     (equivalently varianceAtCompletion < 0)
+ * Projects with no revenue never trip the margin flag, and projects with no
+ * budget never trip the burn / EAC flags — there is nothing to measure against.
+ */
+export function projectAlerts(
+  projectId: string,
+  d: FinanceData,
+  thresholds: AlertThresholds = DEFAULT_ALERT_THRESHOLDS,
+): ProjectAlerts {
+  const f = computeProjectFinancials(projectId, d);
+  const marginBelowTarget = f.revenue > 0 && f.marginPct <= thresholds.marginTargetPct;
+  const burnOver = f.budget > 0 && f.burnPct >= thresholds.burnWarnPct;
+  const eacOverBudget = f.budget > 0 && f.eac > f.budget;
+
+  const items: string[] = [];
+  if (marginBelowTarget) {
+    items.push(`Margin ${f.marginPct.toFixed(1)}% is at or below target ${thresholds.marginTargetPct}%`);
+  }
+  if (burnOver) {
+    items.push(`Burn ${f.burnPct.toFixed(1)}% is at or above warning ${thresholds.burnWarnPct}%`);
+  }
+  if (eacOverBudget) {
+    items.push(`EAC ${f.eac.toFixed(0)} exceeds budget ${f.budget.toFixed(0)} (VAC ${f.varianceAtCompletion.toFixed(0)})`);
+  }
+  return { marginBelowTarget, burnOver, eacOverBudget, items };
+}
+
+export interface PortfolioAlertRow {
+  projectId: string;
+  name?: string;
+  alerts: ProjectAlerts;
+}
+
+/**
+ * Run projectAlerts across every project referenced by the finance data and
+ * return only those with at least one flag raised. The project universe is the
+ * union of project ids seen in financial plans, order lines, requests, billing
+ * items and change requests, so a project shows up even if it only has, say, an
+ * over-budget purchase order. Rows are labelled from `d.projects` when present.
+ */
+export function portfolioAlerts(
+  d: FinanceData,
+  thresholds: AlertThresholds = DEFAULT_ALERT_THRESHOLDS,
+): PortfolioAlertRow[] {
+  const projectIds = new Set<string>();
+  for (const f of d.financials) projectIds.add(f.projectId);
+  for (const l of d.orderLines) projectIds.add(l.projectId);
+  for (const r of d.requests) { if (r.projectId) projectIds.add(r.projectId); }
+  for (const i of d.billingItems ?? []) { if (i.projectId) projectIds.add(i.projectId); }
+  for (const c of d.changeRequests ?? []) projectIds.add(c.projectId);
+
+  const name = new Map((d.projects ?? []).map(p => [p.id, p.name]));
+
+  return [...projectIds]
+    .sort()
+    .map(projectId => ({ projectId, name: name.get(projectId), alerts: projectAlerts(projectId, d, thresholds) }))
+    .filter(row => hasAnyAlert(row.alerts));
+}
+
+// --- Portfolio totals in base currency ---------------------------------------
+//
+// Convenience aggregate for a multi-currency portfolio: every monetary input is
+// normalised to BASE_CURRENCY before summing, so the figures are directly
+// comparable across contracts/orders denominated in different currencies.
+// Order-line amounts are converted through their parent ORDER's currency;
+// billing-item amounts through the item's own currency. With no fxRates present
+// these are plain (single-currency) sums.
+
+export interface PortfolioTotals {
+  /** Reporting currency these totals are expressed in (BASE_CURRENCY). */
+  baseCurrency: string;
+  /** Σ customer order-line revenue (all statuses), in base. */
+  customerRevenue: number;
+  /** Σ customer order-line revenue on Invoiced/Paid orders, in base. */
+  invoicedRevenue: number;
+  /** customerRevenue − invoicedRevenue (revenue not yet invoiced), in base. */
+  backlog: number;
+  /** Σ purchase order-line amounts (external/subcontract cost), in base. */
+  externalCost: number;
+  /** Σ billing-item amounts Invoiced/Paid, in base. */
+  billed: number;
+  /** Σ recognized revenue (POC/realized) across billing items, in base. */
+  recognized: number;
+  /** Σ retention held (items not yet Paid), in base. */
+  retentionHeld: number;
+}
+
+/**
+ * Roll the whole portfolio up into BASE_CURRENCY in a single pass over orders +
+ * billing items. Project attribution is irrelevant here — these are company-wide
+ * totals — so amounts are taken straight from the source rows and converted via
+ * convertToBase (no-op when d.fxRates is absent, i.e. identical to summing the
+ * raw amounts). `recognized` reuses the same per-item recognition rule as
+ * recognizedRevenue (Progress → POC; Advance → 0; otherwise full when realized).
+ */
+export function portfolioTotalsInBase(d: FinanceData): PortfolioTotals {
+  const orderById = new Map(d.orders.map(o => [o.id, o] as const));
+
+  let customerRevenue = 0;
+  let invoicedRevenue = 0;
+  let externalCost = 0;
+  for (const line of d.orderLines) {
+    const order = orderById.get(line.orderId);
+    if (!order) continue; // orphan line: no order => no currency/type context
+    const amountInBase = convertToBase(line.amount, order.currency, d.fxRates);
+    if (order.type === 'Customer') {
+      customerRevenue += amountInBase;
+      if (order.status === 'Invoiced' || order.status === 'Paid') invoicedRevenue += amountInBase;
+    } else if (order.type === 'Purchase') {
+      externalCost += amountInBase;
+    }
+  }
+
+  let billed = 0;
+  let recognized = 0;
+  let retention = 0;
+  for (const i of d.billingItems ?? []) {
+    if (BILLED_STATUSES.has(i.status)) billed += convertToBase(i.amount, i.currency, d.fxRates);
+
+    if (i.type === 'Progress') {
+      const pct = Number.isFinite(i.progressPct) ? (i.progressPct as number) : 0;
+      recognized += convertToBase(i.amount * (pct / 100), i.currency, d.fxRates);
+    } else if (i.type !== 'Advance' && (BILLED_STATUSES.has(i.status) || i.status === 'Ready')) {
+      recognized += convertToBase(i.amount, i.currency, d.fxRates);
+    }
+
+    if (i.status !== 'Paid') {
+      const pct = Number.isFinite(i.retentionPct) ? (i.retentionPct as number) : 0;
+      retention += convertToBase(i.amount * (pct / 100), i.currency, d.fxRates);
+    }
+  }
+
+  return {
+    baseCurrency: BASE_CURRENCY,
+    customerRevenue: finite(customerRevenue),
+    invoicedRevenue: finite(invoicedRevenue),
+    backlog: finite(customerRevenue - invoicedRevenue),
+    externalCost: finite(externalCost),
+    billed: finite(billed),
+    recognized: finite(recognized),
+    retentionHeld: finite(retention),
+  };
+}

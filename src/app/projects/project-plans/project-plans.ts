@@ -1,32 +1,16 @@
-import { ChangeDetectionStrategy, Component, signal, computed, input, inject, OnInit } from '@angular/core';
+import { ChangeDetectionStrategy, Component, signal, computed, input, inject, DestroyRef } from '@angular/core';
+import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
-import { CommonModule } from '@angular/common';
+import { DatePipe } from '@angular/common';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Project } from '../../services/api.service';
-
-interface WorkPackage {
-  id: string;
-  projectId: string;
-  name: string;
-  startDate: string;
-  endDate: string;
-  status: 'Planned' | 'In Progress' | 'Completed';
-  progress: number;
-  assignee: string;
-}
-
-interface Milestone {
-  id: string;
-  projectId: string;
-  name: string;
-  date: string;
-  status: 'Pending' | 'Achieved';
-}
+import { ApiService, Project, WorkPackage, Milestone } from '../../services/api.service';
+import { NotificationService } from '../../services/notification.service';
+import { AuthService } from '../../services/auth.service';
 
 @Component({
   selector: 'app-project-plans',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, CommonModule, FormsModule, ReactiveFormsModule],
+  imports: [MatIconModule, DatePipe, FormsModule, ReactiveFormsModule],
   template: `
     <div [class]="projectId() ? '' : 'max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8'">
       <div class="space-y-8">
@@ -38,7 +22,7 @@ interface Milestone {
                 <h2 class="text-3xl sm:text-4xl font-bold text-slate-900 tracking-tight">Project Schedule & Plans</h2>
                 <p class="text-slate-500 mt-2 text-sm sm:text-base">Manage work packages, scheduling, and key milestones.</p>
               </div>
-              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" class="bg-slate-50 border border-slate-200 text-slate-900 text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block p-2.5">
+              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" class="bg-white focus:bg-white border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500/25 focus:border-blue-500 block p-2.5">
                 <option value="" disabled>Select a project...</option>
                 @for (p of projects(); track p.id) {
                   <option [value]="p.id">{{ p.name }}</option>
@@ -52,17 +36,17 @@ interface Milestone {
             }
           </div>
           <div class="flex gap-3">
-            <button (click)="openMilestoneForm()" class="bg-white border border-slate-200 text-slate-700 px-4 py-2 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors shadow-sm flex items-center gap-2">
+            <button (click)="openMilestoneForm()" class="bg-white border border-slate-200 text-slate-700 px-4 py-2 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors shadow-sm ring-1 ring-slate-900/5 flex items-center gap-2">
               <mat-icon class="text-sm">flag</mat-icon> Add Milestone
             </button>
-            <button (click)="openWpForm()" class="bg-indigo-600 text-white px-4 py-2 rounded-xl text-sm font-medium hover:bg-indigo-700 transition-colors shadow-sm flex items-center gap-2">
+            <button (click)="openWpForm()" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-sm px-4 py-2 rounded-xl text-sm transition-colors flex items-center gap-2">
               <mat-icon class="text-sm">add</mat-icon> Add Work Package
             </button>
           </div>
         </div>
 
         @if (!(projectId() || selectedProjectId())) {
-          <div class="bg-white rounded-2xl border border-slate-100 p-12 text-center">
+          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm ring-1 ring-slate-900/5 p-12 text-center">
             <mat-icon class="text-slate-400 mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
             <h3 class="text-lg font-medium text-slate-900 mt-4">No Project Selected</h3>
             <p class="text-slate-500 mt-1">Please select a project from the dropdown above to view plans and milestones.</p>
@@ -72,10 +56,10 @@ interface Milestone {
           <!-- Work Packages (Main Content) -->
           <div class="lg:col-span-2 space-y-6">
             <h3 class="text-lg font-medium text-slate-900 flex items-center gap-2">
-              <mat-icon class="text-indigo-600">account_tree</mat-icon> Work Packages
+              <mat-icon class="text-blue-600">account_tree</mat-icon> Work Packages
             </h3>
-            
-            <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
+
+            <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 overflow-hidden shadow-sm hover:shadow-md transition-shadow">
               <table class="w-full text-left border-collapse">
                 <thead>
                   <tr class="bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-500 uppercase tracking-wider">
@@ -91,7 +75,7 @@ interface Milestone {
                   <tr class="text-sm text-slate-700 hover:bg-slate-50 transition-colors group">
                     <td class="py-4 px-4">
                       <div class="font-medium text-slate-900">{{ wp.name }}</div>
-                      <div class="text-xs text-slate-500 font-mono mt-0.5">{{ wp.id }}</div>
+                      <div class="text-xs text-blue-700 font-mono mt-0.5">{{ wp.id }}</div>
                     </td>
                     <td class="py-4 px-4">
                       <div class="flex items-center gap-1.5 text-slate-600 text-xs">
@@ -101,7 +85,7 @@ interface Milestone {
                     </td>
                     <td class="py-4 px-4">
                       <div class="flex items-center gap-2">
-                        <div class="w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-xs font-bold">
+                        <div class="w-6 h-6 rounded-full bg-blue-50 text-blue-700 ring-1 ring-blue-200 flex items-center justify-center text-xs font-bold">
                           {{ wp.assignee.charAt(0) }}
                         </div>
                         <span class="text-xs font-medium">{{ wp.assignee }}</span>
@@ -112,15 +96,17 @@ interface Milestone {
                         <div class="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
                           <div class="h-full rounded-full transition-all duration-500"
                                [class.bg-emerald-500]="wp.progress === 100"
-                               [class.bg-indigo-500]="wp.progress > 0 && wp.progress < 100"
-                               [class.bg-slate-300]="wp.progress === 0"
+                               [class.bg-gradient-to-r]="wp.progress > 0 && wp.progress < 100"
+                               [class.from-blue-500]="wp.progress > 0 && wp.progress < 100"
+                               [class.to-blue-600]="wp.progress > 0 && wp.progress < 100"
+                               [class.bg-slate-100]="wp.progress === 0"
                                [style.width.%]="wp.progress"></div>
                         </div>
-                        <span class="text-xs font-medium w-8 text-right">{{ wp.progress }}%</span>
+                        <span class="text-xs font-mono tabular-nums font-medium w-8 text-right">{{ wp.progress }}%</span>
                       </div>
                     </td>
                     <td class="py-4 px-4 text-right">
-                      <button class="text-slate-400 hover:text-indigo-600 transition-colors opacity-0 group-hover:opacity-100">
+                      <button (click)="openEditWpForm(wp)" class="text-slate-400 hover:text-blue-700 transition-colors opacity-0 group-hover:opacity-100">
                         <mat-icon class="text-sm">edit</mat-icon>
                       </button>
                     </td>
@@ -142,29 +128,31 @@ interface Milestone {
             <mat-icon class="text-amber-500">emoji_events</mat-icon> Key Milestones
           </h3>
 
-          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-            <div class="relative border-l-2 border-slate-100 ml-3 space-y-8">
+          <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm hover:shadow-md transition-shadow p-6">
+            <div class="relative border-l-2 border-slate-200 ml-3 space-y-8">
               @for (milestone of filteredMilestones(); track milestone.id; let last = $last) {
                 <div class="relative pl-6">
                   <!-- Timeline Dot -->
                   <div class="absolute -left-[9px] top-1 w-4 h-4 rounded-full border-2 border-white flex items-center justify-center"
                        [class.bg-emerald-500]="milestone.status === 'Achieved'"
-                       [class.bg-slate-300]="milestone.status === 'Pending'">
+                       [class.bg-slate-200]="milestone.status === 'Pending'">
                     @if (milestone.status === 'Achieved') {
                       <mat-icon class="text-white text-[10px] w-[10px] h-[10px]">check</mat-icon>
                     }
                   </div>
-                  
+
                   <div>
                     <div class="flex items-center justify-between mb-1">
                       <h4 class="text-sm font-semibold text-slate-900" [class.line-through]="milestone.status === 'Achieved'">
                         {{ milestone.name }}
                       </h4>
-                      <span class="text-xs font-medium px-2 py-0.5 rounded-full"
+                      <span class="text-xs font-medium px-2 py-0.5 rounded-full ring-1"
                             [class.bg-emerald-50]="milestone.status === 'Achieved'"
                             [class.text-emerald-700]="milestone.status === 'Achieved'"
+                            [class.ring-emerald-200]="milestone.status === 'Achieved'"
                             [class.bg-slate-100]="milestone.status === 'Pending'"
-                            [class.text-slate-600]="milestone.status === 'Pending'">
+                            [class.text-slate-700]="milestone.status === 'Pending'"
+                            [class.ring-slate-200]="milestone.status === 'Pending'">
                         {{ milestone.status }}
                       </span>
                     </div>
@@ -172,6 +160,14 @@ interface Milestone {
                       <mat-icon class="text-[14px] w-[14px] h-[14px]">event</mat-icon>
                       {{ milestone.date | date:'mediumDate' }}
                     </div>
+                    @if (milestone.status === 'Pending') {
+                      <button (click)="achieveMilestone(milestone)" class="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 ring-1 ring-emerald-200 px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-100 transition-colors">
+                        <mat-icon class="text-[14px] w-[14px] h-[14px]">check_circle</mat-icon>
+                        Approve
+                      </button>
+                    } @else if (milestone.approvedBy) {
+                      <p class="mt-2 text-[11px] text-slate-500">Approved by {{ milestone.approvedBy }}</p>
+                    }
                   </div>
                 </div>
               }
@@ -182,22 +178,22 @@ interface Milestone {
           </div>
           
           <!-- Quick Summary -->
-          <div class="bg-indigo-50 rounded-2xl p-6 border border-indigo-100">
-            <h4 class="text-sm font-semibold text-indigo-900 mb-4">Schedule Summary</h4>
+          <div class="bg-blue-50 rounded-2xl p-6 border border-blue-200 ring-1 ring-blue-100">
+            <h4 class="text-sm font-semibold text-blue-700 mb-4">Schedule Summary</h4>
             <div class="space-y-3">
               <div class="flex justify-between text-sm">
-                <span class="text-indigo-700">Total Work Packages</span>
-                <span class="font-medium text-indigo-900">{{ filteredWorkPackages().length }}</span>
+                <span class="text-blue-700">Total Work Packages</span>
+                <span class="font-mono tabular-nums font-medium text-slate-900">{{ filteredWorkPackages().length }}</span>
               </div>
               <div class="flex justify-between text-sm">
-                <span class="text-indigo-700">Completed</span>
-                <span class="font-medium text-indigo-900">
+                <span class="text-blue-700">Completed</span>
+                <span class="font-mono tabular-nums font-medium text-slate-900">
                   {{ completedWorkPackagesCount() }}
                 </span>
               </div>
               <div class="flex justify-between text-sm">
-                <span class="text-indigo-700">Milestones Achieved</span>
-                <span class="font-medium text-indigo-900">
+                <span class="text-blue-700">Milestones Achieved</span>
+                <span class="font-mono tabular-nums font-medium text-slate-900">
                   {{ achievedMilestonesCount() }} / {{ filteredMilestones().length }}
                 </span>
               </div>
@@ -210,32 +206,32 @@ interface Milestone {
 
       <!-- Add Milestone Modal -->
       @if (showMilestoneForm()) {
-        <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6">
-          <div class="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
-            <div class="px-6 sm:px-8 py-6 border-b border-slate-100 flex items-center justify-between bg-gradient-to-br from-slate-50 to-white">
+        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6">
+          <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
+            <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
               <h2 class="text-2xl font-bold text-slate-900 tracking-tight">Add Milestone</h2>
-              <button (click)="closeMilestoneForm()" class="text-slate-400 hover:text-slate-600 hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <button (click)="closeMilestoneForm()" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
-            
+
             <div class="p-6 sm:p-8 overflow-y-auto flex-1">
               <form [formGroup]="milestoneForm" (ngSubmit)="saveMilestone()" class="space-y-6">
                 <div>
                   <label for="milestoneName" class="block text-sm font-semibold text-slate-700 mb-1.5">Milestone Name *</label>
-                  <input id="milestoneName" type="text" formControlName="name" class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all text-sm bg-slate-50 focus:bg-white" placeholder="e.g. Phase 1 Completion">
+                  <input id="milestoneName" type="text" formControlName="name" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. Phase 1 Completion">
                 </div>
-                
+
                 <div>
                   <label for="milestoneDate" class="block text-sm font-semibold text-slate-700 mb-1.5">Date *</label>
-                  <input id="milestoneDate" type="date" formControlName="date" class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all text-sm bg-slate-50 focus:bg-white">
+                  <input id="milestoneDate" type="date" formControlName="date" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
                 </div>
               </form>
             </div>
-            
-            <div class="px-6 sm:px-8 py-5 border-t border-slate-100 bg-slate-50/80 backdrop-blur-sm flex justify-end gap-3">
+
+            <div class="px-6 sm:px-8 py-5 border-t border-slate-200 bg-slate-50 flex justify-end gap-3">
               <button type="button" (click)="closeMilestoneForm()" class="px-5 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all">Cancel</button>
-              <button type="button" (click)="saveMilestone()" [disabled]="!milestoneForm.valid" class="px-6 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 hover:shadow-lg hover:-translate-y-0.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none">
+              <button type="button" (click)="saveMilestone()" [disabled]="!milestoneForm.valid" class="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none">
                 Save
               </button>
             </div>
@@ -245,43 +241,104 @@ interface Milestone {
 
       <!-- Add Work Package Modal -->
       @if (showWpForm()) {
-        <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6">
-          <div class="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
-            <div class="px-6 sm:px-8 py-6 border-b border-slate-100 flex items-center justify-between bg-gradient-to-br from-slate-50 to-white">
+        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6">
+          <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
+            <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
               <h2 class="text-2xl font-bold text-slate-900 tracking-tight">Add Work Package</h2>
-              <button (click)="closeWpForm()" class="text-slate-400 hover:text-slate-600 hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <button (click)="closeWpForm()" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
-            
+
             <div class="p-6 sm:p-8 overflow-y-auto flex-1">
               <form [formGroup]="wpForm" (ngSubmit)="saveWp()" class="space-y-6">
                 <div>
                   <label for="wpName" class="block text-sm font-semibold text-slate-700 mb-1.5">Work Package Name *</label>
-                  <input id="wpName" type="text" formControlName="name" class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all text-sm bg-slate-50 focus:bg-white" placeholder="e.g. Requirements Analysis">
+                  <input id="wpName" type="text" formControlName="name" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. Requirements Analysis">
                 </div>
-                
+
                 <div class="grid grid-cols-2 gap-4">
                   <div>
                     <label for="wpStartDate" class="block text-sm font-semibold text-slate-700 mb-1.5">Start Date *</label>
-                    <input id="wpStartDate" type="date" formControlName="startDate" class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all text-sm bg-slate-50 focus:bg-white">
+                    <input id="wpStartDate" type="date" formControlName="startDate" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
                   </div>
                   <div>
                     <label for="wpEndDate" class="block text-sm font-semibold text-slate-700 mb-1.5">End Date *</label>
-                    <input id="wpEndDate" type="date" formControlName="endDate" class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all text-sm bg-slate-50 focus:bg-white">
+                    <input id="wpEndDate" type="date" formControlName="endDate" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
                   </div>
                 </div>
 
                 <div>
                   <label for="wpAssignee" class="block text-sm font-semibold text-slate-700 mb-1.5">Assignee *</label>
-                  <input id="wpAssignee" type="text" formControlName="assignee" class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all text-sm bg-slate-50 focus:bg-white" placeholder="e.g. John Doe">
+                  <input id="wpAssignee" type="text" formControlName="assignee" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. John Doe">
                 </div>
               </form>
             </div>
-            
-            <div class="px-6 sm:px-8 py-5 border-t border-slate-100 bg-slate-50/80 backdrop-blur-sm flex justify-end gap-3">
+
+            <div class="px-6 sm:px-8 py-5 border-t border-slate-200 bg-slate-50 flex justify-end gap-3">
               <button type="button" (click)="closeWpForm()" class="px-5 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all">Cancel</button>
-              <button type="button" (click)="saveWp()" [disabled]="!wpForm.valid" class="px-6 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 hover:shadow-lg hover:-translate-y-0.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none">
+              <button type="button" (click)="saveWp()" [disabled]="!wpForm.valid" class="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none">
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      }
+
+      <!-- Edit Work Package Modal -->
+      @if (showEditWpForm()) {
+        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6">
+          <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
+            <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
+              <h2 class="text-2xl font-bold text-slate-900 tracking-tight">Edit Work Package</h2>
+              <button (click)="closeEditWpForm()" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
+                <mat-icon>close</mat-icon>
+              </button>
+            </div>
+
+            <div class="p-6 sm:p-8 overflow-y-auto flex-1">
+              <form [formGroup]="editWpForm" (ngSubmit)="saveEditWp()" class="space-y-6">
+                <div>
+                  <label for="editWpName" class="block text-sm font-semibold text-slate-700 mb-1.5">Work Package Name *</label>
+                  <input id="editWpName" type="text" formControlName="name" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. Requirements Analysis">
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                  <div>
+                    <label for="editWpStartDate" class="block text-sm font-semibold text-slate-700 mb-1.5">Start Date *</label>
+                    <input id="editWpStartDate" type="date" formControlName="startDate" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
+                  </div>
+                  <div>
+                    <label for="editWpEndDate" class="block text-sm font-semibold text-slate-700 mb-1.5">End Date *</label>
+                    <input id="editWpEndDate" type="date" formControlName="endDate" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
+                  </div>
+                </div>
+
+                <div>
+                  <label for="editWpAssignee" class="block text-sm font-semibold text-slate-700 mb-1.5">Assignee *</label>
+                  <input id="editWpAssignee" type="text" formControlName="assignee" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. John Doe">
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                  <div>
+                    <label for="editWpStatus" class="block text-sm font-semibold text-slate-700 mb-1.5">Status *</label>
+                    <select id="editWpStatus" formControlName="status" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white">
+                      <option value="Planned">Planned</option>
+                      <option value="In Progress">In Progress</option>
+                      <option value="Completed">Completed</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label for="editWpProgress" class="block text-sm font-semibold text-slate-700 mb-1.5">Progress (%) *</label>
+                    <input id="editWpProgress" type="number" min="0" max="100" formControlName="progress" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
+                  </div>
+                </div>
+              </form>
+            </div>
+
+            <div class="px-6 sm:px-8 py-5 border-t border-slate-200 bg-slate-50 flex justify-end gap-3">
+              <button type="button" (click)="closeEditWpForm()" class="px-5 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all">Cancel</button>
+              <button type="button" (click)="saveEditWp()" [disabled]="!editWpForm.valid" class="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none">
                 Save
               </button>
             </div>
@@ -291,15 +348,21 @@ interface Milestone {
     </div>
   `
 })
-export class ProjectPlans implements OnInit {
+export class ProjectPlans {
   projectId = input<string>();
   private api = inject(ApiService);
-  
-  projects = signal<Project[]>([]);
+  private notificationService = inject(NotificationService);
+  private auth = inject(AuthService);
+  private destroyRef = inject(DestroyRef);
+
+  projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
+  projects = computed(() => this.projectsRes.value());
   selectedProjectId = signal<string>('');
 
   showMilestoneForm = signal(false);
   showWpForm = signal(false);
+  showEditWpForm = signal(false);
+  editingWpId = signal<string | null>(null);
 
   milestoneForm = new FormGroup({
     name: new FormControl('', Validators.required),
@@ -313,22 +376,20 @@ export class ProjectPlans implements OnInit {
     assignee: new FormControl('', Validators.required)
   });
 
-  workPackages = signal<WorkPackage[]>([
-    { id: 'WP-1.1', projectId: 'P-1001', name: 'Requirements Analysis', startDate: '2023-10-01', endDate: '2023-10-15', status: 'Completed', progress: 100, assignee: 'Alice Smith' },
-    { id: 'WP-1.2', projectId: 'P-1001', name: 'System Architecture Design', startDate: '2023-10-16', endDate: '2023-11-05', status: 'Completed', progress: 100, assignee: 'Bob Jones' },
-    { id: 'WP-2.1', projectId: 'P-1002', name: 'Frontend Development', startDate: '2023-11-06', endDate: '2023-12-20', status: 'In Progress', progress: 65, assignee: 'Charlie Brown' },
-    { id: 'WP-2.2', projectId: 'P-1002', name: 'Backend API Implementation', startDate: '2023-11-06', endDate: '2023-12-15', status: 'In Progress', progress: 80, assignee: 'Diana Prince' },
-    { id: 'WP-3.1', projectId: 'P-1001', name: 'Integration Testing', startDate: '2023-12-21', endDate: '2024-01-15', status: 'Planned', progress: 0, assignee: 'Eve Davis' },
-    { id: 'WP-4.1', projectId: 'P-1002', name: 'User Acceptance Testing (UAT)', startDate: '2024-01-16', endDate: '2024-01-31', status: 'Planned', progress: 0, assignee: 'Alice Smith' },
-  ]);
+  editWpForm = new FormGroup({
+    name: new FormControl('', Validators.required),
+    startDate: new FormControl('', Validators.required),
+    endDate: new FormControl('', Validators.required),
+    assignee: new FormControl('', Validators.required),
+    status: new FormControl<WorkPackage['status']>('Planned', Validators.required),
+    progress: new FormControl(0, Validators.required)
+  });
 
-  milestones = signal<Milestone[]>([
-    { id: 'M1', projectId: 'P-1001', name: 'Project Kickoff', date: '2023-10-01', status: 'Achieved' },
-    { id: 'M2', projectId: 'P-1001', name: 'Requirements Signed Off', date: '2023-10-15', status: 'Achieved' },
-    { id: 'M3', projectId: 'P-1002', name: 'Architecture Approved', date: '2023-11-05', status: 'Achieved' },
-    { id: 'M4', projectId: 'P-1002', name: 'Development Complete', date: '2023-12-20', status: 'Pending' },
-    { id: 'M5', projectId: 'P-1001', name: 'Go-Live', date: '2024-02-01', status: 'Pending' },
-  ]);
+  private wpRes = rxResource({ stream: () => this.api.getWorkPackages(), defaultValue: [] as WorkPackage[] });
+  workPackages = this.wpRes.value;
+
+  private milestoneRes = rxResource({ stream: () => this.api.getMilestones(), defaultValue: [] as Milestone[] });
+  milestones = this.milestoneRes.value;
 
   filteredWorkPackages = computed(() => {
     const pId = this.projectId() || this.selectedProjectId();
@@ -345,14 +406,10 @@ export class ProjectPlans implements OnInit {
   completedWorkPackagesCount = computed(() => this.filteredWorkPackages().filter(wp => wp.status === 'Completed').length);
   achievedMilestonesCount = computed(() => this.filteredMilestones().filter(m => m.status === 'Achieved').length);
 
-  ngOnInit() {
-    this.api.getProjects().subscribe(p => this.projects.set(p));
-  }
-
   openMilestoneForm() {
     const pId = this.projectId() || this.selectedProjectId();
     if (!pId) {
-      alert('Please select a project first.');
+      this.notificationService.show('Please select a project first', 'info');
       return;
     }
     this.showMilestoneForm.set(true);
@@ -368,21 +425,20 @@ export class ProjectPlans implements OnInit {
     const pId = this.projectId() || this.selectedProjectId();
     if (!pId) return;
 
-    const newMilestone: Milestone = {
-      id: 'M' + Math.floor(Math.random() * 10000),
+    const v = this.milestoneForm.getRawValue();
+    this.api.createMilestone({
       projectId: pId,
+      name: v.name ?? '',
+      date: v.date ?? '',
       status: 'Pending',
-      ...this.milestoneForm.value
-    } as any;
-
-    this.milestones.update(m => [...m, newMilestone]);
+    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.milestoneRes.reload());
     this.closeMilestoneForm();
   }
 
   openWpForm() {
     const pId = this.projectId() || this.selectedProjectId();
     if (!pId) {
-      alert('Please select a project first.');
+      this.notificationService.show('Please select a project first', 'info');
       return;
     }
     this.showWpForm.set(true);
@@ -398,15 +454,63 @@ export class ProjectPlans implements OnInit {
     const pId = this.projectId() || this.selectedProjectId();
     if (!pId) return;
 
-    const newWp: WorkPackage = {
-      id: 'WP' + Math.floor(Math.random() * 10000),
+    const v = this.wpForm.getRawValue();
+    this.api.createWorkPackage({
       projectId: pId,
+      name: v.name ?? '',
+      startDate: v.startDate ?? '',
+      endDate: v.endDate ?? '',
       status: 'Planned',
       progress: 0,
-      ...this.wpForm.value
-    } as any;
-
-    this.workPackages.update(wp => [...wp, newWp]);
+      assignee: v.assignee ?? '',
+    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.wpRes.reload());
     this.closeWpForm();
+  }
+
+  openEditWpForm(wp: WorkPackage) {
+    this.editingWpId.set(wp.id);
+    this.editWpForm.setValue({
+      name: wp.name,
+      startDate: wp.startDate,
+      endDate: wp.endDate,
+      assignee: wp.assignee,
+      status: wp.status,
+      progress: wp.progress,
+    });
+    this.showEditWpForm.set(true);
+  }
+
+  closeEditWpForm() {
+    this.showEditWpForm.set(false);
+    this.editingWpId.set(null);
+    this.editWpForm.reset();
+  }
+
+  saveEditWp() {
+    if (this.editWpForm.invalid) return;
+    const id = this.editingWpId();
+    if (!id) return;
+
+    const v = this.editWpForm.getRawValue();
+    this.api.updateWorkPackage(id, {
+      name: v.name ?? '',
+      startDate: v.startDate ?? '',
+      endDate: v.endDate ?? '',
+      assignee: v.assignee ?? '',
+      status: v.status ?? 'Planned',
+      progress: v.progress ?? 0,
+    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.wpRes.reload());
+    this.closeEditWpForm();
+  }
+
+  achieveMilestone(milestone: Milestone) {
+    this.api.updateMilestone(milestone.id, {
+      status: 'Achieved',
+      approvedBy: this.auth.userId(),
+      approvedAt: new Date().toISOString(),
+    }).subscribe(() => {
+      this.milestoneRes.reload();
+      this.notificationService.show('Milestone approved', 'success');
+    });
   }
 }

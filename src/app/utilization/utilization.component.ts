@@ -1,21 +1,30 @@
-import { ChangeDetectionStrategy, Component, inject, signal, OnInit, computed } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, signal, computed } from '@angular/core';
+import { rxResource } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
-import { ApiService, Resource, Assignment, ResourceRequest } from '../services/api.service';
-import { CommonModule } from '@angular/common';
+import { ApiService, Resource, Assignment, ResourceRequest, TimeEntry } from '../services/api.service';
+import { AuthService } from '../services/auth.service';
+import { DecimalPipe } from '@angular/common';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { forkJoin } from 'rxjs';
+
+interface UtilizationData {
+  resources: Resource[];
+  assignments: Assignment[];
+  requests: ResourceRequest[];
+  timeEntries: TimeEntry[];
+}
 
 @Component({
   selector: 'app-utilization',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, CommonModule, ReactiveFormsModule],
+  imports: [MatIconModule, DecimalPipe, ReactiveFormsModule],
   template: `
     <div class="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8 space-y-8">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <h1 class="text-3xl sm:text-4xl font-bold text-slate-900 tracking-tight">Manage Resource Utilization</h1>
-        <div class="flex items-center gap-3 bg-white/80 backdrop-blur-md px-5 py-3 rounded-2xl shadow-sm border border-slate-200/60">
+        <div class="flex items-center gap-3 bg-white px-5 py-3 rounded-2xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200">
           <span class="text-sm font-bold tracking-wide text-slate-500 uppercase">Team Average:</span>
-          <span class="text-xl font-black tracking-tight" [ngClass]="getUtilizationColorText(averageUtilization())">
+          <span class="text-xl font-black tracking-tight font-mono tabular-nums" [class]="getUtilizationColorText(averageUtilization())">
             {{ averageUtilization() | number:'1.0-0' }}%
           </span>
         </div>
@@ -23,28 +32,28 @@ import { forkJoin } from 'rxjs';
 
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 sm:gap-8">
         <!-- Left Pane: Managed Resources -->
-        <div class="lg:col-span-1 bg-white/80 backdrop-blur-md rounded-3xl shadow-sm border border-slate-200/60 overflow-hidden flex flex-col h-[800px] hover:shadow-md transition-all">
-          <div class="p-6 sm:p-8 border-b border-slate-100 bg-slate-50/50">
+        <div class="lg:col-span-1 bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden flex flex-col h-[800px] hover:shadow-md transition-all">
+          <div class="p-6 sm:p-8 border-b border-slate-200 bg-slate-50">
             <h2 class="text-xl font-bold text-slate-900 tracking-tight">My Team</h2>
             <p class="text-sm font-medium text-slate-500 mt-2">Resources you manage</p>
           </div>
           <div class="overflow-y-auto flex-1 divide-y divide-slate-100">
             @for (res of managedResources(); track res.id) {
-              <div class="p-6 hover:bg-slate-50/80 transition-all cursor-pointer group relative"
-                   [class.bg-indigo-50]="selectedResource()?.id === res.id"
+              <div class="p-6 hover:bg-slate-50 transition-all cursor-pointer group relative"
+                   [class.bg-blue-50]="selectedResource()?.id === res.id"
                    tabindex="0"
                    (keydown.enter)="selectResource(res)"
                    (click)="selectResource(res)">
                 @if (selectedResource()?.id === res.id) {
-                  <div class="absolute left-0 top-0 bottom-0 w-1.5 bg-indigo-600 rounded-r-full"></div>
+                  <div class="absolute left-0 top-0 bottom-0 w-1.5 bg-blue-600 rounded-r-full"></div>
                 }
                 <div class="flex items-center justify-between mb-4">
                   <div class="flex items-center gap-4">
-                    <div class="w-12 h-12 bg-gradient-to-br from-slate-100 to-slate-200 rounded-2xl flex items-center justify-center text-slate-600 font-bold text-lg shadow-sm border border-white group-hover:scale-105 transition-transform">
+                    <div class="w-12 h-12 bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl flex items-center justify-center text-white font-bold text-lg shadow-sm ring-1 ring-slate-900/5 group-hover:scale-105 transition-transform">
                       {{ res.name.charAt(0) }}
                     </div>
                     <div>
-                      <h3 class="font-bold text-slate-900 text-lg group-hover:text-indigo-700 transition-colors">{{ res.name }}</h3>
+                      <h3 class="font-bold text-slate-900 text-lg group-hover:text-blue-700 transition-colors">{{ res.name }}</h3>
                       <p class="text-xs font-semibold tracking-wide text-slate-500 uppercase mt-0.5">{{ res.role }}</p>
                     </div>
                   </div>
@@ -52,11 +61,11 @@ import { forkJoin } from 'rxjs';
                 <div class="mt-4">
                   <div class="flex items-center justify-between text-xs mb-2">
                     <span class="font-bold tracking-wide text-slate-500 uppercase">Utilization</span>
-                    <span class="font-black text-sm" [ngClass]="getUtilizationColorText(res.utilization)">{{ res.utilization | number:'1.0-0' }}%</span>
+                    <span class="font-black text-sm font-mono tabular-nums" [class]="getUtilizationColorText(res.utilization)">{{ res.utilization | number:'1.0-0' }}%</span>
                   </div>
                   <div class="w-full bg-slate-100 rounded-full h-2 shadow-inner overflow-hidden">
-                    <div class="h-full rounded-full transition-all duration-500 ease-out" 
-                         [ngClass]="getUtilizationColorClass(res.utilization)"
+                    <div class="h-full rounded-full transition-all duration-500 ease-out"
+                         [class]="getUtilizationColorClass(res.utilization)"
                          [style.width.%]="res.utilization > 100 ? 100 : res.utilization"></div>
                   </div>
                 </div>
@@ -72,24 +81,24 @@ import { forkJoin } from 'rxjs';
         <div class="lg:col-span-2 flex flex-col gap-6 sm:gap-8">
           @if (selectedResource()) {
             <!-- Resource Header -->
-            <div class="bg-white/80 backdrop-blur-md p-6 sm:p-8 rounded-3xl shadow-sm border border-slate-200/60 flex flex-col sm:flex-row sm:items-center justify-between gap-6 hover:shadow-md transition-all">
+            <div class="bg-white p-6 sm:p-8 rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-6 hover:shadow-md transition-all">
               <div>
                 <h2 class="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">{{ selectedResource()?.name }}</h2>
-                <p class="text-slate-500 font-medium mt-2">{{ selectedResource()?.role }} <span class="mx-2 text-slate-300">•</span> Capacity: <span class="font-bold text-slate-700">{{ selectedResource()?.capacity }}h/week</span></p>
+                <p class="text-slate-500 font-medium mt-2">{{ selectedResource()?.role }} <span class="mx-2 text-slate-400">•</span> Capacity: <span class="font-bold text-slate-700 font-mono tabular-nums">{{ selectedResource()?.capacity }}h/week</span></p>
               </div>
-              <div class="text-left sm:text-right bg-slate-50/50 p-4 rounded-2xl border border-slate-100">
-                <div class="text-4xl font-black tracking-tighter" [ngClass]="getUtilizationColorText(selectedResource()?.utilization || 0)">
+              <div class="text-left sm:text-right bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                <div class="text-4xl font-black tracking-tighter font-mono tabular-nums" [class]="getUtilizationColorText(selectedResource()?.utilization || 0)">
                   {{ selectedResource()?.utilization | number:'1.0-0' }}%
                 </div>
-                <div class="text-sm font-bold tracking-wide uppercase mt-1" [ngClass]="getStatusColorText(selectedResource()?.utilization || 0)">
+                <div class="text-sm font-bold tracking-wide uppercase mt-1" [class]="getStatusColorText(selectedResource()?.utilization || 0)">
                   {{ getStatusText(selectedResource()?.utilization || 0) }}
                 </div>
               </div>
             </div>
 
             <!-- Assignments -->
-            <div class="bg-white/80 backdrop-blur-md rounded-3xl shadow-sm border border-slate-200/60 overflow-hidden flex-1 flex flex-col hover:shadow-md transition-all">
-              <div class="p-6 sm:p-8 border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden flex-1 flex flex-col hover:shadow-md transition-all">
+              <div class="p-6 sm:p-8 border-b border-slate-200 bg-slate-50 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <h3 class="text-xl font-bold text-slate-900 tracking-tight">Assignments</h3>
                 <div class="flex flex-wrap gap-3">
                   @if (copiedAssignment()) {
@@ -97,20 +106,20 @@ import { forkJoin } from 'rxjs';
                       <mat-icon class="text-[18px] w-[18px] h-[18px]">content_paste</mat-icon> Paste
                     </button>
                   }
-                  <button (click)="openCreateForm()" class="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-indigo-600 text-white px-4 py-2.5 rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-sm hover:shadow-md hover:-translate-y-0.5 text-sm">
+                  <button (click)="openCreateForm()" class="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-sm px-4 py-2.5 rounded-xl transition-all hover:shadow-md hover:-translate-y-0.5 text-sm">
                     <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create
                   </button>
                 </div>
               </div>
 
               @if (showForm()) {
-                <div class="p-6 sm:p-8 border-b border-slate-100 bg-slate-50/80 backdrop-blur-sm">
+                <div class="p-6 sm:p-8 border-b border-slate-200 bg-slate-50">
                   <h4 class="font-bold text-slate-900 text-lg mb-6 tracking-tight">{{ editingAssignmentId() ? 'Edit Assignment' : 'New Assignment' }}</h4>
                   <form [formGroup]="assignmentForm" (ngSubmit)="saveAssignment()" class="space-y-6">
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                       <div class="md:col-span-2">
                         <label for="requestId" class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Project / Request *</label>
-                        <select id="requestId" formControlName="requestId" class="w-full px-4 py-3 rounded-xl border border-slate-200/60 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:outline-none bg-white shadow-inner font-medium text-slate-700 transition-all">
+                        <select id="requestId" formControlName="requestId" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-medium text-slate-900 placeholder:text-slate-400 transition-all">
                           <option value="">Select a project...</option>
                           @for (req of allRequests(); track req.id) {
                             <option [value]="req.id">{{ req.name }} ({{ req.requiredRole }})</option>
@@ -119,12 +128,12 @@ import { forkJoin } from 'rxjs';
                       </div>
                       <div>
                         <label for="assignedHours" class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Hours *</label>
-                        <input id="assignedHours" type="number" formControlName="assignedHours" class="w-full px-4 py-3 rounded-xl border border-slate-200/60 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:outline-none bg-white shadow-inner font-bold text-slate-900 transition-all">
+                        <input id="assignedHours" type="number" formControlName="assignedHours" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-bold text-slate-900 placeholder:text-slate-400 transition-all">
                       </div>
                     </div>
                     <div class="flex justify-end gap-3 pt-2">
-                      <button type="button" (click)="closeForm()" class="px-5 py-2.5 rounded-xl font-bold text-slate-600 hover:bg-slate-200 transition-all text-sm">Cancel</button>
-                      <button type="submit" [disabled]="!assignmentForm.valid" class="bg-indigo-600 text-white px-6 py-2.5 rounded-xl font-bold hover:bg-indigo-700 transition-all disabled:opacity-50 text-sm shadow-sm hover:shadow-md hover:-translate-y-0.5">Save</button>
+                      <button type="button" (click)="closeForm()" class="px-5 py-2.5 rounded-xl font-bold text-slate-700 hover:bg-slate-100 transition-all text-sm">Cancel</button>
+                      <button type="submit" [disabled]="!assignmentForm.valid" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-sm px-6 py-2.5 rounded-xl transition-all disabled:opacity-50 text-sm hover:shadow-md hover:-translate-y-0.5">Save</button>
                     </div>
                   </form>
                 </div>
@@ -132,24 +141,24 @@ import { forkJoin } from 'rxjs';
 
               <div class="divide-y divide-slate-100 overflow-y-auto">
                 @for (assignment of resourceAssignments(); track assignment.id) {
-                  <div class="p-6 sm:p-8 hover:bg-slate-50/50 transition-colors flex flex-col sm:flex-row sm:items-center justify-between group gap-4">
+                  <div class="p-6 sm:p-8 hover:bg-slate-50 transition-colors flex flex-col sm:flex-row sm:items-center justify-between group gap-4">
                     <div>
-                      <h4 class="font-bold text-slate-900 text-lg group-hover:text-indigo-700 transition-colors">{{ getRequestName(assignment.requestId) }}</h4>
+                      <h4 class="font-bold text-slate-900 text-lg group-hover:text-blue-700 transition-colors">{{ getRequestName(assignment.requestId) }}</h4>
                       <div class="flex items-center gap-3 mt-2">
-                        <span class="text-sm font-bold text-slate-500 bg-slate-100 px-2.5 py-1 rounded-lg">{{ assignment.assignedHours }} hours</span>
-                        <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide bg-indigo-50 text-indigo-700 uppercase border border-indigo-100">
+                        <span class="text-sm font-bold text-slate-700 bg-slate-100 px-2.5 py-1 rounded-lg font-mono tabular-nums">{{ assignment.assignedHours }} hours</span>
+                        <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide bg-blue-50 text-blue-700 uppercase ring-1 ring-blue-200">
                           {{ assignment.status }}
                         </span>
                       </div>
                     </div>
                     <div class="flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-                      <button (click)="copyAssignment(assignment)" class="w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 transition-all flex items-center justify-center shadow-sm" title="Copy">
+                      <button (click)="copyAssignment(assignment)" class="w-10 h-10 rounded-full bg-slate-50 border border-slate-200 text-slate-500 hover:text-blue-700 hover:border-blue-200 hover:bg-blue-50 transition-all flex items-center justify-center shadow-sm" title="Copy">
                         <mat-icon class="text-[20px] w-[20px] h-[20px]">content_copy</mat-icon>
                       </button>
-                      <button (click)="openEditForm(assignment)" class="w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 transition-all flex items-center justify-center shadow-sm" title="Edit">
+                      <button (click)="openEditForm(assignment)" class="w-10 h-10 rounded-full bg-slate-50 border border-slate-200 text-slate-500 hover:text-blue-700 hover:border-blue-200 hover:bg-blue-50 transition-all flex items-center justify-center shadow-sm" title="Edit">
                         <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                       </button>
-                      <button (click)="deleteAssignment(assignment.id)" class="w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-red-500 hover:border-red-200 hover:bg-red-50 transition-all flex items-center justify-center shadow-sm" title="Delete">
+                      <button (click)="deleteAssignment(assignment.id)" class="w-10 h-10 rounded-full bg-slate-50 border border-slate-200 text-slate-500 hover:text-red-700 hover:border-red-200 hover:bg-red-50 transition-all flex items-center justify-center shadow-sm" title="Delete">
                         <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                       </button>
                     </div>
@@ -160,9 +169,51 @@ import { forkJoin } from 'rxjs';
                 }
               </div>
             </div>
+
+            <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden hover:shadow-md transition-all">
+              <div class="p-6 sm:p-8 border-b border-slate-200 bg-slate-50">
+                <h3 class="text-xl font-bold text-slate-900 tracking-tight">Actual Time Approval</h3>
+                <p class="text-sm text-slate-500 mt-1">Approve submitted hours so they become actual delivery cost.</p>
+              </div>
+              <div class="divide-y divide-slate-100">
+                @for (entry of resourceTimeEntries(); track entry.id) {
+                  <div class="p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div>
+                      <div class="font-bold text-slate-900">{{ getRequestName(entry.requestId) }}</div>
+                      <div class="text-sm text-slate-500 mt-1 font-mono tabular-nums">{{ entry.date }} · {{ entry.hours }}h · {{ entry.notes || 'No notes' }}</div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <span class="px-2.5 py-1 rounded-lg text-xs font-bold ring-1"
+                            [class.bg-amber-50]="entry.status === 'Submitted'"
+                            [class.text-amber-700]="entry.status === 'Submitted'"
+                            [class.ring-amber-200]="entry.status === 'Submitted'"
+                            [class.bg-emerald-50]="entry.status === 'Approved'"
+                            [class.text-emerald-700]="entry.status === 'Approved'"
+                            [class.ring-emerald-200]="entry.status === 'Approved'"
+                            [class.bg-red-50]="entry.status === 'Rejected'"
+                            [class.text-red-700]="entry.status === 'Rejected'"
+                            [class.ring-red-200]="entry.status === 'Rejected'">
+                        {{ entry.status }}
+                      </span>
+                      @if (entry.status === 'Submitted') {
+                        <button (click)="approveTimeEntry(entry)" class="p-2 rounded-lg text-emerald-600 hover:bg-emerald-50" title="Approve">
+                          <mat-icon>check_circle</mat-icon>
+                        </button>
+                        <button (click)="rejectTimeEntry(entry)" class="p-2 rounded-lg text-red-600 hover:bg-red-50" title="Reject">
+                          <mat-icon>cancel</mat-icon>
+                        </button>
+                      }
+                    </div>
+                  </div>
+                }
+                @if (!resourceTimeEntries().length) {
+                  <div class="p-8 text-center text-slate-500">No actual time entries for this resource.</div>
+                }
+              </div>
+            </div>
           } @else {
-            <div class="bg-white/80 backdrop-blur-md rounded-3xl shadow-sm border border-slate-200/60 h-full flex flex-col items-center justify-center p-12 text-center">
-              <div class="w-20 h-20 bg-gradient-to-br from-slate-100 to-slate-200 rounded-full flex items-center justify-center text-slate-400 mb-6 shadow-inner border border-white">
+            <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 h-full flex flex-col items-center justify-center p-12 text-center">
+              <div class="w-20 h-20 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center text-white mb-6 shadow-inner ring-1 ring-slate-900/5">
                 <mat-icon class="text-4xl">people</mat-icon>
               </div>
               <h2 class="text-2xl font-bold text-slate-900 tracking-tight">Select a Resource</h2>
@@ -174,25 +225,45 @@ import { forkJoin } from 'rxjs';
     </div>
   `
 })
-export class UtilizationComponent implements OnInit {
+export class UtilizationComponent {
   private api = inject(ApiService);
-  
-  // Mocking current user ID for authorization (Resource Manager)
-  private currentManagerId = '1';
 
-  resources = signal<Resource[]>([]);
-  assignments = signal<Assignment[]>([]);
-  allRequests = signal<ResourceRequest[]>([]);
-  
-  selectedResource = signal<Resource | null>(null);
-  
+  // MOCK ONLY: hardcoded current user (Resource Manager) id used for authorization.
+  // TODO: replace with an AuthService providing the authenticated user and
+  // role-based access control once authentication is implemented.
+  private currentManagerId = inject(AuthService).userId();
+
+  private dataResource = rxResource<UtilizationData, unknown>({
+    stream: () =>
+      forkJoin({
+        resources: this.api.getResources(),
+        assignments: this.api.getAssignments(),
+        requests: this.api.getRequests(),
+        timeEntries: this.api.getTimeEntries()
+      }),
+    defaultValue: { resources: [], assignments: [], requests: [], timeEntries: [] }
+  });
+
+  resources = computed(() => this.dataResource.value().resources);
+  assignments = computed(() => this.dataResource.value().assignments);
+  allRequests = computed(() => this.dataResource.value().requests);
+  timeEntries = computed(() => this.dataResource.value().timeEntries);
+
+  private selectedResourceId = signal<string | null>(null);
+  // Derived from the loaded resources so it always reflects the latest data after a reload.
+  selectedResource = computed<Resource | null>(() => {
+    const id = this.selectedResourceId();
+    if (!id) return null;
+    return this.resources().find(r => r.id === id) ?? null;
+  });
+
   showForm = signal(false);
   editingAssignmentId = signal<string | null>(null);
   copiedAssignment = signal<Partial<Assignment> | null>(null);
 
   // Authorization: Only show resources managed by the current user
   managedResources = computed(() => this.resources().filter(r => r.managerId === this.currentManagerId));
-  
+
   averageUtilization = computed(() => {
     const team = this.managedResources();
     if (!team.length) return 0;
@@ -206,35 +277,19 @@ export class UtilizationComponent implements OnInit {
     return this.assignments().filter(a => a.resourceId === resId);
   });
 
+  resourceTimeEntries = computed(() => {
+    const resId = this.selectedResource()?.id;
+    if (!resId) return [];
+    return this.timeEntries().filter(t => t.resourceId === resId).sort((a, b) => b.date.localeCompare(a.date));
+  });
+
   assignmentForm = new FormGroup({
     requestId: new FormControl('', Validators.required),
     assignedHours: new FormControl(0, [Validators.required, Validators.min(1)])
   });
 
-  ngOnInit() {
-    this.loadData();
-  }
-
-  loadData() {
-    forkJoin({
-      resources: this.api.getResources(),
-      assignments: this.api.getAssignments(),
-      requests: this.api.getRequests()
-    }).subscribe(data => {
-      this.resources.set(data.resources);
-      this.assignments.set(data.assignments);
-      this.allRequests.set(data.requests);
-      
-      // Update selected resource reference if it exists
-      if (this.selectedResource()) {
-        const updated = data.resources.find(r => r.id === this.selectedResource()!.id);
-        if (updated) this.selectedResource.set(updated);
-      }
-    });
-  }
-
   selectResource(res: Resource) {
-    this.selectedResource.set(res);
+    this.selectedResourceId.set(res.id);
     this.closeForm();
   }
 
@@ -276,12 +331,12 @@ export class UtilizationComponent implements OnInit {
 
       if (this.editingAssignmentId()) {
         this.api.updateAssignment(this.editingAssignmentId()!, data).subscribe(() => {
-          this.loadData();
+          this.dataResource.reload();
           this.closeForm();
         });
       } else {
         this.api.createAssignment(data).subscribe(() => {
-          this.loadData();
+          this.dataResource.reload();
           this.closeForm();
         });
       }
@@ -306,7 +361,7 @@ export class UtilizationComponent implements OnInit {
         resourceId: resId
       };
       this.api.createAssignment(newAssignment).subscribe(() => {
-        this.loadData();
+        this.dataResource.reload();
         // Optional: clear copied assignment after paste
         // this.copiedAssignment.set(null);
       });
@@ -315,8 +370,20 @@ export class UtilizationComponent implements OnInit {
 
   deleteAssignment(id: string) {
     this.api.deleteAssignment(id).subscribe(() => {
-      this.loadData();
+      this.dataResource.reload();
     });
+  }
+
+  approveTimeEntry(entry: TimeEntry) {
+    this.api.updateTimeEntry(entry.id, {
+      status: 'Approved',
+      approvedBy: this.currentManagerId,
+      approvedAt: new Date().toISOString(),
+    }).subscribe(() => this.dataResource.reload());
+  }
+
+  rejectTimeEntry(entry: TimeEntry) {
+    this.api.updateTimeEntry(entry.id, { status: 'Rejected' }).subscribe(() => this.dataResource.reload());
   }
 
   // --- UI Helpers ---

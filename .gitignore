@@ -41,7 +41,15 @@ yarn-error.log
 testem.log
 /typings
 __screenshots__/
+.runtime/
 
 # System files
 .DS_Store
 Thumbs.db
+
+# Transient artifacts (screenshots, workflow scripts, scratch dirs)
+/.workflows/
+/*.png
+/.remember/
+/.angular/
+/.playwright-mcp/

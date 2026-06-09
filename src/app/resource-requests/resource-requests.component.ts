@@ -1,14 +1,22 @@
-import { ChangeDetectionStrategy, Component, inject, signal, OnInit, computed } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, signal, computed } from '@angular/core';
+import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, ResourceRequest, Assignment, Resource } from '../services/api.service';
+import { AuthService } from '../services/auth.service';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { CommonModule } from '@angular/common';
+import { DecimalPipe } from '@angular/common';
 import { forkJoin } from 'rxjs';
+
+interface RequestsData {
+  requests: ResourceRequest[];
+  assignments: Assignment[];
+  resources: Resource[];
+}
 
 @Component({
   selector: 'app-resource-requests',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, ReactiveFormsModule, CommonModule],
+  imports: [MatIconModule, ReactiveFormsModule, DecimalPipe],
   template: `
     <div class="max-w-7xl mx-auto space-y-8">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -17,8 +25,8 @@ import { forkJoin } from 'rxjs';
           <p class="text-slate-500 mt-1">Create and manage staffing requests for your projects.</p>
         </div>
         <div class="flex flex-col sm:flex-row items-center gap-4">
-          <div class="bg-slate-100/80 backdrop-blur-sm p-1 rounded-xl flex items-center shadow-inner">
-            <button (click)="currentView.set('requests')" 
+          <div class="bg-slate-50 p-1 rounded-xl flex items-center shadow-inner ring-1 ring-slate-900/5 border border-slate-200">
+            <button (click)="currentView.set('requests')"
                     [class.bg-white]="currentView() === 'requests'"
                     [class.shadow-sm]="currentView() === 'requests'"
                     [class.text-slate-900]="currentView() === 'requests'"
@@ -26,7 +34,7 @@ import { forkJoin } from 'rxjs';
                     class="px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ease-out">
               Requests
             </button>
-            <button (click)="currentView.set('availability')" 
+            <button (click)="currentView.set('availability')"
                     [class.bg-white]="currentView() === 'availability'"
                     [class.shadow-sm]="currentView() === 'availability'"
                     [class.text-slate-900]="currentView() === 'availability'"
@@ -36,7 +44,7 @@ import { forkJoin } from 'rxjs';
             </button>
           </div>
           @if (currentView() === 'requests') {
-            <button (click)="openCreateForm()" class="w-full sm:w-auto flex items-center justify-center gap-2 bg-indigo-600 text-white px-6 py-2.5 rounded-xl font-semibold hover:bg-indigo-700 transition-all duration-200 shadow-sm hover:shadow-md active:scale-95">
+            <button (click)="openCreateForm()" class="w-full sm:w-auto flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-xl font-semibold transition-all duration-200 shadow-sm hover:shadow-md active:scale-95">
               <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon> Create Request
             </button>
           }
@@ -45,53 +53,53 @@ import { forkJoin } from 'rxjs';
 
       @if (currentView() === 'requests') {
         @if (showForm()) {
-          <div class="bg-white p-8 rounded-3xl shadow-sm border border-slate-200/60 relative overflow-hidden">
-            <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 to-purple-500"></div>
+          <div class="bg-white p-8 rounded-3xl shadow-sm border border-slate-200 ring-1 ring-slate-900/5 relative overflow-hidden">
+            <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-blue-600"></div>
             <h2 class="text-2xl font-bold text-slate-900 mb-8">{{ editingId() ? 'Edit Request' : 'New Resource Request' }}</h2>
             <form [formGroup]="requestForm" (ngSubmit)="saveRequest()" class="space-y-6">
               <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div class="space-y-1.5">
                   <label for="name" class="block text-sm font-semibold text-slate-700">Project Name <span class="text-red-500">*</span></label>
-                  <input id="name" formControlName="name" class="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all duration-200 outline-none">
+                  <input id="name" formControlName="name" class="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white focus:bg-white text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none">
                 </div>
                 <div class="space-y-1.5">
                   <label for="requiredRole" class="block text-sm font-semibold text-slate-700">Required Role <span class="text-red-500">*</span></label>
-                  <input id="requiredRole" formControlName="requiredRole" class="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all duration-200 outline-none">
+                  <input id="requiredRole" formControlName="requiredRole" class="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white focus:bg-white text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none">
                 </div>
                 <div class="space-y-1.5">
                   <label for="requiredEffort" class="block text-sm font-semibold text-slate-700">Required Effort (Hours) <span class="text-red-500">*</span></label>
-                  <input id="requiredEffort" type="number" formControlName="requiredEffort" class="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all duration-200 outline-none">
+                  <input id="requiredEffort" type="number" formControlName="requiredEffort" class="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white focus:bg-white text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none">
                 </div>
                 <div class="space-y-1.5">
                   <label for="skills" class="block text-sm font-semibold text-slate-700">Required Skill</label>
-                  <input id="skills" formControlName="skills" placeholder="e.g. Java, Angular, React" class="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all duration-200 outline-none">
+                  <input id="skills" formControlName="skills" placeholder="e.g. Java, Angular, React" class="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white focus:bg-white text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none">
                 </div>
                 <div class="space-y-1.5">
                   <label for="startDate" class="block text-sm font-semibold text-slate-700">Start Date</label>
-                  <input id="startDate" type="date" formControlName="startDate" class="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all duration-200 outline-none text-slate-700">
+                  <input id="startDate" type="date" formControlName="startDate" class="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white focus:bg-white placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none text-slate-900">
                 </div>
                 <div class="space-y-1.5">
                   <label for="endDate" class="block text-sm font-semibold text-slate-700">End Date</label>
-                  <input id="endDate" type="date" formControlName="endDate" class="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all duration-200 outline-none text-slate-700">
+                  <input id="endDate" type="date" formControlName="endDate" class="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white focus:bg-white placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none text-slate-900">
                 </div>
               </div>
               <div class="space-y-1.5">
                 <label for="description" class="block text-sm font-semibold text-slate-700">Description</label>
-                <textarea id="description" formControlName="description" rows="4" placeholder="Provide details about the project and the role..." class="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all duration-200 outline-none resize-y"></textarea>
+                <textarea id="description" formControlName="description" rows="4" placeholder="Provide details about the project and the role..." class="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white focus:bg-white text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none resize-y"></textarea>
               </div>
-              <div class="flex justify-end gap-3 pt-6 border-t border-slate-100">
-                <button type="button" (click)="closeForm()" class="px-6 py-2.5 rounded-xl font-semibold text-slate-600 hover:bg-slate-100 transition-colors">Cancel</button>
-                <button type="submit" [disabled]="!requestForm.valid" class="bg-indigo-600 text-white px-8 py-2.5 rounded-xl font-semibold hover:bg-indigo-700 transition-all duration-200 shadow-sm hover:shadow-md disabled:opacity-50 disabled:hover:shadow-sm disabled:hover:bg-indigo-600 active:scale-95">Save Request</button>
+              <div class="flex justify-end gap-3 pt-6 border-t border-slate-200">
+                <button type="button" (click)="closeForm()" class="px-6 py-2.5 rounded-xl font-semibold text-slate-600 hover:bg-slate-50 transition-colors">Cancel</button>
+                <button type="submit" [disabled]="!requestForm.valid" class="bg-blue-600 hover:bg-blue-700 text-white px-8 py-2.5 rounded-xl font-semibold transition-all duration-200 shadow-sm hover:shadow-md disabled:opacity-50 disabled:hover:shadow-sm disabled:hover:bg-blue-600 active:scale-95">Save Request</button>
               </div>
             </form>
           </div>
         }
 
-        <div class="bg-white rounded-3xl shadow-sm border border-slate-200/60 overflow-hidden">
+        <div class="bg-white rounded-3xl shadow-sm border border-slate-200 ring-1 ring-slate-900/5 overflow-hidden">
           <div class="overflow-x-auto">
             <table class="w-full text-left border-collapse min-w-[800px]">
               <thead>
-                <tr class="bg-slate-50/80 border-b border-slate-200/60">
+                <tr class="bg-slate-50 border-b border-slate-200">
                   <th class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Project Details</th>
                   <th class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Role & Skills</th>
                   <th class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Staffing Status</th>
@@ -101,12 +109,12 @@ import { forkJoin } from 'rxjs';
               </thead>
               <tbody class="divide-y divide-slate-100">
                 @for (req of myRequests(); track req.id) {
-                  <tr class="hover:bg-slate-50/80 transition-colors group">
+                  <tr class="hover:bg-slate-50 transition-colors group">
                     <td class="px-6 py-5">
-                      <div class="font-semibold text-slate-900 group-hover:text-indigo-600 transition-colors">{{ req.name }}</div>
+                      <div class="font-semibold text-slate-900 group-hover:text-blue-700 transition-colors">{{ req.name }}</div>
                       <div class="text-xs font-medium text-slate-500 mt-1 flex items-center gap-1"><mat-icon class="text-[14px] w-[14px] h-[14px]">event</mat-icon> {{ req.startDate || 'TBD' }} to {{ req.endDate || 'TBD' }}</div>
                       @if (req.description) {
-                        <div class="text-xs text-slate-400 mt-1.5 truncate max-w-[200px]" [title]="req.description">{{ req.description }}</div>
+                        <div class="text-xs text-slate-500 mt-1.5 truncate max-w-[200px]" [title]="req.description">{{ req.description }}</div>
                       }
                     </td>
                     <td class="px-6 py-5">
@@ -116,15 +124,16 @@ import { forkJoin } from 'rxjs';
                     <td class="px-6 py-5">
                       <div class="flex flex-col gap-1.5">
                         <div class="flex items-center justify-between text-xs font-semibold">
-                          <span class="text-slate-700">{{ req.staffedEffort || 0 }} / {{ req.requiredEffort }}h</span>
-                          <span [class.text-emerald-600]="getStaffingPercentage(req) >= 100"
-                                [class.text-amber-600]="getStaffingPercentage(req) > 0 && getStaffingPercentage(req) < 100"
+                          <span class="text-slate-900 font-mono tabular-nums">{{ req.staffedEffort || 0 }} / {{ req.requiredEffort }}h</span>
+                          <span class="font-mono tabular-nums"
+                                [class.text-emerald-700]="getStaffingPercentage(req) >= 100"
+                                [class.text-amber-700]="getStaffingPercentage(req) > 0 && getStaffingPercentage(req) < 100"
                                 [class.text-slate-500]="getStaffingPercentage(req) === 0">
                             {{ getStaffingPercentage(req) | number:'1.0-0' }}%
                           </span>
                         </div>
                         <div class="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
-                          <div class="h-2 rounded-full transition-all duration-1000 ease-out" 
+                          <div class="h-2 rounded-full transition-all duration-1000 ease-out"
                                [class.bg-emerald-500]="getStaffingPercentage(req) >= 100"
                                [class.bg-amber-500]="getStaffingPercentage(req) > 0 && getStaffingPercentage(req) < 100"
                                [class.bg-slate-300]="getStaffingPercentage(req) === 0"
@@ -133,39 +142,44 @@ import { forkJoin } from 'rxjs';
                       </div>
                     </td>
                     <td class="px-6 py-5">
-                      <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold tracking-wide"
-                        [class.bg-emerald-100]="req.status === 'Published'"
-                        [class.text-emerald-800]="req.status === 'Published'"
+                      <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold tracking-wide ring-1"
+                        [class.bg-emerald-50]="req.status === 'Published'"
+                        [class.text-emerald-700]="req.status === 'Published'"
+                        [class.ring-emerald-200]="req.status === 'Published'"
                         [class.bg-slate-100]="req.status === 'Not Published'"
-                        [class.text-slate-800]="req.status === 'Not Published'"
-                        [class.bg-blue-100]="req.status === 'Open'"
-                        [class.text-blue-800]="req.status === 'Open'"
-                        [class.bg-emerald-100]="req.status === 'Fulfilled'"
-                        [class.text-emerald-800]="req.status === 'Fulfilled'"
-                        [class.bg-orange-100]="req.status === 'Withdrawn'"
-                        [class.text-orange-800]="req.status === 'Withdrawn'">
+                        [class.text-slate-700]="req.status === 'Not Published'"
+                        [class.ring-slate-200]="req.status === 'Not Published'"
+                        [class.bg-blue-50]="req.status === 'Open'"
+                        [class.text-blue-700]="req.status === 'Open'"
+                        [class.ring-blue-200]="req.status === 'Open'"
+                        [class.bg-emerald-50]="req.status === 'Fulfilled'"
+                        [class.text-emerald-700]="req.status === 'Fulfilled'"
+                        [class.ring-emerald-200]="req.status === 'Fulfilled'"
+                        [class.bg-amber-50]="req.status === 'Withdrawn'"
+                        [class.text-amber-700]="req.status === 'Withdrawn'"
+                        [class.ring-amber-200]="req.status === 'Withdrawn'">
                         {{ req.status }}
                       </span>
                     </td>
                     <td class="px-6 py-5 text-right space-x-1">
                       @if (req.status !== 'Not Published' && req.status !== 'Withdrawn') {
-                        <button (click)="trackRequest(req)" class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all" title="Track Staffing">
+                        <button (click)="trackRequest(req)" class="p-2 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-all" title="Track Staffing">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">analytics</mat-icon>
                         </button>
                       }
                       @if (req.status === 'Not Published' || req.status === 'Withdrawn') {
-                        <button (click)="openEditForm(req)" class="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all" title="Edit">
+                        <button (click)="openEditForm(req)" class="p-2 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-all" title="Edit">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                         </button>
-                        <button (click)="publishRequest(req)" class="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all" title="Publish">
+                        <button (click)="publishRequest(req)" class="p-2 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition-all" title="Publish">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">publish</mat-icon>
                         </button>
-                        <button (click)="deleteRequest(req)" class="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all" title="Delete">
+                        <button (click)="deleteRequest(req)" class="p-2 text-slate-400 hover:text-red-700 hover:bg-red-50 rounded-lg transition-all" title="Delete">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                         </button>
                       }
                       @if (req.status === 'Published' || req.status === 'Open' || req.status === 'Fulfilled') {
-                        <button (click)="withdrawRequest(req)" class="p-2 text-slate-400 hover:text-orange-600 hover:bg-orange-50 rounded-lg transition-all" title="Withdraw">
+                        <button (click)="withdrawRequest(req)" class="p-2 text-slate-400 hover:text-amber-700 hover:bg-amber-50 rounded-lg transition-all" title="Withdraw">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">undo</mat-icon>
                         </button>
                       }
@@ -174,7 +188,7 @@ import { forkJoin } from 'rxjs';
                 }
                 @if (!myRequests().length) {
                   <tr>
-                    <td colspan="5" class="px-6 py-12 text-center text-slate-400">
+                    <td colspan="5" class="px-6 py-12 text-center text-slate-500">
                       <div class="flex flex-col items-center justify-center">
                         <mat-icon class="text-4xl mb-3 opacity-50">assignment</mat-icon>
                         <p class="font-medium">No resource requests found.</p>
@@ -189,23 +203,23 @@ import { forkJoin } from 'rxjs';
         </div>
       } @else {
         <!-- Resource Availability View -->
-        <div class="bg-white rounded-3xl shadow-sm border border-slate-200/60 overflow-hidden flex flex-col">
-          <div class="p-6 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white/50 backdrop-blur-sm">
+        <div class="bg-white rounded-3xl shadow-sm border border-slate-200 ring-1 ring-slate-900/5 overflow-hidden flex flex-col">
+          <div class="p-6 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-slate-50">
             <h2 class="text-lg font-semibold text-slate-900">Resource Availability</h2>
             <div class="relative w-full sm:w-auto">
               <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-[20px] w-[20px] h-[20px]">search</mat-icon>
-              <input 
-                type="text" 
+              <input
+                type="text"
                 [formControl]="availabilitySearch"
-                placeholder="Search by name, role, or skills..." 
-                class="w-full sm:w-72 pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all duration-200 outline-none text-sm"
+                placeholder="Search by name, role, or skills..."
+                class="w-full sm:w-72 pl-10 pr-4 py-2.5 rounded-xl border border-slate-300 bg-white focus:bg-white text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none text-sm"
               >
             </div>
           </div>
           <div class="overflow-x-auto flex-1">
             <table class="w-full text-left border-collapse min-w-[800px]">
               <thead>
-                <tr class="bg-slate-50/80 border-b border-slate-200/60">
+                <tr class="bg-slate-50 border-b border-slate-200">
                   <th class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Resource</th>
                   <th class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Role & Skills</th>
                   <th class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Capacity</th>
@@ -215,39 +229,40 @@ import { forkJoin } from 'rxjs';
               </thead>
               <tbody class="divide-y divide-slate-100">
                 @for (res of filteredAvailability(); track res.id) {
-                  <tr class="hover:bg-slate-50/80 transition-colors group">
+                  <tr class="hover:bg-slate-50 transition-colors group">
                     <td class="px-6 py-5">
                       <div class="flex items-center gap-4">
-                        <div class="w-12 h-12 bg-gradient-to-br from-slate-100 to-slate-200 rounded-full flex items-center justify-center text-slate-600 font-semibold text-lg shadow-inner shrink-0">
+                        <div class="w-12 h-12 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center text-white font-semibold text-lg shadow-inner shrink-0">
                           {{ res.name.charAt(0) }}
                         </div>
-                        <div class="font-semibold text-slate-900 group-hover:text-indigo-600 transition-colors">{{ res.name }}</div>
+                        <div class="font-semibold text-slate-900 group-hover:text-blue-700 transition-colors">{{ res.name }}</div>
                       </div>
                     </td>
                     <td class="px-6 py-5">
                       <div class="text-slate-900 font-semibold flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-slate-400">badge</mat-icon> {{ res.role }}</div>
                       <div class="flex gap-1.5 mt-2 flex-wrap">
                         @for (skill of res.skills; track skill.name) {
-                          <span class="text-[11px] font-medium bg-slate-100 text-slate-600 px-2 py-0.5 rounded-md border border-slate-200/60">{{ skill.name }}</span>
+                          <span class="text-[11px] font-medium bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md border border-slate-200">{{ skill.name }}</span>
                         }
                       </div>
                     </td>
                     <td class="px-6 py-5">
-                      <div class="text-slate-700 font-medium flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-slate-400">schedule</mat-icon> {{ res.capacity }}h / week</div>
+                      <div class="text-slate-900 font-medium flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-slate-400">schedule</mat-icon> <span class="font-mono tabular-nums">{{ res.capacity }}h</span> / week</div>
                     </td>
                     <td class="px-6 py-5">
                       <div class="flex flex-col gap-1.5">
                         <div class="flex items-center justify-between text-xs font-semibold">
                           <span class="text-slate-700">Utilization</span>
-                          <span [class.text-emerald-600]="res.utilization >= 80 && res.utilization <= 100"
-                                [class.text-amber-600]="res.utilization > 0 && res.utilization < 80"
-                                [class.text-red-600]="res.utilization > 100"
+                          <span class="font-mono tabular-nums"
+                                [class.text-emerald-700]="res.utilization >= 80 && res.utilization <= 100"
+                                [class.text-amber-700]="res.utilization > 0 && res.utilization < 80"
+                                [class.text-red-700]="res.utilization > 100"
                                 [class.text-slate-500]="res.utilization === 0">
                             {{ res.utilization | number:'1.0-0' }}%
                           </span>
                         </div>
                         <div class="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
-                          <div class="h-2 rounded-full transition-all duration-1000 ease-out" 
+                          <div class="h-2 rounded-full transition-all duration-1000 ease-out"
                                [class.bg-emerald-500]="res.utilization >= 80 && res.utilization <= 100"
                                [class.bg-amber-500]="res.utilization > 0 && res.utilization < 80"
                                [class.bg-red-500]="res.utilization > 100"
@@ -257,11 +272,13 @@ import { forkJoin } from 'rxjs';
                       </div>
                     </td>
                     <td class="px-6 py-5">
-                      <span class="inline-flex items-center px-3 py-1.5 rounded-xl text-xs font-semibold tracking-wide"
-                            [class.bg-emerald-100]="getAvailableHours(res) > 0"
-                            [class.text-emerald-800]="getAvailableHours(res) > 0"
+                      <span class="inline-flex items-center px-3 py-1.5 rounded-xl text-xs font-semibold tracking-wide ring-1"
+                            [class.bg-emerald-50]="getAvailableHours(res) > 0"
+                            [class.text-emerald-700]="getAvailableHours(res) > 0"
+                            [class.ring-emerald-200]="getAvailableHours(res) > 0"
                             [class.bg-slate-100]="getAvailableHours(res) <= 0"
-                            [class.text-slate-600]="getAvailableHours(res) <= 0">
+                            [class.text-slate-700]="getAvailableHours(res) <= 0"
+                            [class.ring-slate-200]="getAvailableHours(res) <= 0">
                         {{ getAvailableHours(res) > 0 ? getAvailableHours(res) + 'h available' : 'Fully booked' }}
                       </span>
                     </td>
@@ -269,7 +286,7 @@ import { forkJoin } from 'rxjs';
                 }
                 @if (!filteredAvailability().length) {
                   <tr>
-                    <td colspan="5" class="px-6 py-12 text-center text-slate-400">
+                    <td colspan="5" class="px-6 py-12 text-center text-slate-500">
                       <div class="flex flex-col items-center justify-center">
                         <mat-icon class="text-4xl mb-3 opacity-50">search_off</mat-icon>
                         <p class="font-medium">No resources found matching your search.</p>
@@ -284,9 +301,9 @@ import { forkJoin } from 'rxjs';
       }
 
       @if (trackingDetails()) {
-        <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 sm:p-6">
-          <div class="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
-            <div class="p-6 sm:p-8 border-b border-slate-100 flex items-start justify-between bg-gradient-to-br from-slate-50 to-white">
+        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 sm:p-6">
+          <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
+            <div class="p-6 sm:p-8 border-b border-slate-200 flex items-start justify-between bg-gradient-to-br from-slate-50 to-transparent">
               <div>
                 <h2 class="text-2xl font-bold text-slate-900 tracking-tight">Staffing Progress</h2>
                 <p class="text-sm font-medium text-slate-500 mt-1.5 flex items-center gap-1.5">
@@ -294,19 +311,19 @@ import { forkJoin } from 'rxjs';
                   {{ trackingDetails()?.request?.name }}
                 </p>
               </div>
-              <button (click)="closeTracking()" class="text-slate-400 hover:text-slate-600 hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <button (click)="closeTracking()" class="text-slate-400 hover:text-slate-600 hover:bg-slate-50 p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
-            
+
             <div class="p-6 sm:p-8 overflow-y-auto flex-1">
               <!-- Progress Bar -->
-              <div class="mb-10 bg-slate-50 p-6 rounded-2xl border border-slate-100/60">
+              <div class="mb-10 bg-slate-50 p-6 rounded-2xl border border-slate-200">
                 <div class="flex justify-between items-end mb-3">
                   <span class="font-semibold text-slate-700">Overall Progress</span>
-                  <span class="text-2xl font-bold text-indigo-600 tracking-tight">{{ getStaffingPercentage(trackingDetails()!.request) }}%</span>
+                  <span class="text-2xl font-bold text-blue-700 tracking-tight font-mono tabular-nums">{{ getStaffingPercentage(trackingDetails()!.request) }}%</span>
                 </div>
-                <div class="w-full bg-slate-200/60 rounded-full h-3 overflow-hidden shadow-inner">
+                <div class="w-full bg-slate-100 rounded-full h-3 overflow-hidden shadow-inner">
                   <div class="h-3 rounded-full transition-all duration-1000 ease-out relative"
                        [class.bg-emerald-500]="getStaffingPercentage(trackingDetails()!.request) >= 100"
                        [class.bg-amber-500]="getStaffingPercentage(trackingDetails()!.request) > 0 && getStaffingPercentage(trackingDetails()!.request) < 100"
@@ -316,54 +333,56 @@ import { forkJoin } from 'rxjs';
                   </div>
                 </div>
                 <div class="flex justify-between text-sm font-medium text-slate-500 mt-3">
-                  <span class="flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-emerald-500">check_circle</mat-icon> {{ trackingDetails()?.request?.staffedEffort || 0 }}h Staffed</span>
-                  <span class="flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-amber-500">pending</mat-icon> {{ trackingDetails()?.remaining }}h Remaining of {{ trackingDetails()?.request?.requiredEffort }}h</span>
+                  <span class="flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-emerald-600">check_circle</mat-icon> {{ trackingDetails()?.request?.staffedEffort || 0 }}h Staffed</span>
+                  <span class="flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-amber-600">pending</mat-icon> {{ trackingDetails()?.remaining }}h Remaining of {{ trackingDetails()?.request?.requiredEffort }}h</span>
                 </div>
               </div>
 
               <!-- Assigned Resources -->
               <div class="flex items-center justify-between mb-4">
                 <h3 class="text-sm font-bold text-slate-900 uppercase tracking-wider">Assigned Resources</h3>
-                <span class="bg-indigo-50 text-indigo-700 text-xs font-bold px-2.5 py-1 rounded-full">{{ trackingDetails()?.assignments?.length || 0 }}</span>
+                <span class="bg-blue-50 text-blue-700 ring-1 ring-blue-200 text-xs font-bold px-2.5 py-1 rounded-full font-mono tabular-nums">{{ trackingDetails()?.assignments?.length || 0 }}</span>
               </div>
-              
+
               <div class="space-y-3">
                 @for (item of trackingDetails()?.assignments; track item.assignment.id) {
-                  <div class="flex items-center justify-between p-4 rounded-2xl border border-slate-100 bg-white hover:border-indigo-100 hover:shadow-md transition-all group">
+                  <div class="flex items-center justify-between p-4 rounded-2xl border border-slate-200 bg-slate-50 hover:border-blue-300 hover:shadow-md transition-all group">
                     <div class="flex items-center gap-4">
-                      <div class="w-12 h-12 bg-gradient-to-br from-indigo-50 to-blue-50 border border-indigo-100/50 rounded-full flex items-center justify-center text-indigo-600 font-bold shadow-sm shrink-0">
+                      <div class="w-12 h-12 bg-blue-50 border border-blue-200 rounded-full flex items-center justify-center text-blue-700 font-bold shadow-sm shrink-0">
                         {{ item.resource?.name?.charAt(0) || '?' }}
                       </div>
                       <div>
-                        <h4 class="font-semibold text-slate-900 group-hover:text-indigo-600 transition-colors">{{ item.resource?.name || 'Unknown Resource' }}</h4>
+                        <h4 class="font-semibold text-slate-900 group-hover:text-blue-700 transition-colors">{{ item.resource?.name || 'Unknown Resource' }}</h4>
                         <p class="text-xs font-medium text-slate-500 mt-0.5 flex items-center gap-1"><mat-icon class="text-[14px] w-[14px] h-[14px]">badge</mat-icon> {{ item.resource?.role }}</p>
                       </div>
                     </div>
                     <div class="text-right flex flex-col items-end gap-1">
-                      <div class="font-bold text-indigo-600 text-lg">{{ item.assignment.assignedHours }}h</div>
-                      <div class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md"
-                           [class.bg-emerald-100]="item.assignment.status === 'confirmed'"
+                      <div class="font-bold text-blue-700 text-lg font-mono tabular-nums">{{ item.assignment.assignedHours }}h</div>
+                      <div class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md ring-1"
+                           [class.bg-emerald-50]="item.assignment.status === 'confirmed'"
                            [class.text-emerald-700]="item.assignment.status === 'confirmed'"
-                           [class.bg-amber-100]="item.assignment.status === 'proposed'"
-                           [class.text-amber-700]="item.assignment.status === 'proposed'">
+                           [class.ring-emerald-200]="item.assignment.status === 'confirmed'"
+                           [class.bg-amber-50]="item.assignment.status === 'proposed'"
+                           [class.text-amber-700]="item.assignment.status === 'proposed'"
+                           [class.ring-amber-200]="item.assignment.status === 'proposed'">
                         {{ item.assignment.status }}
                       </div>
                     </div>
                   </div>
                 }
                 @if (trackingDetails()?.assignments?.length === 0) {
-                  <div class="text-center p-8 border-2 border-dashed border-slate-200 rounded-2xl bg-slate-50/50">
-                    <div class="w-16 h-16 bg-white rounded-full flex items-center justify-center mx-auto mb-3 shadow-sm border border-slate-100">
-                      <mat-icon class="text-slate-300 text-3xl">person_add_disabled</mat-icon>
+                  <div class="text-center p-8 border-2 border-dashed border-slate-200 rounded-2xl bg-slate-50">
+                    <div class="w-16 h-16 bg-white rounded-full flex items-center justify-center mx-auto mb-3 shadow-sm border border-slate-200">
+                      <mat-icon class="text-slate-400 text-3xl">person_add_disabled</mat-icon>
                     </div>
                     <p class="font-medium text-slate-600">No resources assigned yet</p>
-                    <p class="text-sm text-slate-400 mt-1">Assignments will appear here once staffed.</p>
+                    <p class="text-sm text-slate-500 mt-1">Assignments will appear here once staffed.</p>
                   </div>
                 }
               </div>
             </div>
-            
-            <div class="p-6 border-t border-slate-100 bg-slate-50/80 flex justify-end backdrop-blur-sm">
+
+            <div class="p-6 border-t border-slate-200 bg-slate-50 flex justify-end">
               <button (click)="closeTracking()" class="px-6 py-2.5 bg-white border border-slate-200 rounded-xl font-semibold text-slate-700 hover:bg-slate-50 hover:text-slate-900 shadow-sm transition-all">Close</button>
             </div>
           </div>
@@ -372,22 +391,39 @@ import { forkJoin } from 'rxjs';
     </div>
   `
 })
-export class ResourceRequestsComponent implements OnInit {
+export class ResourceRequestsComponent {
   private api = inject(ApiService);
-  
-  // Mocking current user ID for authorization
-  private currentUserId = '1';
 
-  requests = signal<ResourceRequest[]>([]);
-  assignments = signal<Assignment[]>([]);
-  resources = signal<Resource[]>([]);
+  // NOTE: Mock-only hardcoded user ID. Replace with a real AuthService
+  // (e.g. inject(AuthService).currentUserId()) once authentication exists.
+  private currentUserId = inject(AuthService).userId();
+
+  private res = rxResource<RequestsData, unknown>({
+    stream: () => forkJoin({
+      requests: this.api.getRequests(),
+      assignments: this.api.getAssignments(),
+      resources: this.api.getResources()
+    }),
+    defaultValue: { requests: [], assignments: [], resources: [] }
+  });
+
+  requests = computed(() => this.res.value().requests);
+  assignments = computed(() => this.res.value().assignments);
+  resources = computed(() => this.res.value().resources);
+
   showForm = signal(false);
   editingId = signal<string | null>(null);
   trackingRequestId = signal<string | null>(null);
   currentView = signal<'requests' | 'availability'>('requests');
-  
+
   availabilitySearch = new FormControl('');
   searchValue = signal('');
+
+  constructor() {
+    this.availabilitySearch.valueChanges
+      .pipe(takeUntilDestroyed())
+      .subscribe(v => this.searchValue.set(v || ''));
+  }
 
   // Authorization: Only show requests created by the current user
   myRequests = computed(() => this.requests().filter(r => r.requesterId === this.currentUserId));
@@ -440,25 +476,6 @@ export class ResourceRequestsComponent implements OnInit {
     endDate: new FormControl('')
   });
 
-  ngOnInit() {
-    this.loadRequests();
-    this.availabilitySearch.valueChanges.subscribe(val => {
-      this.searchValue.set(val || '');
-    });
-  }
-
-  loadRequests() {
-    forkJoin({
-      requests: this.api.getRequests(),
-      assignments: this.api.getAssignments(),
-      resources: this.api.getResources()
-    }).subscribe(data => {
-      this.requests.set(data.requests);
-      this.assignments.set(data.assignments);
-      this.resources.set(data.resources);
-    });
-  }
-
   trackRequest(req: ResourceRequest) {
     this.trackingRequestId.set(req.id);
   }
@@ -509,12 +526,12 @@ export class ResourceRequestsComponent implements OnInit {
 
       if (this.editingId()) {
         this.api.updateRequest(this.editingId()!, reqData).subscribe(() => {
-          this.loadRequests();
+          this.res.reload();
           this.closeForm();
         });
       } else {
         this.api.createRequest(reqData).subscribe(() => {
-          this.loadRequests();
+          this.res.reload();
           this.closeForm();
         });
       }
@@ -523,21 +540,21 @@ export class ResourceRequestsComponent implements OnInit {
 
   publishRequest(req: ResourceRequest) {
     this.api.updateRequest(req.id, { status: 'Published' }).subscribe(() => {
-      this.loadRequests();
+      this.res.reload();
     });
   }
 
   withdrawRequest(req: ResourceRequest) {
     // Can only withdraw if unstaffed or partially staffed, but let's allow it generally for the demo
     this.api.updateRequest(req.id, { status: 'Withdrawn' }).subscribe(() => {
-      this.loadRequests();
+      this.res.reload();
     });
   }
 
   deleteRequest(req: ResourceRequest) {
     // In a real app, use a custom modal here instead of window.confirm
     this.api.deleteRequest(req.id).subscribe(() => {
-      this.loadRequests();
+      this.res.reload();
     });
   }
 

@@ -1,63 +1,51 @@
 import { Routes } from '@angular/router';
-import { DashboardComponent } from './dashboard/dashboard.component';
-import { MyProfileComponent } from './my-profile/my-profile.component';
-import { ResourceRequestsComponent } from './resource-requests/resource-requests.component';
-import { StaffingComponent } from './staffing/staffing.component';
-import { UtilizationComponent } from './utilization/utilization.component';
-
-import { SetDefaultLanguageComponent } from './configuration/set-default-language.component';
-import { ManageSkillCatalogsComponent } from './configuration/manage-skill-catalogs.component';
-import { ManageProficiencySetsComponent } from './configuration/manage-proficiency-sets.component';
-import { ManageSkillsComponent } from './configuration/manage-skills.component';
-import { ManageProjectRolesComponent } from './configuration/manage-project-roles.component';
-import { ManageCostCentersComponent } from './configuration/manage-cost-centers.component';
-import { ServiceOrganizationDetailsComponent } from './configuration/service-organization-details.component';
-import { ManageResourceOrganizationsComponent } from './configuration/manage-resource-organizations.component';
-import { MaintainAvailabilityDataComponent } from './configuration/maintain-availability-data.component';
-
-import { MyAssignmentsComponent } from './my-assignments/my-assignments.component';
-
-import { ProjectsComponent } from './projects/projects/projects';
-import { ProjectDetailsComponent } from './projects/project-details/project-details';
-import { ProjectPartners } from './projects/project-partners/project-partners';
-import { ProjectDocuments } from './projects/project-documents/project-documents';
-import { ProjectPlans } from './projects/project-plans/project-plans';
-import { FinancialPlans } from './projects/financial-plans/financial-plans';
-import { ProjectCostCenters } from './projects/project-cost-centers/project-cost-centers';
-import { ProjectTasks } from './projects/project-tasks/project-tasks';
-import { ProjectIssues } from './projects/project-issues/project-issues';
-import { Reporting } from './reporting/reporting';
+import { commercialGuard, financeGuard } from './guards/role.guard';
 
 export const routes: Routes = [
-  { path: '', component: DashboardComponent },
-  { path: 'profile', component: MyProfileComponent },
-  { path: 'assignments', component: MyAssignmentsComponent },
-  { path: 'requests', component: ResourceRequestsComponent },
-  { path: 'staffing', component: StaffingComponent },
-  { path: 'utilization', component: UtilizationComponent },
-  
-  // Project Management Routes
-  { path: 'projects', component: ProjectsComponent },
-  { path: 'projects/:id', component: ProjectDetailsComponent },
-  { path: 'project-partners', component: ProjectPartners },
-  { path: 'project-documents', component: ProjectDocuments },
-  { path: 'project-plans', component: ProjectPlans },
-  { path: 'financial-plans', component: FinancialPlans },
-  { path: 'project-cost-centers', component: ProjectCostCenters },
-  { path: 'project-tasks', component: ProjectTasks },
-  { path: 'project-issues', component: ProjectIssues },
+  // Resource Management
+  { path: '', loadComponent: () => import('./dashboard/dashboard.component').then(m => m.DashboardComponent) },
+  { path: 'profile', loadComponent: () => import('./my-profile/my-profile.component').then(m => m.MyProfileComponent) },
+  { path: 'assignments', loadComponent: () => import('./my-assignments/my-assignments.component').then(m => m.MyAssignmentsComponent) },
+  { path: 'requests', loadComponent: () => import('./resource-requests/resource-requests.component').then(m => m.ResourceRequestsComponent) },
+  { path: 'staffing', loadComponent: () => import('./staffing/staffing.component').then(m => m.StaffingComponent) },
+  { path: 'utilization', loadComponent: () => import('./utilization/utilization.component').then(m => m.UtilizationComponent) },
+  { path: 'forecast', loadComponent: () => import('./forecast/forecast').then(m => m.Forecast) },
+  { path: 'what-if', loadComponent: () => import('./forecast/what-if').then(m => m.WhatIf) },
+  { path: 'approvals', loadComponent: () => import('./approvals/approvals').then(m => m.Approvals) },
+
+  // Project Management
+  { path: 'projects', loadComponent: () => import('./projects/projects/projects').then(m => m.ProjectsComponent) },
+  { path: 'projects/:id', loadComponent: () => import('./projects/project-details/project-details').then(m => m.ProjectDetailsComponent) },
+  { path: 'project-partners', loadComponent: () => import('./projects/project-partners/project-partners').then(m => m.ProjectPartners) },
+  { path: 'project-documents', loadComponent: () => import('./projects/project-documents/project-documents').then(m => m.ProjectDocuments) },
+  { path: 'project-plans', loadComponent: () => import('./projects/project-plans/project-plans').then(m => m.ProjectPlans) },
+  { path: 'financial-plans', loadComponent: () => import('./projects/financial-plans/financial-plans').then(m => m.FinancialPlans) },
+  { path: 'project-cost-centers', loadComponent: () => import('./projects/project-cost-centers/project-cost-centers').then(m => m.ProjectCostCenters) },
+  { path: 'project-tasks', loadComponent: () => import('./projects/project-tasks/project-tasks').then(m => m.ProjectTasks) },
+  { path: 'project-issues', loadComponent: () => import('./projects/project-issues/project-issues').then(m => m.ProjectIssues) },
+  { path: 'change-requests', loadComponent: () => import('./projects/change-requests/change-requests').then(m => m.ChangeRequests) },
+
+  // Commercial (gated on commercial capability; billing additionally on finance)
+  { path: 'customers', canMatch: [commercialGuard], loadComponent: () => import('./commercial/customers/customers').then(m => m.Customers) },
+  { path: 'contracts', canMatch: [commercialGuard], loadComponent: () => import('./commercial/contracts/contracts').then(m => m.Contracts) },
+  { path: 'contracts/:id', canMatch: [commercialGuard], loadComponent: () => import('./commercial/contract-details/contract-details').then(m => m.ContractDetails) },
+  { path: 'orders', canMatch: [commercialGuard], loadComponent: () => import('./commercial/orders/orders').then(m => m.Orders) },
+  { path: 'billing', canMatch: [commercialGuard, financeGuard], loadComponent: () => import('./commercial/billing/billing').then(m => m.Billing) },
 
   // Reporting
-  { path: 'reporting', component: Reporting },
+  { path: 'reporting', loadComponent: () => import('./reporting/reporting').then(m => m.Reporting) },
 
-  // Configuration Routes
-  { path: 'config/language', component: SetDefaultLanguageComponent },
-  { path: 'config/skill-catalogs', component: ManageSkillCatalogsComponent },
-  { path: 'config/proficiency-sets', component: ManageProficiencySetsComponent },
-  { path: 'config/skills', component: ManageSkillsComponent },
-  { path: 'config/project-roles', component: ManageProjectRolesComponent },
-  { path: 'config/cost-centers', component: ManageCostCentersComponent },
-  { path: 'config/service-orgs', component: ServiceOrganizationDetailsComponent },
-  { path: 'config/resource-orgs', component: ManageResourceOrganizationsComponent },
-  { path: 'config/availability', component: MaintainAvailabilityDataComponent },
+  // Configuration
+  { path: 'config/language', loadComponent: () => import('./configuration/set-default-language.component').then(m => m.SetDefaultLanguageComponent) },
+  { path: 'config/skill-catalogs', loadComponent: () => import('./configuration/manage-skill-catalogs.component').then(m => m.ManageSkillCatalogsComponent) },
+  { path: 'config/proficiency-sets', loadComponent: () => import('./configuration/manage-proficiency-sets.component').then(m => m.ManageProficiencySetsComponent) },
+  { path: 'config/skills', loadComponent: () => import('./configuration/manage-skills.component').then(m => m.ManageSkillsComponent) },
+  { path: 'config/project-roles', loadComponent: () => import('./configuration/manage-project-roles.component').then(m => m.ManageProjectRolesComponent) },
+  { path: 'config/cost-centers', loadComponent: () => import('./configuration/manage-cost-centers.component').then(m => m.ManageCostCentersComponent) },
+  { path: 'config/service-orgs', loadComponent: () => import('./configuration/service-organization-details.component').then(m => m.ServiceOrganizationDetailsComponent) },
+  { path: 'config/resource-orgs', loadComponent: () => import('./configuration/manage-resource-organizations.component').then(m => m.ManageResourceOrganizationsComponent) },
+  { path: 'config/availability', loadComponent: () => import('./configuration/maintain-availability-data.component').then(m => m.MaintainAvailabilityDataComponent) },
+
+  // 404
+  { path: '**', loadComponent: () => import('./not-found/not-found.component').then(m => m.NotFoundComponent) },
 ];

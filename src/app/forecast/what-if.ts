@@ -1,0 +1,807 @@
+import {
+  ChangeDetectionStrategy,
+  Component,
+  computed,
+  inject,
+  linkedSignal,
+} from '@angular/core';
+import { rxResource } from '@angular/core/rxjs-interop';
+import { DecimalPipe } from '@angular/common';
+import { AbstractControl, FormControl, FormGroup, ReactiveFormsModule, ValidationErrors, Validators } from '@angular/forms';
+import { forkJoin } from 'rxjs';
+import { ApiService, Resource, ResourceRequest, Project } from '../services/api.service';
+import { NotificationService } from '../services/notification.service';
+import {
+  ForecastData,
+  CapacityPeriod,
+  SkillGapEntry,
+  capacityForecast,
+  benchList,
+  skillGap,
+} from '../services/forecast.util';
+
+/** Rolling horizon (weeks) for the sandbox forecast. Fixed: this is a comparison, not a tuning, surface. */
+const HORIZON_WEEKS = 12;
+
+/** A single headline metric compared base-vs-scenario, with a signed delta. */
+interface KpiDelta {
+  label: string;
+  /** Short explanation of what the number means. */
+  note: string;
+  base: number;
+  scenario: number;
+  delta: number;
+  /** How to render the value (percent vs plain count) and how to colour the delta. */
+  format: 'pct' | 'count';
+  /** Direction that should read as "good" (green). 'down' ⇒ lower is better. */
+  better: 'up' | 'down';
+}
+
+/** One scenario timeline row: scenario capacity profile plus the delta vs base demand. */
+interface TimelineRow {
+  /** Short label for the period start (e.g. "12 May"). */
+  label: string;
+  supply: number;
+  demand: number;
+  utilizationPct: number;
+  /** Scenario demand − base demand for the same period (hours). */
+  demandDelta: number;
+  /** Supply bar width as a % of the busiest figure in the horizon. */
+  supplyPct: number;
+  /** Committed-demand bar width as a % of the busiest figure. */
+  committedPct: number;
+  /** Pipeline-demand bar width as a % of the busiest figure. */
+  pipelinePct: number;
+  /** Utilisation band driving the cell colour. */
+  band: 'under' | 'tight' | 'over';
+}
+
+/**
+ * What-If — a CLIENT-ONLY capacity scenario sandbox.
+ *
+ * Loads resources / requests / assignments once into an immutable BASE, then keeps
+ * a writable SCENARIO (a deep copy, seeded from the base via `linkedSignal` so it
+ * re-seeds whenever the base reloads). Three levers mutate only the in-memory
+ * scenario — nothing is ever persisted:
+ *
+ *   • Win deal     — append a synthetic open ResourceRequest (new pipeline demand).
+ *   • Hire         — append N synthetic Resources with capacity + one skill (new supply).
+ *   • Slip project — shift a project's requests' start/end by W weeks (re-timed demand).
+ *
+ * `capacityForecast`, `skillGap` and `benchList` are recomputed on BOTH the base and
+ * the scenario and shown as side-by-side delta KPIs plus a scenario capacity timeline.
+ * "Reset scenario" re-seeds the scenario from the base, discarding all changes.
+ */
+@Component({
+  selector: 'app-what-if',
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [DecimalPipe, ReactiveFormsModule],
+  template: `
+    <div class="command-page space-y-6">
+      <header class="command-header">
+        <div>
+          <div class="command-eyebrow">Capacity Control</div>
+          <h1 class="command-title">What-If Scenario Sandbox</h1>
+          <p class="command-subtitle">
+            Model deals, hires and slips against live capacity without touching any data. Every
+            change is in-memory only; compare the {{ horizonWeeks }}-week outlook against today's
+            baseline and reset whenever you like.
+          </p>
+        </div>
+        <div class="flex flex-col items-stretch gap-2 sm:items-end">
+          <span class="command-section-label">Scenario</span>
+          <div class="flex items-center gap-2">
+            @if (dirty()) {
+              <span class="command-status amber">{{ changeCount() }} change{{ changeCount() === 1 ? '' : 's' }}</span>
+            } @else {
+              <span class="command-status green">Matches baseline</span>
+            }
+            <button
+              type="button"
+              class="command-button secondary"
+              [disabled]="!dirty()"
+              (click)="resetScenario()">
+              Reset scenario
+            </button>
+          </div>
+        </div>
+      </header>
+
+      @if (loading()) {
+        <div class="command-card p-6">
+          <div class="command-skeleton h-24"></div>
+        </div>
+      } @else if (!hasData()) {
+        <div class="command-card">
+          <div class="command-empty">
+            <div class="command-empty-title">No capacity data yet</div>
+            <p class="command-empty-note">
+              Add resources with capacity, then create resource requests and assignments to model
+              what-if scenarios against a baseline.
+            </p>
+          </div>
+        </div>
+      } @else {
+        <!-- Delta KPI strip -->
+        <section class="grid grid-cols-1 gap-4 sm:gap-6 sm:grid-cols-2 xl:grid-cols-4" aria-label="Scenario versus baseline metrics">
+          @for (k of kpis(); track k.label) {
+            <div class="command-kpi"
+                 [class.green]="deltaIsGood(k)"
+                 [class.danger]="deltaIsBad(k)">
+              <p class="command-kpi-label">{{ k.label }}</p>
+              <p class="command-kpi-value">{{ formatMetric(k, k.scenario) }}</p>
+              <p class="command-kpi-note">
+                <span class="font-mono tabular-nums">{{ deltaText(k) }}</span>
+                vs base {{ formatMetric(k, k.base) }}
+                <span class="block">{{ k.note }}</span>
+              </p>
+            </div>
+          }
+        </section>
+
+        <!-- Levers -->
+        <section class="grid grid-cols-1 gap-6 xl:grid-cols-3" aria-label="Scenario controls">
+          <!-- Win deal -->
+          <form class="command-card flex flex-col" [formGroup]="dealForm" (ngSubmit)="winDeal()">
+            <div class="command-card-header">
+              <div>
+                <h2 class="font-display text-lg font-bold text-[var(--cc-ink)]">Win deal</h2>
+                <p class="mt-1 text-sm text-[var(--cc-muted)]">Add an open request to the pipeline.</p>
+              </div>
+            </div>
+            <div class="space-y-4 p-5">
+              <div>
+                <label for="dealRole" class="block text-sm font-semibold text-slate-700 mb-1.5">Required role *</label>
+                <input id="dealRole" type="text" formControlName="requiredRole" class="cc-input" placeholder="e.g. Senior Developer">
+              </div>
+              <div>
+                <label for="dealEffort" class="block text-sm font-semibold text-slate-700 mb-1.5">Required effort (h) *</label>
+                <input id="dealEffort" type="number" min="1" formControlName="requiredEffort" class="cc-input" placeholder="e.g. 320">
+              </div>
+              <div>
+                <label for="dealSkills" class="block text-sm font-semibold text-slate-700 mb-1.5">Skills (comma-separated)</label>
+                <input id="dealSkills" type="text" formControlName="skills" class="cc-input" placeholder="e.g. Java, AWS, Kafka">
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label for="dealStart" class="block text-sm font-semibold text-slate-700 mb-1.5">Start</label>
+                  <input id="dealStart" type="date" formControlName="startDate" class="cc-input">
+                </div>
+                <div>
+                  <label for="dealEnd" class="block text-sm font-semibold text-slate-700 mb-1.5">End</label>
+                  <input id="dealEnd" type="date" formControlName="endDate" class="cc-input">
+                </div>
+              </div>
+            </div>
+            <div class="mt-auto flex justify-end border-t border-[var(--cc-line)] p-4">
+              <button type="submit" class="command-button" [disabled]="dealForm.invalid">Add deal</button>
+            </div>
+          </form>
+
+          <!-- Hire -->
+          <form class="command-card flex flex-col" [formGroup]="hireForm" (ngSubmit)="hire()">
+            <div class="command-card-header">
+              <div>
+                <h2 class="font-display text-lg font-bold text-[var(--cc-ink)]">Hire</h2>
+                <p class="mt-1 text-sm text-[var(--cc-muted)]">Add resources with spare capacity.</p>
+              </div>
+            </div>
+            <div class="space-y-4 p-5">
+              <div>
+                <label for="hireRole" class="block text-sm font-semibold text-slate-700 mb-1.5">Role *</label>
+                <input id="hireRole" type="text" formControlName="role" class="cc-input" placeholder="e.g. Developer">
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label for="hireCount" class="block text-sm font-semibold text-slate-700 mb-1.5">Headcount *</label>
+                  <input id="hireCount" type="number" min="1" max="50" formControlName="count" class="cc-input" placeholder="e.g. 3">
+                </div>
+                <div>
+                  <label for="hireCapacity" class="block text-sm font-semibold text-slate-700 mb-1.5">Capacity (h/wk) *</label>
+                  <input id="hireCapacity" type="number" min="1" formControlName="capacity" class="cc-input" placeholder="e.g. 40">
+                </div>
+              </div>
+              <div>
+                <label for="hireSkill" class="block text-sm font-semibold text-slate-700 mb-1.5">Skill</label>
+                <input id="hireSkill" type="text" formControlName="skill" class="cc-input" placeholder="e.g. Java">
+              </div>
+            </div>
+            <div class="mt-auto flex justify-end border-t border-[var(--cc-line)] p-4">
+              <button type="submit" class="command-button" [disabled]="hireForm.invalid">Add hires</button>
+            </div>
+          </form>
+
+          <!-- Slip project -->
+          <form class="command-card flex flex-col" [formGroup]="slipForm" (ngSubmit)="slipProject()">
+            <div class="command-card-header">
+              <div>
+                <h2 class="font-display text-lg font-bold text-[var(--cc-ink)]">Slip project</h2>
+                <p class="mt-1 text-sm text-[var(--cc-muted)]">Shift a project's request dates.</p>
+              </div>
+            </div>
+            <div class="space-y-4 p-5">
+              <div>
+                <label for="slipProjectId" class="block text-sm font-semibold text-slate-700 mb-1.5">Project *</label>
+                <select id="slipProjectId" formControlName="projectId" class="cc-input">
+                  <option value="">Select a project…</option>
+                  @for (p of slippableProjects(); track p.id) {
+                    <option [value]="p.id">{{ p.name }} ({{ requestCountFor(p.id) }} req)</option>
+                  }
+                </select>
+                @if (!slippableProjects().length) {
+                  <p class="mt-1.5 text-xs text-[var(--cc-muted)]">No projects have dated requests to shift.</p>
+                }
+              </div>
+              <div>
+                <label for="slipWeeks" class="block text-sm font-semibold text-slate-700 mb-1.5">Shift by (weeks) *</label>
+                <input id="slipWeeks" type="number" formControlName="weeks" class="cc-input" placeholder="e.g. 4 (negative pulls in)">
+                <p class="mt-1.5 text-xs text-[var(--cc-muted)]">Positive delays the project; negative pulls it earlier.</p>
+              </div>
+            </div>
+            <div class="mt-auto flex justify-end border-t border-[var(--cc-line)] p-4">
+              <button type="submit" class="command-button" [disabled]="slipForm.invalid">Apply slip</button>
+            </div>
+          </form>
+        </section>
+
+        <!-- Scenario capacity timeline -->
+        <section class="command-card overflow-hidden">
+          <div class="command-card-header">
+            <div>
+              <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Scenario Capacity Timeline</h2>
+              <p class="mt-1 text-sm text-[var(--cc-muted)]">
+                Weekly supply versus demand under the scenario, with the demand delta against baseline.
+              </p>
+            </div>
+            <div class="flex flex-wrap items-center gap-3 text-xs text-[var(--cc-muted)]">
+              <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-slate-300"></span>Supply</span>
+              <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-blue-600"></span>Committed</span>
+              <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-blue-300"></span>Pipeline</span>
+            </div>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="command-data-table">
+              <thead>
+                <tr>
+                  <th scope="col">Week of</th>
+                  <th scope="col">Capacity profile</th>
+                  <th scope="col" class="num">Supply</th>
+                  <th scope="col" class="num">Demand</th>
+                  <th scope="col" class="num">Util %</th>
+                  <th scope="col" class="num">Δ Demand</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (row of timeline(); track row.label) {
+                  <tr>
+                    <td class="font-mono whitespace-nowrap">{{ row.label }}</td>
+                    <td class="min-w-[14rem]">
+                      <div class="space-y-1.5"
+                           [attr.aria-label]="(row.demand | number: '1.0-0') + ' demand hours against ' + (row.supply | number: '1.0-0') + ' supply'">
+                        <div class="h-2 overflow-hidden rounded-full bg-slate-100">
+                          <span class="block h-full rounded-full bg-slate-300" [style.width.%]="row.supplyPct"></span>
+                        </div>
+                        <div class="flex h-2 overflow-hidden rounded-full bg-slate-100">
+                          <span class="block h-full bg-blue-600" [style.width.%]="row.committedPct"></span>
+                          <span class="block h-full bg-blue-300" [style.width.%]="row.pipelinePct"></span>
+                        </div>
+                      </div>
+                    </td>
+                    <td class="num">{{ row.supply | number: '1.0-0' }}</td>
+                    <td class="num">{{ row.demand | number: '1.0-0' }}</td>
+                    <td class="num">
+                      <span class="command-status"
+                            [class.green]="row.band === 'under'"
+                            [class.amber]="row.band === 'tight'"
+                            [class.red]="row.band === 'over'">
+                        {{ row.utilizationPct | number: '1.0-0' }}%
+                      </span>
+                    </td>
+                    <td class="num font-semibold"
+                        [style.color]="row.demandDelta > 0 ? 'var(--cc-red)' : (row.demandDelta < 0 ? 'var(--cc-green)' : 'var(--cc-muted)')">
+                      {{ row.demandDelta > 0 ? '+' : '' }}{{ row.demandDelta | number: '1.0-0' }}
+                    </td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- Skill gap: base vs scenario -->
+        <section class="command-card overflow-hidden">
+          <div class="command-card-header">
+            <div>
+              <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Skill Coverage — Base vs Scenario</h2>
+              <p class="mt-1 text-sm text-[var(--cc-muted)]">
+                Open-request demand against covering resources. Rows present in either view are shown.
+              </p>
+            </div>
+            <span class="command-status"
+                  [class.red]="scenarioShortages() > baseShortages()"
+                  [class.green]="scenarioShortages() < baseShortages()">
+              {{ scenarioShortages() }} shortage{{ scenarioShortages() === 1 ? '' : 's' }}
+              <span aria-hidden="true">·</span>
+              base {{ baseShortages() }}
+            </span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="command-data-table">
+              <thead>
+                <tr>
+                  <th scope="col">Skill</th>
+                  <th scope="col" class="num">Base demand (h)</th>
+                  <th scope="col" class="num">Scenario demand (h)</th>
+                  <th scope="col" class="num">Base covered by</th>
+                  <th scope="col" class="num">Scenario covered by</th>
+                  <th scope="col">Scenario status</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (row of skillRows(); track row.skill) {
+                  <tr>
+                    <td class="font-semibold text-[var(--cc-ink)]">{{ row.skill }}</td>
+                    <td class="num">{{ row.baseDemandHours | number: '1.0-0' }}</td>
+                    <td class="num">{{ row.scenarioDemandHours | number: '1.0-0' }}</td>
+                    <td class="num">{{ row.baseSupplyCount }}</td>
+                    <td class="num">{{ row.scenarioSupplyCount }}</td>
+                    <td>
+                      <span class="command-status"
+                            [class.red]="row.scenarioShortage"
+                            [class.amber]="!row.scenarioShortage && row.scenarioThin"
+                            [class.green]="!row.scenarioShortage && !row.scenarioThin">
+                        {{ row.scenarioShortage ? 'No coverage' : (row.scenarioThin ? 'Thin' : 'Covered') }}
+                      </span>
+                    </td>
+                  </tr>
+                } @empty {
+                  <tr>
+                    <td colspan="6" class="text-center text-[var(--cc-muted)]">No open requests demand specific skills.</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        </section>
+      }
+    </div>
+  `,
+  styles: [`
+    .cc-input {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border: 1px solid var(--cc-line);
+      border-radius: 0.75rem;
+      background: #ffffff;
+      color: var(--cc-ink);
+      font-size: var(--text-sm);
+      outline: none;
+      transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+    }
+    .cc-input:focus {
+      border-color: rgb(37 99 235 / 100%);
+      background: #ffffff;
+      box-shadow: 0 0 0 2px rgb(59 130 246 / 25%);
+    }
+    .cc-input::placeholder { color: #94a3b8; }
+  `],
+})
+export class WhatIf {
+  private readonly api = inject(ApiService);
+  private readonly notify = inject(NotificationService);
+
+  /** Fixed comparison horizon, in weeks. */
+  readonly horizonWeeks = HORIZON_WEEKS;
+
+  /** Monotonic counter for synthetic, client-only entity ids (never sent to the server). */
+  private syntheticSeq = 0;
+
+  // --- BASE: loaded once, treated as immutable -------------------------------
+
+  private readonly dataRes = rxResource<ForecastData, unknown>({
+    stream: () =>
+      forkJoin({
+        resources: this.api.getResources(),
+        requests: this.api.getRequests(),
+        assignments: this.api.getAssignments(),
+      }),
+    defaultValue: { resources: [], requests: [], assignments: [] },
+  });
+
+  private readonly projectsRes = rxResource<Project[], unknown>({
+    stream: () => this.api.getProjects(),
+    defaultValue: [],
+  });
+
+  readonly loading = computed<boolean>(() => this.dataRes.isLoading() || this.projectsRes.isLoading());
+
+  /** Immutable baseline forecast inputs. */
+  private readonly baseData = computed<ForecastData>(() => {
+    const d = this.dataRes.value();
+    return { resources: d.resources, requests: d.requests, assignments: d.assignments };
+  });
+
+  readonly hasData = computed<boolean>(() => {
+    const d = this.baseData();
+    return d.resources.length > 0 || d.requests.length > 0 || d.assignments.length > 0;
+  });
+
+  // --- SCENARIO: a deep copy of the base, re-seeded whenever the base reloads --
+  // `linkedSignal` gives us a writable signal that resets to a fresh deep copy of
+  // the base each time the base changes (the canonical "writable state from a
+  // source" primitive) — no effect-writes-signal anti-pattern, and reset is trivial.
+
+  private readonly scenario = linkedSignal<ForecastData, ForecastData>({
+    source: this.baseData,
+    computation: base => this.clone(base),
+  });
+
+  /** True when the scenario diverges from the baseline (drives the badge + reset button). */
+  readonly dirty = computed<boolean>(() => {
+    const base = this.baseData();
+    const s = this.scenario();
+    return (
+      s.resources.length !== base.resources.length ||
+      s.requests.length !== base.requests.length ||
+      s.assignments.length !== base.assignments.length ||
+      this.requestsShifted(base.requests, s.requests)
+    );
+  });
+
+  /** Rough count of distinct changes applied (added resources/requests + shifted requests). */
+  readonly changeCount = computed<number>(() => {
+    const base = this.baseData();
+    const s = this.scenario();
+    const addedResources = Math.max(0, s.resources.length - base.resources.length);
+    const addedRequests = Math.max(0, s.requests.length - base.requests.length);
+    const shifted = this.shiftedRequestCount(base.requests, s.requests);
+    return addedResources + addedRequests + shifted;
+  });
+
+  // --- Horizon + forecasts on BOTH base and scenario --------------------------
+
+  /** Horizon start = today (UTC midnight), so periods line up with calendar weeks. */
+  private readonly horizonStartIso = computed<string>(() => new Date().toISOString().slice(0, 10));
+
+  private readonly basePeriods = computed<CapacityPeriod[]>(() =>
+    capacityForecast(this.baseData(), this.horizonStartIso(), HORIZON_WEEKS, 'weekly'),
+  );
+  private readonly scenarioPeriods = computed<CapacityPeriod[]>(() =>
+    capacityForecast(this.scenario(), this.horizonStartIso(), HORIZON_WEEKS, 'weekly'),
+  );
+
+  private readonly baseSkills = computed<SkillGapEntry[]>(() => skillGap(this.baseData()));
+  private readonly scenarioSkills = computed<SkillGapEntry[]>(() => skillGap(this.scenario()));
+
+  private readonly baseBenchCount = computed<number>(() => benchList(this.baseData()).length);
+  private readonly scenarioBenchCount = computed<number>(() => benchList(this.scenario()).length);
+
+  readonly baseShortages = computed<number>(() => this.baseSkills().filter(s => s.shortage).length);
+  readonly scenarioShortages = computed<number>(() => this.scenarioSkills().filter(s => s.shortage).length);
+
+  // --- Delta KPIs -------------------------------------------------------------
+
+  readonly kpis = computed<KpiDelta[]>(() => {
+    const baseAvg = this.avgUtil(this.basePeriods());
+    const scenAvg = this.avgUtil(this.scenarioPeriods());
+    const basePeak = this.peakDemand(this.basePeriods());
+    const scenPeak = this.peakDemand(this.scenarioPeriods());
+    const baseShort = this.baseShortages();
+    const scenShort = this.scenarioShortages();
+    const baseBench = this.baseBenchCount();
+    const scenBench = this.scenarioBenchCount();
+
+    return [
+      {
+        label: 'Avg Utilization',
+        note: `Mean across ${HORIZON_WEEKS} weeks`,
+        base: baseAvg,
+        scenario: scenAvg,
+        delta: scenAvg - baseAvg,
+        format: 'pct',
+        better: 'up',
+      },
+      {
+        label: 'Peak Demand',
+        note: 'Busiest weekly hours',
+        base: basePeak,
+        scenario: scenPeak,
+        delta: scenPeak - basePeak,
+        format: 'count',
+        better: 'down',
+      },
+      {
+        label: 'Skill Shortages',
+        note: 'Skills with zero coverage',
+        base: baseShort,
+        scenario: scenShort,
+        delta: scenShort - baseShort,
+        format: 'count',
+        better: 'down',
+      },
+      {
+        label: 'On Bench',
+        note: 'Under-allocated resources',
+        base: baseBench,
+        scenario: scenBench,
+        delta: scenBench - baseBench,
+        format: 'count',
+        better: 'down',
+      },
+    ];
+  });
+
+  // --- Scenario timeline rows -------------------------------------------------
+
+  readonly timeline = computed<TimelineRow[]>(() => {
+    const rows = this.scenarioPeriods();
+    const baseByPeriod = new Map(this.basePeriods().map(p => [p.period, p]));
+    // Scale bars against the busiest figure across the scenario horizon (>=1 to avoid /0).
+    const scale = Math.max(1, ...rows.map(r => Math.max(r.supply, r.demand)));
+    const pct = (v: number): number => Math.min(100, Math.max(0, (v / scale) * 100));
+    return rows.map(r => ({
+      label: this.shortDate(r.period),
+      supply: r.supply,
+      demand: r.demand,
+      utilizationPct: r.utilizationPct,
+      demandDelta: r.demand - (baseByPeriod.get(r.period)?.demand ?? 0),
+      supplyPct: pct(r.supply),
+      committedPct: pct(r.committed),
+      pipelinePct: pct(r.pipeline),
+      band: this.bandFor(r.utilizationPct),
+    }));
+  });
+
+  // --- Skill rows: union of base + scenario skills ----------------------------
+
+  readonly skillRows = computed(() => {
+    const base = new Map(this.baseSkills().map(s => [s.skill.toLowerCase(), s]));
+    const scen = new Map(this.scenarioSkills().map(s => [s.skill.toLowerCase(), s]));
+    const keys = new Set([...base.keys(), ...scen.keys()]);
+    return [...keys]
+      .map(key => {
+        const b = base.get(key);
+        const s = scen.get(key);
+        const scenarioDemandCount = s?.demandCount ?? 0;
+        const scenarioSupplyCount = s?.supplyCount ?? 0;
+        return {
+          skill: s?.skill ?? b?.skill ?? key,
+          baseDemandHours: b?.demandHours ?? 0,
+          scenarioDemandHours: s?.demandHours ?? 0,
+          baseSupplyCount: b?.supplyCount ?? 0,
+          scenarioSupplyCount,
+          scenarioShortage: s ? s.shortage : false,
+          // "Thin" = demanded by more open requests than there are covering resources.
+          scenarioThin: scenarioDemandCount > 0 && scenarioSupplyCount < scenarioDemandCount,
+        };
+      })
+      .sort((a, b) => {
+        if (a.scenarioShortage !== b.scenarioShortage) return a.scenarioShortage ? -1 : 1;
+        return b.scenarioDemandHours - a.scenarioDemandHours;
+      });
+  });
+
+  // --- "Slip project" support -------------------------------------------------
+
+  /** Projects that have at least one request with usable dates in the (base) data. */
+  readonly slippableProjects = computed<Project[]>(() => {
+    const datedProjectIds = new Set(
+      this.baseData().requests
+        .filter(r => r.projectId && (r.startDate || r.endDate))
+        .map(r => r.projectId as string),
+    );
+    return this.projectsRes.value().filter(p => datedProjectIds.has(p.id));
+  });
+
+  requestCountFor(projectId: string): number {
+    return this.scenario().requests.filter(r => r.projectId === projectId).length;
+  }
+
+  // --- Typed forms ------------------------------------------------------------
+
+  readonly dealForm = new FormGroup({
+    requiredRole: new FormControl('', { nonNullable: true, validators: Validators.required }),
+    requiredEffort: new FormControl<number>(0, {
+      nonNullable: true,
+      validators: [Validators.required, Validators.min(1)],
+    }),
+    skills: new FormControl('', { nonNullable: true }),
+    startDate: new FormControl('', { nonNullable: true }),
+    endDate: new FormControl('', { nonNullable: true }),
+  });
+
+  readonly hireForm = new FormGroup({
+    role: new FormControl('', { nonNullable: true, validators: Validators.required }),
+    count: new FormControl<number>(1, {
+      nonNullable: true,
+      validators: [Validators.required, Validators.min(1), Validators.max(50)],
+    }),
+    capacity: new FormControl<number>(40, {
+      nonNullable: true,
+      validators: [Validators.required, Validators.min(1)],
+    }),
+    skill: new FormControl('', { nonNullable: true }),
+  });
+
+  readonly slipForm = new FormGroup({
+    projectId: new FormControl('', { nonNullable: true, validators: Validators.required }),
+    weeks: new FormControl<number>(4, {
+      nonNullable: true,
+      validators: [Validators.required, WhatIf.nonZeroWeeks],
+    }),
+  });
+
+  // --- Lever handlers (mutate the in-memory scenario only) --------------------
+
+  /** Append a synthetic open ResourceRequest to the scenario's pipeline. */
+  winDeal(): void {
+    if (this.dealForm.invalid) return;
+    const v = this.dealForm.getRawValue();
+    const skills = this.parseSkills(v.skills);
+    const request: ResourceRequest = {
+      id: this.nextId('whatif-req'),
+      name: `What-If: ${v.requiredRole.trim()}`,
+      requiredRole: v.requiredRole.trim(),
+      requiredEffort: Math.max(0, v.requiredEffort),
+      staffedEffort: 0,
+      status: 'Open',
+      skills,
+      startDate: v.startDate || undefined,
+      endDate: v.endDate || undefined,
+    };
+    this.scenario.update(s => ({ ...s, requests: [...s.requests, request] }));
+    this.notify.show(`Added open request for ${request.requiredRole} (${request.requiredEffort}h).`, 'success');
+    this.dealForm.reset({ requiredRole: '', requiredEffort: 0, skills: '', startDate: '', endDate: '' });
+  }
+
+  /** Append N synthetic, fully-available Resources (new supply) to the scenario. */
+  hire(): void {
+    if (this.hireForm.invalid) return;
+    const v = this.hireForm.getRawValue();
+    const count = Math.floor(Math.max(1, v.count));
+    const capacity = Math.max(0, v.capacity);
+    const skillName = v.skill.trim();
+    const role = v.role.trim();
+    const hires: Resource[] = Array.from({ length: count }, (_, i) => ({
+      id: this.nextId('whatif-res'),
+      name: `New ${role} ${i + 1}`,
+      role,
+      skills: skillName ? [{ name: skillName, level: 3 }] : [],
+      projectRoles: [],
+      externalExperience: [],
+      utilization: 0,
+      capacity,
+    }));
+    this.scenario.update(s => ({ ...s, resources: [...s.resources, ...hires] }));
+    this.notify.show(`Added ${count} ${role}${count === 1 ? '' : 's'} at ${capacity}h/week.`, 'success');
+    this.hireForm.reset({ role: '', count: 1, capacity: 40, skill: '' });
+  }
+
+  /** Shift every request of the chosen project by W weeks (start + end) in the scenario. */
+  slipProject(): void {
+    if (this.slipForm.invalid) return;
+    const { projectId, weeks } = this.slipForm.getRawValue();
+    const deltaMs = weeks * 7 * 86_400_000;
+    let shifted = 0;
+    this.scenario.update(s => ({
+      ...s,
+      requests: s.requests.map(r => {
+        if (r.projectId !== projectId) return r;
+        const start = this.shiftIso(r.startDate, deltaMs);
+        const end = this.shiftIso(r.endDate, deltaMs);
+        if (start === r.startDate && end === r.endDate) return r;
+        shifted++;
+        return { ...r, startDate: start, endDate: end };
+      }),
+    }));
+    if (shifted === 0) {
+      this.notify.show('That project has no dated requests to shift.', 'info');
+      return;
+    }
+    const dir = weeks >= 0 ? 'later' : 'earlier';
+    this.notify.show(`Shifted ${shifted} request${shifted === 1 ? '' : 's'} ${Math.abs(weeks)}w ${dir}.`, 'success');
+    this.slipForm.reset({ projectId: '', weeks: 4 });
+  }
+
+  /** Discard all scenario changes by re-seeding from the immutable base. */
+  resetScenario(): void {
+    this.scenario.set(this.clone(this.baseData()));
+    this.notify.show('Scenario reset to baseline.', 'info');
+  }
+
+  // --- Template formatting helpers --------------------------------------------
+
+  formatMetric(k: KpiDelta, value: number): string {
+    const rounded = Math.round(value);
+    return k.format === 'pct' ? `${rounded}%` : `${rounded}`;
+  }
+
+  deltaText(k: KpiDelta): string {
+    const rounded = Math.round(k.delta);
+    const sign = rounded > 0 ? '+' : '';
+    return k.format === 'pct' ? `${sign}${rounded}%` : `${sign}${rounded}`;
+  }
+
+  deltaIsGood(k: KpiDelta): boolean {
+    if (k.delta === 0) return false;
+    return k.better === 'up' ? k.delta > 0 : k.delta < 0;
+  }
+
+  deltaIsBad(k: KpiDelta): boolean {
+    if (k.delta === 0) return false;
+    return k.better === 'up' ? k.delta < 0 : k.delta > 0;
+  }
+
+  // --- Pure helpers -----------------------------------------------------------
+
+  /** Structured deep copy so scenario mutations never leak back into the base. */
+  private clone(data: ForecastData): ForecastData {
+    return {
+      resources: data.resources.map(r => ({ ...r, skills: r.skills.map(s => ({ ...s })) })),
+      requests: data.requests.map(r => ({ ...r, skills: [...r.skills] })),
+      assignments: data.assignments.map(a => ({ ...a })),
+    };
+  }
+
+  private nextId(prefix: string): string {
+    return `${prefix}-${++this.syntheticSeq}`;
+  }
+
+  private parseSkills(csv: string): string[] {
+    return csv
+      .split(',')
+      .map(s => s.trim())
+      .filter(s => s.length > 0);
+  }
+
+  /** Shift an ISO date by `deltaMs`, preserving YYYY-MM-DD; passes through missing/invalid dates. */
+  private shiftIso(iso: string | undefined, deltaMs: number): string | undefined {
+    if (!iso) return iso;
+    const ms = Date.parse(iso);
+    if (!Number.isFinite(ms)) return iso;
+    return new Date(ms + deltaMs).toISOString().slice(0, 10);
+  }
+
+  private avgUtil(periods: CapacityPeriod[]): number {
+    if (!periods.length) return 0;
+    return periods.reduce((acc, p) => acc + p.utilizationPct, 0) / periods.length;
+  }
+
+  private peakDemand(periods: CapacityPeriod[]): number {
+    return periods.reduce((max, p) => Math.max(max, p.demand), 0);
+  }
+
+  /** Utilisation → colour band: <85% spare, 85–100% tight, >100% over capacity. */
+  private bandFor(utilizationPct: number): TimelineRow['band'] {
+    if (utilizationPct > 100) return 'over';
+    if (utilizationPct >= 85) return 'tight';
+    return 'under';
+  }
+
+  /** True when any request shared by both lists has a changed start/end date. */
+  private requestsShifted(base: ResourceRequest[], scenario: ResourceRequest[]): boolean {
+    return this.shiftedRequestCount(base, scenario) > 0;
+  }
+
+  private shiftedRequestCount(base: ResourceRequest[], scenario: ResourceRequest[]): number {
+    const baseById = new Map(base.map(r => [r.id, r]));
+    let count = 0;
+    for (const r of scenario) {
+      const original = baseById.get(r.id);
+      if (original && (original.startDate !== r.startDate || original.endDate !== r.endDate)) count++;
+    }
+    return count;
+  }
+
+  /** Validator: the slip amount must be a non-zero number of weeks. */
+  private static nonZeroWeeks(control: AbstractControl): ValidationErrors | null {
+    return Number(control.value) === 0 ? { zeroWeeks: true } : null;
+  }
+
+  /** ISO date → "12 May" style label (UTC, time-zone stable). */
+  private shortDate(iso: string): string {
+    const ms = Date.parse(iso);
+    if (!Number.isFinite(ms)) return iso;
+    return new Date(ms).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  }
+}
