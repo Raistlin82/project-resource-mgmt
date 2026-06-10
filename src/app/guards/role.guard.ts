@@ -1,4 +1,5 @@
-import { inject } from '@angular/core';
+import { inject, PLATFORM_ID } from '@angular/core';
+import { isPlatformBrowser } from '@angular/common';
 import { CanMatchFn, Router, UrlTree } from '@angular/router';
 import { AuthService } from '../services/auth.service';
 
@@ -11,11 +12,18 @@ import { AuthService } from '../services/auth.service';
  * (instead of `CanActivate`) keeps the lazy chunk from even loading when the
  * route is not authorized.
  *
- * SSR-safe: it only touches injected services (no `window`/DOM), and
- * {@link AuthService} already falls back to safe defaults on the server.
+ * SSR-aware: identity is unknowable on the server ({@link AuthService} only
+ * populates claims client-side via `afterNextRender`), so a capability check
+ * there would always fail and the returned `UrlTree` would surface as an HTTP
+ * 302 — breaking refresh/deep-link/bookmark of guarded routes for everyone.
+ * We therefore allow the match on the server (letting the page render) and let
+ * this same guard re-run authoritatively in the browser after hydration. Data
+ * stays protected because the server JWKS-verifies the Bearer on every `/api`
+ * call regardless of which route rendered.
  */
 export function roleGuard(check: (auth: AuthService) => boolean, redirect = '/'): CanMatchFn {
   return (): boolean | UrlTree => {
+    if (!isPlatformBrowser(inject(PLATFORM_ID))) return true;
     const auth = inject(AuthService);
     const router = inject(Router);
     return check(auth) ? true : router.parseUrl(redirect);

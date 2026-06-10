@@ -6,10 +6,12 @@ import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-int
 import { concatMap, from, switchMap, toArray } from 'rxjs';
 import {
   ApiService,
+  BASE_CURRENCY,
   BillingPlanItem,
   BillingType,
   Contract,
   Customer,
+  FxRate,
   Milestone,
   Order,
   Project,
@@ -17,7 +19,7 @@ import {
   TimeEntry,
 } from '../../services/api.service';
 import { NotificationService } from '../../services/notification.service';
-import { daysOverdue } from '../../services/finance.util';
+import { convertToBase, daysOverdue } from '../../services/finance.util';
 import { CsvColumn, downloadCsv, toCsv } from '../../services/export.util';
 
 type BillingStatus = BillingPlanItem['status'];
@@ -118,42 +120,42 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
       <section class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-8 gap-4" aria-label="Billing metrics">
         <article class="command-kpi info">
           <p class="command-kpi-label">Planned</p>
-          <p class="command-kpi-value">{{ kpis().planned | currency: 'EUR' : 'symbol' : '1.0-0' }}</p>
+          <p class="command-kpi-value">{{ kpis().planned | currency: baseCurrency : 'symbol' : '1.0-0' }}</p>
           <p class="command-kpi-note">Conditions awaiting trigger</p>
         </article>
         <article class="command-kpi green">
           <p class="command-kpi-label">Ready</p>
-          <p class="command-kpi-value">{{ kpis().ready | currency: 'EUR' : 'symbol' : '1.0-0' }}</p>
+          <p class="command-kpi-value">{{ kpis().ready | currency: baseCurrency : 'symbol' : '1.0-0' }}</p>
           <p class="command-kpi-note">Billable right now</p>
         </article>
         <article class="command-kpi warning">
           <p class="command-kpi-label">Invoiced</p>
-          <p class="command-kpi-value">{{ kpis().invoiced | currency: 'EUR' : 'symbol' : '1.0-0' }}</p>
+          <p class="command-kpi-value">{{ kpis().invoiced | currency: baseCurrency : 'symbol' : '1.0-0' }}</p>
           <p class="command-kpi-note">Issued, awaiting payment</p>
         </article>
         <article class="command-kpi danger">
           <p class="command-kpi-label">Overdue</p>
-          <p class="command-kpi-value">{{ kpis().overdueAmount | currency: 'EUR' : 'symbol' : '1.0-0' }}</p>
+          <p class="command-kpi-value">{{ kpis().overdueAmount | currency: baseCurrency : 'symbol' : '1.0-0' }}</p>
           <p class="command-kpi-note">{{ kpis().overdueCount }} invoiced past due</p>
         </article>
         <article class="command-kpi">
           <p class="command-kpi-label">Paid</p>
-          <p class="command-kpi-value">{{ kpis().paid | currency: 'EUR' : 'symbol' : '1.0-0' }}</p>
+          <p class="command-kpi-value">{{ kpis().paid | currency: baseCurrency : 'symbol' : '1.0-0' }}</p>
           <p class="command-kpi-note">Cash collected</p>
         </article>
         <article class="command-kpi info">
           <p class="command-kpi-label">T&amp;M Accrued</p>
-          <p class="command-kpi-value">{{ kpis().tmAccrued | currency: 'EUR' : 'symbol' : '1.0-0' }}</p>
+          <p class="command-kpi-value">{{ kpis().tmAccrued | currency: baseCurrency : 'symbol' : '1.0-0' }}</p>
           <p class="command-kpi-note">Unbilled approved hours × bill rate</p>
         </article>
         <article class="command-kpi warning">
           <p class="command-kpi-label">Retention Held</p>
-          <p class="command-kpi-value">{{ kpis().retentionHeld | currency: 'EUR' : 'symbol' : '1.0-0' }}</p>
+          <p class="command-kpi-value">{{ kpis().retentionHeld | currency: baseCurrency : 'symbol' : '1.0-0' }}</p>
           <p class="command-kpi-note">Ritenuta a garanzia, not yet paid</p>
         </article>
         <article class="command-kpi">
           <p class="command-kpi-label">Tax (IVA)</p>
-          <p class="command-kpi-value">{{ kpis().tax | currency: 'EUR' : 'symbol' : '1.0-0' }}</p>
+          <p class="command-kpi-value">{{ kpis().tax | currency: baseCurrency : 'symbol' : '1.0-0' }}</p>
           <p class="command-kpi-note">On Ready &amp; Invoiced conditions</p>
         </article>
       </section>
@@ -772,6 +774,8 @@ export class Billing {
   private readonly ordersRes = rxResource({ stream: () => this.api.getOrders(), defaultValue: [] as Order[] });
   private readonly timeEntriesRes = rxResource({ stream: () => this.api.getTimeEntries(), defaultValue: [] as TimeEntry[] });
   private readonly resourcesRes = rxResource({ stream: () => this.api.getResources(), defaultValue: [] as Resource[] });
+  /** FX rate table (base-currency value of 1 unit of each currency); normalises mixed-currency KPI rollups. */
+  private readonly fxRatesRes = rxResource({ stream: () => this.api.getFxRates(), defaultValue: [] as FxRate[] });
 
   readonly items = this.itemsRes.value;
   readonly contracts = this.contractsRes.value;
@@ -781,6 +785,10 @@ export class Billing {
   readonly orders = this.ordersRes.value;
   readonly timeEntries = this.timeEntriesRes.value;
   readonly resources = this.resourcesRes.value;
+  readonly fxRates = this.fxRatesRes.value;
+
+  /** Reporting/base currency the aggregate KPI strip is denominated in. */
+  readonly baseCurrency = BASE_CURRENCY;
 
   // --- lookups via computed Maps ---
   private readonly metaByType = new Map<BillingType, TypeMeta>(TYPE_META.map(m => [m.type, m]));
@@ -912,10 +920,15 @@ export class Billing {
   });
 
   // --- KPI strip ---
+  // Every rollup normalises each item's amount to BASE_CURRENCY before summing
+  // (the book mixes EUR/USD/GBP), so the strip's hardcoded base-currency label is
+  // truthful. With no FX table loaded, convertToBase is an identity (single-currency).
   readonly kpis = computed(() => {
     const items = this.items();
+    const fx = this.fxRates();
+    const base = (i: BillingPlanItem) => convertToBase(i.amount, i.currency, fx);
     const sumWhere = (pred: (i: BillingPlanItem) => boolean) =>
-      items.filter(pred).reduce((s, i) => s + (Number.isFinite(i.amount) ? i.amount : 0), 0);
+      items.filter(pred).reduce((s, i) => s + base(i), 0);
 
     const planned = sumWhere(i => i.status === 'Planned');
     const ready = sumWhere(i => i.status === 'Ready');
@@ -924,18 +937,18 @@ export class Billing {
 
     // Overdue: Invoiced conditions whose due date has passed.
     const overdueItems = items.filter(i => this.overdueDaysOf(i) > 0);
-    const overdueAmount = overdueItems.reduce((s, i) => s + (Number.isFinite(i.amount) ? i.amount : 0), 0);
+    const overdueAmount = overdueItems.reduce((s, i) => s + base(i), 0);
     const overdueCount = overdueItems.length;
 
     // Retention held: ritenuta on every condition not yet paid.
     const retentionHeld = items
       .filter(i => i.status !== 'Paid')
-      .reduce((s, i) => s + this.retentionOf(i), 0);
+      .reduce((s, i) => s + convertToBase(this.retentionOf(i), i.currency, fx), 0);
 
     // Tax (IVA): on Ready + Invoiced conditions.
     const tax = items
       .filter(i => i.status === 'Ready' || i.status === 'Invoiced')
-      .reduce((s, i) => s + this.taxOf(i), 0);
+      .reduce((s, i) => s + convertToBase(this.taxOf(i), i.currency, fx), 0);
 
     return { planned, ready, invoiced, paid, tmAccrued: this.tmAccrued(), retentionHeld, tax, overdueAmount, overdueCount };
   });

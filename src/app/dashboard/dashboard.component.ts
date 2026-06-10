@@ -550,7 +550,9 @@ export class DashboardComponent {
   criticalChanges = computed(() =>
     this.data().changeRequests.filter(c => (c.status === 'Draft' || c.status === 'Submitted') && (c.priority === 'High' || c.priority === 'Critical')).length,
   );
-  criticalRisks = computed(() => this.riskQueue().length);
+  criticalRisks = computed(() =>
+    this.data().issues.filter(i => i.status !== 'Resolved' && (i.severity === 'Critical' || i.severity === 'High' || i.escalated)).length,
+  );
   escalations = computed(() => this.data().issues.filter(i => i.status !== 'Resolved' && i.escalated).length);
 
   overbookedResourcesList = computed(() =>

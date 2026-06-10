@@ -7,6 +7,7 @@ import { getRepositories, type FxRateRow } from './db/repositories';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
 import type { AuditLog, Resource, ResourceRequest, Assignment, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Project } from './app/services/api.service';
+import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition } from './app/services/staffing.util';
 
 const serverDistFolder = dirname(fileURLToPath(import.meta.url));
 const browserDistFolder = resolve(serverDistFolder, '../browser');
@@ -43,6 +44,33 @@ function isNonNegNumber(v: unknown): v is number {
 /** B10: keep utilization within [0, 100] and avoid float drift. */
 function clampUtil(v: number): number {
   return Math.round(Math.max(0, Math.min(100, v)));
+}
+
+/**
+ * B-CONCURRENCY: serialized critical section (per-process async mutex).
+ *
+ * Express handlers run concurrently and every repository call is awaited, so a
+ * read-modify-write over a shared aggregate (a request's `staffedEffort`, a
+ * resource's `utilization`, the invoice sequence) can interleave between its
+ * `get()` and its `update()` — two concurrent writers both read the pre-state
+ * and one increment is silently lost. There is no atomic-increment / FOR UPDATE
+ * primitive on the `Repository<T>` boundary (it must serve both the in-memory
+ * dev adapter and the Postgres adapter), so we serialize the whole
+ * read-modify-write per logical key: each key holds a tail Promise and new work
+ * chains onto it, guaranteeing strictly sequential execution per key while
+ * different keys still run in parallel. Sufficient for the single-process Node
+ * server; a multi-process deployment would additionally need a DB-level lock.
+ */
+const criticalSections = new Map<string, Promise<unknown>>();
+function withLock<R>(key: string, fn: () => Promise<R>): Promise<R> {
+  const prev = criticalSections.get(key) ?? Promise.resolve();
+  // Run `fn` only after any in-flight work on this key settles (success OR
+  // failure), so one rejected section never wedges the key.
+  const run = prev.then(fn, fn);
+  // The stored tail must never reject (an unhandled rejection here would crash
+  // the process and the next waiter would inherit it); swallow settlement state.
+  criticalSections.set(key, run.then(() => undefined, () => undefined));
+  return run;
 }
 
 /** S6: minimal in-memory fixed-window rate limiter (no external dependency). */
@@ -188,6 +216,15 @@ function highestRole(roles: readonly string[]): UserRole | 'unknown' {
 
 const OIDC_ISSUER = process.env['OIDC_ISSUER'] || 'http://localhost:8081/realms/psa';
 /**
+ * Expected token audience (`aud`) for THIS API — the resource/client id Keycloak
+ * stamps on access tokens minted for us. When set, `jwtVerify` both requires the
+ * `aud` claim and rejects tokens issued for a different audience, preventing a
+ * token minted for another client in the same realm from being replayed here
+ * (confused-deputy / cross-audience escalation). When unset, audience is not
+ * checked (preserves the local-dev default and existing tests).
+ */
+const OIDC_AUDIENCE = process.env['OIDC_AUDIENCE'];
+/**
  * Remote JWKS for the Keycloak realm. `createRemoteJWKSet` lazily fetches and
  * caches the signing keys (with cooldown + rotation handling) so each request
  * does not hit the network. Kept module-scoped so the cache is shared.
@@ -220,7 +257,7 @@ function bearerToken(req: Request): string | null {
 async function verifyBearer(req: Request): Promise<{ userId: string; role: UserRole | 'unknown' } | null> {
   const token = bearerToken(req);
   if (!token) return null;
-  const { payload } = await jwtVerify(token, JWKS, { issuer: OIDC_ISSUER });
+  const { payload } = await jwtVerify(token, JWKS, { issuer: OIDC_ISSUER, audience: OIDC_AUDIENCE });
   const claims = payload as KeycloakClaims;
   const roles = Array.isArray(claims.realm_access?.roles) ? claims.realm_access.roles : [];
   const sub = typeof claims.sub === 'string' ? claims.sub : '';
@@ -244,19 +281,22 @@ const actorRole = (req: Request): UserRole | 'unknown' =>
  * from a signed session or validated JWT (i.e. identity the client cannot
  * forge). DO NOT ship header-based identity to any untrusted network.
  *
- * As a defence-in-depth guard, `trustHeaders` below restricts header trust to
- * loopback binds (localhost/127.0.0.1) unless explicitly opted in via
- * AUTH_TRUST_HEADERS=true. When headers are NOT trusted, every actor is
- * treated as role 'unknown', so privileged mutations are denied (403).
+ * As a defence-in-depth guard, header trust requires an EXPLICIT opt-in via
+ * AUTH_TRUST_HEADERS=true (dev-only). It is NEVER inferred from the bind host:
+ * binding to 127.0.0.1 behind a reverse proxy is the normal production
+ * topology, so the bind host says nothing about whether the connecting peer is
+ * trusted. When headers are NOT trusted, every actor is treated as role
+ * 'unknown', so privileged mutations are denied (403).
  */
 const bindHost = (process.env['HOST'] || 'localhost').trim();
-const isLoopbackHost = ['localhost', '127.0.0.1', '::1'].includes(bindHost);
-const trustHeaders = isLoopbackHost || process.env['AUTH_TRUST_HEADERS'] === 'true';
+// DEV-ONLY opt-in. Do NOT enable in any environment reachable by untrusted
+// clients (incl. behind a TLS-terminating reverse proxy on a loopback bind).
+const trustHeaders = process.env['AUTH_TRUST_HEADERS'] === 'true';
 
 /**
  * Server-trusted role for the request. A VERIFIED JWT role (set by the async
  * auth middleware) is always trusted. Otherwise this falls back to the demo
- * header role only on loopback/opted-in binds, else 'unknown'.
+ * header role only when header trust is explicitly opted in, else 'unknown'.
  */
 const trustedRole = (req: Request): UserRole | 'unknown' => {
   if (req.verifiedRole !== undefined) return req.verifiedRole;
@@ -292,16 +332,32 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
     return;
   }
 
+  const path = req.path;
+  const role = trustedRole(req);
+
+  // READ-SIDE AUTHORIZATION: GETs were previously served to anyone, leaking
+  // sensitive data (the integrity/audit trail and the commercial/financial
+  // collections). Require a recognised principal for those collections and
+  // apply per-collection read RBAC. All other GETs stay open as before
+  // (catalogs, config, projects, etc. — non-sensitive reference reads).
   if (!['POST', 'PUT', 'DELETE'].includes(req.method)) {
+    const readRule = READ_RULES.find(r => r.test(path));
+    if (readRule && !canMutate(role, readRule.roles)) {
+      // 'unknown' means no verified JWT and no trusted header -> unauthenticated.
+      res.status(role === 'unknown' ? 401 : 403).json({ error: `Role ${role} cannot read ${path}` });
+      return;
+    }
     next();
     return;
   }
 
-  const path = req.path;
-  const role = trustedRole(req);
   const rules: { test: (path: string) => boolean; roles: UserRole[] }[] = [
     { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
     { test: p => ['/project-financials', '/project-cost-centers', '/cost-centers'].some(prefix => p.startsWith(prefix)), roles: ['finance', 'delivery-executive', 'admin'] },
+    // Sensitive financial rates (costRate/billRate) live on resources; restrict who may rewrite them.
+    { test: p => p.startsWith('/resources'), roles: ['resource-manager', 'delivery-executive', 'admin'] },
+    // Time entries incl. approval. Self-approval is additionally blocked in the PUT handler (SoD).
+    { test: p => p.startsWith('/time-entries'), roles: ['employee', 'pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
     { test: p => ['/assignments', '/requests'].some(prefix => p.startsWith(prefix)), roles: ['pm', 'resource-manager', 'delivery-executive', 'admin'] },
     { test: p => ['/projects', '/work-packages', '/milestones', '/project-tasks', '/project-issues', '/change-requests'].some(prefix => p.startsWith(prefix)), roles: ['pm', 'delivery-executive', 'admin'] },
     { test: p => ['/skill-catalogs', '/proficiency-sets', '/skills', '/project-roles', '/resource-organizations', '/languages'].some(prefix => p.startsWith(prefix)), roles: ['admin', 'delivery-executive'] },
@@ -315,6 +371,19 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
   }
   next();
 }
+
+/**
+ * READ-side RBAC rules. Only the genuinely sensitive collections are gated; the
+ * rest of the GET surface stays open to any caller as before. A request whose
+ * `trustedRole` is 'unknown' (no verified JWT and no trusted header) fails these
+ * and is rejected with 401.
+ *   - /audit-logs            -> the integrity/audit trail: admin/delivery-executive only.
+ *   - commercial collections -> contracts/orders/billing/etc.: sales/finance/delivery-executive/admin.
+ */
+const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
+  { test: p => p.startsWith('/audit-logs'), roles: ['admin', 'delivery-executive'] },
+  { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
+];
 
 /**
  * Validate that any present, allow-listed numeric field is a non-negative
@@ -339,8 +408,8 @@ function findInvalidNumericField(
  *   - POST   `/${path}`     -> validate numerics, pick allow-list, repo.create()
  *                              (id server-assigned via newId(); 200 json item)
  *   - PUT    `/${path}/:id` -> 404 if missing, validate numerics, repo.update()
- *   - DELETE `/${path}/:id` -> repo.remove() then 204 (unconditional, mirroring
- *                              the prior filter-and-204 semantics — no 404)
+ *   - DELETE `/${path}/:id` -> repo.remove(); 404 when the id was absent,
+ *                              else 204 (parity with the bespoke handlers)
  */
 function crud<T extends { id: string }>(
   router: Router,
@@ -368,7 +437,11 @@ function crud<T extends { id: string }>(
     res.json(updated);
   });
   router.delete(`/${path}/:id`, async (req, res) => {
-    await repo.remove(req.params.id);
+    // AUDIT CORRECTNESS: honor remove()'s boolean so a DELETE of a non-existent
+    // id 404s (parity with the bespoke handlers) instead of returning 204 and
+    // recording a phantom DELETE audit entry (before/after both undefined).
+    const removed = await repo.remove(req.params.id);
+    if (!removed) { res.status(404).json({ error: 'Not found' }); return; }
     res.status(204).send();
   });
 }
@@ -493,16 +566,22 @@ apiRouter.post('/assignments', async (req, res) => {
   const newAssig = { id: newId(), ...body } as Assignment;
   const created = await repos.assignments.create(newAssig);
 
-  const resource = await repos.resources.get(created.resourceId);
-  // B-DATA: capacity is a divisor; skip the utilization recompute when it is not usable.
-  if (resource && resource.capacity > 0) await repos.resources.update(resource.id, { utilization: clampUtil(resource.utilization + (created.assignedHours / resource.capacity) * 100) });
+  // B-CONCURRENCY: serialize the per-resource / per-request read-modify-write so
+  // two concurrent assignment creates can't both read the same pre-state and
+  // lose one increment.
+  await withLock(`res:${created.resourceId}`, async () => {
+    const resource = await repos.resources.get(created.resourceId);
+    // B-DATA: utilizationContribution returns 0 when capacity is not usable.
+    if (resource) await repos.resources.update(resource.id, { utilization: clampUtil(resource.utilization + utilizationContribution(created.assignedHours, resource.capacity)) });
+  });
 
-  const request = await repos.requests.get(created.requestId);
-  if (request) {
-    const staffedEffort = (request.staffedEffort ?? 0) + created.assignedHours;
-    const status = staffedEffort >= request.requiredEffort ? 'Fulfilled' : request.status;
-    await repos.requests.update(request.id, { staffedEffort, status });
-  }
+  await withLock(`req:${created.requestId}`, async () => {
+    const request = await repos.requests.get(created.requestId);
+    if (request) {
+      const staffedEffort = (request.staffedEffort ?? 0) + created.assignedHours;
+      await repos.requests.update(request.id, { staffedEffort, status: requestStatusFor(request, staffedEffort) });
+    }
+  });
   res.json(created);
 });
 apiRouter.put('/assignments/:id', async (req, res) => {
@@ -524,17 +603,57 @@ apiRouter.put('/assignments/:id', async (req, res) => {
   const newAssig = { ...oldAssig, ...body };
   await repos.assignments.update(req.params.id, body);
 
-  const resource = await repos.resources.get(newAssig.resourceId);
-  // B-DATA: capacity is a divisor; skip the utilization recompute when it is not usable.
-  if (resource && resource.capacity > 0) await repos.resources.update(resource.id, { utilization: clampUtil(resource.utilization + ((newAssig.assignedHours - oldAssig.assignedHours) / resource.capacity) * 100) });
+  const resourceChanged = newAssig.resourceId !== oldAssig.resourceId;
+  const requestChanged = newAssig.requestId !== oldAssig.requestId;
 
-  const request = await repos.requests.get(newAssig.requestId);
-  if (request) {
-    const staffedEffort = (request.staffedEffort ?? 0) + (newAssig.assignedHours - oldAssig.assignedHours);
-    let status = request.status;
-    if (staffedEffort >= request.requiredEffort) status = 'Fulfilled';
-    else if (request.status === 'Fulfilled') status = 'Open';
-    await repos.requests.update(request.id, { staffedEffort, status });
+  // B-STAFFING-RECALC: the recalc must account for FK retargeting. When the
+  // resource (or request) is unchanged we apply only the hours DELTA to the
+  // single target; when it changes we must FULLY REVERSE the old target's
+  // contribution and apply the new target's FULL contribution — otherwise the
+  // old target keeps phantom load forever and the new target is under-counted.
+  // Each aggregate read-modify-write is serialized per key (B-CONCURRENCY).
+  if (resourceChanged) {
+    await withLock(`res:${oldAssig.resourceId}`, async () => {
+      const oldRes = await repos.resources.get(oldAssig.resourceId);
+      if (oldRes) await repos.resources.update(oldRes.id, { utilization: clampUtil(oldRes.utilization - utilizationContribution(oldAssig.assignedHours, oldRes.capacity)) });
+    });
+    await withLock(`res:${newAssig.resourceId}`, async () => {
+      const newRes = await repos.resources.get(newAssig.resourceId);
+      if (newRes) await repos.resources.update(newRes.id, { utilization: clampUtil(newRes.utilization + utilizationContribution(newAssig.assignedHours, newRes.capacity)) });
+    });
+  } else {
+    await withLock(`res:${newAssig.resourceId}`, async () => {
+      const resource = await repos.resources.get(newAssig.resourceId);
+      // B-DATA: utilizationContribution returns 0 when capacity is not usable.
+      if (resource) await repos.resources.update(resource.id, { utilization: clampUtil(resource.utilization + utilizationContribution(newAssig.assignedHours - oldAssig.assignedHours, resource.capacity)) });
+    });
+  }
+
+  if (requestChanged) {
+    // Fully back out the assignment's old hours from the OLD request...
+    await withLock(`req:${oldAssig.requestId}`, async () => {
+      const oldReq = await repos.requests.get(oldAssig.requestId);
+      if (oldReq) {
+        const staffedEffort = (oldReq.staffedEffort ?? 0) - oldAssig.assignedHours;
+        await repos.requests.update(oldReq.id, { staffedEffort, status: requestStatusFor(oldReq, staffedEffort) });
+      }
+    });
+    // ...and add the assignment's full hours to the NEW request.
+    await withLock(`req:${newAssig.requestId}`, async () => {
+      const newReq = await repos.requests.get(newAssig.requestId);
+      if (newReq) {
+        const staffedEffort = (newReq.staffedEffort ?? 0) + newAssig.assignedHours;
+        await repos.requests.update(newReq.id, { staffedEffort, status: requestStatusFor(newReq, staffedEffort) });
+      }
+    });
+  } else {
+    await withLock(`req:${newAssig.requestId}`, async () => {
+      const request = await repos.requests.get(newAssig.requestId);
+      if (request) {
+        const staffedEffort = (request.staffedEffort ?? 0) + (newAssig.assignedHours - oldAssig.assignedHours);
+        await repos.requests.update(request.id, { staffedEffort, status: requestStatusFor(request, staffedEffort) });
+      }
+    });
   }
   res.json(newAssig);
 });
@@ -543,16 +662,20 @@ apiRouter.delete('/assignments/:id', async (req, res) => {
   if (oldAssig === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   await repos.assignments.remove(req.params.id);
 
-  const resource = await repos.resources.get(oldAssig.resourceId);
-  // B-DATA: capacity is a divisor; skip the utilization recompute when it is not usable.
-  if (resource && resource.capacity > 0) await repos.resources.update(resource.id, { utilization: clampUtil(resource.utilization - (oldAssig.assignedHours / resource.capacity) * 100) });
+  // B-CONCURRENCY: serialize the per-resource / per-request read-modify-write.
+  await withLock(`res:${oldAssig.resourceId}`, async () => {
+    const resource = await repos.resources.get(oldAssig.resourceId);
+    // B-DATA: utilizationContribution returns 0 when capacity is not usable.
+    if (resource) await repos.resources.update(resource.id, { utilization: clampUtil(resource.utilization - utilizationContribution(oldAssig.assignedHours, resource.capacity)) });
+  });
 
-  const request = await repos.requests.get(oldAssig.requestId);
-  if (request) {
-    const staffedEffort = (request.staffedEffort ?? 0) - oldAssig.assignedHours;
-    const status = request.status === 'Fulfilled' && staffedEffort < request.requiredEffort ? 'Open' : request.status;
-    await repos.requests.update(request.id, { staffedEffort, status });
-  }
+  await withLock(`req:${oldAssig.requestId}`, async () => {
+    const request = await repos.requests.get(oldAssig.requestId);
+    if (request) {
+      const staffedEffort = (request.staffedEffort ?? 0) - oldAssig.assignedHours;
+      await repos.requests.update(request.id, { staffedEffort, status: requestStatusFor(request, staffedEffort) });
+    }
+  });
   res.status(204).send();
 });
 
@@ -581,9 +704,26 @@ apiRouter.put('/time-entries/:id', async (req, res) => {
     res.status(400).json({ error: 'hours must be a non-negative number' });
     return;
   }
-  if (body.status === 'Approved') {
-    body.approvedBy = body.approvedBy || actorId(req);
-    body.approvedAt = body.approvedAt || new Date().toISOString();
+  // B-TIME-ENTRY: enforce the allowed status-transition whitelist. A status that
+  // is present must be a permitted move from the current status (a no-op
+  // transition is allowed); any other move (e.g. Approved->Draft, or jumping
+  // straight to Approved from Draft) is rejected.
+  if (body.status !== undefined && !isAllowedTimeEntryTransition(existing.status, body.status)) {
+    res.status(400).json({ error: `Illegal time-entry transition: ${existing.status} -> ${body.status}` });
+    return;
+  }
+  if (body.status === 'Approved' && existing.status !== 'Approved') {
+    // SEGREGATION OF DUTIES: the approver is the TRUSTED actor (never a
+    // client-supplied approvedBy) and must differ from the entry's owner
+    // (its resourceId) so a resource cannot approve their own time and inflate
+    // accrued T&M. Mirrors the approval engine's SoD check.
+    const approver = actorId(req);
+    if (approver === existing.resourceId) {
+      res.status(400).json({ error: 'Segregation of duties: a resource cannot approve their own time entry' });
+      return;
+    }
+    body.approvedBy = approver;
+    body.approvedAt = new Date().toISOString();
   }
   const updated = await repos.timeEntries.update(req.params.id, body);
   res.json(updated);
@@ -865,8 +1005,12 @@ apiRouter.post('/orders', async (req, res) => {
   if (fkError) { res.status(400).json({ error: fkError }); return; }
   const item = { id: newId(), partnerId: '', ...body } as OrderEntry;
   // INVOICE NUMBERING: an order created directly as 'Invoiced' gets a number now.
-  applyInvoiceNumbering(item);
-  const created = await repos.orders.create(item as unknown as Order);
+  // Serialize on the shared invoice-sequence so the ++invoiceSeq increment is
+  // atomic relative to concurrent order writes (no burned/duplicated sequence).
+  const created = await withLock('invoice-seq', async () => {
+    applyInvoiceNumbering(item);
+    return repos.orders.create(item as unknown as Order);
+  });
   res.json(created);
 });
 apiRouter.put('/orders/:id', async (req, res) => {
@@ -877,12 +1021,20 @@ apiRouter.put('/orders/:id', async (req, res) => {
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
   const fkError = await validateOrder(body, existing as unknown as OrderEntry);
   if (fkError) { res.status(400).json({ error: fkError }); return; }
-  const merged = { ...(existing as unknown as OrderEntry), ...body };
   // INVOICE NUMBERING: assign a sequential number/date on transition to
   // 'Invoiced'. invoiceNumber/invoiceDate are not in ORDER_FIELDS, so the
   // client can never set them; they are strictly server-assigned.
-  applyInvoiceNumbering(merged);
-  const updated = await repos.orders.update(req.params.id, merged as Partial<Order>);
+  // B-CONCURRENCY: serialize the assign-and-persist for THIS order on the shared
+  // invoice-sequence key and re-read the order inside the lock, so two
+  // concurrent PUTs transitioning the same order to 'Invoiced' assign exactly
+  // one number (the second sees the number already set) — no gap in the
+  // strictly-sequential INV-YEAR-#### series and no double-advanced counter.
+  const updated = await withLock('invoice-seq', async () => {
+    const current = (await repos.orders.get(req.params.id)) as OrderEntry | undefined;
+    const merged = { ...(current ?? (existing as unknown as OrderEntry)), ...body };
+    applyInvoiceNumbering(merged);
+    return repos.orders.update(req.params.id, merged as Partial<Order>);
+  });
   res.json(updated);
 });
 apiRouter.delete('/orders/:id', async (req, res) => {
@@ -1376,6 +1528,37 @@ async function seedSequences(): Promise<void> {
 
 await initPersistence();
 await seedSequences();
+
+/**
+ * Narrow guard for a PostgreSQL foreign-key-violation error. The `pg` driver
+ * surfaces the SQLSTATE in a string `code` property (`'23503'` ==
+ * foreign_key_violation) on the thrown error — present on both the JS
+ * `DatabaseError` and the native binding — so we match on `code` rather than a
+ * constructor. Read via `unknown`/`in` so no `any` leaks in.
+ */
+function isFkViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err
+    && (err as { code?: unknown }).code === '23503';
+}
+
+/**
+ * API error mapper (Express 5 forwards rejected async-handler promises here).
+ *
+ * ADAPTER PARITY: deleting an FK-referenced row raises a foreign-key violation
+ * on the Postgres adapter (the InMemory adapter would orphan instead). Without
+ * this, that rejection reaches Express's default handler as an opaque 500.
+ * Map it to 409 Conflict — a clean, adapter-independent "row is still
+ * referenced" status — instead of leaking a 500. All other errors fall through
+ * to the default handler unchanged.
+ */
+apiRouter.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+  if (res.headersSent) { next(err); return; }
+  if (isFkViolation(err)) {
+    res.status(409).json({ error: 'Cannot delete: the record is still referenced by other records' });
+    return;
+  }
+  next(err);
+});
 
 app.use('/api', apiRouter);
 // ------------------

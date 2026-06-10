@@ -238,7 +238,10 @@ export class App {
   readonly exactActiveOptions = { exact: true };
   readonly defaultActiveOptions = { exact: false };
 
-  readonly navGroups: NavGroup[] = [
+  // Static nav definition. The Commercial group is capability-gated at render
+  // time (see navGroups) so links only appear when the route guards would let
+  // the user through — no dead-end affordances for unauthorized/anonymous users.
+  private readonly allNavGroups: NavGroup[] = [
     {
       label: 'Resource Control',
       items: [
@@ -298,6 +301,26 @@ export class App {
     },
   ];
 
+  // Capability-filtered nav: Customers/Contracts/Orders require
+  // canManageCommercial() and Billing additionally requires
+  // canApproveFinancials(), mirroring commercialGuard/financeGuard so links
+  // only appear when they would actually navigate. An emptied Commercial group
+  // is dropped entirely.
+  readonly navGroups = computed<NavGroup[]>(() => {
+    const canCommercial = this.auth.canManageCommercial();
+    const canFinance = this.auth.canApproveFinancials();
+    return this.allNavGroups
+      .map(group => {
+        if (group.label !== 'Commercial') return group;
+        const items = group.items.filter(item => {
+          if (item.route === '/billing') return canCommercial && canFinance;
+          return canCommercial;
+        });
+        return { label: group.label, items };
+      })
+      .filter(group => group.items.length > 0);
+  });
+
   private navRes = rxResource<NavState, unknown>({
     stream: () => forkJoin({
       requests: this.api.getRequests(),
@@ -337,7 +360,7 @@ export class App {
     const url = this.currentUrl().split('?')[0];
     let bestLabel: string | null = null;
     let bestLen = -1;
-    for (const group of this.navGroups) {
+    for (const group of this.navGroups()) {
       for (const item of group.items) {
         const matches = item.exact ? url === item.route : url === item.route || url.startsWith(item.route + '/');
         if (matches && item.route.length > bestLen) {
@@ -352,8 +375,8 @@ export class App {
   // Filtered groups; while a query is active, only matching items/groups are shown.
   filteredGroups = computed<NavGroup[]>(() => {
     const q = this.navFilter().trim().toLowerCase();
-    if (!q) return this.navGroups;
-    return this.navGroups
+    if (!q) return this.navGroups();
+    return this.navGroups()
       .map(group => ({ label: group.label, items: group.items.filter(i => i.label.toLowerCase().includes(q)) }))
       .filter(group => group.items.length > 0);
   });
