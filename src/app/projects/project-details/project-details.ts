@@ -86,7 +86,7 @@ import { ChangeRequests } from '../change-requests/change-requests';
                 </div>
               </div>
             } @else {
-              <div class="py-8 text-slate-500 font-medium">Loading...</div>
+              <div class="py-8 text-[var(--cc-muted)] font-medium">Loading...</div>
             }
           </div>
         </div>
@@ -135,70 +135,70 @@ import { ChangeRequests } from '../change-requests/change-requests';
               </div>
             </div>
             <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
-              <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
-                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Contract Revenue</p>
-                <p class="text-2xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.revenue | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="text-xs text-slate-500 mt-1">Invoiced <span class="font-mono">{{ f.invoiced | currency:'EUR':'symbol':'1.0-0' }}</span></p>
+              <div class="command-kpi">
+                <p class="command-kpi-label">Contract Revenue</p>
+                <p class="command-kpi-value font-mono tabular-nums">{{ f.revenue | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Invoiced <span class="font-mono">{{ f.invoiced | currency:'EUR':'symbol':'1.0-0' }}</span></p>
               </div>
-              <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
-                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Actual Cost</p>
-                <p class="text-2xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.actualCost | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="text-xs text-slate-500 mt-1">Labor <span class="font-mono">{{ f.laborCost | currency:'EUR':'symbol':'1.0-0' }}</span> · External <span class="font-mono">{{ f.externalCost | currency:'EUR':'symbol':'1.0-0' }}</span></p>
+              <div class="command-kpi">
+                <p class="command-kpi-label">Actual Cost</p>
+                <p class="command-kpi-value font-mono tabular-nums">{{ f.actualCost | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Labor <span class="font-mono">{{ f.laborCost | currency:'EUR':'symbol':'1.0-0' }}</span> · External <span class="font-mono">{{ f.externalCost | currency:'EUR':'symbol':'1.0-0' }}</span></p>
               </div>
-              <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
-                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Margin</p>
-                <p class="text-2xl font-bold tracking-tight font-mono tabular-nums" [class.text-emerald-700]="f.margin >= 0" [class.text-red-700]="f.margin < 0">{{ f.margin | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="text-xs font-semibold mt-1" [class.text-emerald-700]="f.margin >= 0" [class.text-red-700]="f.margin < 0">{{ f.marginPct | number:'1.0-1' }}% margin</p>
+              <div class="command-kpi" [class.danger]="f.margin < 0">
+                <p class="command-kpi-label">Margin</p>
+                <p class="command-kpi-value font-mono tabular-nums" [class.text-emerald-700]="f.margin >= 0" [class.text-red-700]="f.margin < 0">{{ f.margin | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note font-semibold" [class.text-emerald-700]="f.margin >= 0" [class.text-red-700]="f.margin < 0">{{ f.marginPct | number:'1.0-1' }}% margin</p>
               </div>
-              <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
-                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Backlog</p>
-                <p class="text-2xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.backlog | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="text-xs text-slate-500 mt-1">Revenue not yet invoiced</p>
+              <div class="command-kpi info">
+                <p class="command-kpi-label">Backlog</p>
+                <p class="command-kpi-value font-mono tabular-nums">{{ f.backlog | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Revenue not yet invoiced</p>
               </div>
-              <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
-                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Budget</p>
-                <p class="text-2xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.budget | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="text-xs text-slate-500 mt-1">Planned cost</p>
+              <div class="command-kpi">
+                <p class="command-kpi-label">Budget</p>
+                <p class="command-kpi-value font-mono tabular-nums">{{ f.budget | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Planned cost</p>
               </div>
-              <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
-                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Budget Burn</p>
-                <p class="text-2xl font-bold tracking-tight font-mono tabular-nums" [class.text-emerald-700]="f.burnPct <= 100" [class.text-red-700]="f.burnPct > 100">{{ f.burnPct | number:'1.0-0' }}%</p>
+              <div class="command-kpi" [class.danger]="f.burnPct > 100">
+                <p class="command-kpi-label">Budget Burn</p>
+                <p class="command-kpi-value font-mono tabular-nums" [class.text-emerald-700]="f.burnPct <= 100" [class.text-red-700]="f.burnPct > 100">{{ f.burnPct | number:'1.0-0' }}%</p>
                 <div class="w-full bg-slate-100 rounded-full h-2 overflow-hidden mt-2">
                   <div class="h-2 rounded-full" [class.bg-gradient-to-r]="f.burnPct <= 100" [class.from-blue-500]="f.burnPct <= 100" [class.to-blue-600]="f.burnPct <= 100" [class.bg-red-500]="f.burnPct > 100" [style.width.%]="f.burnPct < 100 ? f.burnPct : 100"></div>
                 </div>
               </div>
-              <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
-                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">EAC</p>
-                <p class="text-2xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.eac | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="text-xs text-slate-500 mt-1">Estimate at completion</p>
+              <div class="command-kpi info">
+                <p class="command-kpi-label">EAC</p>
+                <p class="command-kpi-value font-mono tabular-nums">{{ f.eac | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Estimate at completion</p>
               </div>
-              <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
-                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">ETC</p>
-                <p class="text-2xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.etc | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="text-xs text-slate-500 mt-1">Estimated remaining cost</p>
+              <div class="command-kpi">
+                <p class="command-kpi-label">ETC</p>
+                <p class="command-kpi-value font-mono tabular-nums">{{ f.etc | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Estimated remaining cost</p>
               </div>
-              <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
-                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">VAC</p>
-                <p class="text-2xl font-bold tracking-tight font-mono tabular-nums" [class.text-emerald-700]="f.varianceAtCompletion >= 0" [class.text-red-700]="f.varianceAtCompletion < 0">{{ f.varianceAtCompletion | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="text-xs text-slate-500 mt-1">Budget minus EAC</p>
+              <div class="command-kpi" [class.danger]="f.varianceAtCompletion < 0">
+                <p class="command-kpi-label">VAC</p>
+                <p class="command-kpi-value font-mono tabular-nums" [class.text-emerald-700]="f.varianceAtCompletion >= 0" [class.text-red-700]="f.varianceAtCompletion < 0">{{ f.varianceAtCompletion | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Budget minus EAC</p>
               </div>
             </div>
 
-            <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 sm:p-8 transition-shadow hover:shadow-md">
-              <h3 class="text-lg font-bold text-slate-900 tracking-tight mb-6">Revenue breakdown</h3>
+            <div class="command-card p-6 sm:p-8">
+              <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] tracking-tight mb-6">Revenue breakdown</h3>
               @if (f.revenue > 0) {
                 <div class="flex h-9 w-full rounded-xl overflow-hidden text-xs font-bold ring-1 ring-slate-200">
                   <div class="bg-amber-100 text-amber-700 flex items-center justify-center min-w-0" [style.width.%]="f.laborCost / f.revenue * 100">Labor</div>
                   <div class="bg-orange-100 text-orange-700 flex items-center justify-center min-w-0" [style.width.%]="f.externalCost / f.revenue * 100">Ext</div>
                   <div class="flex items-center justify-center min-w-0" [class.bg-emerald-100]="f.margin >= 0" [class.text-emerald-700]="f.margin >= 0" [class.bg-red-100]="f.margin < 0" [class.text-red-700]="f.margin < 0" [style.width.%]="f.marginPct > 0 ? f.marginPct : 0">Margin</div>
                 </div>
-                <div class="flex flex-wrap gap-4 mt-3 text-xs text-slate-500">
+                <div class="flex flex-wrap gap-4 mt-3 text-xs text-[var(--cc-muted)]">
                   <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-amber-500"></span> Labor</span>
                   <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-orange-500"></span> External</span>
                   <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-emerald-500"></span> Margin</span>
                 </div>
               } @else {
-                <p class="text-slate-500 text-sm">No customer revenue recorded for this project yet. Add a Customer order with a line imputed to this project (Commercial → Orders).</p>
+                <p class="text-sm text-[var(--cc-muted)]">No customer revenue recorded for this project yet. Add a Customer order with a line imputed to this project (Commercial → Orders).</p>
               }
             </div>
           </div>

@@ -279,7 +279,7 @@ interface ProjectCommandRow {
             <div class="command-card-header">
               <div>
                 <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Risk & Escalation Queue</h2>
-                <p class="mt-1 text-sm text-[var(--cc-muted)]">Issue aperte con severità alta, critica o escalation.</p>
+                <p class="mt-1 text-sm text-[var(--cc-muted)]">Open issues with high or critical severity, or escalated.</p>
               </div>
               <a routerLink="/project-issues" class="command-status red" [class.green]="criticalRisks() === 0">Issues</a>
             </div>
@@ -307,7 +307,7 @@ interface ProjectCommandRow {
             <div class="command-card-header">
               <div>
                 <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Change Control</h2>
-                <p class="mt-1 text-sm text-[var(--cc-muted)]">Impatto budget e schedule in attesa decisione.</p>
+                <p class="mt-1 text-sm text-[var(--cc-muted)]">Budget and schedule impact awaiting decision.</p>
               </div>
               <a routerLink="/change-requests" class="command-status amber">CR</a>
             </div>
@@ -345,7 +345,7 @@ interface ProjectCommandRow {
           <div class="command-card-header">
             <div>
               <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Demand Queue</h2>
-              <p class="mt-1 text-sm text-[var(--cc-muted)]">Richieste aperte con gap di staffing residuo.</p>
+              <p class="mt-1 text-sm text-[var(--cc-muted)]">Open requests with a residual staffing gap.</p>
             </div>
             <a routerLink="/staffing" class="command-status">Staffing</a>
           </div>

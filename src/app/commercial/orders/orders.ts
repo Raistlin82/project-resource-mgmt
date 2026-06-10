@@ -14,37 +14,38 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [MatIconModule, CurrencyPipe, DatePipe, ReactiveFormsModule, ModalDialogDirective],
   template: `
-    <div class="max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8">
+    <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 class="text-3xl sm:text-4xl font-bold text-slate-900 tracking-tight">Orders</h1>
-          <p class="text-slate-500 mt-2 text-sm sm:text-base">Track customer and purchase orders across your contracts.</p>
+          <div class="command-eyebrow">Commercial</div>
+          <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Orders</h1>
+          <p class="mt-2 text-sm text-[var(--cc-muted)]">Track customer and purchase orders across your contracts.</p>
         </div>
-        <button (click)="showForm.set(true)" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-sm px-5 py-2.5 rounded-xl text-sm hover:-translate-y-0.5 transition-all flex items-center justify-center gap-2 w-full sm:w-auto">
+        <button (click)="showForm.set(true)" class="command-button w-full sm:w-auto">
           <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon> New Order
         </button>
       </div>
 
-      <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden">
+      <div class="command-card overflow-hidden">
         <div class="overflow-x-auto">
-          <table class="w-full text-sm">
+          <table class="command-data-table">
             <thead>
-              <tr class="bg-slate-50 border-b border-slate-200 text-left">
-                <th class="px-6 py-4 font-semibold text-slate-500 uppercase tracking-wider">Contract</th>
-                <th class="px-6 py-4 font-semibold text-slate-500 uppercase tracking-wider">Project Imputation</th>
-                <th class="px-6 py-4 font-semibold text-slate-500 uppercase tracking-wider">Type</th>
-                <th class="px-6 py-4 font-semibold text-slate-500 uppercase tracking-wider">Partner</th>
-                <th class="px-6 py-4 font-semibold text-slate-500 uppercase tracking-wider text-right">Amount</th>
-                <th class="px-6 py-4 font-semibold text-slate-500 uppercase tracking-wider">Status</th>
-                <th class="px-6 py-4 font-semibold text-slate-500 uppercase tracking-wider">Date</th>
+              <tr>
+                <th scope="col">Contract</th>
+                <th scope="col">Project Imputation</th>
+                <th scope="col">Type</th>
+                <th scope="col">Partner</th>
+                <th scope="col" class="num">Amount</th>
+                <th scope="col">Status</th>
+                <th scope="col">Date</th>
               </tr>
             </thead>
             <tbody>
               @for (order of orders(); track order.id) {
-                <tr class="border-b border-slate-200 last:border-0 hover:bg-slate-50 transition-colors">
-                  <td class="px-6 py-4 font-medium text-slate-900">{{ contractName(order.contractId) }}</td>
-                  <td class="px-6 py-4 text-slate-600">{{ orderProjectSummary(order.id) }}</td>
-                  <td class="px-6 py-4">
+                <tr>
+                  <td class="font-medium">{{ contractName(order.contractId) }}</td>
+                  <td class="text-[var(--cc-muted)]">{{ orderProjectSummary(order.id) }}</td>
+                  <td>
                     <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-wide ring-1"
                           [class.bg-blue-50]="order.type === 'Customer'"
                           [class.text-blue-700]="order.type === 'Customer'"
@@ -55,42 +56,32 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                       {{ order.type }}
                     </span>
                   </td>
-                  <td class="px-6 py-4 text-slate-600">
+                  <td class="text-[var(--cc-muted)]">
                     @if (order.type === 'Purchase') {
                       {{ partnerName(order.partnerId) }}
                     } @else {
-                      <span class="text-slate-400">&mdash;</span>
+                      <span class="text-[var(--cc-muted)]">&mdash;</span>
                     }
                   </td>
-                  <td class="px-6 py-4 text-right font-semibold text-slate-900 font-mono tabular-nums">{{ order.amount | currency:order.currency }}</td>
-                  <td class="px-6 py-4">
-                    <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-wide ring-1"
-                          [class.bg-slate-100]="order.status === 'Open'"
-                          [class.text-slate-700]="order.status === 'Open'"
-                          [class.ring-slate-200]="order.status === 'Open'"
-                          [class.bg-blue-50]="order.status === 'Confirmed'"
-                          [class.text-blue-700]="order.status === 'Confirmed'"
-                          [class.ring-blue-200]="order.status === 'Confirmed'"
-                          [class.bg-amber-50]="order.status === 'Invoiced'"
-                          [class.text-amber-700]="order.status === 'Invoiced'"
-                          [class.ring-amber-200]="order.status === 'Invoiced'"
-                          [class.bg-emerald-50]="order.status === 'Paid'"
-                          [class.text-emerald-700]="order.status === 'Paid'"
-                          [class.ring-emerald-200]="order.status === 'Paid'">
+                  <td class="num font-semibold">{{ order.amount | currency:order.currency }}</td>
+                  <td>
+                    <span class="command-status"
+                          [class.amber]="order.status === 'Invoiced'"
+                          [class.green]="order.status === 'Paid'">
                       {{ order.status }}
                     </span>
                   </td>
-                  <td class="px-6 py-4 text-slate-600 font-mono tabular-nums">{{ order.orderDate | date:'mediumDate' }}</td>
+                  <td class="text-[var(--cc-muted)] font-mono tabular-nums">{{ order.orderDate | date:'mediumDate' }}</td>
                 </tr>
               }
               @if (!orders().length) {
                 <tr>
-                  <td colspan="7" class="px-6 py-16 text-center">
-                    <div class="w-20 h-20 bg-slate-50 ring-1 ring-slate-900/5 shadow-sm rounded-full flex items-center justify-center mx-auto mb-4">
-                      <mat-icon class="text-slate-400 text-4xl">receipt_long</mat-icon>
+                  <td colspan="7">
+                    <div class="command-empty">
+                      <mat-icon>receipt_long</mat-icon>
+                      <h3 class="command-empty-title">No orders yet</h3>
+                      <p class="command-empty-note">Create your first customer or purchase order to get started.</p>
                     </div>
-                    <h3 class="text-xl font-bold text-slate-900 mb-2">No orders yet</h3>
-                    <p class="text-slate-500">Create your first customer or purchase order to get started.</p>
                   </td>
                 </tr>
               }
@@ -103,10 +94,10 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
     @if (showForm()) {
       <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
            appModal ariaLabelledby="orderModalTitle" (dismiss)="closeForm()">
-        <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
-          <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-            <h2 id="orderModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">New Order</h2>
-            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
+        <div class="command-card w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+          <div class="command-card-header">
+            <h2 id="orderModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">New Order</h2>
+            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-colors">
               <mat-icon>close</mat-icon>
             </button>
           </div>
@@ -116,7 +107,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div class="sm:col-span-2">
                   <label for="contractId" class="block text-sm font-semibold text-slate-700 mb-1.5">Contract *</label>
-                  <select id="contractId" formControlName="contractId" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
+                  <select id="contractId" formControlName="contractId" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
                     <option value="">Select a contract...</option>
                     @for (contract of contracts(); track contract.id) {
                       <option [value]="contract.id">{{ contract.name }}</option>
@@ -126,7 +117,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
                 <div>
                   <label for="type" class="block text-sm font-semibold text-slate-700 mb-1.5">Type *</label>
-                  <select id="type" formControlName="type" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
+                  <select id="type" formControlName="type" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
                     <option value="Customer">Customer</option>
                     <option value="Purchase">Purchase</option>
                   </select>
@@ -135,7 +126,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 @if (selectedType() === 'Purchase') {
                   <div>
                     <label for="partnerId" class="block text-sm font-semibold text-slate-700 mb-1.5">Partner</label>
-                    <select id="partnerId" formControlName="partnerId" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
+                    <select id="partnerId" formControlName="partnerId" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
                       <option value="">Select a partner...</option>
                       @for (partner of partners(); track partner.id) {
                         <option [value]="partner.id">{{ partner.company }}</option>
@@ -146,12 +137,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
                 <div>
                   <label for="amount" class="block text-sm font-semibold text-slate-700 mb-1.5">Amount *</label>
-                  <input id="amount" type="number" formControlName="amount" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="0.00">
+                  <input id="amount" type="number" formControlName="amount" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="0.00">
                 </div>
 
                 <div>
                   <label for="projectId" class="block text-sm font-semibold text-slate-700 mb-1.5">Project Imputation *</label>
-                  <select id="projectId" formControlName="projectId" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
+                  <select id="projectId" formControlName="projectId" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
                     <option value="">Select a project...</option>
                     @for (project of projectsForSelectedContract(); track project.id) {
                       <option [value]="project.id">{{ project.name }}</option>
@@ -161,17 +152,17 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
                 <div class="sm:col-span-2">
                   <label for="lineDescription" class="block text-sm font-semibold text-slate-700 mb-1.5">Line Description</label>
-                  <input id="lineDescription" type="text" formControlName="lineDescription" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="e.g. Phase 1 delivery">
+                  <input id="lineDescription" type="text" formControlName="lineDescription" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="e.g. Phase 1 delivery">
                 </div>
 
                 <div>
                   <label for="currency" class="block text-sm font-semibold text-slate-700 mb-1.5">Currency *</label>
-                  <input id="currency" type="text" formControlName="currency" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="EUR">
+                  <input id="currency" type="text" formControlName="currency" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="EUR">
                 </div>
 
                 <div>
                   <label for="status" class="block text-sm font-semibold text-slate-700 mb-1.5">Status *</label>
-                  <select id="status" formControlName="status" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
+                  <select id="status" formControlName="status" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
                     <option value="Open">Open</option>
                     <option value="Confirmed">Confirmed</option>
                     <option value="Invoiced">Invoiced</option>
@@ -181,15 +172,15 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
                 <div>
                   <label for="orderDate" class="block text-sm font-semibold text-slate-700 mb-1.5">Order Date *</label>
-                  <input id="orderDate" type="date" formControlName="orderDate" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
+                  <input id="orderDate" type="date" formControlName="orderDate" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
                 </div>
               </div>
             </form>
           </div>
 
-          <div class="px-6 sm:px-8 py-5 border-t border-slate-200 bg-slate-50 flex justify-end gap-3">
-            <button type="button" (click)="closeForm()" class="px-5 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all">Cancel</button>
-            <button type="button" (click)="saveOrder()" [disabled]="orderForm.invalid" class="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm hover:-translate-y-0.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none">
+          <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
+            <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
+            <button type="button" (click)="saveOrder()" [disabled]="orderForm.invalid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
               Create Order
             </button>
           </div>

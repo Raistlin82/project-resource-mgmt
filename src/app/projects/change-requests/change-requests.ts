@@ -13,21 +13,21 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CurrencyPipe, MatIconModule, ReactiveFormsModule, ModalDialogDirective],
   template: `
-    <div [class]="projectId() ? '' : 'max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8'">
+    <div [class]="projectId() ? '' : 'command-page space-y-6'">
       <div class="space-y-6">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
-            <h2 class="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">Change Control</h2>
-            <p class="text-sm text-slate-500 mt-1">Govern scope, budget, and schedule changes through explicit decisions.</p>
+            <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Change Control</h2>
+            <p class="text-sm text-[var(--cc-muted)] mt-1">Govern scope, budget, and schedule changes through explicit decisions.</p>
           </div>
-          <button (click)="openForm()" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-sm px-4 py-2 rounded-xl text-sm transition-colors flex items-center gap-2">
+          <button (click)="openForm()" class="command-button">
             <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> New Change
           </button>
         </div>
 
         @if (!projectId()) {
-          <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm p-4">
-            <label for="changeProjectFilter" class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Project Filter</label>
+          <div class="command-card p-4">
+            <label for="changeProjectFilter" class="command-section-label block mb-2">Project Filter</label>
             <select id="changeProjectFilter" [formControl]="projectFilter" class="w-full sm:w-96 px-4 py-3 border border-slate-300 rounded-xl bg-white focus:bg-white focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none text-sm text-slate-900">
               <option value="">All projects</option>
               @for (project of projects(); track project.id) {
@@ -38,47 +38,47 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
         }
 
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm hover:shadow-md transition-shadow p-5">
-            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Open</p>
-            <p class="text-2xl font-bold font-mono tabular-nums text-slate-900 mt-1">{{ openCount() }}</p>
+          <div class="command-kpi warning">
+            <p class="command-kpi-label">Open</p>
+            <p class="command-kpi-value">{{ openCount() }}</p>
           </div>
-          <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm hover:shadow-md transition-shadow p-5">
-            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Approved Impact</p>
-            <p class="text-2xl font-bold font-mono tabular-nums text-slate-900 mt-1">{{ approvedBudgetImpact() | currency:'EUR':'symbol':'1.0-0' }}</p>
+          <div class="command-kpi">
+            <p class="command-kpi-label">Approved Impact</p>
+            <p class="command-kpi-value">{{ approvedBudgetImpact() | currency:'EUR':'symbol':'1.0-0' }}</p>
           </div>
-          <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm hover:shadow-md transition-shadow p-5">
-            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Schedule Impact</p>
-            <p class="text-2xl font-bold font-mono tabular-nums text-slate-900 mt-1">{{ approvedScheduleImpact() }}d</p>
+          <div class="command-kpi">
+            <p class="command-kpi-label">Schedule Impact</p>
+            <p class="command-kpi-value">{{ approvedScheduleImpact() }}d</p>
           </div>
-          <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm hover:shadow-md transition-shadow p-5">
-            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">High/Critical</p>
-            <p class="text-2xl font-bold font-mono tabular-nums text-slate-900 mt-1">{{ severeCount() }}</p>
+          <div class="command-kpi" [class.danger]="severeCount() > 0">
+            <p class="command-kpi-label">High/Critical</p>
+            <p class="command-kpi-value">{{ severeCount() }}</p>
           </div>
         </div>
 
-        <div class="bg-white rounded-3xl shadow-sm border border-slate-200 ring-1 ring-slate-900/5 overflow-hidden">
+        <div class="command-card overflow-hidden">
           <div class="overflow-x-auto">
-            <table class="w-full text-sm">
-              <thead class="bg-slate-50 text-left text-xs font-bold uppercase tracking-wider text-slate-500">
+            <table class="command-data-table">
+              <thead>
                 <tr>
                   <th class="px-6 py-4">Change</th>
                   <th class="px-6 py-4">Project</th>
                   <th class="px-6 py-4">Priority</th>
-                  <th class="px-6 py-4">Budget</th>
-                  <th class="px-6 py-4">Schedule</th>
+                  <th class="px-6 py-4 text-right">Budget</th>
+                  <th class="px-6 py-4 text-right">Schedule</th>
                   <th class="px-6 py-4">Status</th>
                   <th class="px-6 py-4 text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody class="divide-y divide-slate-100">
+              <tbody class="divide-y divide-[var(--cc-line)]">
                 @for (change of filteredChanges(); track change.id) {
                   <tr class="hover:bg-slate-50 transition-colors">
                     <td class="px-6 py-5 min-w-72">
-                      <div class="font-bold text-slate-900">{{ change.title }}</div>
-                      <div class="text-xs text-slate-500 mt-1 line-clamp-2">{{ change.description }}</div>
-                      <div class="text-xs text-slate-500 mt-2">Owner: {{ change.owner || 'Unassigned' }}</div>
+                      <div class="font-bold text-[var(--cc-ink)]">{{ change.title }}</div>
+                      <div class="text-xs text-[var(--cc-muted)] mt-1 line-clamp-2">{{ change.description }}</div>
+                      <div class="text-xs text-[var(--cc-muted)] mt-2">Owner: {{ change.owner || 'Unassigned' }}</div>
                     </td>
-                    <td class="px-6 py-5 text-slate-600">{{ projectName(change.projectId) }}</td>
+                    <td class="px-6 py-5 text-[var(--cc-muted)]">{{ projectName(change.projectId) }}</td>
                     <td class="px-6 py-5">
                       <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold ring-1"
                             [class.bg-red-50]="change.priority === 'Critical'"
@@ -96,10 +96,10 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                         {{ change.priority }}
                       </span>
                     </td>
-                    <td class="px-6 py-5 font-semibold font-mono tabular-nums text-slate-900" [class.text-red-600]="change.impactBudget > 0" [class.text-emerald-600]="change.impactBudget < 0">
+                    <td class="px-6 py-5 text-right font-semibold font-mono tabular-nums text-slate-900" [class.text-red-700]="change.impactBudget > 0" [class.text-emerald-700]="change.impactBudget < 0">
                       {{ change.impactBudget | currency:'EUR':'symbol':'1.0-0' }}
                     </td>
-                    <td class="px-6 py-5 font-semibold font-mono tabular-nums text-slate-900" [class.text-red-600]="change.impactScheduleDays > 0" [class.text-emerald-600]="change.impactScheduleDays < 0">
+                    <td class="px-6 py-5 text-right font-semibold font-mono tabular-nums text-slate-900" [class.text-red-700]="change.impactScheduleDays > 0" [class.text-emerald-700]="change.impactScheduleDays < 0">
                       {{ change.impactScheduleDays }}d
                     </td>
                     <td class="px-6 py-5">
@@ -145,7 +145,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 }
                 @if (!filteredChanges().length) {
                   <tr>
-                    <td colspan="7" class="px-6 py-12 text-center text-slate-500">No change requests found.</td>
+                    <td colspan="7" class="px-6 py-12 text-center text-[var(--cc-muted)]">No change requests found.</td>
                   </tr>
                 }
               </tbody>
@@ -157,9 +157,9 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
       @if (showForm()) {
         <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
              appModal ariaLabelledby="changeRequestModalTitle" (dismiss)="closeForm()">
-          <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-              <h3 id="changeRequestModalTitle" class="text-2xl font-bold text-slate-900">New Change Request</h3>
+          <div class="command-card shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div class="command-card-header">
+              <h3 id="changeRequestModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">New Change Request</h3>
               <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100">
                 <mat-icon>close</mat-icon>
               </button>
@@ -210,9 +210,9 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 </div>
               </form>
             </div>
-            <div class="px-6 sm:px-8 py-5 border-t border-slate-200 bg-slate-50 flex justify-end gap-3">
-              <button (click)="closeForm()" class="px-5 py-2.5 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancel</button>
-              <button (click)="save()" [disabled]="form.invalid" class="px-6 py-2.5 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-700 text-white shadow-sm disabled:opacity-50">Create</button>
+            <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
+              <button (click)="closeForm()" class="command-button secondary">Cancel</button>
+              <button (click)="save()" [disabled]="form.invalid" class="command-button disabled:opacity-50">Create</button>
             </div>
           </div>
         </div>

@@ -40,13 +40,13 @@ interface TypeMeta {
 /** Single source of truth for type → colour + copy. Drives chips, legend and the modal. */
 const TYPE_META: readonly TypeMeta[] = [
   { type: 'Milestone', label: 'Milestone (SAL)', chip: 'bg-blue-50 text-blue-700 ring-1 ring-blue-200', dot: 'bg-blue-500', hint: 'Fixed-price stage billed when a project milestone is achieved.' },
-  { type: 'Recurring', label: 'Recurring', chip: 'bg-violet-50 text-violet-700 ring-1 ring-violet-200', dot: 'bg-violet-500', hint: 'Retainer / canone billed on a fixed cadence.' },
-  { type: 'TimeAndMaterials', label: 'Time & Materials', chip: 'bg-sky-50 text-sky-700 ring-1 ring-sky-200', dot: 'bg-sky-500', hint: 'A consuntivo — approved hours × bill rate.' },
+  { type: 'Recurring', label: 'Recurring', chip: 'bg-violet-50 text-violet-700 ring-1 ring-violet-200', dot: 'bg-violet-500', hint: 'Retainer billed on a fixed cadence.' },
+  { type: 'TimeAndMaterials', label: 'Time & Materials', chip: 'bg-sky-50 text-sky-700 ring-1 ring-sky-200', dot: 'bg-sky-500', hint: 'As incurred — approved hours × bill rate.' },
   { type: 'Capped', label: 'Capped T&M', chip: 'bg-teal-50 text-teal-700 ring-1 ring-teal-200', dot: 'bg-teal-500', hint: 'Time & materials with a not-to-exceed ceiling.' },
-  { type: 'Advance', label: 'Advance', chip: 'bg-amber-50 text-amber-700 ring-1 ring-amber-200', dot: 'bg-amber-500', hint: 'Acconto / down payment taken up front.' },
+  { type: 'Advance', label: 'Advance', chip: 'bg-amber-50 text-amber-700 ring-1 ring-amber-200', dot: 'bg-amber-500', hint: 'Down payment taken up front.' },
   { type: 'Progress', label: 'Progress (POC)', chip: 'bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200', dot: 'bg-indigo-500', hint: 'Percentage-of-completion billing.' },
   { type: 'Expense', label: 'Expense', chip: 'bg-fuchsia-50 text-fuchsia-700 ring-1 ring-fuchsia-200', dot: 'bg-fuchsia-500', hint: 'Pass-through expenses, optionally marked up.' },
-  { type: 'CreditNote', label: 'Credit Note', chip: 'bg-rose-50 text-rose-700 ring-1 ring-rose-200', dot: 'bg-rose-500', hint: 'Nota di credito — reduces invoiced value (negative).' },
+  { type: 'CreditNote', label: 'Credit Note', chip: 'bg-rose-50 text-rose-700 ring-1 ring-rose-200', dot: 'bg-rose-500', hint: 'Credit note — reduces invoiced value (negative).' },
 ] as const;
 
 const ALL_STATUSES: readonly BillingStatus[] = ['Planned', 'Ready', 'Invoiced', 'Paid', 'Blocked'] as const;
@@ -153,7 +153,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
         <article class="command-kpi warning">
           <p class="command-kpi-label">Retention Held</p>
           <p class="command-kpi-value">{{ kpis().retentionHeld | currency: baseCurrency : 'symbol' : '1.0-0' }}</p>
-          <p class="command-kpi-note">Ritenuta a garanzia, not yet paid</p>
+          <p class="command-kpi-note">Retention guarantee, not yet paid</p>
         </article>
         <article class="command-kpi">
           <p class="command-kpi-label">Tax (IVA)</p>
@@ -211,7 +211,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
       <!-- MASTER TABLE -->
       <section class="command-card rounded-lg overflow-hidden">
         <div class="command-card-header">
-          <h2 class="text-base font-semibold text-slate-900 tracking-tight">All Billing Conditions</h2>
+          <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">All Billing Conditions</h2>
           <div class="flex items-center gap-3">
             @if (selectedReadyCount() > 0) {
               <button type="button" class="command-button"
@@ -382,11 +382,11 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
     @if (showForm()) {
       <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
            appModal ariaLabelledby="billingModalTitle" (dismiss)="closeForm()">
-        <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
-          <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
+        <div class="command-card w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+          <div class="command-card-header">
             <div>
               <p class="command-eyebrow">{{ editingId() ? 'Edit condition' : 'New condition' }}</p>
-              <h2 id="billingModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">{{ editingId() ? 'Edit Billing Condition' : 'New Billing Condition' }}</h2>
+              <h2 id="billingModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Billing Condition' : 'New Billing Condition' }}</h2>
             </div>
             <button type="button" (click)="closeForm()" class="p-2 rounded-full text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-colors" aria-label="Close dialog">
               <mat-icon>close</mat-icon>
@@ -487,7 +487,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                 </label>
                 <input id="bAmount" type="number" formControlName="amount" class="cc-input" [placeholder]="selectedType() === 'CreditNote' ? 'Entered as a credit' : '0.00'">
                 @if (selectedType() === 'CreditNote') {
-                  <p class="text-xs text-rose-700 mt-1.5">Stored as a negative value (nota di credito).</p>
+                  <p class="text-xs text-rose-700 mt-1.5">Stored as a negative value (credit note).</p>
                 }
               </div>
 
@@ -523,7 +523,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
             </form>
           </div>
 
-          <div class="px-6 sm:px-8 py-5 border-t border-slate-200 bg-slate-50 flex justify-end gap-3">
+          <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
             <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
             <button type="button" (click)="save()" [disabled]="form.invalid || saving()" class="command-button">
               {{ editingId() ? 'Save changes' : 'Create condition' }}
@@ -537,12 +537,12 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
     @if (invoiceRow(); as inv) {
       <div class="invoice-overlay fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
            appModal ariaLabelledby="invoiceDocTitle" (dismiss)="closeInvoice()">
-        <div class="invoice-shell bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[92vh]">
+        <div class="invoice-shell command-card w-full max-w-3xl overflow-hidden flex flex-col max-h-[92vh]">
           <!-- Toolbar (screen only) -->
-          <div class="invoice-toolbar px-6 sm:px-8 py-4 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
+          <div class="invoice-toolbar command-card-header">
             <div>
               <p class="command-eyebrow">Invoice document</p>
-              <h2 id="invoiceDocTitle" class="text-lg font-bold text-slate-900 tracking-tight">{{ inv.invoiceNumber }}</h2>
+              <h2 id="invoiceDocTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ inv.invoiceNumber }}</h2>
             </div>
             <div class="flex items-center gap-2">
               <button type="button" class="command-button" (click)="printInvoice()"

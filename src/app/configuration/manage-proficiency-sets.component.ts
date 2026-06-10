@@ -9,52 +9,52 @@ import { NotificationService } from '../services/notification.service';
   selector: 'app-manage-proficiency-sets',
   imports: [ReactiveFormsModule, MatIconModule],
   template: `
-    <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden hover:shadow-md transition-all">
-      <div class="p-6 sm:p-8 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-        <h2 class="text-xl font-bold text-slate-900 tracking-tight">Manage Proficiency Sets</h2>
-        <button (click)="openCreateForm()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2 shadow-sm hover:-translate-y-0.5">
+    <div class="command-card overflow-hidden">
+      <div class="command-card-header">
+        <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Manage Proficiency Sets</h2>
+        <button (click)="openCreateForm()" class="command-button">
           <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create Set
         </button>
       </div>
 
       @if (showForm()) {
-        <div class="p-6 sm:p-8 border-b border-slate-200 bg-slate-50 backdrop-blur-sm">
+        <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)]">
           <form [formGroup]="setForm" (ngSubmit)="onSubmit()" class="space-y-6 max-w-3xl">
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
-                <label for="setName" class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Name</label>
+                <label for="setName" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Name</label>
                 <input id="setName" type="text" formControlName="name" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-bold text-slate-900 placeholder:text-slate-400 transition-all">
               </div>
               <div>
-                <label for="setDescription" class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Description</label>
+                <label for="setDescription" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Description</label>
                 <input id="setDescription" type="text" formControlName="description" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-medium text-slate-700 placeholder:text-slate-400 transition-all">
               </div>
             </div>
 
             <div formArrayName="levels" class="space-y-4 mt-8">
-              <div class="flex justify-between items-center pb-2 border-b border-slate-200">
-                <h3 class="text-sm font-bold text-slate-700 uppercase tracking-wider">Proficiency Levels</h3>
-                <button type="button" (click)="addLevel()" class="text-blue-700 hover:text-blue-800 text-sm font-bold flex items-center gap-1.5 transition-colors bg-blue-50 hover:bg-blue-100 ring-1 ring-blue-200 px-3 py-1.5 rounded-lg">
+              <div class="flex justify-between items-center pb-2 border-b border-[var(--cc-line)]">
+                <h3 class="command-section-label">Proficiency Levels</h3>
+                <button type="button" (click)="addLevel()" class="command-button secondary">
                   <mat-icon class="text-[18px] w-[18px] h-[18px]">add_circle</mat-icon> Add Level
                 </button>
               </div>
 
               <div class="space-y-3">
                 @for (level of levels.controls; track i; let i = $index) {
-                  <div [formGroupName]="i" class="flex flex-col sm:flex-row gap-4 items-start bg-white p-4 rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm hover:shadow-md transition-all group">
+                  <div [formGroupName]="i" class="flex flex-col sm:flex-row gap-4 items-start command-card p-4">
                     <div class="w-full sm:w-24">
-                      <label [for]="'level' + i" class="block text-[10px] font-bold text-slate-600 uppercase tracking-wider mb-1.5">Level</label>
+                      <label [for]="'level' + i" class="block text-[10px] font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-1.5">Level</label>
                       <input [id]="'level' + i" type="number" formControlName="level" class="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white font-mono font-bold text-blue-700 placeholder:text-slate-400 transition-all text-center">
                     </div>
                     <div class="flex-1 w-full">
-                      <label [for]="'levelName' + i" class="block text-[10px] font-bold text-slate-600 uppercase tracking-wider mb-1.5">Name</label>
+                      <label [for]="'levelName' + i" class="block text-[10px] font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-1.5">Name</label>
                       <input [id]="'levelName' + i" type="text" formControlName="name" class="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white font-bold text-slate-900 placeholder:text-slate-400 transition-all">
                     </div>
                     <div class="flex-1 w-full">
-                      <label [for]="'levelDesc' + i" class="block text-[10px] font-bold text-slate-600 uppercase tracking-wider mb-1.5">Description</label>
+                      <label [for]="'levelDesc' + i" class="block text-[10px] font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-1.5">Description</label>
                       <input [id]="'levelDesc' + i" type="text" formControlName="description" class="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white font-medium text-slate-700 placeholder:text-slate-400 transition-all">
                     </div>
-                    <button type="button" (click)="removeLevel(i)" class="mt-0 sm:mt-6 w-10 h-10 rounded-full bg-slate-50 border border-slate-200 text-slate-400 hover:text-red-600 hover:border-red-300 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm self-end sm:self-auto">
+                    <button type="button" (click)="removeLevel(i)" class="mt-0 sm:mt-6 w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-red-600 hover:border-red-300 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm self-end sm:self-auto">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">remove_circle</mat-icon>
                     </button>
                   </div>
@@ -62,57 +62,55 @@ import { NotificationService } from '../services/notification.service';
               </div>
             </div>
 
-            <div class="flex justify-end gap-3 pt-6 border-t border-slate-200">
-              <button type="button" (click)="closeForm()" class="px-5 py-2.5 text-sm font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-xl hover:bg-slate-100 transition-all shadow-sm">Cancel</button>
-              <button type="submit" [disabled]="setForm.invalid" class="px-6 py-2.5 text-sm font-semibold text-white bg-blue-600 border border-transparent rounded-xl hover:bg-blue-700 disabled:opacity-50 transition-all shadow-sm hover:-translate-y-0.5">Save</button>
+            <div class="flex justify-end gap-3 pt-6 border-t border-[var(--cc-line)]">
+              <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
+              <button type="submit" [disabled]="setForm.invalid" class="command-button disabled:opacity-50">Save</button>
             </div>
           </form>
         </div>
       }
 
-      <div class="p-6 sm:p-8">
-        <div class="overflow-x-auto">
-          <table class="w-full text-left border-collapse">
-            <thead>
-              <tr class="border-b border-slate-200">
-                <th class="pb-4 font-bold text-slate-500 text-xs uppercase tracking-wider w-1/4">Name</th>
-                <th class="pb-4 font-bold text-slate-500 text-xs uppercase tracking-wider w-1/3">Description</th>
-                <th class="pb-4 font-bold text-slate-500 text-xs uppercase tracking-wider">Levels</th>
-                <th class="pb-4 font-bold text-slate-500 text-xs uppercase tracking-wider text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody class="text-sm">
-              @for (set of proficiencySets(); track set.id) {
-                <tr class="border-b border-slate-100 hover:bg-slate-50 transition-colors group">
-                  <td class="py-5 text-slate-900 font-bold text-base group-hover:text-blue-700 transition-colors">{{ set.name }}</td>
-                  <td class="py-5 text-slate-600 font-medium">{{ set.description }}</td>
-                  <td class="py-5 text-slate-600">
-                    <div class="flex flex-wrap gap-2">
-                      @for (lvl of set.levels; track lvl.id) {
-                        <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide bg-slate-100 text-slate-700 ring-1 ring-slate-200" title="{{lvl.description}}">
-                          <span class="text-blue-700 font-mono mr-1">{{ lvl.level }}:</span> {{ lvl.name }}
-                        </span>
-                      }
-                    </div>
-                  </td>
-                  <td class="py-5 text-right">
-                    @if (pendingDeleteId() === set.id) {
-                      <div class="inline-flex items-center gap-2">
-                        <span class="text-xs font-bold text-slate-600">Delete?</span>
-                        <button (click)="confirmDelete(set.id)" class="px-3 py-1.5 text-xs font-bold text-red-700 bg-red-50 ring-1 ring-red-200 rounded-lg hover:bg-red-100 transition-all shadow-sm">Confirm</button>
-                        <button (click)="cancelDelete()" class="px-3 py-1.5 text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 rounded-lg hover:bg-slate-100 transition-all shadow-sm">Cancel</button>
-                      </div>
-                    } @else {
-                      <button (click)="requestDelete(set.id)" class="w-10 h-10 rounded-full bg-slate-50 border border-slate-200 text-slate-400 hover:text-red-600 hover:border-red-300 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm" title="Delete">
-                        <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
-                      </button>
+      <div class="overflow-x-auto">
+        <table class="command-data-table">
+          <thead>
+            <tr>
+              <th class="w-1/4">Name</th>
+              <th class="w-1/3">Description</th>
+              <th>Levels</th>
+              <th class="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (set of proficiencySets(); track set.id) {
+              <tr>
+                <td class="font-bold">{{ set.name }}</td>
+                <td>{{ set.description }}</td>
+                <td>
+                  <div class="flex flex-wrap gap-2">
+                    @for (lvl of set.levels; track lvl.id) {
+                      <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide bg-slate-100 text-slate-700 ring-1 ring-slate-200" title="{{lvl.description}}">
+                        <span class="text-blue-700 font-mono mr-1">{{ lvl.level }}:</span> {{ lvl.name }}
+                      </span>
                     }
-                  </td>
-                </tr>
-              }
-            </tbody>
-          </table>
-        </div>
+                  </div>
+                </td>
+                <td class="text-right">
+                  @if (pendingDeleteId() === set.id) {
+                    <div class="inline-flex items-center gap-2">
+                      <span class="text-xs font-bold text-[var(--cc-muted)]">Delete?</span>
+                      <button (click)="confirmDelete(set.id)" class="px-3 py-1.5 text-xs font-bold text-red-700 bg-red-50 ring-1 ring-red-200 rounded-lg hover:bg-red-100 transition-all shadow-sm">Confirm</button>
+                      <button (click)="cancelDelete()" class="px-3 py-1.5 text-xs font-bold text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-all shadow-sm">Cancel</button>
+                    </div>
+                  } @else {
+                    <button (click)="requestDelete(set.id)" class="w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-red-600 hover:border-red-300 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm" title="Delete">
+                      <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
+                    </button>
+                  }
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
       </div>
     </div>
   `

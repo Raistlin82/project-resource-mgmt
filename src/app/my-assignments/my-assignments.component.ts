@@ -13,10 +13,10 @@ import { ListStateComponent } from '../shared/list-state.component';
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [MatIconModule, DecimalPipe, FormsModule, ListStateComponent],
   template: `
-    <div class="max-w-6xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8">
+    <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <h1 class="text-3xl sm:text-4xl font-bold text-slate-900 tracking-tight">My Assignments</h1>
-        <div class="flex items-center gap-2 bg-white rounded-2xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-1.5">
+        <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">My Assignments</h1>
+        <div class="command-card flex items-center gap-2 p-1.5">
           <button (click)="viewMode.set('week')"
                   [class.bg-blue-50]="viewMode() === 'week'"
                   [class.text-blue-700]="viewMode() === 'week'"
@@ -25,7 +25,7 @@ import { ListStateComponent } from '../shared/list-state.component';
                   [class.shadow-sm]="viewMode() === 'week'"
                   [class.text-slate-500]="viewMode() !== 'week'"
                   [class.hover:bg-slate-50]="viewMode() !== 'week'"
-                  class="px-5 py-2 rounded-xl text-sm font-bold tracking-wide transition-all">
+                  class="px-5 py-2 rounded-md text-sm font-bold tracking-wide transition-all">
             Week
           </button>
           <button (click)="viewMode.set('month')"
@@ -36,7 +36,7 @@ import { ListStateComponent } from '../shared/list-state.component';
                   [class.shadow-sm]="viewMode() === 'month'"
                   [class.text-slate-500]="viewMode() !== 'month'"
                   [class.hover:bg-slate-50]="viewMode() !== 'month'"
-                  class="px-5 py-2 rounded-xl text-sm font-bold tracking-wide transition-all">
+                  class="px-5 py-2 rounded-md text-sm font-bold tracking-wide transition-all">
             Month
           </button>
         </div>
@@ -44,36 +44,39 @@ import { ListStateComponent } from '../shared/list-state.component';
 
       <!-- Overview Cards -->
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6">
-        <div class="bg-white p-6 sm:p-8 rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 hover:shadow-md transition-all group">
+        <div class="command-kpi group">
           <div class="flex items-center gap-5">
-            <div class="w-14 h-14 bg-blue-50 text-blue-700 ring-1 ring-blue-200 rounded-2xl flex items-center justify-center group-hover:scale-110 transition-transform shadow-sm">
+            <div class="w-14 h-14 bg-blue-50 text-blue-700 ring-1 ring-blue-200 rounded-md flex items-center justify-center group-hover:scale-110 transition-transform shadow-sm">
               <mat-icon class="text-[28px] w-[28px] h-[28px]">assignment</mat-icon>
             </div>
             <div>
-              <p class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-1">Active Assignments</p>
-              <p class="text-3xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ activeAssignmentsCount() }}</p>
+              <p class="command-kpi-label">Active Assignments</p>
+              <p class="command-kpi-value">{{ activeAssignmentsCount() }}</p>
             </div>
           </div>
         </div>
-        <div class="bg-white p-6 sm:p-8 rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 hover:shadow-md transition-all group">
+        <div class="command-kpi group">
           <div class="flex items-center gap-5">
-            <div class="w-14 h-14 bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200 rounded-2xl flex items-center justify-center group-hover:scale-110 transition-transform shadow-sm">
+            <div class="w-14 h-14 bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200 rounded-md flex items-center justify-center group-hover:scale-110 transition-transform shadow-sm">
               <mat-icon class="text-[28px] w-[28px] h-[28px]">schedule</mat-icon>
             </div>
             <div>
-              <p class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-1">Total Assigned Hours</p>
-              <p class="text-3xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ totalAssignedHours() }}h</p>
+              <p class="command-kpi-label">Total Assigned Hours</p>
+              <p class="command-kpi-value">{{ totalAssignedHours() }}h</p>
             </div>
           </div>
         </div>
-        <div class="bg-white p-6 sm:p-8 rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 hover:shadow-md transition-all group">
+        <div class="command-kpi group"
+             [class.danger]="currentUtilization() > 110"
+             [class.green]="currentUtilization() >= 80 && currentUtilization() <= 110"
+             [class.warning]="currentUtilization() < 80">
           <div class="flex items-center gap-5">
-            <div class="w-14 h-14 bg-amber-50 text-amber-700 ring-1 ring-amber-200 rounded-2xl flex items-center justify-center group-hover:scale-110 transition-transform shadow-sm">
+            <div class="w-14 h-14 bg-amber-50 text-amber-700 ring-1 ring-amber-200 rounded-md flex items-center justify-center group-hover:scale-110 transition-transform shadow-sm">
               <mat-icon class="text-[28px] w-[28px] h-[28px]">trending_up</mat-icon>
             </div>
             <div>
-              <p class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-1">Current Utilization</p>
-              <p class="text-3xl font-bold tracking-tight font-mono tabular-nums" [class]="getUtilizationColorText(currentUtilization())">
+              <p class="command-kpi-label">Current Utilization</p>
+              <p class="command-kpi-value">
                 {{ currentUtilization() | number:'1.0-0' }}%
               </p>
             </div>
@@ -82,9 +85,9 @@ import { ListStateComponent } from '../shared/list-state.component';
       </div>
 
       <!-- Calendar View -->
-      <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden">
-        <div class="p-6 sm:p-8 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-          <h2 class="text-xl font-bold text-slate-900 tracking-tight">
+      <div class="command-card overflow-hidden">
+        <div class="command-card-header">
+          <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">
             {{ viewMode() === 'week' ? 'Weekly Schedule' : 'Monthly Overview' }}
           </h2>
           <div class="flex items-center gap-3">
@@ -122,12 +125,12 @@ import { ListStateComponent } from '../shared/list-state.component';
                   <th class="pb-4 pl-4 text-right">Total</th>
                 </tr>
               </thead>
-              <tbody class="divide-y divide-slate-100">
+              <tbody class="divide-y divide-[var(--cc-line)]">
                 @for (assignment of myAssignments(); track assignment.id) {
                   <tr class="text-sm text-slate-700 hover:bg-slate-50 transition-colors group">
                     <td class="py-5 pr-4">
-                      <div class="font-bold text-slate-900">{{ getRequestName(assignment.requestId) }}</div>
-                      <div class="text-xs font-semibold tracking-wide text-slate-500 mt-1 uppercase">{{ assignment.status }}</div>
+                      <div class="font-bold text-[var(--cc-ink)]">{{ getRequestName(assignment.requestId) }}</div>
+                      <div class="text-xs font-semibold tracking-wide text-[var(--cc-muted)] mt-1 uppercase">{{ assignment.status }}</div>
                     </td>
                     <!-- Estimated even daily distribution (Mon–Fri) -->
                     @for (h of dailyHours(assignment.assignedHours); track $index) {
@@ -137,7 +140,7 @@ import { ListStateComponent } from '../shared/list-state.component';
                         </div>
                       </td>
                     }
-                    <td class="py-5 pl-4 text-right font-bold text-slate-900 text-lg font-mono tabular-nums">
+                    <td class="py-5 pl-4 text-right font-bold text-[var(--cc-ink)] text-lg font-mono tabular-nums">
                       {{ assignment.assignedHours }}h
                     </td>
                   </tr>
@@ -180,19 +183,19 @@ import { ListStateComponent } from '../shared/list-state.component';
       </div>
 
       <!-- Assignment Details & Editing -->
-      <div class="bg-white rounded-2xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden">
-        <div class="p-6 border-b border-slate-200 bg-slate-50">
-          <h2 class="text-lg font-medium text-slate-900">Assignment Details</h2>
+      <div class="command-card overflow-hidden">
+        <div class="command-card-header">
+          <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Assignment Details</h2>
         </div>
         <div class="p-6">
           <app-list-state [loading]="dataRes.isLoading()" [error]="dataRes.status() === 'error'" label="assignments" (retry)="dataRes.reload()">
           <div class="space-y-4">
             @for (assignment of myAssignments(); track assignment.id) {
-              <div class="p-5 rounded-xl border border-slate-200 bg-slate-50 hover:border-blue-300 hover:shadow-md transition-all">
+              <div class="command-card-muted p-5 hover:shadow-md transition-all">
                 <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
                   <div class="flex-1">
-                    <h3 class="text-lg font-medium text-slate-900">{{ getRequestName(assignment.requestId) }}</h3>
-                    <div class="flex items-center gap-4 mt-2 text-sm text-slate-500">
+                    <h3 class="text-lg font-medium text-[var(--cc-ink)]">{{ getRequestName(assignment.requestId) }}</h3>
+                    <div class="flex items-center gap-4 mt-2 text-sm text-[var(--cc-muted)]">
                       <span class="flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px]">business</mat-icon> Client Project</span>
                       <span class="flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px]">info</mat-icon> <span class="capitalize">{{ assignment.status }}</span></span>
                     </div>
@@ -212,8 +215,8 @@ import { ListStateComponent } from '../shared/list-state.component';
                       </div>
                     } @else {
                       <div class="text-right">
-                        <div class="text-xl font-semibold text-slate-900 font-mono tabular-nums">{{ assignment.assignedHours }}h</div>
-                        <div class="text-xs text-slate-500 uppercase tracking-wider">Total Assigned</div>
+                        <div class="text-xl font-semibold text-[var(--cc-ink)] font-mono tabular-nums">{{ assignment.assignedHours }}h</div>
+                        <div class="text-xs text-[var(--cc-muted)] uppercase tracking-wider">Total Assigned</div>
                         <div class="text-xs text-emerald-700 font-semibold mt-1 font-mono tabular-nums">{{ approvedHours(assignment.id) }}h approved actual</div>
                       </div>
                       <button type="button" (click)="startEdit(assignment)" class="p-2 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors" aria-label="Edit Hours" title="Edit Hours">
@@ -241,7 +244,7 @@ import { ListStateComponent } from '../shared/list-state.component';
                         <input id="timeEntryNotes" type="text" [ngModel]="timeEntryNotes()" (ngModelChange)="timeEntryNotes.set($event)" class="w-full px-3 py-2 rounded-lg bg-white focus:bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none text-sm" placeholder="Work performed">
                       </div>
                       <div class="flex gap-2">
-                        <button (click)="saveTimeEntry(assignment)" class="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-bold hover:bg-blue-700 shadow-sm">Submit</button>
+                        <button (click)="saveTimeEntry(assignment)" class="command-button">Submit</button>
                         <button type="button" (click)="cancelTimeEntry()" aria-label="Cancel time entry" title="Cancel time entry" class="p-2 rounded-lg text-slate-500 hover:bg-slate-50"><mat-icon>close</mat-icon></button>
                       </div>
                     </div>
@@ -250,7 +253,7 @@ import { ListStateComponent } from '../shared/list-state.component';
                 @if (timeEntriesForAssignment(assignment.id).length) {
                   <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
                     @for (entry of timeEntriesForAssignment(assignment.id); track entry.id) {
-                      <div class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
+                      <div class="command-card-muted px-4 py-3 text-sm">
                         <div class="flex items-center justify-between gap-3">
                           <span class="font-semibold text-slate-700 font-mono tabular-nums">{{ entry.date }} · {{ entry.hours }}h</span>
                           <span class="text-xs font-bold rounded-md px-2 py-0.5 ring-1"

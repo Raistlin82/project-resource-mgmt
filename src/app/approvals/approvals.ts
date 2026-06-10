@@ -56,15 +56,15 @@ interface ApprovalRow {
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CurrencyPipe, DatePipe, MatIconModule, ListStateComponent],
   template: `
-    <div class="max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8">
+    <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 class="text-3xl sm:text-4xl font-bold text-slate-900 tracking-tight">Approvals Inbox</h1>
-          <p class="text-slate-500 mt-2 text-sm sm:text-base">
+          <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Approvals Inbox</h1>
+          <p class="text-[var(--cc-muted)] mt-2 text-sm">
             Review and decide items awaiting your sign-off across time, expenses, milestones, changes, and invoices.
           </p>
         </div>
-        <div class="bg-slate-50 p-1 rounded-xl flex items-center shadow-inner ring-1 ring-slate-900/5 border border-slate-200 self-start sm:self-auto">
+        <div class="command-card-muted p-1 flex items-center self-start sm:self-auto">
           <button type="button" (click)="filter.set('mine')"
                   [class.bg-white]="filter() === 'mine'"
                   [class.shadow-sm]="filter() === 'mine'"
@@ -72,7 +72,7 @@ interface ApprovalRow {
                   [class.text-slate-500]="filter() !== 'mine'"
                   class="px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ease-out flex items-center gap-2">
             My inbox
-            <span class="font-mono tabular-nums text-xs px-1.5 py-0.5 rounded-md bg-blue-50 text-blue-700 ring-1 ring-blue-200">{{ mineCount() }}</span>
+            <span class="command-status">{{ mineCount() }}</span>
           </button>
           <button type="button" (click)="filter.set('all')"
                   [class.bg-white]="filter() === 'all'"
@@ -86,76 +86,70 @@ interface ApprovalRow {
       </div>
 
       <app-list-state [loading]="res.isLoading()" [error]="res.status() === 'error'" label="approvals" (retry)="res.reload()">
-      <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden">
+      <div class="command-card overflow-hidden">
         <div class="overflow-x-auto">
-          <table class="w-full text-sm text-left border-collapse min-w-[960px]">
+          <table class="command-data-table min-w-[960px]">
             <thead>
-              <tr class="bg-slate-50 border-b border-slate-200">
-                <th scope="col" class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Kind</th>
-                <th scope="col" class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Reference</th>
-                <th scope="col" class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Project</th>
-                <th scope="col" class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Amount</th>
-                <th scope="col" class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Requested by</th>
-                <th scope="col" class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Current step</th>
-                <th scope="col" class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">SLA</th>
-                <th scope="col" class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Status</th>
-                <th scope="col" class="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Actions</th>
+              <tr>
+                <th scope="col">Kind</th>
+                <th scope="col">Reference</th>
+                <th scope="col">Project</th>
+                <th scope="col" class="text-right">Amount</th>
+                <th scope="col">Requested by</th>
+                <th scope="col">Current step</th>
+                <th scope="col">SLA</th>
+                <th scope="col">Status</th>
+                <th scope="col" class="text-right">Actions</th>
               </tr>
             </thead>
-            <tbody class="divide-y divide-slate-100">
+            <tbody class="divide-y divide-[var(--cc-line)]">
               @for (row of rows(); track row.request.id) {
-                <tr class="hover:bg-slate-50 transition-colors">
-                  <td class="px-6 py-5">
+                <tr class="transition-colors">
+                  <td>
                     <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold ring-1 bg-slate-50 text-slate-700 ring-slate-200">
                       <mat-icon class="text-[16px] w-[16px] h-[16px]">{{ kindIcon(row.kind) }}</mat-icon>
                       {{ row.kind }}
                     </span>
                   </td>
-                  <td class="px-6 py-5 font-mono tabular-nums text-slate-900">{{ row.reference }}</td>
-                  <td class="px-6 py-5 text-slate-600">{{ row.projectLabel }}</td>
-                  <td class="px-6 py-5 text-right font-mono tabular-nums font-semibold text-slate-900">
+                  <td class="font-mono tabular-nums">{{ row.reference }}</td>
+                  <td><span class="text-[var(--cc-muted)]">{{ row.projectLabel }}</span></td>
+                  <td class="text-right font-semibold">
                     @if (row.amount !== undefined) {
                       {{ row.amount | currency:'EUR':'symbol':'1.0-0' }}
                     } @else {
                       <span class="text-slate-400">&mdash;</span>
                     }
                   </td>
-                  <td class="px-6 py-5 text-slate-600">{{ row.requestedByLabel }}</td>
-                  <td class="px-6 py-5">
-                    <div class="text-slate-900 font-semibold">{{ row.stepRoleLabel }}</div>
-                    <div class="text-xs font-medium text-slate-500 mt-0.5">{{ row.stepLabel }}</div>
+                  <td><span class="text-[var(--cc-muted)]">{{ row.requestedByLabel }}</span></td>
+                  <td>
+                    <div class="text-[var(--cc-ink)] font-semibold">{{ row.stepRoleLabel }}</div>
+                    <div class="text-xs font-medium text-[var(--cc-muted)] mt-0.5">{{ row.stepLabel }}</div>
                   </td>
-                  <td class="px-6 py-5">
+                  <td>
                     @if (row.slaDueAt) {
                       <div class="flex flex-col gap-1">
-                        <span class="font-mono tabular-nums text-xs text-slate-500">{{ row.slaDueAt | date:'mediumDate' }}</span>
+                        <span class="font-mono tabular-nums text-xs text-[var(--cc-muted)]">{{ row.slaDueAt | date:'mediumDate' }}</span>
                         @if (row.overdue) {
-                          <span class="inline-flex items-center gap-1 self-start px-2 py-0.5 rounded-md text-[11px] font-bold ring-1 bg-red-50 text-red-700 ring-red-200">
+                          <span class="command-status red self-start">
                             <mat-icon class="text-[13px] w-[13px] h-[13px]">schedule</mat-icon> Overdue
                           </span>
                         } @else {
-                          <span class="inline-flex items-center self-start px-2 py-0.5 rounded-md text-[11px] font-bold ring-1 bg-emerald-50 text-emerald-700 ring-emerald-200">On track</span>
+                          <span class="command-status green self-start">On track</span>
                         }
                       </div>
                     } @else {
                       <span class="text-slate-400">&mdash;</span>
                     }
                   </td>
-                  <td class="px-6 py-5">
-                    <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold ring-1"
-                          [class.bg-amber-50]="row.request.status === 'Pending'"
-                          [class.text-amber-700]="row.request.status === 'Pending'"
-                          [class.ring-amber-200]="row.request.status === 'Pending'"
-                          [class.bg-emerald-50]="row.request.status === 'Approved'"
-                          [class.text-emerald-700]="row.request.status === 'Approved'"
-                          [class.ring-emerald-200]="row.request.status === 'Approved'"
-                          [class.bg-red-50]="row.request.status === 'Rejected'"
-                          [class.text-red-700]="row.request.status === 'Rejected'"
-                          [class.ring-red-200]="row.request.status === 'Rejected'">
+                  <td>
+                    <span class="command-status"
+                          [class.amber]="row.request.status === 'Pending'"
+                          [class.green]="row.request.status === 'Approved'"
+                          [class.red]="row.request.status === 'Rejected'">
                       {{ row.request.status }}
                     </span>
                   </td>
-                  <td class="px-6 py-5 text-right">
+                  <td class="text-right">
                     @if (row.request.status === 'Pending') {
                       <div class="inline-flex items-center gap-1">
                         <button type="button"
@@ -176,14 +170,14 @@ interface ApprovalRow {
                         </button>
                       </div>
                     } @else {
-                      <span class="text-xs font-medium text-slate-500">Decided</span>
+                      <span class="text-xs font-medium text-[var(--cc-muted)]">Decided</span>
                     }
                   </td>
                 </tr>
               } @empty {
                 <tr>
-                  <td colspan="9" class="px-6 py-16 text-center text-slate-500">
-                    <div class="flex flex-col items-center justify-center">
+                  <td colspan="9" class="text-center text-[var(--cc-muted)]">
+                    <div class="flex flex-col items-center justify-center px-6 py-16">
                       <mat-icon class="text-4xl mb-3 opacity-50">inbox</mat-icon>
                       <p class="font-medium text-slate-600">
                         {{ filter() === 'mine' ? 'Your inbox is clear.' : 'No pending approvals.' }}

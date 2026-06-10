@@ -10,43 +10,44 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
   selector: 'app-manage-resource-organizations',
   imports: [ReactiveFormsModule, MatIconModule, ModalDialogDirective],
   template: `
-    <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden hover:shadow-md transition-all">
-      <div class="p-6 sm:p-8 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-        <h2 class="text-xl font-bold text-slate-900 tracking-tight">Manage Resource Organizations</h2>
-        <button (click)="openCreateForm()" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-4 py-2.5 rounded-xl text-sm shadow-sm transition-all flex items-center gap-2 hover:-translate-y-0.5">
+    <div class="command-page space-y-6">
+    <div class="command-card overflow-hidden">
+      <div class="command-card-header">
+        <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Manage Resource Organizations</h2>
+        <button (click)="openCreateForm()" class="command-button">
           <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create Organization
         </button>
       </div>
 
       @if (showForm()) {
-        <div class="p-6 sm:p-8 border-b border-slate-200 bg-slate-50">
+        <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)]">
           <form [formGroup]="orgForm" (ngSubmit)="onSubmit()" class="space-y-6 max-w-3xl">
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
-                <label for="orgName" class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Name</label>
+                <label for="orgName" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Name</label>
                 <input id="orgName" type="text" formControlName="name" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-bold text-slate-900 placeholder:text-slate-400 transition-all">
               </div>
               <div>
-                <label for="orgDescription" class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Description</label>
+                <label for="orgDescription" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Description</label>
                 <input id="orgDescription" type="text" formControlName="description" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-medium text-slate-900 placeholder:text-slate-400 transition-all">
               </div>
             </div>
 
             <div formArrayName="costCenters" class="space-y-4 mt-8">
-              <div class="flex justify-between items-center pb-2 border-b border-slate-200">
-                <h3 class="text-sm font-bold text-slate-700 uppercase tracking-wider">Cost Centers</h3>
-                <button type="button" (click)="addCostCenter()" class="text-blue-700 hover:text-blue-800 text-sm font-bold flex items-center gap-1.5 transition-colors bg-blue-50 hover:bg-blue-100 ring-1 ring-blue-200 px-3 py-1.5 rounded-lg">
+              <div class="flex justify-between items-center pb-2 border-b border-[var(--cc-line)]">
+                <h3 class="command-section-label">Cost Centers</h3>
+                <button type="button" (click)="addCostCenter()" class="command-button secondary">
                   <mat-icon class="text-[18px] w-[18px] h-[18px]">add_circle</mat-icon> Add Cost Center
                 </button>
               </div>
 
               <div class="space-y-3">
                 @for (cc of costCenters.controls; track i; let i = $index) {
-                  <div class="flex gap-4 items-center bg-white p-4 rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm hover:shadow-md transition-all group">
+                  <div class="command-card flex gap-4 items-center p-4 group">
                     <div class="flex-1">
                       <input type="text" [formControlName]="i" placeholder="Cost Center ID" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white font-mono font-bold text-blue-700 placeholder:text-slate-400 transition-all">
                     </div>
-                    <button type="button" (click)="removeCostCenter(i)" class="w-10 h-10 rounded-full bg-slate-50 border border-slate-200 text-slate-400 hover:text-red-600 hover:border-red-300 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm">
+                    <button type="button" (click)="removeCostCenter(i)" class="w-10 h-10 rounded-full bg-slate-50 border border-slate-200 text-slate-500 hover:text-red-600 hover:border-red-300 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">remove_circle</mat-icon>
                     </button>
                   </div>
@@ -54,9 +55,9 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
               </div>
             </div>
 
-            <div class="flex justify-end gap-3 pt-6 border-t border-slate-200">
-              <button type="button" (click)="closeForm()" class="px-5 py-2.5 text-sm font-bold text-slate-600 bg-slate-50 border border-slate-200 rounded-xl hover:bg-slate-100 transition-all shadow-sm">Cancel</button>
-              <button type="submit" [disabled]="orgForm.invalid" class="px-6 py-2.5 text-sm font-semibold text-white bg-blue-600 border border-transparent rounded-xl hover:bg-blue-700 disabled:opacity-50 transition-all shadow-sm hover:-translate-y-0.5">Save</button>
+            <div class="flex justify-end gap-3 pt-6 border-t border-[var(--cc-line)]">
+              <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
+              <button type="submit" [disabled]="orgForm.invalid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save</button>
             </div>
           </form>
         </div>
@@ -64,30 +65,30 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 
       <div class="p-6 sm:p-8">
         <div class="overflow-x-auto">
-          <table class="w-full text-left border-collapse">
+          <table class="command-data-table">
             <thead>
-              <tr class="border-b border-slate-200 bg-slate-50">
-                <th class="pb-4 font-bold text-slate-500 text-xs uppercase tracking-wider w-1/4">Name</th>
-                <th class="pb-4 font-bold text-slate-500 text-xs uppercase tracking-wider w-1/3">Description</th>
-                <th class="pb-4 font-bold text-slate-500 text-xs uppercase tracking-wider">Cost Centers</th>
-                <th class="pb-4 font-bold text-slate-500 text-xs uppercase tracking-wider text-right">Actions</th>
+              <tr>
+                <th class="w-1/4">Name</th>
+                <th class="w-1/3">Description</th>
+                <th>Cost Centers</th>
+                <th class="text-right">Actions</th>
               </tr>
             </thead>
-            <tbody class="text-sm">
+            <tbody>
               @for (org of resourceOrganizations(); track org.id) {
-                <tr class="border-b border-slate-200 hover:bg-slate-50 transition-colors group">
-                  <td class="py-5 text-slate-900 font-bold text-base group-hover:text-blue-700 transition-colors">{{ org.name }}</td>
-                  <td class="py-5 text-slate-600 font-medium">{{ org.description }}</td>
-                  <td class="py-5 text-slate-600">
+                <tr>
+                  <td class="font-bold text-base">{{ org.name }}</td>
+                  <td class="font-medium"><span class="text-[var(--cc-muted)]">{{ org.description }}</span></td>
+                  <td>
                     <div class="flex flex-wrap gap-2">
                       @for (cc of org.costCenters; track cc) {
-                        <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide bg-blue-50 text-blue-700 font-mono ring-1 ring-blue-200">
+                        <span class="command-status">
                           {{ cc }}
                         </span>
                       }
                     </div>
                   </td>
-                  <td class="py-5 text-right">
+                  <td class="text-right">
                     <button (click)="deleteOrg(org.id)" class="w-10 h-10 rounded-full bg-slate-50 border border-slate-200 text-slate-500 hover:text-red-600 hover:border-red-300 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm" title="Delete">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                     </button>
@@ -103,21 +104,22 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
     @if (deletingId()) {
       <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
            appModal ariaLabelledby="resourceOrgDeleteTitle" (dismiss)="cancelDelete()">
-        <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden flex flex-col transform transition-all">
+        <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col transform transition-all">
           <div class="p-8 text-center">
             <div class="w-20 h-20 bg-red-50 ring-1 ring-red-200 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner">
-              <mat-icon class="text-red-600 text-4xl">warning</mat-icon>
+              <mat-icon class="text-red-700 text-4xl">warning</mat-icon>
             </div>
-            <h3 id="resourceOrgDeleteTitle" class="text-2xl font-bold text-slate-900 mb-2 tracking-tight">Delete Resource Organization</h3>
-            <p class="text-slate-500 text-sm">Are you sure you want to delete this resource organization? This action cannot be undone.</p>
+            <h3 id="resourceOrgDeleteTitle" class="font-display text-2xl font-bold text-[var(--cc-ink)] mb-2 tracking-tight">Delete Resource Organization</h3>
+            <p class="text-[var(--cc-muted)] text-sm">Are you sure you want to delete this resource organization? This action cannot be undone.</p>
           </div>
-          <div class="p-5 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-            <button (click)="cancelDelete()" class="px-5 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all">Cancel</button>
+          <div class="p-5 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
+            <button (click)="cancelDelete()" class="command-button secondary">Cancel</button>
             <button (click)="confirmDelete()" class="px-6 py-2.5 bg-red-50 text-red-700 ring-1 ring-red-200 rounded-xl text-sm font-semibold hover:bg-red-100 hover:shadow-md hover:-translate-y-0.5 transition-all">Delete</button>
           </div>
         </div>
       </div>
     }
+    </div>
   `
 })
 export class ManageResourceOrganizationsComponent {

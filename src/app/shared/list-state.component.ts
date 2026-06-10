@@ -27,21 +27,21 @@ import { MatIconModule } from '@angular/material/icon';
     @if (loading()) {
       <div class="space-y-3" aria-busy="true" [attr.aria-label]="loadingLabel()">
         @for (row of skeletonRows(); track row) {
-          <div class="command-skeleton h-14 rounded-2xl"></div>
+          <div class="command-skeleton h-14"></div>
         }
       </div>
     } @else if (error()) {
       <div role="alert"
-           class="bg-white border border-red-200 ring-1 ring-red-100 rounded-3xl p-10 text-center flex flex-col items-center gap-4">
+           class="command-card border-red-200! p-10 text-center flex flex-col items-center gap-4">
         <div class="w-16 h-16 bg-red-50 ring-1 ring-red-200 rounded-full flex items-center justify-center">
           <mat-icon class="text-red-700 text-3xl">error_outline</mat-icon>
         </div>
         <div>
-          <h3 class="text-lg font-bold text-slate-900">Couldn't load {{ label() }}</h3>
-          <p class="text-slate-500 text-sm mt-1">Something went wrong while fetching the data.</p>
+          <h3 class="font-display text-lg font-bold text-[var(--cc-ink)]">Couldn't load {{ label() }}</h3>
+          <p class="text-[var(--cc-muted)] text-sm mt-1">Something went wrong while fetching the data.</p>
         </div>
         <button type="button" (click)="retry.emit()"
-                class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-sm rounded-xl text-sm transition-colors inline-flex items-center gap-2">
+                class="command-button">
           <mat-icon class="text-[18px] w-[18px] h-[18px]">refresh</mat-icon> Retry
         </button>
       </div>

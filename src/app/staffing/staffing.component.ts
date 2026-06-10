@@ -29,19 +29,21 @@ interface DimensionMeter {
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [MatIconModule, DecimalPipe, FormsModule, ListStateComponent],
   template: `
-    <div class="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
-      <h1 class="text-3xl sm:text-4xl font-bold text-slate-900 tracking-tight mb-8">Staff Resource Requests</h1>
+    <div class="command-page space-y-6">
+      <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Staff Resource Requests</h1>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8">
         <!-- Requests List -->
-        <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden flex flex-col h-[min(800px,80vh)] hover:shadow-md transition-all">
-          <div class="p-6 sm:p-8 border-b border-slate-200 bg-slate-50">
-            <h2 class="text-xl font-bold text-slate-900 tracking-tight">Open Requests</h2>
-            <p class="text-sm font-medium text-slate-500 mt-2">Select a request to find matching resources</p>
+        <div class="command-card overflow-hidden flex flex-col h-[min(800px,80vh)]">
+          <div class="command-card-header">
+            <div>
+              <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Open Requests</h2>
+              <p class="mt-1 text-sm text-[var(--cc-muted)]">Select a request to find matching resources</p>
+            </div>
           </div>
           <div class="overflow-y-auto flex-1">
             <app-list-state [loading]="res.isLoading()" [error]="res.status() === 'error'" label="requests" (retry)="res.reload()">
-            <div class="divide-y divide-slate-100">
+            <div class="divide-y divide-[var(--cc-line)]">
             @for (req of openRequests(); track req.id) {
               <div class="p-6 sm:p-8 hover:bg-slate-50 transition-all cursor-pointer group relative"
                    [class.bg-blue-50]="selectedRequest()?.id === req.id"
@@ -53,16 +55,16 @@ interface DimensionMeter {
                    (keydown.space)="selectRequest(req); $event.preventDefault()"
                    (click)="selectRequest(req)">
                 @if (selectedRequest()?.id === req.id) {
-                  <div class="absolute left-0 top-0 bottom-0 w-1.5 bg-blue-600 rounded-r-full"></div>
+                  <div class="absolute left-0 top-0 bottom-0 w-1.5 bg-[var(--cc-primary)] rounded-r-full"></div>
                 }
                 <div class="flex justify-between items-start mb-3">
-                  <h3 class="font-bold text-slate-900 text-lg group-hover:text-blue-700 transition-colors">{{ req.name }}</h3>
-                  <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide font-mono tabular-nums bg-blue-50 text-blue-700 ring-1 ring-blue-200">{{ req.requiredEffort }}h</span>
+                  <h3 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ req.name }}</h3>
+                  <span class="command-status">{{ req.requiredEffort }}h</span>
                 </div>
-                <p class="text-sm font-semibold text-slate-500 mb-4 uppercase tracking-wider">{{ req.requiredRole }}</p>
+                <p class="text-sm font-semibold text-[var(--cc-muted)] mb-4 uppercase tracking-wider">{{ req.requiredRole }}</p>
                 <div class="flex gap-2 flex-wrap">
                   @for (skill of req.skills; track skill) {
-                    <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide bg-slate-100 text-slate-700 border border-slate-200">
+                    <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold tracking-wide bg-slate-100 text-slate-700 border border-slate-200">
                       {{ skill }}
                     </span>
                   }
@@ -70,7 +72,7 @@ interface DimensionMeter {
               </div>
             }
             @if (openRequests().length === 0) {
-              <div class="p-12 text-center text-slate-500 font-medium italic">No open requests available for staffing.</div>
+              <div class="p-12 text-center text-sm text-[var(--cc-muted)]">No open requests available for staffing.</div>
             }
             </div>
             </app-list-state>
@@ -78,19 +80,19 @@ interface DimensionMeter {
         </div>
 
         <!-- Resources List -->
-        <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden flex flex-col h-[min(800px,80vh)] hover:shadow-md transition-all">
-          <div class="p-6 sm:p-8 border-b border-slate-200 bg-slate-50">
+        <div class="command-card overflow-hidden flex flex-col h-[min(800px,80vh)]">
+          <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)]">
             <div class="flex items-center justify-between mb-6">
               <div>
-                <h2 class="text-xl font-bold text-slate-900 tracking-tight">
+                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">
                   {{ selectedRequest() ? 'Matching Resources' : 'All Resources' }}
                 </h2>
                 @if (selectedRequest()) {
-                  <p class="text-sm font-medium text-slate-500 mt-2">For <span class="font-bold text-slate-700">{{ selectedRequest()?.name }}</span></p>
+                  <p class="mt-1 text-sm text-[var(--cc-muted)]">For <span class="font-bold text-[var(--cc-ink)]">{{ selectedRequest()?.name }}</span></p>
                 }
               </div>
               @if (selectedRequest()) {
-                <button (click)="clearSelection()" class="text-sm text-blue-700 hover:text-blue-800 font-bold tracking-wide uppercase transition-colors bg-blue-50 hover:bg-blue-100 ring-1 ring-blue-200 px-3 py-1.5 rounded-xl">Clear Selection</button>
+                <button (click)="clearSelection()" class="command-button secondary">Clear Selection</button>
               }
             </div>
 
@@ -101,18 +103,18 @@ interface DimensionMeter {
                 [ngModel]="searchQuery()"
                 (ngModelChange)="searchQuery.set($event)"
                 placeholder="Search by name, role, or skills..."
-                class="w-full pl-12 pr-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none text-sm font-medium text-slate-900 placeholder:text-slate-400 transition-all shadow-inner bg-white focus:bg-white"
+                class="w-full pl-12 pr-4 py-3 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] focus:outline-none text-sm font-medium text-[var(--cc-ink)] placeholder:text-slate-400 transition-all"
               >
             </div>
 
             @if (missingSkillGap().length > 0) {
-              <div class="mt-6 flex items-start gap-3 rounded-xl bg-amber-50 ring-1 ring-amber-200 p-4">
+              <div class="mt-6 flex items-start gap-3 rounded-md bg-amber-50 ring-1 ring-amber-200 p-4">
                 <mat-icon class="text-amber-700 text-[20px] w-[20px] h-[20px] shrink-0 mt-0.5">warning_amber</mat-icon>
                 <div>
                   <p class="text-sm font-bold text-amber-800">Skill gap: no available resource covers these skills</p>
                   <div class="flex gap-2 flex-wrap mt-2">
                     @for (skill of missingSkillGap(); track skill) {
-                      <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide bg-white text-amber-800 ring-1 ring-amber-300">
+                      <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold tracking-wide bg-white text-amber-800 ring-1 ring-amber-300">
                         {{ skill }}
                       </span>
                     }
@@ -121,22 +123,22 @@ interface DimensionMeter {
               </div>
             }
           </div>
-          <div class="overflow-y-auto flex-1 divide-y divide-slate-100">
+          <div class="overflow-y-auto flex-1 divide-y divide-[var(--cc-line)]">
             @if (rankedCandidates(); as candidates) {
               <!-- Ranked candidate mode: a request is selected. -->
               @for (cand of candidates; track cand.resourceId) {
                 <div class="p-6 sm:p-8 hover:bg-slate-50 transition-colors group">
                   <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                     <div class="flex items-start gap-5 min-w-0">
-                      <div class="relative w-14 h-14 bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl flex items-center justify-center text-white font-bold text-xl shrink-0 shadow-sm border border-slate-200">
+                      <div class="relative w-14 h-14 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex items-center justify-center font-display font-bold text-xl text-[var(--cc-ink)] shrink-0">
                         {{ cand.resource.name.charAt(0) }}
                         <span class="absolute -bottom-2 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded-md bg-white ring-1 ring-slate-200 text-[10px] font-bold font-mono tabular-nums shadow-sm"
                               [class]="scoreTextClass(cand.score)"
                               [title]="scoreTooltip(cand)">{{ cand.score | number:'1.0-0' }}</span>
                       </div>
                       <div class="min-w-0">
-                        <h3 class="font-bold text-slate-900 text-lg group-hover:text-blue-700 transition-colors">{{ cand.resource.name }}</h3>
-                        <p class="text-sm font-medium text-slate-500 mt-0.5">{{ cand.resource.role }} <span class="mx-1.5 text-slate-400">•</span> <span class="font-mono tabular-nums" [class.text-red-700]="cand.resource.utilization > 100" [class.text-emerald-700]="cand.resource.utilization <= 100">{{ cand.resource.utilization | number:'1.0-0' }}% Utilized</span></p>
+                        <h3 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ cand.resource.name }}</h3>
+                        <p class="text-sm font-medium text-[var(--cc-muted)] mt-0.5">{{ cand.resource.role }} <span class="mx-1.5 text-slate-400">•</span> <span class="font-mono tabular-nums" [class.text-red-700]="cand.resource.utilization > 100" [class.text-emerald-700]="cand.resource.utilization <= 100">{{ cand.resource.utilization | number:'1.0-0' }}% Utilized</span></p>
                         <div class="flex gap-1.5 mt-3 flex-wrap">
                           @for (skill of cand.resource.skills; track skill.name) {
                             <span class="text-[10px] font-bold tracking-wider uppercase bg-slate-100 text-slate-700 px-2 py-1 rounded-md border border-slate-200">{{ skill.name }}</span>
@@ -147,12 +149,12 @@ interface DimensionMeter {
                     <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0 w-full sm:w-auto">
                       @if (assigningResourceId() === cand.resourceId) {
                         <div class="flex items-center gap-2 w-full sm:w-auto">
-                          <input type="number" [ngModel]="assignHours()" (ngModelChange)="assignHours.set($event)" class="w-20 px-3 py-2 border border-slate-300 rounded-xl text-sm font-bold font-mono tabular-nums text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none shadow-inner" min="1" [max]="selectedRequest()?.requiredEffort || 1">
-                          <button (click)="confirmAssign(cand.resourceId)" [disabled]="assigning()" class="flex-1 sm:flex-none bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0">Confirm</button>
-                          <button type="button" (click)="cancelAssign()" aria-label="Cancel assignment" title="Cancel assignment" class="p-2 text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition-colors flex items-center justify-center"><mat-icon class="text-[20px] w-[20px] h-[20px]">close</mat-icon></button>
+                          <input type="number" [ngModel]="assignHours()" (ngModelChange)="assignHours.set($event)" class="w-20 px-3 py-2 border border-[var(--cc-line)] rounded-md text-sm font-bold font-mono tabular-nums text-[var(--cc-ink)] placeholder:text-slate-400 bg-white focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] focus:outline-none" min="1" [max]="selectedRequest()?.requiredEffort || 1">
+                          <button (click)="confirmAssign(cand.resourceId)" [disabled]="assigning()" class="command-button flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">Confirm</button>
+                          <button type="button" (click)="cancelAssign()" aria-label="Cancel assignment" title="Cancel assignment" class="command-button secondary"><mat-icon class="text-[20px] w-[20px] h-[20px]">close</mat-icon></button>
                         </div>
                       } @else {
-                        <button (click)="startAssign(cand.resourceId)" class="w-full sm:w-auto bg-slate-50 border border-slate-200 text-slate-700 px-4 py-2 rounded-xl text-sm font-bold hover:bg-slate-100 hover:border-slate-300 transition-all shadow-sm flex items-center justify-center gap-2">
+                        <button (click)="startAssign(cand.resourceId)" class="command-button secondary w-full sm:w-auto">
                           <mat-icon class="text-[18px] w-[18px] h-[18px]">person_add</mat-icon> Assign
                         </button>
                       }
@@ -160,10 +162,10 @@ interface DimensionMeter {
                   </div>
 
                   <!-- Match score: overall bar + per-dimension breakdown cells -->
-                  <div class="mt-5 rounded-2xl bg-slate-50 ring-1 ring-slate-200 p-4">
+                  <div class="mt-5 command-card-muted p-4">
                     <div class="flex items-center justify-between mb-2">
-                      <span class="text-[10px] font-bold tracking-wider uppercase text-slate-500">Match score</span>
-                      <span class="text-sm font-bold font-mono tabular-nums" [class]="scoreTextClass(cand.score)">{{ cand.score | number:'1.0-1' }}<span class="text-slate-500"> / 100</span></span>
+                      <span class="text-[10px] font-bold tracking-wider uppercase text-[var(--cc-muted)]">Match score</span>
+                      <span class="text-sm font-bold font-mono tabular-nums" [class]="scoreTextClass(cand.score)">{{ cand.score | number:'1.0-1' }}<span class="text-[var(--cc-muted)]"> / 100</span></span>
                     </div>
                     <div class="h-2 w-full rounded-full bg-slate-200 overflow-hidden" [title]="scoreTooltip(cand)">
                       <div class="h-full rounded-full transition-all" [class]="scoreBarClass(cand.score)" [style.width.%]="cand.score"></div>
@@ -172,17 +174,17 @@ interface DimensionMeter {
                     <div class="grid grid-cols-5 gap-2 mt-4">
                       @for (m of meters(cand); track m.key) {
                         <div class="flex flex-col items-center text-center" [title]="m.label + ': ' + m.value.toFixed(1) + ' / ' + m.weight">
-                          <span class="text-[10px] font-bold tracking-wider uppercase text-slate-500 mb-1.5">{{ m.short }}</span>
+                          <span class="text-[10px] font-bold tracking-wider uppercase text-[var(--cc-muted)] mb-1.5">{{ m.short }}</span>
                           <div class="h-1.5 w-full rounded-full bg-slate-200 overflow-hidden">
-                            <div class="h-full rounded-full bg-blue-600" [style.width.%]="m.pct"></div>
+                            <div class="h-full rounded-full bg-[var(--cc-primary)]" [style.width.%]="m.pct"></div>
                           </div>
-                          <span class="text-[11px] font-bold font-mono tabular-nums text-slate-700 mt-1.5">{{ m.value | number:'1.0-1' }}<span class="text-slate-500">/{{ m.weight }}</span></span>
+                          <span class="text-[11px] font-bold font-mono tabular-nums text-slate-700 mt-1.5">{{ m.value | number:'1.0-1' }}<span class="text-[var(--cc-muted)]">/{{ m.weight }}</span></span>
                         </div>
                       }
                     </div>
 
                     @if (cand.missingSkills.length > 0) {
-                      <div class="flex items-center gap-2 flex-wrap mt-4 pt-3 border-t border-slate-200">
+                      <div class="flex items-center gap-2 flex-wrap mt-4 pt-3 border-t border-[var(--cc-line)]">
                         <span class="inline-flex items-center gap-1 text-[10px] font-bold tracking-wider uppercase text-rose-700">
                           <mat-icon class="text-[14px] w-[14px] h-[14px]">error_outline</mat-icon> Missing
                         </span>
@@ -195,19 +197,19 @@ interface DimensionMeter {
                 </div>
               }
               @if (candidates.length === 0) {
-                <div class="p-12 text-center text-slate-500 font-medium italic">No resources found matching your criteria.</div>
+                <div class="p-12 text-center text-sm text-[var(--cc-muted)]">No resources found matching your criteria.</div>
               }
             } @else {
               <!-- Plain resource list mode: no request selected. -->
               @for (res of displayedResources(); track res.id) {
                 <div class="p-6 sm:p-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-slate-50 transition-colors group">
                   <div class="flex items-center gap-5">
-                    <div class="w-14 h-14 bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl flex items-center justify-center text-white font-bold text-xl shrink-0 shadow-sm border border-slate-200">
+                    <div class="w-14 h-14 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex items-center justify-center font-display font-bold text-xl text-[var(--cc-ink)] shrink-0">
                       {{ res.name.charAt(0) }}
                     </div>
                     <div>
-                      <h3 class="font-bold text-slate-900 text-lg group-hover:text-blue-700 transition-colors">{{ res.name }}</h3>
-                      <p class="text-sm font-medium text-slate-500 mt-0.5">{{ res.role }} <span class="mx-1.5 text-slate-400">•</span> <span class="font-mono tabular-nums" [class.text-red-700]="res.utilization > 100" [class.text-emerald-700]="res.utilization <= 100">{{ res.utilization | number:'1.0-0' }}% Utilized</span></p>
+                      <h3 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ res.name }}</h3>
+                      <p class="text-sm font-medium text-[var(--cc-muted)] mt-0.5">{{ res.role }} <span class="mx-1.5 text-slate-400">•</span> <span class="font-mono tabular-nums" [class.text-red-700]="res.utilization > 100" [class.text-emerald-700]="res.utilization <= 100">{{ res.utilization | number:'1.0-0' }}% Utilized</span></p>
                       <div class="flex gap-1.5 mt-3 flex-wrap">
                         @for (skill of res.skills; track skill.name) {
                           <span class="text-[10px] font-bold tracking-wider uppercase bg-slate-100 text-slate-700 px-2 py-1 rounded-md border border-slate-200">{{ skill.name }}</span>
@@ -218,7 +220,7 @@ interface DimensionMeter {
                 </div>
               }
               @if (displayedResources().length === 0) {
-                <div class="p-12 text-center text-slate-500 font-medium italic">No resources found matching your criteria.</div>
+                <div class="p-12 text-center text-sm text-[var(--cc-muted)]">No resources found matching your criteria.</div>
               }
             }
           </div>

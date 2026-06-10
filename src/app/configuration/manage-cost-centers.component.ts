@@ -13,16 +13,17 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
     <div class="max-w-5xl mx-auto space-y-8">
       <div class="flex items-center justify-between">
         <div>
-          <h1 class="text-3xl font-semibold text-slate-900">Manage Cost Centers</h1>
-          <p class="text-slate-500 mt-1">Define and manage organizational cost centers for project budgeting.</p>
+          <div class="command-section-label">Configuration</div>
+          <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Manage Cost Centers</h1>
+          <p class="mt-1 text-sm text-[var(--cc-muted)]">Define and manage organizational cost centers for project budgeting.</p>
         </div>
-        <button (click)="openForm()" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-sm px-4 py-2 rounded-xl text-sm transition-colors flex items-center gap-2">
+        <button (click)="openForm()" class="command-button">
           <mat-icon class="text-sm">add</mat-icon> Add Cost Center
         </button>
       </div>
 
-      <div class="bg-white rounded-2xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden hover:shadow-md transition-shadow">
-        <div class="p-4 border-b border-slate-200 flex gap-4 bg-slate-50">
+      <div class="command-card overflow-hidden">
+        <div class="p-4 border-b border-[var(--cc-line)] flex gap-4 bg-[var(--cc-panel-muted)]">
           <div class="flex-1 relative">
             <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">search</mat-icon>
             <input type="text" placeholder="Search cost centers..."
@@ -31,28 +32,28 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
           </div>
         </div>
 
-        <table class="w-full text-left border-collapse">
+        <table class="command-data-table">
           <thead>
-            <tr class="bg-slate-50 border-b border-slate-200 text-sm font-medium text-slate-500 uppercase tracking-wider">
-              <th class="py-3 px-6">Name</th>
-              <th class="py-3 px-6">Manager</th>
-              <th class="py-3 px-6 text-right">Allocated</th>
-              <th class="py-3 px-6 text-right">Actual</th>
-              <th class="py-3 px-6 text-right">Actions</th>
+            <tr>
+              <th>Name</th>
+              <th>Manager</th>
+              <th class="text-right">Allocated</th>
+              <th class="text-right">Actual</th>
+              <th class="text-right">Actions</th>
             </tr>
           </thead>
-          <tbody class="divide-y divide-slate-100">
+          <tbody>
             @for (cc of filteredCostCenters(); track cc.id) {
-              <tr class="text-sm text-slate-700 hover:bg-slate-50 transition-colors">
-                <td class="py-4 px-6 font-medium text-slate-900">{{ cc.name }}</td>
-                <td class="py-4 px-6">{{ cc.manager }}</td>
-                <td class="py-4 px-6 text-right font-mono tabular-nums text-blue-700">{{ cc.allocated }}</td>
-                <td class="py-4 px-6 text-right font-mono tabular-nums text-slate-900">{{ cc.actual }}</td>
-                <td class="py-4 px-6 text-right">
-                  <button type="button" (click)="openForm(cc)" [attr.aria-label]="'Edit ' + cc.name" [attr.title]="'Edit ' + cc.name" class="text-slate-400 hover:text-blue-700 transition-colors p-1">
+              <tr>
+                <td class="font-bold">{{ cc.name }}</td>
+                <td>{{ cc.manager }}</td>
+                <td class="text-right"><span class="text-blue-700">{{ cc.allocated }}</span></td>
+                <td class="text-right">{{ cc.actual }}</td>
+                <td class="text-right">
+                  <button type="button" (click)="openForm(cc)" [attr.aria-label]="'Edit ' + cc.name" [attr.title]="'Edit ' + cc.name" class="text-slate-500 hover:text-blue-700 transition-colors p-1">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                   </button>
-                  <button type="button" (click)="deleteCostCenter(cc.id)" [attr.aria-label]="'Delete ' + cc.name" [attr.title]="'Delete ' + cc.name" class="text-slate-400 hover:text-red-600 transition-colors p-1 ml-2">
+                  <button type="button" (click)="deleteCostCenter(cc.id)" [attr.aria-label]="'Delete ' + cc.name" [attr.title]="'Delete ' + cc.name" class="text-slate-500 hover:text-red-600 transition-colors p-1 ml-2">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                   </button>
                 </td>
@@ -60,7 +61,7 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
             }
             @if (filteredCostCenters().length === 0) {
               <tr>
-                <td colspan="5" class="py-8 text-center text-slate-500">No cost centers defined yet.</td>
+                <td colspan="5" class="text-center"><span class="text-[var(--cc-muted)]">No cost centers defined yet.</span></td>
               </tr>
             }
           </tbody>
@@ -71,10 +72,10 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
       @if (showForm()) {
         <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
              appModal ariaLabelledby="costCenterModalTitle" (dismiss)="closeForm()">
-          <div class="bg-white border border-slate-200 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden flex flex-col">
-            <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-gradient-to-r from-slate-50 to-transparent">
-              <h2 id="costCenterModalTitle" class="text-lg font-semibold text-slate-900">{{ editingId() ? 'Edit Cost Center' : 'Add Cost Center' }}</h2>
-              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-slate-400 hover:text-slate-600 transition-colors">
+          <div class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col">
+            <div class="command-card-header">
+              <h2 id="costCenterModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Cost Center' : 'Add Cost Center' }}</h2>
+              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -101,8 +102,8 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
               </div>
 
               <div class="pt-4 flex justify-end gap-3">
-                <button type="button" (click)="closeForm()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">Cancel</button>
-                <button type="submit" [disabled]="!form.valid" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-sm rounded-lg text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
+                <button type="submit" [disabled]="!form.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
                   Save Cost Center
                 </button>
               </div>
@@ -114,16 +115,16 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
       @if (deletingId()) {
         <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
              appModal ariaLabelledby="costCenterDeleteTitle" (dismiss)="cancelDelete()">
-          <div class="bg-white border border-slate-200 rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden flex flex-col">
+          <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col">
             <div class="p-6 text-center">
               <div class="w-16 h-16 bg-red-50 ring-1 ring-red-200 rounded-full flex items-center justify-center mx-auto mb-4">
                 <mat-icon class="text-red-700 text-3xl">warning</mat-icon>
               </div>
-              <h3 id="costCenterDeleteTitle" class="text-lg font-semibold text-slate-900 mb-2">Delete Cost Center</h3>
-              <p class="text-slate-500 text-sm">Are you sure you want to delete this cost center? This action cannot be undone.</p>
+              <h3 id="costCenterDeleteTitle" class="font-display text-lg font-bold text-[var(--cc-ink)] mb-2">Delete Cost Center</h3>
+              <p class="text-[var(--cc-muted)] text-sm">Are you sure you want to delete this cost center? This action cannot be undone.</p>
             </div>
-            <div class="p-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-              <button (click)="cancelDelete()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors">Cancel</button>
+            <div class="p-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
+              <button (click)="cancelDelete()" class="command-button secondary">Cancel</button>
               <button (click)="confirmDelete()" class="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 transition-colors shadow-sm">Delete</button>
             </div>
           </div>

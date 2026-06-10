@@ -11,37 +11,37 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [MatIconModule, FormsModule, ReactiveFormsModule, ModalDialogDirective],
   template: `
-    <div [class]="projectId() ? '' : 'max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8'">
+    <div [class]="projectId() ? '' : 'command-page space-y-6'">
       <div class="space-y-6">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-4">
             @if (!projectId()) {
-              <h2 class="text-3xl sm:text-4xl font-bold text-slate-900 tracking-tight">Tasks</h2>
-              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" class="bg-white focus:bg-white border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500/25 focus:border-blue-500 block p-2.5">
+              <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Tasks</h2>
+              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
                 <option value="" disabled>Select a project...</option>
                 @for (p of projects(); track p.id) {
                   <option [value]="p.id">{{ p.name }}</option>
                 }
               </select>
             } @else {
-              <h2 class="text-lg font-semibold text-slate-900">Tasks</h2>
+              <h2 class="font-display text-lg font-bold text-[var(--cc-ink)]">Tasks</h2>
             }
           </div>
-          <button (click)="openForm()" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-sm px-4 py-2 rounded-xl text-sm transition-colors flex items-center gap-2">
+          <button (click)="openForm()" class="command-button">
             <mat-icon class="text-sm">add</mat-icon> Create Task
           </button>
         </div>
 
         @if (!(projectId() || selectedProjectId())) {
-          <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm p-12 text-center">
+          <div class="command-card p-12 text-center">
             <mat-icon class="text-slate-400 mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
-            <h3 class="text-lg font-medium text-slate-900 mt-4">No Project Selected</h3>
-            <p class="text-slate-500 mt-1">Please select a project from the dropdown above to view tasks.</p>
+            <h3 class="text-lg font-medium text-[var(--cc-ink)] mt-4">No Project Selected</h3>
+            <p class="text-[var(--cc-muted)] mt-1">Please select a project from the dropdown above to view tasks.</p>
           </div>
         } @else {
-        <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm overflow-hidden">
-          <table class="w-full text-left text-sm">
-            <thead class="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase tracking-wider">
+        <div class="command-card overflow-hidden">
+          <table class="command-data-table">
+            <thead>
               <tr>
                 <th class="px-6 py-4 font-medium">Task</th>
                 <th class="px-6 py-4 font-medium">Assignment</th>
@@ -51,13 +51,13 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 <th class="px-6 py-4 font-medium">Priority</th>
               </tr>
             </thead>
-            <tbody class="divide-y divide-slate-100">
+            <tbody class="divide-y divide-[var(--cc-line)]">
               @for (task of filteredTasks(); track task.id) {
-                <tr class="hover:bg-slate-50 transition-colors">
-                  <td class="px-6 py-4 font-medium text-slate-900">{{ task.name }}</td>
-                  <td class="px-6 py-4 text-slate-600">
-                    <div class="font-medium text-slate-900">{{ assignmentLabel(task) }}</div>
-                    <div class="mt-1 text-xs text-slate-500">{{ task.assigneeType || 'Internal' }} · {{ task.assignee }}</div>
+                <tr>
+                  <td class="px-6 py-4 font-medium text-[var(--cc-ink)]">{{ task.name }}</td>
+                  <td class="px-6 py-4">
+                    <div class="font-medium text-[var(--cc-ink)]">{{ assignmentLabel(task) }}</div>
+                    <div class="mt-1 text-xs text-[var(--cc-muted)]">{{ task.assigneeType || 'Internal' }} · {{ task.assignee }}</div>
                   </td>
                   <td class="px-6 py-4">
                     <span class="command-status"
@@ -67,7 +67,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                       {{ commercialCoverage(task) }}
                     </span>
                   </td>
-                  <td class="px-6 py-4 text-slate-900 font-mono tabular-nums">{{ task.dueDate }}</td>
+                  <td class="px-6 py-4 text-[var(--cc-ink)] font-mono tabular-nums">{{ task.dueDate }}</td>
                   <td class="px-6 py-4">
                     <select [ngModel]="task.status" (ngModelChange)="updateStatus(task, $event)"
                             class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border-0 ring-1 focus:ring-2 focus:ring-blue-500/25 cursor-pointer"
@@ -80,10 +80,10 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                     </select>
                   </td>
                   <td class="px-6 py-4">
-                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ring-1"
-                          [class.bg-red-50]="task.priority === 'High'" [class.text-red-700]="task.priority === 'High'" [class.ring-red-200]="task.priority === 'High'"
-                          [class.bg-amber-50]="task.priority === 'Medium'" [class.text-amber-700]="task.priority === 'Medium'" [class.ring-amber-200]="task.priority === 'Medium'"
-                          [class.bg-emerald-50]="task.priority === 'Low'" [class.text-emerald-700]="task.priority === 'Low'" [class.ring-emerald-200]="task.priority === 'Low'">
+                    <span class="command-status"
+                          [class.red]="task.priority === 'High'"
+                          [class.amber]="task.priority === 'Medium'"
+                          [class.green]="task.priority === 'Low'">
                       {{ task.priority }}
                     </span>
                   </td>
@@ -91,7 +91,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               }
               @if (filteredTasks().length === 0) {
                 <tr>
-                  <td colspan="6" class="px-6 py-8 text-center text-slate-500">No tasks found for this project.</td>
+                  <td colspan="6" class="px-6 py-8 text-center text-[var(--cc-muted)]">No tasks found for this project.</td>
                 </tr>
               }
             </tbody>
@@ -104,9 +104,9 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
     @if (showForm()) {
       <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
            appModal ariaLabelledby="taskModalTitle" (dismiss)="closeForm()">
-        <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
-          <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-            <h2 id="taskModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">Create Task</h2>
+        <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+          <div class="command-card-header">
+            <h2 id="taskModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Create Task</h2>
             <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-slate-400 hover:text-slate-600 hover:bg-slate-50 p-2 rounded-full transition-colors">
               <mat-icon>close</mat-icon>
             </button>
@@ -164,9 +164,9 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             </form>
           </div>
           
-          <div class="px-6 sm:px-8 py-5 border-t border-slate-200 bg-slate-50 flex justify-end gap-3">
-            <button type="button" (click)="closeForm()" class="px-5 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all">Cancel</button>
-            <button type="button" (click)="saveTask()" [disabled]="!taskForm.valid" class="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none">
+          <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
+            <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
+            <button type="button" (click)="saveTask()" [disabled]="!taskForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
               Create Task
             </button>
           </div>

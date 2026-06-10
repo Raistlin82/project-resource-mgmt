@@ -58,10 +58,10 @@ interface BillingControlRow {
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CurrencyPipe, DatePipe, MatIconModule, ReactiveFormsModule, RouterLink, ModalDialogDirective],
   template: `
-    <div class="max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8">
+    <div class="command-page space-y-6 p-4 sm:p-6 lg:p-8">
       @if (contract(); as c) {
         <!-- Header card -->
-        <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 sm:p-8 transition-shadow hover:shadow-md">
+        <div class="command-card p-6 sm:p-8">
           <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-6">
             <div class="min-w-0">
               <div class="flex items-center gap-2 text-xs text-slate-500 mb-2">
@@ -69,8 +69,9 @@ interface BillingControlRow {
                   <mat-icon class="text-[16px] w-[16px] h-[16px]">arrow_back</mat-icon> Contracts
                 </a>
               </div>
-              <h1 class="text-3xl sm:text-4xl font-bold text-slate-900 tracking-tight truncate">{{ c.name }}</h1>
-              <div class="flex flex-wrap items-center gap-3 mt-3 text-sm text-slate-600">
+              <p class="command-eyebrow">Contract</p>
+              <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight truncate">{{ c.name }}</h1>
+              <div class="flex flex-wrap items-center gap-3 mt-3 text-sm text-[var(--cc-muted)]">
                 <span class="inline-flex items-center gap-1.5 font-medium">
                   <mat-icon class="text-[18px] w-[18px] h-[18px] text-slate-400">business</mat-icon>
                   {{ customerName() }}
@@ -93,82 +94,82 @@ interface BillingControlRow {
               </div>
             </div>
             <div class="text-right shrink-0">
-              <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Total Value</p>
-              <p class="text-2xl font-bold text-slate-900 mt-1 font-mono tabular-nums">{{ c.totalValue | currency: c.currency }}</p>
+              <p class="command-kpi-label">Total Value</p>
+              <p class="command-kpi-value">{{ c.totalValue | currency: c.currency }}</p>
             </div>
           </div>
         </div>
 
         <!-- KPI row -->
         <div class="grid grid-cols-2 lg:grid-cols-6 gap-4">
-          <div class="bg-white rounded-2xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-5 transition-shadow hover:shadow-md">
-            <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Contract Value</p>
-            <p class="text-2xl font-bold text-slate-900 mt-2 font-mono tabular-nums">{{ c.totalValue | currency: c.currency }}</p>
+          <div class="command-kpi">
+            <p class="command-kpi-label">Contract Value</p>
+            <p class="command-kpi-value">{{ c.totalValue | currency: c.currency }}</p>
           </div>
-          <div class="bg-white rounded-2xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-5 transition-shadow hover:shadow-md">
-            <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Order Revenue</p>
-            <p class="text-2xl font-bold text-slate-900 mt-2 font-mono tabular-nums">{{ kpis().revenue | currency: c.currency }}</p>
+          <div class="command-kpi">
+            <p class="command-kpi-label">Order Revenue</p>
+            <p class="command-kpi-value">{{ kpis().revenue | currency: c.currency }}</p>
           </div>
-          <div class="bg-white rounded-2xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-5 transition-shadow hover:shadow-md">
-            <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Invoiced</p>
-            <p class="text-2xl font-bold text-slate-900 mt-2 font-mono tabular-nums">{{ kpis().invoiced | currency: c.currency }}</p>
+          <div class="command-kpi info">
+            <p class="command-kpi-label">Invoiced</p>
+            <p class="command-kpi-value">{{ kpis().invoiced | currency: c.currency }}</p>
           </div>
-          <div class="bg-white rounded-2xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-5 transition-shadow hover:shadow-md">
-            <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Margin</p>
-            <p class="text-2xl font-bold mt-2 font-mono tabular-nums"
+          <div class="command-kpi" [class.danger]="kpis().margin < 0">
+            <p class="command-kpi-label">Margin</p>
+            <p class="command-kpi-value"
                [class.text-emerald-700]="kpis().margin >= 0"
                [class.text-red-700]="kpis().margin < 0">
               {{ kpis().margin | currency: c.currency }}
             </p>
           </div>
-          <div class="bg-white rounded-2xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-5 transition-shadow hover:shadow-md">
-            <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Margin %</p>
-            <p class="text-2xl font-bold mt-2 font-mono tabular-nums"
+          <div class="command-kpi" [class.danger]="kpis().marginPct < 0">
+            <p class="command-kpi-label">Margin %</p>
+            <p class="command-kpi-value"
                [class.text-emerald-700]="kpis().marginPct >= 0"
                [class.text-red-700]="kpis().marginPct < 0">
               {{ kpis().marginPct.toFixed(1) }}%
             </p>
           </div>
-          <div class="bg-white rounded-2xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-5 transition-shadow hover:shadow-md">
-            <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide">EAC</p>
-            <p class="text-2xl font-bold text-slate-900 mt-2 font-mono tabular-nums">{{ kpis().eac | currency: c.currency }}</p>
+          <div class="command-kpi info">
+            <p class="command-kpi-label">EAC</p>
+            <p class="command-kpi-value">{{ kpis().eac | currency: c.currency }}</p>
           </div>
         </div>
 
         <!-- Projects under this contract -->
-        <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden transition-shadow hover:shadow-md">
-          <div class="px-6 sm:px-8 py-5 border-b border-slate-200">
-            <h2 class="text-xl font-bold text-slate-900 tracking-tight">Projects under this contract</h2>
+        <div class="command-card overflow-hidden">
+          <div class="command-card-header">
+            <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Projects under this contract</h2>
           </div>
           <div class="overflow-x-auto">
-            <table class="w-full text-sm">
+            <table class="command-data-table">
               <thead>
-                <tr class="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider bg-slate-50">
-                  <th class="px-6 sm:px-8 py-3">Project</th>
-                  <th class="px-6 py-3 text-right">Revenue</th>
-                  <th class="px-6 py-3 text-right">Actual Cost</th>
-                  <th class="px-6 py-3 text-right">EAC</th>
-                  <th class="px-6 py-3 text-right">Margin</th>
-                  <th class="px-6 sm:px-8 py-3 text-right">Margin %</th>
+                <tr>
+                  <th>Project</th>
+                  <th class="text-right">Revenue</th>
+                  <th class="text-right">Actual Cost</th>
+                  <th class="text-right">EAC</th>
+                  <th class="text-right">Margin</th>
+                  <th class="text-right">Margin %</th>
                 </tr>
               </thead>
-              <tbody class="divide-y divide-slate-100">
+              <tbody>
                 @for (row of projectRows(); track row.project.id) {
-                  <tr class="hover:bg-slate-50 transition-colors">
-                    <td class="px-6 sm:px-8 py-4 font-medium text-slate-900">
+                  <tr>
+                    <td class="font-medium">
                       <a [routerLink]="['/projects', row.project.id]" class="text-blue-700 hover:text-blue-800 transition-colors">
                         {{ row.project.name }}
                       </a>
                     </td>
-                    <td class="px-6 py-4 text-right text-slate-700 font-mono tabular-nums">{{ row.fin.revenue | currency: c.currency }}</td>
-                    <td class="px-6 py-4 text-right text-slate-700 font-mono tabular-nums">{{ row.fin.actualCost | currency: c.currency }}</td>
-                    <td class="px-6 py-4 text-right text-slate-700 font-mono tabular-nums">{{ row.fin.eac | currency: c.currency }}</td>
-                    <td class="px-6 py-4 text-right font-medium font-mono tabular-nums"
+                    <td class="text-right text-slate-700 font-mono tabular-nums">{{ row.fin.revenue | currency: c.currency }}</td>
+                    <td class="text-right text-slate-700 font-mono tabular-nums">{{ row.fin.actualCost | currency: c.currency }}</td>
+                    <td class="text-right text-slate-700 font-mono tabular-nums">{{ row.fin.eac | currency: c.currency }}</td>
+                    <td class="text-right font-medium font-mono tabular-nums"
                         [class.text-emerald-700]="row.fin.margin >= 0"
                         [class.text-red-700]="row.fin.margin < 0">
                       {{ row.fin.margin | currency: c.currency }}
                     </td>
-                    <td class="px-6 sm:px-8 py-4 text-right font-medium font-mono tabular-nums"
+                    <td class="text-right font-medium font-mono tabular-nums"
                         [class.text-emerald-700]="row.fin.marginPct >= 0"
                         [class.text-red-700]="row.fin.marginPct < 0">
                       {{ row.fin.marginPct.toFixed(1) }}%
@@ -523,26 +524,26 @@ interface BillingControlRow {
         </div>
 
         <!-- Orders -->
-        <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden transition-shadow hover:shadow-md">
-          <div class="px-6 sm:px-8 py-5 border-b border-slate-200">
-            <h2 class="text-xl font-bold text-slate-900 tracking-tight">Orders</h2>
+        <div class="command-card overflow-hidden">
+          <div class="command-card-header">
+            <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Orders</h2>
           </div>
           <div class="overflow-x-auto">
-            <table class="w-full text-sm">
+            <table class="command-data-table">
               <thead>
-                <tr class="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider bg-slate-50">
-                  <th class="px-6 sm:px-8 py-3">Type</th>
-                  <th class="px-6 py-3 text-right">Amount</th>
-                  <th class="px-6 py-3">Status</th>
-                  <th class="px-6 sm:px-8 py-3">Order Date</th>
+                <tr>
+                  <th>Type</th>
+                  <th class="text-right">Amount</th>
+                  <th>Status</th>
+                  <th>Order Date</th>
                 </tr>
               </thead>
-              <tbody class="divide-y divide-slate-100">
+              <tbody>
                 @for (o of contractOrders(); track o.id) {
-                  <tr class="hover:bg-slate-50 transition-colors">
-                    <td class="px-6 sm:px-8 py-4 font-medium text-slate-900">{{ o.type }}</td>
-                    <td class="px-6 py-4 text-right text-slate-700 font-mono tabular-nums">{{ o.amount | currency: o.currency }}</td>
-                    <td class="px-6 py-4">
+                  <tr>
+                    <td class="font-medium">{{ o.type }}</td>
+                    <td class="text-right text-slate-700 font-mono tabular-nums">{{ o.amount | currency: o.currency }}</td>
+                    <td>
                       <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold tracking-wide ring-1"
                             [class.bg-slate-100]="o.status === 'Open'"
                             [class.text-slate-700]="o.status === 'Open'"
@@ -559,7 +560,7 @@ interface BillingControlRow {
                         {{ o.status }}
                       </span>
                     </td>
-                    <td class="px-6 sm:px-8 py-4 text-slate-700">{{ o.orderDate | date: 'mediumDate' }}</td>
+                    <td class="text-slate-700">{{ o.orderDate | date: 'mediumDate' }}</td>
                   </tr>
                 }
                 @if (!contractOrders().length) {
@@ -577,10 +578,10 @@ interface BillingControlRow {
         @if (showBillingPlanForm()) {
           <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
                appModal ariaLabelledby="billingPlanModalTitle" (dismiss)="closeBillingPlanForm()">
-            <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
-              <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-                <h2 id="billingPlanModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">Expected Billing</h2>
-                <button type="button" (click)="closeBillingPlanForm()" class="text-slate-400 hover:text-slate-600 hover:bg-slate-50 p-2 rounded-full transition-colors" aria-label="Close">
+            <div class="command-card w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+              <div class="command-card-header">
+                <h2 id="billingPlanModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Expected Billing</h2>
+                <button type="button" (click)="closeBillingPlanForm()" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors" aria-label="Close">
                   <mat-icon>close</mat-icon>
                 </button>
               </div>
@@ -640,8 +641,8 @@ interface BillingControlRow {
                 </form>
               </div>
 
-              <div class="px-6 sm:px-8 py-5 border-t border-slate-200 bg-slate-50 flex justify-end gap-3">
-                <button type="button" (click)="closeBillingPlanForm()" class="px-5 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all">Cancel</button>
+              <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
+                <button type="button" (click)="closeBillingPlanForm()" class="command-button secondary">Cancel</button>
                 <button type="button" (click)="saveBillingPlanItem(c)" [disabled]="billingPlanForm.invalid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
                   Save Expected Billing
                 </button>
@@ -650,12 +651,12 @@ interface BillingControlRow {
           </div>
         }
       } @else {
-        <div class="p-12 text-center bg-white rounded-3xl ring-1 ring-slate-900/5 border-2 border-slate-200 border-dashed">
-          <div class="w-20 h-20 bg-slate-50 shadow-sm ring-1 ring-slate-900/5 rounded-full flex items-center justify-center mx-auto mb-4">
+        <div class="command-card-muted p-12 text-center">
+          <div class="w-20 h-20 bg-white shadow-sm ring-1 ring-slate-900/5 rounded-full flex items-center justify-center mx-auto mb-4">
             <mat-icon class="text-slate-400 text-4xl">description</mat-icon>
           </div>
-          <h3 class="text-xl font-bold text-slate-900 mb-2">Contract not found</h3>
-          <p class="text-slate-500">The contract you are looking for is unavailable or still loading.</p>
+          <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-2">Contract not found</h3>
+          <p class="text-[var(--cc-muted)]">The contract you are looking for is unavailable or still loading.</p>
         </div>
       }
     </div>

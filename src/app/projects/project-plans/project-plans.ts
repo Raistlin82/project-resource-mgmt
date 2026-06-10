@@ -13,17 +13,17 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [MatIconModule, DatePipe, FormsModule, ReactiveFormsModule, ModalDialogDirective],
   template: `
-    <div [class]="projectId() ? '' : 'max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8'">
+    <div [class]="projectId() ? '' : 'command-page space-y-6'">
       <div class="space-y-8">
         <!-- Header -->
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-4">
             @if (!projectId()) {
               <div>
-                <h2 class="text-3xl sm:text-4xl font-bold text-slate-900 tracking-tight">Project Schedule & Plans</h2>
-                <p class="text-slate-500 mt-2 text-sm sm:text-base">Manage work packages, scheduling, and key milestones.</p>
+                <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Project Schedule & Plans</h2>
+                <p class="text-sm text-[var(--cc-muted)] mt-2">Manage work packages, scheduling, and key milestones.</p>
               </div>
-              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" class="bg-white focus:bg-white border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500/25 focus:border-blue-500 block p-2.5">
+              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
                 <option value="" disabled>Select a project...</option>
                 @for (p of projects(); track p.id) {
                   <option [value]="p.id">{{ p.name }}</option>
@@ -31,39 +31,39 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               </select>
             } @else {
               <div>
-                <h2 class="text-xl font-semibold text-slate-900">Project Schedule & Plans</h2>
-                <p class="text-sm text-slate-500 mt-1">Manage work packages, scheduling, and key milestones.</p>
+                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Project Schedule & Plans</h2>
+                <p class="text-sm text-[var(--cc-muted)] mt-1">Manage work packages, scheduling, and key milestones.</p>
               </div>
             }
           </div>
           <div class="flex gap-3">
-            <button (click)="openMilestoneForm()" class="bg-white border border-slate-200 text-slate-700 px-4 py-2 rounded-xl text-sm font-medium hover:bg-slate-50 transition-colors shadow-sm ring-1 ring-slate-900/5 flex items-center gap-2">
+            <button (click)="openMilestoneForm()" class="command-button secondary">
               <mat-icon class="text-sm">flag</mat-icon> Add Milestone
             </button>
-            <button (click)="openWpForm()" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold shadow-sm px-4 py-2 rounded-xl text-sm transition-colors flex items-center gap-2">
+            <button (click)="openWpForm()" class="command-button">
               <mat-icon class="text-sm">add</mat-icon> Add Work Package
             </button>
           </div>
         </div>
 
         @if (!(projectId() || selectedProjectId())) {
-          <div class="bg-white rounded-2xl border border-slate-200 shadow-sm ring-1 ring-slate-900/5 p-12 text-center">
+          <div class="command-card p-12 text-center">
             <mat-icon class="text-slate-400 mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
-            <h3 class="text-lg font-medium text-slate-900 mt-4">No Project Selected</h3>
-            <p class="text-slate-500 mt-1">Please select a project from the dropdown above to view plans and milestones.</p>
+            <h3 class="text-lg font-medium text-[var(--cc-ink)] mt-4">No Project Selected</h3>
+            <p class="text-[var(--cc-muted)] mt-1">Please select a project from the dropdown above to view plans and milestones.</p>
           </div>
         } @else {
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <!-- Work Packages (Main Content) -->
           <div class="lg:col-span-2 space-y-6">
-            <h3 class="text-lg font-medium text-slate-900 flex items-center gap-2">
+            <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] flex items-center gap-2">
               <mat-icon class="text-blue-600">account_tree</mat-icon> Work Packages
             </h3>
 
-            <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 overflow-hidden shadow-sm hover:shadow-md transition-shadow">
-              <table class="w-full text-left border-collapse">
+            <div class="command-card overflow-hidden">
+              <table class="command-data-table">
                 <thead>
-                  <tr class="bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  <tr>
                     <th class="py-3 px-4">WBS / Name</th>
                     <th class="py-3 px-4">Timeline</th>
                     <th class="py-3 px-4">Assignee</th>
@@ -71,15 +71,15 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                     <th class="py-3 px-4 text-right">Actions</th>
                   </tr>
               </thead>
-              <tbody class="divide-y divide-slate-100">
+              <tbody class="divide-y divide-[var(--cc-line)]">
                 @for (wp of filteredWorkPackages(); track wp.id) {
-                  <tr class="text-sm text-slate-700 hover:bg-slate-50 transition-colors group">
+                  <tr class="group">
                     <td class="py-4 px-4">
-                      <div class="font-medium text-slate-900">{{ wp.name }}</div>
+                      <div class="font-medium text-[var(--cc-ink)]">{{ wp.name }}</div>
                       <div class="text-xs text-blue-700 font-mono mt-0.5">{{ wp.id }}</div>
                     </td>
                     <td class="py-4 px-4">
-                      <div class="flex items-center gap-1.5 text-slate-600 text-xs">
+                      <div class="flex items-center gap-1.5 text-[var(--cc-muted)] text-xs">
                         <mat-icon class="text-[14px] w-[14px] h-[14px]">calendar_today</mat-icon>
                         {{ wp.startDate | date:'MMM d' }} - {{ wp.endDate | date:'MMM d' }}
                       </div>
@@ -115,7 +115,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 }
                 @if (filteredWorkPackages().length === 0) {
                   <tr>
-                    <td colspan="5" class="px-6 py-8 text-center text-slate-500">No work packages found for this project.</td>
+                    <td colspan="5" class="px-6 py-8 text-center text-[var(--cc-muted)]">No work packages found for this project.</td>
                   </tr>
                 }
               </tbody>
@@ -125,12 +125,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
         <!-- Milestones (Sidebar) -->
         <div class="space-y-6">
-          <h3 class="text-lg font-medium text-slate-900 flex items-center gap-2">
+          <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] flex items-center gap-2">
             <mat-icon class="text-amber-500">emoji_events</mat-icon> Key Milestones
           </h3>
 
-          <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm hover:shadow-md transition-shadow p-6">
-            <div class="relative border-l-2 border-slate-200 ml-3 space-y-8">
+          <div class="command-card p-6">
+            <div class="relative border-l-2 border-[var(--cc-line)] ml-3 space-y-8">
               @for (milestone of filteredMilestones(); track milestone.id; let last = $last) {
                 <div class="relative pl-6">
                   <!-- Timeline Dot -->
@@ -144,7 +144,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
                   <div>
                     <div class="flex items-center justify-between mb-1">
-                      <h4 class="text-sm font-semibold text-slate-900" [class.line-through]="milestone.status === 'Achieved'">
+                      <h4 class="text-sm font-semibold text-[var(--cc-ink)]" [class.line-through]="milestone.status === 'Achieved'">
                         {{ milestone.name }}
                       </h4>
                       <span class="text-xs font-medium px-2 py-0.5 rounded-full ring-1"
@@ -157,7 +157,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                         {{ milestone.status }}
                       </span>
                     </div>
-                    <div class="flex items-center gap-1.5 text-xs text-slate-500">
+                    <div class="flex items-center gap-1.5 text-xs text-[var(--cc-muted)]">
                       <mat-icon class="text-[14px] w-[14px] h-[14px]">event</mat-icon>
                       {{ milestone.date | date:'mediumDate' }}
                     </div>
@@ -167,34 +167,34 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                         Approve
                       </button>
                     } @else if (milestone.approvedBy) {
-                      <p class="mt-2 text-[11px] text-slate-500">Approved by {{ milestone.approvedBy }}</p>
+                      <p class="mt-2 text-[11px] text-[var(--cc-muted)]">Approved by {{ milestone.approvedBy }}</p>
                     }
                   </div>
                 </div>
               }
               @if (filteredMilestones().length === 0) {
-                <div class="pl-6 text-sm text-slate-500">No milestones found.</div>
+                <div class="pl-6 text-sm text-[var(--cc-muted)]">No milestones found.</div>
               }
             </div>
           </div>
           
           <!-- Quick Summary -->
-          <div class="bg-blue-50 rounded-2xl p-6 border border-blue-200 ring-1 ring-blue-100">
-            <h4 class="text-sm font-semibold text-blue-700 mb-4">Schedule Summary</h4>
+          <div class="command-card-muted p-6">
+            <h4 class="command-kpi-label mb-4">Schedule Summary</h4>
             <div class="space-y-3">
               <div class="flex justify-between text-sm">
-                <span class="text-blue-700">Total Work Packages</span>
-                <span class="font-mono tabular-nums font-medium text-slate-900">{{ filteredWorkPackages().length }}</span>
+                <span class="text-[var(--cc-muted)]">Total Work Packages</span>
+                <span class="font-mono tabular-nums font-medium text-[var(--cc-ink)]">{{ filteredWorkPackages().length }}</span>
               </div>
               <div class="flex justify-between text-sm">
-                <span class="text-blue-700">Completed</span>
-                <span class="font-mono tabular-nums font-medium text-slate-900">
+                <span class="text-[var(--cc-muted)]">Completed</span>
+                <span class="font-mono tabular-nums font-medium text-[var(--cc-ink)]">
                   {{ completedWorkPackagesCount() }}
                 </span>
               </div>
               <div class="flex justify-between text-sm">
-                <span class="text-blue-700">Milestones Achieved</span>
-                <span class="font-mono tabular-nums font-medium text-slate-900">
+                <span class="text-[var(--cc-muted)]">Milestones Achieved</span>
+                <span class="font-mono tabular-nums font-medium text-[var(--cc-ink)]">
                   {{ achievedMilestonesCount() }} / {{ filteredMilestones().length }}
                 </span>
               </div>
@@ -209,9 +209,9 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
       @if (showMilestoneForm()) {
         <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
              appModal ariaLabelledby="milestoneModalTitle" (dismiss)="closeMilestoneForm()">
-          <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
-            <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-              <h2 id="milestoneModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">Add Milestone</h2>
+          <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+            <div class="command-card-header">
+              <h2 id="milestoneModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Add Milestone</h2>
               <button type="button" (click)="closeMilestoneForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
@@ -231,9 +231,9 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               </form>
             </div>
 
-            <div class="px-6 sm:px-8 py-5 border-t border-slate-200 bg-slate-50 flex justify-end gap-3">
-              <button type="button" (click)="closeMilestoneForm()" class="px-5 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all">Cancel</button>
-              <button type="button" (click)="saveMilestone()" [disabled]="!milestoneForm.valid" class="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none">
+            <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
+              <button type="button" (click)="closeMilestoneForm()" class="command-button secondary">Cancel</button>
+              <button type="button" (click)="saveMilestone()" [disabled]="!milestoneForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
                 Save
               </button>
             </div>
@@ -245,9 +245,9 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
       @if (showWpForm()) {
         <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
              appModal ariaLabelledby="wpModalTitle" (dismiss)="closeWpForm()">
-          <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
-            <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-              <h2 id="wpModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">Add Work Package</h2>
+          <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+            <div class="command-card-header">
+              <h2 id="wpModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Add Work Package</h2>
               <button type="button" (click)="closeWpForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
@@ -278,9 +278,9 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               </form>
             </div>
 
-            <div class="px-6 sm:px-8 py-5 border-t border-slate-200 bg-slate-50 flex justify-end gap-3">
-              <button type="button" (click)="closeWpForm()" class="px-5 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all">Cancel</button>
-              <button type="button" (click)="saveWp()" [disabled]="!wpForm.valid" class="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none">
+            <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
+              <button type="button" (click)="closeWpForm()" class="command-button secondary">Cancel</button>
+              <button type="button" (click)="saveWp()" [disabled]="!wpForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
                 Save
               </button>
             </div>
@@ -292,9 +292,9 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
       @if (showEditWpForm()) {
         <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
              appModal ariaLabelledby="editWpModalTitle" (dismiss)="closeEditWpForm()">
-          <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
-            <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-              <h2 id="editWpModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">Edit Work Package</h2>
+          <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+            <div class="command-card-header">
+              <h2 id="editWpModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Edit Work Package</h2>
               <button type="button" (click)="closeEditWpForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
@@ -340,9 +340,9 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               </form>
             </div>
 
-            <div class="px-6 sm:px-8 py-5 border-t border-slate-200 bg-slate-50 flex justify-end gap-3">
-              <button type="button" (click)="closeEditWpForm()" class="px-5 py-2.5 text-sm font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-all">Cancel</button>
-              <button type="button" (click)="saveEditWp()" [disabled]="!editWpForm.valid" class="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none">
+            <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
+              <button type="button" (click)="closeEditWpForm()" class="command-button secondary">Cancel</button>
+              <button type="button" (click)="saveEditWp()" [disabled]="!editWpForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
                 Save
               </button>
             </div>
