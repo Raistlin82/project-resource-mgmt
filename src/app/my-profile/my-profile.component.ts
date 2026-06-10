@@ -311,7 +311,10 @@ export class MyProfileComponent {
   private notify = inject(NotificationService);
   private auth = inject(AuthService);
 
-  private currentUserId = this.auth.userId();
+  // Read LIVE, never snapshot at field-init (see auth.service note): at
+  // construction the OAuth bootstrap hasn't settled so userId() is still the
+  // anonymous default — capturing it would load the wrong user on deep-link/reload.
+  private get currentUserId(): string { return this.auth.userId(); }
 
   // The resource profile read (getResource) is principal-gated server-side (401
   // until the Keycloak JWT is restored). On reload the OIDC token restores async;

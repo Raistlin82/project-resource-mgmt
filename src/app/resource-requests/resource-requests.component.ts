@@ -393,7 +393,9 @@ export class ResourceRequestsComponent {
   private api = inject(ApiService);
   private auth = inject(AuthService);
 
-  private currentUserId = this.auth.userId();
+  // Read LIVE, never snapshot at field-init (see auth.service note): a captured
+  // value freezes the anonymous default and shows the wrong user's data on reload.
+  private get currentUserId(): string { return this.auth.userId(); }
 
   // The resources read is principal-gated server-side (401 until the Keycloak JWT
   // is restored). On reload the OIDC token restores async; firing the forkJoin

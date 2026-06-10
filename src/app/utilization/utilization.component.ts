@@ -228,7 +228,9 @@ export class UtilizationComponent {
   private auth = inject(AuthService);
 
   // Current authenticated user (Resource Manager) id used for authorization.
-  private currentManagerId = this.auth.userId();
+  // Read LIVE, never snapshot at field-init (see auth.service note): a captured
+  // value freezes the anonymous default and scopes the wrong manager on reload.
+  private get currentManagerId(): string { return this.auth.userId(); }
 
   // resources and time-entries are principal-gated server-side: key the forkJoin
   // on auth readiness so it fires only AFTER the OAuth bootstrap has settled and

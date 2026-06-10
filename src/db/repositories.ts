@@ -35,6 +35,7 @@ import { db } from './client';
 import {
   InMemoryRepository,
   PgRepository,
+  nullsToUndefined,
   type Repository,
   type EntityTable,
   type Entity,
@@ -197,9 +198,17 @@ class NaturalKeyPgRepository<TRow extends Entity, KCol extends string>
     this.tbl = table;
   }
 
-  /** Add the synthetic `id` (mirroring the natural key) to a stored DB row. */
+  /**
+   * Add the synthetic `id` (mirroring the natural key) to a stored DB row, and
+   * normalize nullable columns to the `V | undefined` contract via
+   * `nullsToUndefined` so the prod JSON shape matches the in-memory (DEV)
+   * adapter (no `key: null` vs key-absent divergence). Applied on every return
+   * path (list/get/create/update). The synthetic `id` is derived from the
+   * natural key, which is never null, so it is added after normalization.
+   */
   private withId(row: Record<string, unknown>): TRow {
-    return { ...row, id: String(row[this.keyColumn]) } as unknown as TRow;
+    const normalized = nullsToUndefined(row);
+    return { ...normalized, id: String(row[this.keyColumn]) } as unknown as TRow;
   }
 
   /** Drop the synthetic `id` before writing — the table has no `id` column. */
@@ -246,8 +255,21 @@ class NaturalKeyPgRepository<TRow extends Entity, KCol extends string>
 
   async update(id: string, patch: Partial<TRow>): Promise<TRow | undefined> {
     const setValues = this.stripId(patch as Record<string, unknown>);
+    // Empty-patch parity with the in-memory adapter: if there is nothing to set
+    // (no keys, or every remaining value is `undefined`), Drizzle's `.set()`
+    // throws "No values to set" — a 500 in prod, while the in-memory adapter
+    // returns the unchanged entity (200). Short-circuit to a plain read so both
+    // adapters behave identically.
+    const hasValuesToSet = Object.values(setValues).some(
+      (value) => value !== undefined,
+    );
+    if (!hasValuesToSet) {
+      return this.get(id);
+    }
     // LOCALIZED CAST (Drizzle generics): same rationale as `create`, for the
-    // `.set()` update model.
+    // `.set()` update model. Set semantics are unchanged — `undefined` is
+    // omitted by Drizzle (no clobber), explicit `null` still sets NULL; only the
+    // RETURNED row is normalized (inside `withId`).
     const rows = (await this.database
       .update(this.tbl)
       .set(setValues as unknown as PgUpdateSetSource<PgTable>)

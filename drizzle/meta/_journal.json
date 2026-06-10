@@ -8,6 +8,13 @@
       "when": 1780990987874,
       "tag": "0000_graceful_firedrake",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1781126249628,
+      "tag": "0001_quiet_goblin_queen",
+      "breakpoints": true
     }
   ]
 }

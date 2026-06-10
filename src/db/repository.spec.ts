@@ -1,4 +1,4 @@
-import { InMemoryRepository } from './repository';
+import { InMemoryRepository, nullsToUndefined } from './repository';
 
 /**
  * Unit tests for the DEV adapter (`InMemoryRepository`). These exercise the full
@@ -76,6 +76,27 @@ describe('InMemoryRepository', () => {
     expect(await repo.list()).toHaveLength(1);
   });
 
+  it('update() with an empty patch returns the unchanged entity', async () => {
+    // PG PARITY (issue #8): with a patch that has no defined keys after the `id`
+    // is stripped, Drizzle's `.set()` throws "No values to set" -> a 500 in the
+    // PgRepository / NaturalKeyPgRepository adapters. Both Pg adapters now
+    // short-circuit to `this.get(id)` so they match this in-memory behavior:
+    // an empty patch is a no-op that returns the current entity unchanged (200).
+    //
+    // The trigger for the Pg short-circuit is "no value to set" — i.e. either an
+    // empty patch OR a patch whose every value is `undefined` (Drizzle omits
+    // `undefined` from `.set()`). NOTE: the in-memory adapter spreads the patch
+    // verbatim, so a `{ qty: undefined }` patch DOES write `qty: undefined`
+    // there; that pre-existing in-memory behavior is intentionally left alone.
+    // This test covers the canonical empty-`{}` case where both adapters agree.
+    // (The Pg branch isn't unit-tested here as it needs a live database; this
+    // documents the contract the Pg short-circuit is written to honor.)
+    const repo = new InMemoryRepository<Widget>([widget('1', 'a', 1)]);
+    const updated = await repo.update('1', {});
+    expect(updated).toEqual(widget('1', 'a', 1));
+    expect(await repo.get('1')).toEqual(widget('1', 'a', 1));
+  });
+
   it('remove() deletes an existing entity and returns true', async () => {
     const repo = new InMemoryRepository<Widget>([widget('1', 'a', 1), widget('2', 'b', 2)]);
     expect(await repo.remove('1')).toBe(true);
@@ -135,5 +156,39 @@ describe('InMemoryRepository', () => {
       created.qty = 999;
       expect(await repo.get('1')).toEqual(widget('1', 'a', 1));
     });
+  });
+});
+
+describe('nullsToUndefined', () => {
+  // PG NULL-vs-UNDEFINED (issue #9): Drizzle returns nullable columns as explicit
+  // `null`, but the api.service interfaces model them as OPTIONAL (`V | undefined`)
+  // and the in-memory (DEV) adapter omits the key entirely. This helper is applied
+  // on the Pg adapters' RETURN paths (list/get/create/update) so the prod JSON
+  // shape matches dev. It must NEVER touch the values passed to `.set()` on an
+  // update — that's covered by leaving the set semantics untouched in the adapter.
+
+  it('converts top-level null values to undefined', () => {
+    const out = nullsToUndefined({ id: '1', a: null, b: 2, c: null });
+    expect(out).toEqual({ id: '1', a: undefined, b: 2, c: undefined });
+  });
+
+  it('leaves non-null values (including falsy ones) untouched', () => {
+    const out = nullsToUndefined({ id: '1', zero: 0, empty: '', flag: false });
+    expect(out).toEqual({ id: '1', zero: 0, empty: '', flag: false });
+  });
+
+  it('leaves already-undefined values as undefined', () => {
+    const out = nullsToUndefined({ id: '1', a: undefined });
+    expect(out).toEqual({ id: '1', a: undefined });
+  });
+
+  it('is shallow: does not convert nulls nested inside objects or arrays', () => {
+    const out = nullsToUndefined({ id: '1', nested: { x: null }, arr: [null] });
+    expect(out).toEqual({ id: '1', nested: { x: null }, arr: [null] });
+  });
+
+  it('preserves all keys (null keys remain present, just undefined)', () => {
+    const out = nullsToUndefined({ id: '1', a: null }) as Record<string, unknown>;
+    expect(Object.keys(out).sort()).toEqual(['a', 'id']);
   });
 });

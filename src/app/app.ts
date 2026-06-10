@@ -2,7 +2,7 @@ import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@a
 import { NavigationEnd, Router, RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
 import { MatIconModule } from '@angular/material/icon';
 import { rxResource, toSignal } from '@angular/core/rxjs-interop';
-import { forkJoin } from 'rxjs';
+import { forkJoin, of } from 'rxjs';
 import { filter, map } from 'rxjs/operators';
 import {
   ApiService,
@@ -351,13 +351,21 @@ export class App {
       .filter(group => group.items.length > 0);
   });
 
-  private navRes = rxResource<NavState, unknown>({
-    stream: () => forkJoin({
-      requests: this.api.getRequests(),
-      issues: this.api.getProjectIssues(),
-      changes: this.api.getChangeRequests(),
-      resources: this.api.getResources(),
-    }),
+  // Gate the shell badges' load on auth readiness: getResources() is a
+  // principal-gated read, so firing before the post-redirect token is attached
+  // 401s and latches the badges at 0 until a manual reload (the same latch the
+  // page components fixed). authReady false->true re-runs the stream.
+  private navRes = rxResource<NavState, boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) =>
+      ready
+        ? forkJoin({
+            requests: this.api.getRequests(),
+            issues: this.api.getProjectIssues(),
+            changes: this.api.getChangeRequests(),
+            resources: this.api.getResources(),
+          })
+        : of<NavState>({ requests: [], issues: [], changes: [], resources: [] }),
     defaultValue: { requests: [], issues: [], changes: [], resources: [] },
   });
 

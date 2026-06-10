@@ -69,6 +69,29 @@ function clone<V>(value: V): V {
 }
 
 /**
+ * Normalize a database row to the `V | undefined` contract used across the app.
+ *
+ * Drizzle returns NULLABLE columns as explicit `null`, but the api.service
+ * interfaces model those same fields as OPTIONAL (`prop?: V`, i.e. `V | undefined`)
+ * — and the in-memory (DEV) adapter simply omits the key. Without this shim the
+ * production JSON shape would differ from dev (`key: null` vs key absent),
+ * violating the `V | undefined` contract callers rely on.
+ *
+ * This is a SHALLOW conversion: top-level `null` values become `undefined`.
+ * It must only run on RETURN paths (reads + the rows Drizzle returns from
+ * insert/update). It must NEVER touch the values handed to `.set()` on an
+ * update — there, `undefined` is intentionally omitted (no clobber) while an
+ * explicit `null` is intended to set the column NULL.
+ */
+export function nullsToUndefined<R>(row: R): R {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row as Record<string, unknown>)) {
+    out[key] = value === null ? undefined : value;
+  }
+  return out as R;
+}
+
+/**
  * DEV adapter: an array-backed repository.
  *
  * The constructor takes an initial `T[]` which is defensively cloned, so the
@@ -159,14 +182,22 @@ export class PgRepository<T extends Entity> implements Repository<T> {
   ) {}
 
   async list(): Promise<T[]> {
-    const rows = await this.db.select().from(this.table);
+    // `.orderBy(id)` gives a stable, deterministic order (Postgres makes no
+    // ordering guarantee otherwise), matching the seed/insertion order the
+    // in-memory adapter preserves.
+    const rows = await this.db
+      .select()
+      .from(this.table)
+      .orderBy(this.table.id);
     // LOCALIZED CAST (Drizzle generics): a schema-less `select()` yields rows
     // typed as `Record<string, unknown>`, which TypeScript cannot prove equals
     // the generic `T`. The `EntityTable<T>` constraint guarantees the table's
     // select model *is* `T`, so the rows are structurally correct at runtime.
     // We bridge through `unknown` (TS's own recommendation) and keep the cast
     // confined here rather than weakening `db`/`table` to `any`.
-    return rows as unknown as T[];
+    // `nullsToUndefined` normalizes nullable columns to the `V | undefined`
+    // contract so the prod JSON shape matches the in-memory (DEV) adapter.
+    return (rows as unknown as T[]).map((row) => nullsToUndefined(row));
   }
 
   async get(id: string): Promise<T | undefined> {
@@ -176,7 +207,8 @@ export class PgRepository<T extends Entity> implements Repository<T> {
       .where(eq(this.table.id, id))
       .limit(1);
     // LOCALIZED CAST (Drizzle generics): see `list`.
-    return (rows[0] as unknown as T | undefined) ?? undefined;
+    const row = rows[0] as unknown as T | undefined;
+    return row ? nullsToUndefined(row) : undefined;
   }
 
   async create(entity: T): Promise<T> {
@@ -194,7 +226,8 @@ export class PgRepository<T extends Entity> implements Repository<T> {
       .insert(this.table)
       .values(values)
       .returning();
-    return rows[0] as unknown as T;
+    // Normalize nullable columns on the returned row (see `list`).
+    return nullsToUndefined(rows[0] as unknown as T);
   }
 
   async update(id: string, patch: Partial<T>): Promise<T | undefined> {
@@ -202,17 +235,34 @@ export class PgRepository<T extends Entity> implements Repository<T> {
     // without binding an unused variable (the binding would trip no-unused-vars).
     const rest = { ...patch };
     delete (rest as Partial<T>).id;
+    // Empty-patch parity with the in-memory adapter: if there is nothing to set
+    // (no keys, or every remaining value is `undefined`), Drizzle's `.set()`
+    // throws "No values to set" — a 500 in prod, while the in-memory adapter
+    // returns the unchanged entity (200). Short-circuit to a plain read so both
+    // adapters behave identically.
+    const hasValuesToSet = Object.values(rest).some(
+      (value) => value !== undefined,
+    );
+    if (!hasValuesToSet) {
+      return this.get(id);
+    }
     // LOCALIZED CAST (Drizzle generics): same rationale as `create` — `.set()`
     // wants the table-derived update model (`PgUpdateSetSource`), which can't be
     // statically tied to the generic `T`. The cast (via `unknown`) is confined
     // to this argument.
+    //
+    // NOTE: set semantics are unchanged — `undefined` values are omitted by
+    // Drizzle (no clobber), an explicit `null` still sets the column NULL. We
+    // therefore pass `rest` UNTOUCHED to `.set()` and only normalize the
+    // RETURNED row below.
     const setValues = rest as unknown as PgUpdateSetSource<EntityTable<T>>;
     const rows = await this.db
       .update(this.table)
       .set(setValues)
       .where(eq(this.table.id, id))
       .returning();
-    return (rows[0] as unknown as T | undefined) ?? undefined;
+    const row = rows[0] as unknown as T | undefined;
+    return row ? nullsToUndefined(row) : undefined;
   }
 
   async remove(id: string): Promise<boolean> {

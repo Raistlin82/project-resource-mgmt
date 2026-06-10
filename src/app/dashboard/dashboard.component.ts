@@ -516,7 +516,8 @@ export class DashboardComponent {
   /** True only when a real prior reading was derived (caller renders the chip). */
   hasRecognizedRevTrend = computed(() => this.recognizedRevTrend().direction !== null);
 
-  projectRows = computed<ProjectCommandRow[]>(() =>
+  /** All projects scored + sorted (NOT truncated). Source of truth for KPIs. */
+  allProjectRows = computed<ProjectCommandRow[]>(() =>
     this.data().projects
       .map(project => {
         const financials = computeProjectFinancials(project.id, this.financeData());
@@ -538,13 +539,16 @@ export class DashboardComponent {
           openChanges,
         };
       })
-      .sort((a, b) => this.healthWeight(b.health) - this.healthWeight(a.health) || a.vac - b.vac)
-      .slice(0, 8),
+      .sort((a, b) => this.healthWeight(b.health) - this.healthWeight(a.health) || a.vac - b.vac),
   );
+
+  /** Truncated for the control-board table only. */
+  projectRows = computed<ProjectCommandRow[]>(() => this.allProjectRows().slice(0, 8));
 
   healthDistribution = computed(() => {
     const base = { green: 0, amber: 0, red: 0 };
-    return this.projectRows().reduce((acc, p) => ({ ...acc, [p.health]: acc[p.health] + 1 }), base);
+    // Over the FULL portfolio, not the 8-row table slice.
+    return this.allProjectRows().reduce((acc, p) => ({ ...acc, [p.health]: acc[p.health] + 1 }), base);
   });
 
   totalRevenue = computed(() =>

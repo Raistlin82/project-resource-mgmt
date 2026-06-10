@@ -479,6 +479,10 @@ export const changeRequests = pgTable(
       .$type<'Low' | 'Medium' | 'High' | 'Critical'>()
       .notNull(),
     createdAt: text('created_at').notNull(),
+    // SERVER-PINNED creator: the immutable SoD basis for self-approval (set once
+    // on POST from the verified actor; never client-rewritable). Nullable so rows
+    // created before this column existed remain valid.
+    createdBy: text('created_by'),
     decidedBy: text('decided_by'),
     decidedAt: text('decided_at'),
   },
@@ -656,16 +660,24 @@ export const approvalRequests = pgTable(
 // Audit log (append-only)
 // ---------------------------------------------------------------------------
 
-export const auditLogs = pgTable('audit_logs', {
-  id: text('id').primaryKey(),
-  at: text('at').notNull(),
-  actorId: text('actor_id').notNull(),
-  actorRole: text('actor_role').$type<UserRole | 'unknown'>().notNull(),
-  method: text('method').notNull(),
-  path: text('path').notNull(),
-  statusCode: integer('status_code').notNull(),
-  // append-only before/after snapshots of just the changed keys.
-  changedKeys: jsonb('changed_keys').$type<string[]>(),
-  before: jsonb('before').$type<Record<string, unknown>>(),
-  after: jsonb('after').$type<Record<string, unknown>>(),
-});
+export const auditLogs = pgTable(
+  'audit_logs',
+  {
+    id: text('id').primaryKey(),
+    at: text('at').notNull(),
+    actorId: text('actor_id').notNull(),
+    actorRole: text('actor_role').$type<UserRole | 'unknown'>().notNull(),
+    method: text('method').notNull(),
+    path: text('path').notNull(),
+    statusCode: integer('status_code').notNull(),
+    // append-only before/after snapshots of just the changed keys.
+    changedKeys: jsonb('changed_keys').$type<string[]>(),
+    before: jsonb('before').$type<Record<string, unknown>>(),
+    after: jsonb('after').$type<Record<string, unknown>>(),
+  },
+  (t) => [
+    // The audit-log read is paged newest-first by `at` (ORDER BY at DESC LIMIT
+    // OFFSET); this index keeps that bounded query from a full scan/sort.
+    index('audit_logs_at_idx').on(t.at),
+  ],
+);

@@ -13,7 +13,12 @@ import { UserRole } from './api.service';
  *   {@link canManageCommercial}, {@link canApproveFinancials},
  *   {@link canApproveDelivery}, {@link hasAnyRole}) is unchanged so existing
  *   consumers (interceptors, route guards, components) keep working. These are
- *   synchronous signal reads — safe to call during request setup / field init.
+ *   synchronous signal reads — safe to call inside interceptors and per-request.
+ *   IMPORTANT: read them REACTIVELY (inside a computed / rxResource params /
+ *   getter), NEVER snapshot at field-init: until {@link authReady} flips true the
+ *   OAuth bootstrap hasn't settled, so userId()/role() return the anonymous
+ *   defaults — a captured value freezes the wrong identity for the component's
+ *   life (e.g. loading another user's data on a deep-link/reload).
  * - SSR-safe: on the server the user is anonymous and OAuth is never touched.
  * - Demo/loopback fallback: if discovery or login fails (e.g. Keycloak is
  *   unreachable) the service silently stays anonymous and never throws on

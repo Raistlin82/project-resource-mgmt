@@ -3,13 +3,17 @@ import express, { Request, Response, NextFunction, Router } from 'express';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
+import { desc } from 'drizzle-orm';
 import { getRepositories, type FxRateRow } from './db/repositories';
+import { db } from './db/client';
+import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
 import type { AuditLog, Resource, ResourceRequest, Assignment, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Project } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition } from './app/services/staffing.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate } from './app/services/api.service';
+import { maxIdSeq } from './server/id-seq.util';
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
 import { EInvoiceValidationError } from './server/integrations/fatturapa.adapter';
@@ -131,6 +135,12 @@ function rateLimit(maxPerWindow: number, windowMs: number, keyOf: (req: Request)
 let idSeq = 1000;
 const newId = () => `${++idSeq}`;
 
+// Re-export the pure id-suffix scanner (imported above) so it is also reachable
+// from this module. It is defined in its own side-effect-free module so it can be
+// unit-tested without importing this SSR server (which instantiates the Angular
+// app engine at load). seedSequences uses the local binding directly.
+export { maxIdSeq };
+
 /**
  * Process-wide repositories (Postgres when DATABASE_URL is set, else in-memory).
  * Declared early so it is in scope for the audit middleware and the boot
@@ -141,8 +151,10 @@ const repos = getRepositories();
 /**
  * AUDIT INTEGRITY: the audit log is APPEND-ONLY — entries are created in
  * insertion order and are never edited or deleted. The READ endpoint
- * (`GET /audit-logs`) sorts newest-first and applies a bounded default page
- * size (so the response and per-request work stay O(page), not O(whole log)).
+ * (`GET /audit-logs`) returns a bounded, newest-first page: on the Pg adapter the
+ * ordering, LIMIT and OFFSET are pushed into SQL (backed by audit_logs_at_idx),
+ * so the database read is bounded rather than a full SELECT *; the in-memory
+ * adapter sorts newest-first and slices the same page.
  * For PUT/DELETE mutations we additionally capture which keys changed plus
  * before/after snapshots of just those keys.
  */
@@ -356,7 +368,9 @@ const canMutate = (role: UserRole | 'unknown', allowed: UserRole[]) => allowed.i
  *    - Valid token  -> stash the verified principal on the request; it wins over
  *      the demo X-User-* headers for both roleGate and audit actor derivation.
  *    - Invalid token -> respond 401 (do NOT silently fall back to headers).
- *    - No token      -> keep the existing loopback-trusted demo-header fallback.
+ *    - No token      -> fall back to the demo X-User-* headers ONLY when header
+ *      trust is explicitly opted in via AUTH_TRUST_HEADERS=true; otherwise the
+ *      actor is treated as 'unknown' (privileged mutations denied).
  * 2. Apply the role gating to mutating (POST/PUT/DELETE) requests.
  *
  * Async because JWT verification is async; on unexpected errors we delegate to
@@ -403,7 +417,7 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
     // Time entries incl. approval. Self-approval is additionally blocked in the PUT handler (SoD).
     { test: p => p.startsWith('/time-entries'), roles: ['employee', 'pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
     { test: p => ['/assignments', '/requests'].some(prefix => p.startsWith(prefix)), roles: ['pm', 'resource-manager', 'delivery-executive', 'admin'] },
-    { test: p => ['/projects', '/work-packages', '/milestones', '/project-tasks', '/project-issues', '/change-requests'].some(prefix => p.startsWith(prefix)), roles: ['pm', 'delivery-executive', 'admin'] },
+    { test: p => ['/projects', '/project-partners', '/project-documents', '/work-packages', '/milestones', '/project-tasks', '/project-issues', '/change-requests'].some(prefix => p.startsWith(prefix)), roles: ['pm', 'delivery-executive', 'admin'] },
     { test: p => ['/skill-catalogs', '/proficiency-sets', '/skills', '/project-roles', '/resource-organizations', '/languages'].some(prefix => p.startsWith(prefix)), roles: ['admin', 'delivery-executive'] },
     { test: p => p.startsWith('/approval-requests'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
     // Integration actions (prepare CRM sync payloads, ...) mirror the read gate.
@@ -763,7 +777,13 @@ apiRouter.delete('/assignments/:id', async (req, res) => {
 
 apiRouter.get('/time-entries', async (_req, res) => { res.json(await repos.timeEntries.list()); });
 apiRouter.post('/time-entries', async (req, res) => {
-  const body = pick<TimeEntry>(req.body, ['assignmentId', 'requestId', 'resourceId', 'projectId', 'date', 'hours', 'status', 'notes']);
+  // B-TIME-ENTRY (status bypass): 'status'/'approvedBy'/'approvedAt' are NOT in
+  // the create allow-list, so a client cannot seed an already-'Approved' entry
+  // that would bypass the PUT transition whitelist + SoD and inflate the billing
+  // cap accrual (accrued T&M sums APPROVED entries). The initial status is forced
+  // to 'Draft' AFTER the spread (parity with POST /requests pinning its status),
+  // so it can never be overridden by the body.
+  const body = pick<TimeEntry>(req.body, ['assignmentId', 'requestId', 'resourceId', 'projectId', 'date', 'hours', 'notes']);
   if (!isNonNegNumber(body.hours)) {
     res.status(400).json({ error: 'hours must be a non-negative number' });
     return;
@@ -771,8 +791,8 @@ apiRouter.post('/time-entries', async (req, res) => {
   const reqRef = await repos.requests.get(body.requestId ?? '');
   const item = {
     id: `TE${newId()}`,
-    status: 'Draft',
     ...body,
+    status: 'Draft',
     projectId: body.projectId || reqRef?.projectId || '',
   } as TimeEntry;
   const created = await repos.timeEntries.create(item);
@@ -985,6 +1005,10 @@ interface ChangeRequestEntry {
   impactScheduleDays: number;
   priority: 'Low' | 'Medium' | 'High' | 'Critical';
   createdAt: string;
+  // SERVER-PINNED creator (set once on POST from the verified actor; NOT in the
+  // allow-list, so it can never be rewritten by a client). The self-approval
+  // guard keys on this instead of the editable `requestedBy`/`owner` fields.
+  createdBy?: string;
   decidedBy?: string;
   decidedAt?: string;
 }
@@ -993,12 +1017,19 @@ interface ChangeRequestEntry {
 const CHANGE_REQUEST_FIELDS = ['projectId', 'title', 'description', 'requestedBy', 'owner', 'status', 'impactScope', 'impactBudget', 'impactScheduleDays', 'priority', 'createdAt'] as const;
 apiRouter.get('/change-requests', async (_req, res) => { res.json(await repos.changeRequests.list()); });
 apiRouter.post('/change-requests', async (req, res) => {
-  const item = { id: newId(), createdAt: new Date().toISOString(), ...pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_FIELDS) } as ChangeRequestEntry;
+  // `createdBy` is pinned to the verified actor AFTER the spread so the body
+  // cannot supply/override it (it is also absent from CHANGE_REQUEST_FIELDS). It
+  // is the immutable SoD basis the approval guard below trusts.
+  const item = { id: newId(), createdAt: new Date().toISOString(), ...pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_FIELDS), createdBy: actorId(req) } as ChangeRequestEntry;
   res.json(await repos.changeRequests.create(item));
 });
 apiRouter.put('/change-requests/:id', async (req, res) => {
-  const existing = await repos.changeRequests.get(req.params.id);
-  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const stored = await repos.changeRequests.get(req.params.id);
+  if (stored === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  // The api.service `ChangeRequest` interface predates the server-only
+  // `createdBy` SoD field; the persisted row carries it (schema + create pin), so
+  // read it through the richer server-side `ChangeRequestEntry` view.
+  const existing = stored as unknown as ChangeRequestEntry;
   const body = pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_FIELDS);
   const merged = { ...existing, ...body } as ChangeRequestEntry;
   // CR APPROVAL — SEGREGATION OF DUTIES + AUTHORIZATION. Approved CRs feed
@@ -1014,9 +1045,18 @@ apiRouter.put('/change-requests/:id', async (req, res) => {
       res.status(403).json({ error: 'Only delivery-executive or admin may approve a change request' });
       return;
     }
+    // SoD basis is the SERVER-PINNED creator (`createdBy`), NOT the editable
+    // `requestedBy`/`owner` (a requester could otherwise rewrite those in a Draft
+    // PUT to a dummy id and then self-approve). Fall back to the legacy fields
+    // only for CRs created before `createdBy` existed, so legitimate flows for
+    // older rows keep their guard.
     const decider = actorId(req);
-    if (decider === existing.requestedBy || decider === existing.owner) {
-      res.status(403).json({ error: 'Segregation of duties: the requester/owner cannot approve their own change request' });
+    const creator = existing.createdBy;
+    const selfApproving = creator !== undefined
+      ? decider === creator
+      : decider === existing.requestedBy || decider === existing.owner;
+    if (selfApproving) {
+      res.status(403).json({ error: 'Segregation of duties: the change request creator cannot approve their own change request' });
       return;
     }
   }
@@ -1553,7 +1593,10 @@ function slaDueFrom(createdAtIso: string): string {
   return new Date(new Date(createdAtIso).getTime() + APPROVAL_SLA_DAYS * 24 * 60 * 60 * 1000).toISOString();
 }
 
-const APPROVAL_REQUEST_FIELDS = ['kind', 'refId', 'projectId', 'amount', 'requestedBy', 'note'] as const;
+// `requestedBy` is intentionally NOT client-settable: it is the SoD basis the
+// decision endpoint compares the trusted decider against, so it is pinned to the
+// verified actor at creation rather than copied from the (forgeable) body.
+const APPROVAL_REQUEST_FIELDS = ['kind', 'refId', 'projectId', 'amount', 'note'] as const;
 
 apiRouter.get('/approval-requests', async (_req, res) => { res.json(await repos.approvalRequests.list()); });
 apiRouter.post('/approval-requests', async (req, res) => {
@@ -1577,7 +1620,10 @@ apiRouter.post('/approval-requests', async (req, res) => {
     refId: body.refId,
     projectId: body.projectId,
     amount: body.amount,
-    requestedBy: typeof body.requestedBy === 'string' && body.requestedBy.length > 0 ? body.requestedBy : actorId(req),
+    // SoD basis: pinned to the SERVER-VERIFIED actor, never a client-supplied
+    // value (excluded from the create allow-list), so the requester cannot forge
+    // a different identity and defeat the self-approval guard at /decision.
+    requestedBy: actorId(req),
     status: 'Pending',
     steps: buildApprovalSteps(body.kind as ApprovalKind, body.amount),
     currentStep: 0,
@@ -1652,19 +1698,33 @@ apiRouter.put('/approval-requests/:id/decision', async (req, res) => {
   res.status(result.status).json(result.body);
 });
 
-/** Default + maximum page size for the (unbounded) audit log read. */
+/** Default + maximum page size for the (paged) audit log read. */
 const AUDIT_LOG_DEFAULT_LIMIT = 200;
 const AUDIT_LOG_MAX_LIMIT = 1000;
 apiRouter.get('/audit-logs', async (req, res) => {
-  // AUDIT READ: never stream the entire ever-growing log. Sort newest-first
-  // (by `at`, stable) and return a bounded page. `limit`/`offset` query params
-  // allow pagination; both are clamped so a client cannot request the whole log.
-  const all = (await repos.auditLogs.list()) as unknown as AuditEntry[];
-  const sorted = [...all].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  // AUDIT READ: never stream the entire ever-growing log. Return a bounded page
+  // ordered newest-first by `at`. `limit`/`offset` query params drive pagination;
+  // both are clamped so a client cannot request the whole log.
   const rawLimit = Number(req.query['limit']);
   const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, AUDIT_LOG_MAX_LIMIT) : AUDIT_LOG_DEFAULT_LIMIT;
   const rawOffset = Number(req.query['offset']);
   const offset = Number.isInteger(rawOffset) && rawOffset > 0 ? rawOffset : 0;
+  if (db) {
+    // Pg path: push the ordering + paging into SQL (ORDER BY at DESC LIMIT
+    // OFFSET, backed by audit_logs_at_idx) so the DB read is bounded — never a
+    // full SELECT * materialised in the process.
+    const page = await db
+      .select()
+      .from(auditLogsTable)
+      .orderBy(desc(auditLogsTable.at))
+      .limit(limit)
+      .offset(offset);
+    res.json(page);
+    return;
+  }
+  // In-memory path: sort newest-first by `at` (stable) and slice the page.
+  const all = (await repos.auditLogs.list()) as unknown as AuditEntry[];
+  const sorted = [...all].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   res.json(sorted.slice(offset, offset + limit));
 });
 apiRouter.get('/storage-status', (_req, res) => res.json({
@@ -1887,10 +1947,12 @@ apiRouter.get('/integrations/bi/feed', async (_req, res) => {
  * Make id generation safe across restarts by advancing the in-memory sequences
  * past anything already persisted:
  *
- *  - `idSeq` is set to the largest PURELY-NUMERIC id (matching /^\d+$/) seen
- *    across every repository. newId() only ever emits numeric ids, so prefixed
- *    ids ('TE1', 'CT1', 'AL…', 'AR…', …) are deliberately ignored — they are not
- *    produced by newId and must not move the counter.
+ *  - `idSeq` is set to the largest numeric SUFFIX seen across every repository —
+ *    BOTH purely-numeric ids and PREFIXED ids ('TE…', 'AL…', 'AR…', 'OB…'). The
+ *    suffix is `newId()`'s output, so it must move the counter even when wrapped
+ *    in a prefix: otherwise a restart re-issues an already-used suffix and the
+ *    prefixed PK ('TE'+suffix, …) collides (a violation the best-effort audit
+ *    insert silently swallows). See `maxIdSeq`.
  *  - `invoiceSeq` is set to the largest INV-<INVOICE_YEAR>-NNNN across orders, so
  *    a restart can never re-issue an invoice number that is already in use.
  *
@@ -1909,16 +1971,15 @@ async function seedSequences(): Promise<void> {
     repos.fxRates, repos.approvalRequests, repos.auditLogs,
   ];
 
-  // idSeq -> max purely-numeric id across all repositories.
-  let maxNumericId = idSeq;
+  // idSeq -> max numeric SUFFIX across all repositories (numeric AND prefixed ids).
+  // newId()'s output is embedded in prefixed ids (TE…/AL…/AR…/OB…), so the
+  // counter must advance past those suffixes too or a restart re-issues a used
+  // suffix and the prefixed PK collides. See maxIdSeq.
   const lists = await Promise.all(allRepos.map(r => r.list()));
+  let maxNumericId = idSeq;
   for (const rows of lists) {
-    for (const row of rows) {
-      if (/^\d+$/.test(row.id)) {
-        const n = Number(row.id);
-        if (Number.isInteger(n) && n > maxNumericId) maxNumericId = n;
-      }
-    }
+    const fromRows = maxIdSeq(rows.map(row => row.id));
+    if (fromRows > maxNumericId) maxNumericId = fromRows;
   }
   idSeq = maxNumericId;
 

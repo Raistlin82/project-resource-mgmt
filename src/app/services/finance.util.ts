@@ -538,14 +538,28 @@ function periodRange(fromYm: string, toYm: string): string[] {
   return out;
 }
 
-/** Clamp a period into [first,last]; '' (undated) clamps to the first period. */
+/**
+ * Clamp a period to one that ACTUALLY EXISTS in `periods`. For a contiguous
+ * monthly window this is the plain [first,last] clamp; for a NON-contiguous
+ * explicit list it additionally snaps an in-range-but-absent period DOWN to the
+ * nearest earlier listed period, so its amount is never silently dropped by the
+ * by-period index lookup (it lands in the closest prior recognised bucket).
+ */
 function clampPeriod(p: string, periods: string[]): string {
   if (periods.length === 0) return '';
   const first = periods[0];
   const last = periods[periods.length - 1];
   if (!p || p < first) return first;
   if (p > last) return last;
-  return p;
+  // In range: if p is itself a listed period, keep it; otherwise snap to the
+  // nearest earlier listed period (periods is ascending).
+  let snapped = first;
+  for (const candidate of periods) {
+    if (candidate === p) return p;
+    if (candidate <= p) snapped = candidate;
+    else break;
+  }
+  return snapped;
 }
 
 /** Recognized amount for a single item under its obligation pattern (period-agnostic total). */

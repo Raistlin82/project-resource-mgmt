@@ -716,7 +716,7 @@ export class Reporting {
 
   private financeData = computed<FinanceData>(() => {
     const d = this.dataRes.value();
-    return { requests: d.requests, assignments: d.assignments, resources: d.resources, orders: d.orders, orderLines: d.orderLines, financials: d.financials, timeEntries: d.timeEntries, changeRequests: d.changeRequests, projects: d.projects, fxRates: this.fxRes.value() };
+    return { requests: d.requests, assignments: d.assignments, resources: d.resources, orders: d.orders, orderLines: d.orderLines, financials: d.financials, timeEntries: d.timeEntries, changeRequests: d.changeRequests, projects: d.projects, billingItems: d.billingItems, contracts: d.contracts, customers: d.customers, milestones: d.milestones, fxRates: this.fxRes.value() };
   });
 
   /** Real per-project profitability (revenue/margin) from the commercial + finance data. */
