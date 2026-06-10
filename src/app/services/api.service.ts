@@ -267,12 +267,12 @@ export interface OrderLine {
 
 export type BillingType =
   | 'Milestone'          // SAL — fixed-price, triggered by a project Milestone
-  | 'Recurring'          // canone/retainer
-  | 'TimeAndMaterials'   // a consuntivo: approved hours x billRate
+  | 'Recurring'          // retainer billed on a fixed cadence
+  | 'TimeAndMaterials'   // as-incurred: approved hours x billRate
   | 'Capped'             // T&M not-to-exceed (cap)
-  | 'Advance'            // acconto/anticipo (down payment)
-  | 'Progress'           // % completamento (POC)
-  | 'Expense'            // pass-through / spese rifatturate
+  | 'Advance'            // down payment taken up front
+  | 'Progress'           // percentage of completion (POC)
+  | 'Expense'            // pass-through / re-invoiced expenses
   | 'CreditNote';        // nota di credito (negative)
 
 export interface BillingPlanItem {
@@ -386,6 +386,77 @@ export const BASE_CURRENCY = 'EUR';
 export interface FxRate {
   currency: string;
   rateToBase: number;
+}
+
+// --- Integrations (local-artifact adapters: implemented, NOT connected) ---
+
+/** The four supported integration kinds. */
+export type IntegrationKind = 'erp' | 'einvoice' | 'crm' | 'bi';
+
+/** Server-side adapter self-description (mirror of the server contract). */
+export interface IntegrationDescriptor {
+  kind: IntegrationKind;
+  key: string;
+  name: string;
+  description: string;
+  /** Always false today: local-artifact adapters never contact external systems. */
+  connected: boolean;
+  mode: 'local-artifact';
+}
+
+/** GET /integrations response: active descriptors + per-kind active key. */
+export interface IntegrationsInfo {
+  adapters: IntegrationDescriptor[];
+  active: Record<IntegrationKind, string>;
+}
+
+/** CRM account record inside a prepared sync payload. */
+export interface CrmOutboxAccount {
+  externalId: string;
+  name: string;
+  industry?: string;
+  country?: string;
+}
+
+/** Condensed order nested under a CRM deal. */
+export interface CrmOutboxOrder {
+  id: string;
+  type: string;
+  amount: number;
+  status: string;
+}
+
+/** CRM deal record inside a prepared sync payload. */
+export interface CrmOutboxDeal {
+  externalId: string;
+  accountExternalId: string;
+  name: string;
+  value: number;
+  currency: string;
+  stage: string;
+  orders: CrmOutboxOrder[];
+}
+
+/**
+ * One prepared (never sent) CRM sync payload. The server keeps these in an
+ * intentionally ephemeral in-memory outbox (demo state, cleared on restart).
+ */
+export interface CrmOutboxEntry {
+  id?: string;
+  preparedAt: string;
+  status: string;
+  target: string;
+  payload: { accounts: CrmOutboxAccount[]; deals: CrmOutboxDeal[] };
+}
+
+/** A single cell of the BI feed (primitives only). */
+export type BiFeedCell = string | number | boolean | null;
+
+/** GET /integrations/bi/feed response: flat per-project financial rows. */
+export interface BiFeedPreview {
+  generatedAt: string;
+  rowCount: number;
+  rows: Record<string, BiFeedCell>[];
 }
 
 @Injectable({ providedIn: 'root' })
@@ -635,4 +706,24 @@ export class ApiService {
   // --- Multi-currency foundation ---
 
   getFxRates(): Observable<FxRate[]> { return this.http.get<FxRate[]>(`${this.baseUrl}/fx-rates`); }
+
+  // --- Integrations (local-artifact adapters: implemented, NOT connected) ---
+
+  getIntegrations(): Observable<IntegrationsInfo> { return this.http.get<IntegrationsInfo>(`${this.baseUrl}/integrations`); }
+
+  getCrmOutbox(): Observable<CrmOutboxEntry[]> { return this.http.get<CrmOutboxEntry[]>(`${this.baseUrl}/integrations/crm/outbox`); }
+
+  prepareCrmSync(): Observable<CrmOutboxEntry> { return this.http.post<CrmOutboxEntry>(`${this.baseUrl}/integrations/crm/outbox`, {}); }
+
+  getBiFeedPreview(): Observable<BiFeedPreview> { return this.http.get<BiFeedPreview>(`${this.baseUrl}/integrations/bi/feed`); }
+
+  /** URL of the ERP GL-journal export download (the page fetch-blobs it). */
+  erpJournalExportUrl(format: 'csv' | 'json'): string {
+    return `${this.baseUrl}/integrations/erp/journal-export?format=${format}`;
+  }
+
+  /** URL of the FatturaPA XML download for an invoiced order (fetch-blob). */
+  einvoiceXmlUrl(orderId: string): string {
+    return `${this.baseUrl}/integrations/einvoice/orders/${encodeURIComponent(orderId)}`;
+  }
 }

@@ -8,8 +8,12 @@ import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
 import type { AuditLog, Resource, ResourceRequest, Assignment, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Project } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition } from './app/services/staffing.util';
-import { convertToBase } from './app/services/finance.util';
+import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate } from './app/services/api.service';
+import { getIntegrations, listDescriptors } from './server/integrations/registry';
+import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
+import { EInvoiceValidationError } from './server/integrations/fatturapa.adapter';
+import type { CrmOutboxEntry, ExportArtifact, ProjectFinancialsRow, SupplierInfo } from './server/integrations/types';
 
 const serverDistFolder = dirname(fileURLToPath(import.meta.url));
 const browserDistFolder = resolve(serverDistFolder, '../browser');
@@ -402,6 +406,8 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
     { test: p => ['/projects', '/work-packages', '/milestones', '/project-tasks', '/project-issues', '/change-requests'].some(prefix => p.startsWith(prefix)), roles: ['pm', 'delivery-executive', 'admin'] },
     { test: p => ['/skill-catalogs', '/proficiency-sets', '/skills', '/project-roles', '/resource-organizations', '/languages'].some(prefix => p.startsWith(prefix)), roles: ['admin', 'delivery-executive'] },
     { test: p => p.startsWith('/approval-requests'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
+    // Integration actions (prepare CRM sync payloads, ...) mirror the read gate.
+    { test: p => p.startsWith('/integrations'), roles: ['finance', 'delivery-executive', 'admin'] },
   ];
 
   const rule = rules.find(r => r.test(path));
@@ -433,6 +439,9 @@ const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   // Timesheets for the whole org: require an authenticated principal (any role),
   // never served to an unauthenticated ('unknown') caller.
   { test: p => p.startsWith('/time-entries'), roles: ['employee', 'pm', 'resource-manager', 'delivery-executive', 'finance', 'sales', 'admin'] },
+  // Integration artifacts expose commercial/financial rollups (GL journal,
+  // e-invoices, CRM payloads, BI financials): finance-grade readers only.
+  { test: p => p.startsWith('/integrations'), roles: ['finance', 'delivery-executive', 'admin'] },
 ];
 
 /**
@@ -1662,6 +1671,175 @@ apiRouter.get('/storage-status', (_req, res) => res.json({
   provider: process.env['DATABASE_URL'] ? 'postgresql' : 'memory',
   persistent: Boolean(process.env['DATABASE_URL']),
 }));
+
+// --- Integrations (local-artifact adapters: implemented, NOT connected) ------
+//
+// Every adapter is a pure builder producing a downloadable artifact from the
+// repository data. No network calls, no credentials, no vendor SDKs — the
+// descriptors advertise `connected: false` / `mode: 'local-artifact'`.
+// RBAC: '/integrations' is gated (reads AND mutations) to
+// finance/delivery-executive/admin via READ_RULES + the mutation rules above.
+
+/** Assemble the full FinanceData snapshot from the repositories. */
+async function loadFinanceData(): Promise<FinanceData> {
+  const [
+    requests, assignments, resources, orders, orderLines, financials,
+    timeEntries, billingItems, contracts, customers, milestones,
+    changeRequests, projects, fxRates,
+  ] = await Promise.all([
+    repos.requests.list(), repos.assignments.list(), repos.resources.list(),
+    repos.orders.list(), repos.orderLines.list(), repos.projectFinancials.list(),
+    repos.timeEntries.list(), repos.billingPlanItems.list(), repos.contracts.list(),
+    repos.customers.list(), repos.milestones.list(), repos.changeRequests.list(),
+    repos.projects.list(), repos.fxRates.list(),
+  ]);
+  return {
+    requests, assignments, resources, orders, orderLines, financials,
+    timeEntries, billingItems, contracts, customers, milestones,
+    changeRequests, projects, fxRates,
+  };
+}
+
+/** Send a locally-built ExportArtifact as a file-download response. */
+function sendArtifact(res: Response, artifact: ExportArtifact): void {
+  res.setHeader('Content-Type', artifact.mimeType);
+  res.setHeader('Content-Disposition', `attachment; filename="${artifact.filename}"`);
+  res.send(artifact.content);
+}
+
+/**
+ * Default rev-rec window for the GL journal export: full-year 2026, monthly.
+ * Covers the seed data (all demo billing/time activity is dated in 2026).
+ */
+const ERP_JOURNAL_WINDOW: { from: string; to: string } = { from: '2026-01', to: '2026-12' };
+
+/** Supplier (CedentePrestatore) master data from env, with sane demo defaults. */
+function supplierFromEnv(): SupplierInfo {
+  return {
+    name: process.env['INTEGRATION_SUPPLIER_NAME'] || 'Delivery Control Demo S.r.l.',
+    vatNumber: process.env['INTEGRATION_SUPPLIER_VAT'] || '01234567890',
+    address: process.env['INTEGRATION_SUPPLIER_ADDRESS'] || 'Via Roma 1',
+    city: process.env['INTEGRATION_SUPPLIER_CITY'] || 'Milano',
+    zip: process.env['INTEGRATION_SUPPLIER_ZIP'] || '20100',
+    country: process.env['INTEGRATION_SUPPLIER_COUNTRY'] || 'IT',
+    codiceDestinatario: process.env['INTEGRATION_SUPPLIER_SDI'] || '0000000',
+  };
+}
+
+// Descriptors of the active adapters plus the per-kind active key.
+apiRouter.get('/integrations', async (_req, res) => {
+  const integrations = getIntegrations();
+  res.json({
+    adapters: listDescriptors(),
+    active: {
+      erp: integrations.erp.describe().key,
+      einvoice: integrations.einvoice.describe().key,
+      crm: integrations.crm.describe().key,
+      bi: integrations.bi.describe().key,
+    },
+  });
+});
+
+// ERP: balanced double-entry GL journal of the rev-rec schedule (CSV or JSON).
+apiRouter.get('/integrations/erp/journal-export', async (req, res) => {
+  const format = req.query['format'] === 'json' ? 'json' : 'csv';
+  const data = await loadFinanceData();
+  const journal = recognitionJournal(data, ERP_JOURNAL_WINDOW);
+  try {
+    const artifact = getIntegrations().erp.buildJournalExport(journal, { format });
+    sendArtifact(res, artifact);
+  } catch (err) {
+    // The balance invariant (Σ debit === Σ credit) failed: never ship an
+    // unbalanced batch to an ERP. recognitionJournal is balanced by
+    // construction, so this is a defensive guard, not an expected path.
+    if (err instanceof UnbalancedJournalError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+});
+
+// E-invoice: simplified FatturaPA (FPR12) XML for one INVOICED order.
+apiRouter.get('/integrations/einvoice/orders/:id', async (req, res) => {
+  const order = await repos.orders.get(req.params.id);
+  if (order === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const contract = await repos.contracts.get(order.contractId);
+  const customer = contract ? await repos.customers.get(contract.customerId) : undefined;
+  if (customer === undefined) {
+    res.status(404).json({ error: 'No customer found for the order (broken contract/customer chain)' });
+    return;
+  }
+  const lines = (await repos.orderLines.list()).filter(l => l.orderId === order.id);
+  try {
+    const artifact = getIntegrations().einvoice.buildInvoiceXml({
+      order, customer, contract, lines, supplier: supplierFromEnv(),
+    });
+    sendArtifact(res, artifact);
+  } catch (err) {
+    // Validation failures (e.g. the order has no invoiceNumber yet) are client
+    // errors: only invoiced orders can be exported as FatturaPA.
+    if (err instanceof EInvoiceValidationError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+});
+
+/**
+ * CRM outbox — INTENTIONALLY EPHEMERAL demo state. Prepared sync payloads are
+ * kept in this module-scoped in-memory array only (never persisted, never
+ * transmitted: the CRM adapter is a local-artifact builder). Newest first,
+ * capped at CRM_OUTBOX_MAX entries; a restart clears it by design.
+ */
+const CRM_OUTBOX_MAX = 50;
+const crmOutbox: CrmOutboxEntry[] = [];
+
+apiRouter.get('/integrations/crm/outbox', async (_req, res) => { res.json(crmOutbox); });
+apiRouter.post('/integrations/crm/outbox', async (_req, res) => {
+  const [customers, contracts, orders] = await Promise.all([
+    repos.customers.list(), repos.contracts.list(), repos.orders.list(),
+  ]);
+  const entry = getIntegrations().crm.buildSyncPayload({
+    customers, contracts, orders, preparedAt: new Date().toISOString(),
+  });
+  // The adapter is pure and never assigns ids; the persistence layer (this
+  // ephemeral outbox) does, via the shared newId() sequence.
+  entry.id = `OB${newId()}`;
+  crmOutbox.unshift(entry);
+  if (crmOutbox.length > CRM_OUTBOX_MAX) crmOutbox.length = CRM_OUTBOX_MAX;
+  res.json(entry);
+});
+
+// BI: flat per-project financial feed (JSON rows of primitives).
+apiRouter.get('/integrations/bi/feed', async (_req, res) => {
+  const data = await loadFinanceData();
+  const projects = data.projects ?? [];
+  const financials: ProjectFinancialsRow[] = projects.map(project => {
+    const f = computeProjectFinancials(project.id, data);
+    return {
+      projectId: project.id,
+      projectName: project.name,
+      status: project.status,
+      revenue: f.revenue,
+      actualCost: f.actualCost,
+      margin: f.margin,
+      marginPct: f.marginPct,
+      budget: f.budget,
+      eac: f.eac,
+      vac: f.varianceAtCompletion,
+    };
+  });
+  const artifact = getIntegrations().bi.buildFeed({
+    generatedAt: new Date().toISOString(),
+    projects,
+    financials,
+  });
+  // The feed is consumed inline (preview/ingestion), not as a download.
+  res.setHeader('Content-Type', artifact.mimeType);
+  res.send(artifact.content);
+});
 
 /**
  * Make id generation safe across restarts by advancing the in-memory sequences

@@ -45,6 +45,9 @@ export const routes: Routes = [
   { path: 'config/service-orgs', loadComponent: () => import('./configuration/service-organization-details.component').then(m => m.ServiceOrganizationDetailsComponent) },
   { path: 'config/resource-orgs', loadComponent: () => import('./configuration/manage-resource-organizations.component').then(m => m.ManageResourceOrganizationsComponent) },
   { path: 'config/availability', loadComponent: () => import('./configuration/maintain-availability-data.component').then(m => m.MaintainAvailabilityDataComponent) },
+  // Integrations expose financial artifacts (GL journal, e-invoices, BI feed):
+  // gate on the finance capability, mirroring the server's '/integrations' RBAC.
+  { path: 'config/integrations', canMatch: [financeGuard], loadComponent: () => import('./configuration/integrations.component').then(m => m.IntegrationsComponent) },
 
   // 404
   { path: '**', loadComponent: () => import('./not-found/not-found.component').then(m => m.NotFoundComponent) },

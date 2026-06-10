@@ -318,6 +318,7 @@ export class App {
         { label: 'Service Orgs', icon: 'business', route: '/config/service-orgs', compact: true },
         { label: 'Resource Orgs', icon: 'domain', route: '/config/resource-orgs', compact: true },
         { label: 'Availability Data', icon: 'event_available', route: '/config/availability', compact: true },
+        { label: 'Integrations', icon: 'cable', route: '/config/integrations', compact: true },
       ],
     },
   ];
@@ -325,19 +326,27 @@ export class App {
   // Capability-filtered nav: Customers/Contracts/Orders require
   // canManageCommercial() and Billing additionally requires
   // canApproveFinancials(), mirroring commercialGuard/financeGuard so links
-  // only appear when they would actually navigate. An emptied Commercial group
+  // only appear when they would actually navigate. Integrations (Configuration
+  // group) mirrors financeGuard for the same reason — its artifacts expose
+  // financial data (finance/delivery-executive/admin only). An emptied group
   // is dropped entirely.
   readonly navGroups = computed<NavGroup[]>(() => {
     const canCommercial = this.auth.canManageCommercial();
     const canFinance = this.auth.canApproveFinancials();
     return this.allNavGroups
       .map(group => {
-        if (group.label !== 'Commercial') return group;
-        const items = group.items.filter(item => {
-          if (item.route === '/billing') return canCommercial && canFinance;
-          return canCommercial;
-        });
-        return { label: group.label, items };
+        if (group.label === 'Commercial') {
+          const items = group.items.filter(item => {
+            if (item.route === '/billing') return canCommercial && canFinance;
+            return canCommercial;
+          });
+          return { label: group.label, items };
+        }
+        if (group.label === 'Configuration') {
+          const items = group.items.filter(item => item.route !== '/config/integrations' || canFinance);
+          return { label: group.label, items };
+        }
+        return group;
       })
       .filter(group => group.items.length > 0);
   });
