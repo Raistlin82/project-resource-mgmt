@@ -4,14 +4,19 @@ import { isPlatformBrowser, CurrencyPipe, DecimalPipe } from '@angular/common';
 import { forkJoin } from 'rxjs';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, OrderLine, FinancialItem, TimeEntry, Issue, ChangeRequest, Milestone, BillingPlanItem, Contract, Customer, FxRate, BASE_CURRENCY } from '../services/api.service';
-import { computeProjectFinancials, FinanceData, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow } from '../services/finance.util';
+import { computeProjectFinancials, FinanceData, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, realizationMetrics, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity } from '../services/finance.util';
 import { NotificationService } from '../services/notification.service';
 import { toCsv, downloadCsv } from '../services/export.util';
 
 interface Kpi {
   label: string;
   value: string;
-  trend: number;
+  /**
+   * Real period-over-period trend. `null` means there is no derivable prior
+   * reading (e.g. a count metric with no dated history) — the indicator is
+   * HIDDEN rather than showing a fabricated number. See requirement #15.
+   */
+  trend: PeriodDelta | null;
   icon: string;
   colorClass: string;
 }
@@ -69,10 +74,15 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
               <div class="w-12 h-12 rounded-md flex items-center justify-center shadow-sm" [class]="kpi.colorClass">
                 <mat-icon class="text-white">{{ kpi.icon }}</mat-icon>
               </div>
-              <span class="command-status"
-                    [class]="kpi.trend > 0 ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'bg-red-50 text-red-700 ring-1 ring-red-200'">
-                {{ kpi.trend > 0 ? '+' : '' }}{{ kpi.trend }}%
-              </span>
+              <!-- Real trend only; hidden entirely when no prior period is derivable (#15). -->
+              @if (kpi.trend?.direction; as dir) {
+                <span class="command-status inline-flex items-center gap-0.5"
+                      [class]="dir === 'up' ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : dir === 'down' ? 'bg-red-50 text-red-700 ring-1 ring-red-200' : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'"
+                      [attr.aria-label]="trendAriaLabel(kpi.trend)">
+                  <mat-icon class="text-[14px] w-[14px] h-[14px]">{{ dir === 'up' ? 'trending_up' : dir === 'down' ? 'trending_down' : 'trending_flat' }}</mat-icon>
+                  {{ kpi.trend?.deltaPct !== null ? (kpi.trend!.deltaPct! > 0 ? '+' : '') + (kpi.trend!.deltaPct! | number:'1.0-0') + '%' : '—' }}
+                </span>
+              }
             </div>
             <h3 class="command-kpi-label">{{ kpi.label }}</h3>
             <p class="command-kpi-value">{{ kpi.value }}</p>
@@ -117,6 +127,45 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
         <div class="command-kpi" [class.danger]="highRiskIssues() > 0">
           <p class="command-kpi-label">High Risk Issues</p>
           <p class="command-kpi-value font-mono tabular-nums" [class.text-red-700]="highRiskIssues() > 0">{{ highRiskIssues() }}</p>
+        </div>
+      </div>
+
+      <!-- Realization & revenue-per-FTE strip (real, recognised revenue vs rate-card) -->
+      <div class="command-section-label flex items-center justify-between">
+        <span>Realization &amp; Productivity</span>
+        <span class="text-xs font-semibold text-slate-500 normal-case tracking-normal">Recognised revenue vs rate-card &middot; {{ baseCurrency }} (base)</span>
+      </div>
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+        <div class="command-kpi" [class.warning]="realization().realizationPct > 0 && realization().realizationPct < 85">
+          <div class="flex items-center justify-between mb-1">
+            <p class="command-kpi-label">Realization</p>
+            <!-- Real recognised-revenue trend; hidden when no prior window is derivable (#15). -->
+            @if (recognizedTrend().direction; as dir) {
+              <span class="command-status inline-flex items-center gap-0.5"
+                    [class]="dir === 'up' ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : dir === 'down' ? 'bg-red-50 text-red-700 ring-1 ring-red-200' : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'"
+                    [attr.aria-label]="trendAriaLabel(recognizedTrend())">
+                <mat-icon class="text-[14px] w-[14px] h-[14px]">{{ dir === 'up' ? 'trending_up' : dir === 'down' ? 'trending_down' : 'trending_flat' }}</mat-icon>
+                {{ recognizedTrend().deltaPct !== null ? (recognizedTrend().deltaPct! > 0 ? '+' : '') + (recognizedTrend().deltaPct! | number:'1.0-0') + '%' : '—' }}
+              </span>
+            }
+          </div>
+          <p class="command-kpi-value font-mono tabular-nums">{{ realization().realizationPct | number:'1.0-1' }}%</p>
+          <p class="command-note">Recognised / rate-card value</p>
+        </div>
+        <div class="command-kpi info">
+          <p class="command-kpi-label">Recognised Revenue</p>
+          <p class="command-kpi-value font-mono tabular-nums">{{ realization().revenue | currency:'EUR':'symbol':'1.0-0' }}</p>
+          <p class="command-note">Earned to date (POC / realised)</p>
+        </div>
+        <div class="command-kpi">
+          <p class="command-kpi-label">Revenue / FTE</p>
+          <p class="command-kpi-value font-mono tabular-nums">{{ realization().revenuePerFte | currency:'EUR':'symbol':'1.0-0' }}</p>
+          <p class="command-note">{{ realization().fte | number:'1.0-1' }} FTE &middot; {{ hoursPerFte }}h basis</p>
+        </div>
+        <div class="command-kpi">
+          <p class="command-kpi-label">Revenue / Head</p>
+          <p class="command-kpi-value font-mono tabular-nums">{{ realization().revenuePerHead | currency:'EUR':'symbol':'1.0-0' }}</p>
+          <p class="command-note">{{ realization().headcount }} {{ realization().headcount === 1 ? 'person' : 'people' }} &middot; {{ realization().hours | number:'1.0-0' }}h</p>
         </div>
       </div>
 
@@ -335,6 +384,146 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
         </ul>
       </div>
 
+      <!-- Margin-Compression alerts (project + customer, severity-graded) -->
+      <div class="command-card overflow-hidden">
+        <div class="p-6 sm:p-8 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50">
+          <div>
+            <h3 class="text-xl font-bold text-slate-900 tracking-tight">Margin-Compression Alerts</h3>
+            <span class="text-xs font-semibold text-slate-500">Margin &le; {{ marginCompressionThresholds.marginTargetPct }}% or thin bill-vs-cost spread &middot; project &amp; customer</span>
+          </div>
+          <button type="button" (click)="exportMarginCompressionCsv()" [disabled]="compressionAlerts().length === 0" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
+            <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> Export CSV
+          </button>
+        </div>
+        <ul class="divide-y divide-slate-100">
+          @for (a of compressionAlerts(); track a.scope + ':' + a.id) {
+            <li class="px-6 sm:px-8 py-5 flex flex-col sm:flex-row sm:items-start gap-3 hover:bg-slate-50 transition-colors">
+              <span class="command-status shrink-0" [class]="severityBadgeClass(a.severity)">
+                {{ severityLabel(a.severity) }}
+              </span>
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-bold text-slate-900">{{ a.name ?? a.id }}</span>
+                  <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold uppercase tracking-wide ring-1"
+                        [class.bg-blue-50]="a.scope === 'project'" [class.text-blue-700]="a.scope === 'project'" [class.ring-blue-200]="a.scope === 'project'"
+                        [class.bg-violet-50]="a.scope === 'customer'" [class.text-violet-700]="a.scope === 'customer'" [class.ring-violet-200]="a.scope === 'customer'">
+                    {{ a.scope }}
+                  </span>
+                  <span class="text-xs font-semibold text-slate-500 font-mono tabular-nums">{{ a.marginPct | number:'1.0-1' }}% margin &middot; {{ a.gapPts | number:'1.0-1' }}pt gap</span>
+                </div>
+                <ul class="mt-1.5 space-y-1">
+                  @for (reason of a.reasons; track reason) {
+                    <li class="flex items-start gap-2 text-sm text-slate-600">
+                      <mat-icon class="text-[16px] w-[16px] h-[16px] mt-0.5 shrink-0"
+                                [class.text-red-700]="a.severity === 'high'" [class.text-amber-700]="a.severity === 'medium'" [class.text-slate-500]="a.severity === 'low'">error_outline</mat-icon>
+                      <span class="font-mono tabular-nums">{{ reason }}</span>
+                    </li>
+                  }
+                </ul>
+              </div>
+              <div class="shrink-0 text-right font-mono tabular-nums text-sm text-slate-700">
+                {{ a.revenue | currency:'EUR':'symbol':'1.0-0' }}
+                <div class="text-xs text-slate-500">revenue</div>
+              </div>
+            </li>
+          } @empty {
+            <li class="px-6 sm:px-8 py-8 flex items-center justify-center gap-2 text-sm text-emerald-700 font-semibold">
+              <mat-icon class="text-[18px] w-[18px] h-[18px]">check_circle</mat-icon>
+              No projects or customers showing margin compression.
+            </li>
+          }
+        </ul>
+      </div>
+
+      <!-- Customer Profitability & Concentration ------------------------------- -->
+      <div class="command-section-label">Customer Profitability &amp; Concentration</div>
+
+      <!-- Concentration KPI cards (single-customer dependency risk) -->
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+        <div class="command-kpi">
+          <p class="command-kpi-label">Customers</p>
+          <p class="command-kpi-value font-mono tabular-nums">{{ concentration().customerCount }}</p>
+          <p class="command-note">With customer revenue</p>
+        </div>
+        <div class="command-kpi" [class.warning]="concentration().topCustomerSharePct >= 40 && concentration().topCustomerSharePct < 60" [class.danger]="concentration().topCustomerSharePct >= 60">
+          <p class="command-kpi-label">Top Customer Share</p>
+          <p class="command-kpi-value font-mono tabular-nums">{{ concentration().topCustomerSharePct | number:'1.0-1' }}%</p>
+          <p class="command-note">{{ concentration().topCustomerName ?? '—' }}</p>
+        </div>
+        <div class="command-kpi" [class.warning]="concentration().top3SharePct >= 75">
+          <p class="command-kpi-label">Top-3 Share</p>
+          <p class="command-kpi-value font-mono tabular-nums">{{ concentration().top3SharePct | number:'1.0-1' }}%</p>
+          <p class="command-note">Combined revenue share</p>
+        </div>
+        <div class="command-kpi" [class.warning]="concentration().hhi >= 2500 && concentration().hhi < 5000" [class.danger]="concentration().hhi >= 5000">
+          <p class="command-kpi-label">HHI</p>
+          <p class="command-kpi-value font-mono tabular-nums">{{ concentration().hhi | number:'1.0-0' }}</p>
+          <p class="command-note">Concentration index (0–10000)</p>
+        </div>
+      </div>
+
+      <!-- Top customers by margin -->
+      <div class="command-card overflow-hidden">
+        <div class="p-6 sm:p-8 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50">
+          <h3 class="text-xl font-bold text-slate-900 tracking-tight">Top Customers by Margin <span class="ml-1 text-xs font-semibold text-slate-500 normal-case tracking-normal">{{ baseCurrency }} (base)</span></h3>
+          <button type="button" (click)="exportCustomerProfitabilityCsv()" [disabled]="customerRows().length === 0" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
+            <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> Export CSV
+          </button>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="command-data-table">
+            <thead class="bg-slate-50 border-b border-slate-200 text-slate-500">
+              <tr>
+                <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs">Customer</th>
+                <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Revenue</th>
+                <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Cost</th>
+                <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Margin</th>
+                <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Margin %</th>
+                <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Rev. Share</th>
+                <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Projects</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              @for (c of customerRows(); track c.customerId) {
+                <tr class="hover:bg-slate-50 transition-colors">
+                  <td class="px-6 sm:px-8 py-5 font-bold text-slate-900 min-w-[160px]">{{ c.customerName }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums text-slate-700">{{ c.revenue | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums text-slate-600">{{ c.cost | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums font-bold" [class.text-emerald-700]="c.margin >= 0" [class.text-red-700]="c.margin < 0">{{ c.margin | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-emerald-700]="c.marginPct >= 0" [class.text-red-700]="c.marginPct < 0">{{ c.marginPct | number:'1.0-1' }}%</td>
+                  <td class="px-4 py-5 text-right">
+                    <div class="flex items-center justify-end gap-2">
+                      <span class="font-mono tabular-nums text-slate-700">{{ c.sharePct | number:'1.0-1' }}%</span>
+                      <span class="hidden sm:block w-16 bg-slate-100 rounded-full h-2 overflow-hidden shadow-inner">
+                        <span class="block h-full bg-blue-600 rounded-full" [style.width.%]="c.shareW"></span>
+                      </span>
+                    </div>
+                  </td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums text-slate-500">{{ c.projectIds.length }}</td>
+                </tr>
+              } @empty {
+                <tr>
+                  <td colspan="7" class="px-6 sm:px-8 py-8 text-center text-slate-500 text-sm">No customer revenue yet. Link projects to contracts and add Customer orders.</td>
+                </tr>
+              }
+            </tbody>
+            @if (customerRows().length > 0) {
+              <tfoot class="border-t-2 border-slate-200 bg-slate-50 font-bold text-slate-900">
+                <tr>
+                  <td class="px-6 sm:px-8 py-4">Total <span class="ml-1 text-xs font-semibold text-slate-500 normal-case tracking-normal">{{ baseCurrency }} (base)</span></td>
+                  <td class="px-4 py-4 text-right font-mono tabular-nums">{{ customerTotals().revenue | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-4 text-right font-mono tabular-nums">{{ customerTotals().cost | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-emerald-700]="customerTotals().margin >= 0" [class.text-red-700]="customerTotals().margin < 0">{{ customerTotals().margin | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-emerald-700]="customerTotals().marginPct >= 0" [class.text-red-700]="customerTotals().marginPct < 0">{{ customerTotals().marginPct | number:'1.0-1' }}%</td>
+                  <td class="px-4 py-4 text-right font-mono tabular-nums">100%</td>
+                  <td class="px-4 py-4"></td>
+                </tr>
+              </tfoot>
+            }
+          </table>
+        </div>
+      </div>
+
       <!-- Accounts Receivable (A/R aging) -->
       <div class="command-section-label">Accounts Receivable</div>
 
@@ -438,8 +627,21 @@ export class Reporting {
   private notificationService = inject(NotificationService);
   private platformId = inject(PLATFORM_ID);
 
-  /** Selected reporting period; recomputes KPI trend factors. */
+  /**
+   * Selected reporting period. Drives the length of the recognised-revenue trend
+   * window (1 / 3 / 12 months) — the real prior-period comparison shown on the
+   * Realization strip. It no longer scales any fabricated KPI trend figures (#15).
+   */
   period = signal<'30d' | 'quarter' | 'year'>('30d');
+
+  /** Months in the current trend window for each period selection (prior block is equal-length). */
+  private periodMonths = computed(() => (this.period() === 'year' ? 12 : this.period() === 'quarter' ? 3 : 1));
+
+  /**
+   * Hours that constitute one FTE over the trend window, used to convert approved
+   * delivery hours into an FTE denominator for revenue-per-FTE (≈160h/month).
+   */
+  protected readonly hoursPerFte = 160;
 
   private dataRes = rxResource<ReportingData, unknown>({
     stream: () => forkJoin({
@@ -626,16 +828,128 @@ export class Reporting {
     return total / resources.length;
   });
 
-  kpis = computed<Kpi[]>(() => {
-    // Period scales the comparison window used for the illustrative trend figures.
-    const trendFactor = this.period() === 'year' ? 3 : this.period() === 'quarter' ? 2 : 1;
-    return [
-      { label: 'Total Active Projects', value: String(this.activeProjectsCount()), trend: 12 * trendFactor, icon: 'folder', colorClass: 'bg-blue-500' },
-      { label: 'Avg Resource Utilization', value: `${Math.round(this.avgUtilization())}%`, trend: 4 * trendFactor, icon: 'bar_chart', colorClass: 'bg-emerald-500' },
-      { label: 'Open Resource Requests', value: String(this.openRequestsCount()), trend: -5 * trendFactor, icon: 'person_add', colorClass: 'bg-amber-500' },
-      { label: 'Delivery Risk Items', value: String(this.highRiskIssues() + this.openChanges() + this.pendingMilestones()), trend: -2 * trendFactor, icon: 'warning', colorClass: 'bg-red-500' },
-    ];
+  // --- Realization & productivity (portfolio roll-up of realizationMetrics) ----
+  /**
+   * Portfolio realization & revenue-per-FTE. realizationMetrics is per-project, so
+   * we sum its additive parts (recognised revenue, approved hours, rate-card value,
+   * headcount, FTE) across every project and re-derive the ratios on the totals.
+   * headcount is de-duplicated across projects so a resource on several projects
+   * counts once. Pass-through of the hoursPerFte basis keeps FTE comparable.
+   */
+  realization = computed(() => {
+    const d = this.financeData();
+    const heads = new Set<string>();
+    let revenue = 0, hours = 0, standardBillValue = 0, fte = 0;
+    for (const p of this.dataRes.value().projects) {
+      const m = realizationMetrics(p.id, d, { hoursPerFte: this.hoursPerFte });
+      revenue += m.revenue;
+      hours += m.hours;
+      standardBillValue += m.standardBillValue;
+      fte += m.fte;
+      for (const t of d.timeEntries ?? []) {
+        if (t.projectId === p.id && t.status === 'Approved') heads.add(t.resourceId);
+      }
+    }
+    const headcount = heads.size;
+    const revenuePerHead = headcount > 0 ? revenue / headcount : 0;
+    return {
+      revenue,
+      hours,
+      standardBillValue,
+      realizationPct: standardBillValue > 0 ? (revenue / standardBillValue) * 100 : 0,
+      headcount,
+      fte,
+      revenuePerHead,
+      revenuePerFte: fte > 0 ? revenue / fte : revenuePerHead,
+    };
   });
+
+  /**
+   * Real recognised-revenue trend across the selected window vs the immediately
+   * preceding equal-length window, derived purely from dated billing/time data.
+   * `direction` is null (indicator HIDDEN) whenever the prior window has no basis —
+   * we never fabricate a trend (#15).
+   */
+  recognizedTrend = computed<PeriodDelta>(() => {
+    const periods = this.recentPeriods(this.periodMonths());
+    return periods.length === 0 ? periodDelta(0, null) : recognizedRevenueTrend(this.financeData(), periods);
+  });
+
+  /** The last `n` calendar months as YYYY-MM (oldest first), anchored on `today`. */
+  private recentPeriods(n: number): string[] {
+    const out: string[] = [];
+    const [y, m] = this.today.slice(0, 7).split('-').map(Number);
+    if (!Number.isFinite(y) || !Number.isFinite(m)) return out;
+    let yy = y, mm = m;
+    for (let i = 0; i < n; i++) {
+      out.unshift(`${yy}-${String(mm).padStart(2, '0')}`);
+      mm -= 1;
+      if (mm < 1) { mm = 12; yy -= 1; }
+    }
+    return out;
+  }
+
+  // --- Customer profitability & concentration --------------------------------
+  /** Per-customer revenue/cost/margin (revenue desc) with revenue-share + bar width. */
+  customerRows = computed(() => {
+    const conc = customerConcentration(this.financeData());
+    const total = conc.totalRevenue;
+    const maxRev = Math.max(1, ...customerProfitability(this.financeData()).map(r => Math.max(0, r.revenue)));
+    return customerProfitability(this.financeData()).map(r => ({
+      ...r,
+      sharePct: total > 0 && r.revenue > 0 ? (r.revenue / total) * 100 : 0,
+      shareW: (Math.max(0, r.revenue) / maxRev) * 100,
+    }));
+  });
+
+  /** Portfolio totals across the customer rows (for the table footer). */
+  customerTotals = computed(() => {
+    const rows = this.customerRows();
+    const revenue = rows.reduce((s, r) => s + r.revenue, 0);
+    const cost = rows.reduce((s, r) => s + r.cost, 0);
+    const margin = revenue - cost;
+    return { revenue, cost, margin, marginPct: revenue > 0 ? (margin / revenue) * 100 : 0 };
+  });
+
+  /** Revenue-concentration metrics (top share, top-3 share, HHI) for the KPI strip. */
+  concentration = computed<CustomerConcentration>(() => customerConcentration(this.financeData()));
+
+  // --- Margin-compression alerts (project + customer, severity-graded) --------
+  compressionAlerts = computed<MarginCompressionAlert[]>(() => marginCompressionAlerts(this.financeData()));
+  /** Thresholds surfaced in the UI so the caption matches the firing logic. */
+  readonly marginCompressionThresholds = DEFAULT_MARGIN_COMPRESSION_CONFIG;
+
+  /** Tailwind classes for a severity badge (AA-contrast light theme). */
+  severityBadgeClass(s: AlertSeverity): string {
+    switch (s) {
+      case 'high': return 'bg-red-50 text-red-700 ring-1 ring-red-200';
+      case 'medium': return 'bg-amber-50 text-amber-700 ring-1 ring-amber-200';
+      default: return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+    }
+  }
+
+  /** Title-cased severity label for the badge. */
+  severityLabel(s: AlertSeverity): string {
+    return s === 'high' ? 'High' : s === 'medium' ? 'Medium' : 'Low';
+  }
+
+  kpis = computed<Kpi[]>(() => [
+    // #15: these are point-in-time COUNT/AVERAGE metrics with no dated history to
+    // derive a prior period from, so their trend is null and the indicator is
+    // HIDDEN (never a fabricated %). The one metric we can trend honestly —
+    // recognised revenue — drives the Realization strip below via recognizedTrend().
+    { label: 'Total Active Projects', value: String(this.activeProjectsCount()), trend: null, icon: 'folder', colorClass: 'bg-blue-500' },
+    { label: 'Avg Resource Utilization', value: `${Math.round(this.avgUtilization())}%`, trend: null, icon: 'bar_chart', colorClass: 'bg-emerald-500' },
+    { label: 'Open Resource Requests', value: String(this.openRequestsCount()), trend: null, icon: 'person_add', colorClass: 'bg-amber-500' },
+    { label: 'Delivery Risk Items', value: String(this.highRiskIssues() + this.openChanges() + this.pendingMilestones()), trend: null, icon: 'warning', colorClass: 'bg-red-500' },
+  ]);
+
+  /** Human-readable label for a real trend badge (used as aria-label on the icon chip). */
+  trendAriaLabel(t: PeriodDelta | null): string {
+    if (!t || t.direction === null || t.deltaPct === null) return 'No prior-period comparison available';
+    const dir = t.direction === 'up' ? 'up' : t.direction === 'down' ? 'down' : 'flat';
+    return `Trend ${dir} ${Math.abs(t.deltaPct).toFixed(0)}% versus prior period`;
+  }
 
   utilizationData = computed(() => this.dataRes.value().resources.map(r => ({
     month: r.name.split(' ')[0] || r.name,
@@ -662,8 +976,11 @@ export class Reporting {
 
   exportReport(): void {
     if (!isPlatformBrowser(this.platformId)) return;
+    // Trend column carries the REAL period delta % (or blank when not derivable) — never a fabricated figure (#15).
+    const trendCell = (t: PeriodDelta | null): string =>
+      t && t.deltaPct !== null && t.direction !== null ? `${t.deltaPct > 0 ? '+' : ''}${t.deltaPct.toFixed(0)}%` : '';
     const csvContent = 'KPI,Value,Trend\n' +
-      this.kpis().map(k => `${this.escapeCsv(k.label)},${this.escapeCsv(k.value)},${k.trend}%`).join('\n');
+      this.kpis().map(k => `${this.escapeCsv(k.label)},${this.escapeCsv(k.value)},${this.escapeCsv(trendCell(k.trend))}`).join('\n');
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
@@ -720,5 +1037,40 @@ export class Reporting {
     ]);
     downloadCsv('Margin_And_Variance.csv', csv);
     this.notificationService.show('Margin & variance exported', 'success');
+  }
+
+  /** Export the per-customer profitability table (amounts in base currency) as CSV. */
+  exportCustomerProfitabilityCsv(): void {
+    if (!isPlatformBrowser(this.platformId)) return;
+    const cur = this.baseCurrency;
+    const csv = toCsv(this.customerRows(), [
+      { key: 'customerName', header: 'Customer' },
+      { key: 'revenue', header: `Revenue (${cur} base)` },
+      { key: 'cost', header: `Cost (${cur} base)` },
+      { key: 'margin', header: `Margin (${cur} base)` },
+      { key: 'marginPct', header: 'Margin %', map: r => r.marginPct.toFixed(1) },
+      { key: 'sharePct', header: 'Revenue Share %', map: r => r.sharePct.toFixed(1) },
+      { key: 'projectIds', header: 'Projects', map: r => String(r.projectIds.length) },
+    ]);
+    downloadCsv('Customer_Profitability.csv', csv);
+    this.notificationService.show('Customer profitability exported', 'success');
+  }
+
+  /** Export the margin-compression alert list (project + customer) as CSV. */
+  exportMarginCompressionCsv(): void {
+    if (!isPlatformBrowser(this.platformId)) return;
+    const cur = this.baseCurrency;
+    const csv = toCsv(this.compressionAlerts(), [
+      { key: 'scope', header: 'Scope' },
+      { key: 'name', header: 'Name', map: a => a.name ?? a.id },
+      { key: 'severity', header: 'Severity', map: a => this.severityLabel(a.severity) },
+      { key: 'revenue', header: `Revenue (${cur} base)` },
+      { key: 'cost', header: `Cost (${cur} base)` },
+      { key: 'marginPct', header: 'Margin %', map: a => a.marginPct.toFixed(1) },
+      { key: 'gapPts', header: 'Gap (pts)', map: a => a.gapPts.toFixed(1) },
+      { key: 'reasons', header: 'Reasons', map: a => a.reasons.join('; ') },
+    ]);
+    downloadCsv('Margin_Compression_Alerts.csv', csv);
+    this.notificationService.show('Margin-compression alerts exported', 'success');
   }
 }

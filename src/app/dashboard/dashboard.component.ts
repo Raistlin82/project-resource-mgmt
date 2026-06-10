@@ -8,6 +8,7 @@ import {
   ApiService,
   Assignment,
   BASE_CURRENCY,
+  BillingPlanItem,
   ChangeRequest,
   FinancialItem,
   FxRate,
@@ -19,7 +20,15 @@ import {
   ResourceRequest,
   TimeEntry,
 } from '../services/api.service';
-import { computeProjectFinancials, FinanceData, PortfolioAlertRow, portfolioAlerts, ProjectAlerts } from '../services/finance.util';
+import {
+  computeProjectFinancials,
+  FinanceData,
+  PeriodDelta,
+  PortfolioAlertRow,
+  portfolioAlerts,
+  ProjectAlerts,
+  recognizedRevenueTrend,
+} from '../services/finance.util';
 
 interface DashboardData {
   resources: Resource[];
@@ -30,6 +39,7 @@ interface DashboardData {
   orderLines: OrderLine[];
   financials: FinancialItem[];
   timeEntries: TimeEntry[];
+  billingItems: BillingPlanItem[];
   issues: Issue[];
   changeRequests: ChangeRequest[];
 }
@@ -92,6 +102,15 @@ interface ProjectCommandRow {
               <div class="command-kpi-label">Portfolio Margin</div>
               <div class="command-kpi-value">{{ portfolioMarginPct() | number:'1.0-1' }}%</div>
               <div class="command-kpi-note">{{ totalMargin() | currency:'EUR':'symbol':'1.0-0' }} on {{ totalRevenue() | currency:'EUR':'symbol':'1.0-0' }} revenue</div>
+              @if (hasRecognizedRevTrend()) {
+                <div class="mt-2 flex items-center gap-1.5">
+                  <span class="command-status" [class.green]="trendChipClass(recognizedRevTrend()) === 'green'" [class.red]="trendChipClass(recognizedRevTrend()) === 'red'">
+                    <mat-icon class="text-[14px] w-[14px] h-[14px]">{{ trendArrow(recognizedRevTrend()) }}</mat-icon>
+                    {{ trendLabel(recognizedRevTrend()) }}
+                  </span>
+                  <span class="text-[11px] font-medium text-[var(--cc-muted)]">Recognized rev vs prior 3 mo</span>
+                </div>
+              }
             </div>
             <mat-icon class="text-[28px] text-[var(--cc-primary)]">stacked_line_chart</mat-icon>
           </div>
@@ -405,6 +424,7 @@ export class DashboardComponent {
       orderLines: this.api.getOrderLines(),
       financials: this.api.getProjectFinancials(),
       timeEntries: this.api.getTimeEntries(),
+      billingItems: this.api.getBillingPlanItems(),
       issues: this.api.getProjectIssues(),
       changeRequests: this.api.getChangeRequests(),
     }),
@@ -417,6 +437,7 @@ export class DashboardComponent {
       orderLines: [],
       financials: [],
       timeEntries: [],
+      billingItems: [],
       issues: [],
       changeRequests: [],
     },
@@ -434,6 +455,9 @@ export class DashboardComponent {
       orderLines: d.orderLines,
       financials: d.financials,
       timeEntries: d.timeEntries,
+      // Dated billing items + approved time feed recognizedRevenueTrend's
+      // current-vs-prior-window recognition (see recognizedRevTrend below).
+      billingItems: d.billingItems,
       // CR-adjusted budgets feed burn/EAC/VAC; projects label the alert rows.
       changeRequests: d.changeRequests,
       projects: d.projects,
@@ -441,6 +465,39 @@ export class DashboardComponent {
       fxRates: this.fxRates(),
     };
   });
+
+  // --- Real period-over-period trend (#15) ------------------------------------
+  // The ONLY portfolio KPI here with a prior period derivable from finance.util
+  // is recognised revenue: recognizedRevenueTrend compares revenue recognised in
+  // the trailing window against the immediately preceding equal-length window,
+  // both reconstructed from dated billing items + approved time. The margin/VAC/
+  // EAC snapshots and the open-changes/critical-risk counts have NO dated prior
+  // basis in finance.util, so they are intentionally rendered WITHOUT a trend
+  // chip rather than with a fabricated one.
+
+  /** Trailing 3 calendar months ending at the current month, as sorted YYYY-MM. */
+  private readonly trendPeriods = ((): string[] => {
+    const now = new Date();
+    const out: string[] = [];
+    for (let back = 2; back >= 0; back--) {
+      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1));
+      out.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+    }
+    return out;
+  })();
+
+  /**
+   * Portfolio recognised-revenue delta: current trailing window vs the prior
+   * equal-length window. `direction` is null when the prior window is not
+   * derivable (no dated source data before the window) — the chip is hidden,
+   * never faked. No projectId => whole portfolio.
+   */
+  recognizedRevTrend = computed<PeriodDelta>(() =>
+    recognizedRevenueTrend(this.financeData(), this.trendPeriods),
+  );
+
+  /** True only when a real prior reading was derived (caller renders the chip). */
+  hasRecognizedRevTrend = computed(() => this.recognizedRevTrend().direction !== null);
 
   projectRows = computed<ProjectCommandRow[]>(() =>
     this.data().projects
@@ -547,6 +604,37 @@ export class DashboardComponent {
 
   meter(value: number, max: number): number {
     return Math.max(0, Math.min(100, (value / max) * 100));
+  }
+
+  /** AA-safe pill modifier for a real trend ('' = neutral/flat). Empty when not derivable. */
+  trendChipClass(t: PeriodDelta): 'green' | 'red' | '' {
+    if (t.direction === 'up') return 'green';
+    if (t.direction === 'down') return 'red';
+    return '';
+  }
+
+  /** Material icon for a real trend direction; '' when not derivable. */
+  trendArrow(t: PeriodDelta): string {
+    if (t.direction === 'up') return 'trending_up';
+    if (t.direction === 'down') return 'trending_down';
+    if (t.direction === 'flat') return 'trending_flat';
+    return '';
+  }
+
+  /**
+   * Signed, human-readable change for a derived trend: percentage when defined,
+   * otherwise the absolute base-currency delta. Returns '' when not derivable.
+   */
+  trendLabel(t: PeriodDelta): string {
+    if (t.direction === null) return '';
+    const pct = t.deltaPct;
+    if (pct !== null) {
+      const sign = pct > 0 ? '+' : '';
+      return `${sign}${pct.toFixed(1)}%`;
+    }
+    const delta = t.delta ?? 0;
+    const sign = delta > 0 ? '+' : '';
+    return `${sign}${Math.round(delta).toLocaleString()} ${this.baseCurrency}`;
   }
 
   staffedPct(req: ResourceRequest): number {

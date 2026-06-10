@@ -2,8 +2,11 @@ import { AngularNodeAppEngine, isMainModule, writeResponseToNodeResponse, create
 import express, { Request, Response, NextFunction, Router } from 'express';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
-import { Pool } from 'pg';
+import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
+import { getRepositories, type FxRateRow } from './db/repositories';
+import { initPersistence } from './db/bootstrap';
+import type { Entity, Repository } from './db/repository';
+import type { AuditLog, Resource, ResourceRequest, Assignment, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Project } from './app/services/api.service';
 
 const serverDistFolder = dirname(fileURLToPath(import.meta.url));
 const browserDistFolder = resolve(serverDistFolder, '../browser');
@@ -77,6 +80,13 @@ let idSeq = 1000;
 const newId = () => `${++idSeq}`;
 
 /**
+ * Process-wide repositories (Postgres when DATABASE_URL is set, else in-memory).
+ * Declared early so it is in scope for the audit middleware and the boot
+ * sequence below.
+ */
+const repos = getRepositories();
+
+/**
  * AUDIT INTEGRITY: the audit log is APPEND-ONLY. Entries are only ever
  * prepended (newest-first) and capped; existing entries are never edited.
  * For PUT/DELETE mutations we additionally capture which keys changed plus
@@ -94,26 +104,31 @@ interface AuditEntry {
   before?: Record<string, unknown>;
   after?: Record<string, unknown>;
 }
-const AUDIT_LOG_CAP = 2000;
-const auditLogStore = { items: [] as AuditEntry[] };
-
 /**
- * Registry mapping a collection segment (e.g. 'orders') to a getter for its
- * backing array, used by the audit middleware to snapshot an entity
- * before/after a mutation. Getters (not array references) are stored so that
- * collections reassigned via `let` (projects, languages, ...) always resolve
- * to the live binding. Populated by registerAuditStores() once stores exist.
+ * Registry mapping a collection segment (e.g. 'orders') to the READ side of its
+ * repository, used by the audit middleware to snapshot an entity before/after a
+ * mutation. Only `get()` is needed here. Resolved against `repos` (declared
+ * above), so it always targets the live persistence adapter.
  */
-const auditStores = new Map<string, () => readonly { id: string }[]>();
+interface AuditReadable { get(id: string): Promise<Entity | undefined> }
+const auditRepoBySegment = new Map<string, AuditReadable>([
+  ['resources', repos.resources], ['requests', repos.requests], ['assignments', repos.assignments],
+  ['time-entries', repos.timeEntries], ['skill-catalogs', repos.skillCatalogs], ['proficiency-sets', repos.proficiencySets],
+  ['skills', repos.skills], ['project-roles', repos.projectRoles], ['resource-organizations', repos.resourceOrganizations],
+  ['projects', repos.projects], ['project-partners', repos.projectPartners], ['project-documents', repos.projectDocuments],
+  ['work-packages', repos.workPackages], ['milestones', repos.milestones], ['project-financials', repos.projectFinancials],
+  ['project-cost-centers', repos.projectCostCenters], ['project-tasks', repos.projectTasks], ['project-issues', repos.projectIssues],
+  ['change-requests', repos.changeRequests], ['cost-centers', repos.costCenters], ['customers', repos.customers],
+  ['contracts', repos.contracts], ['orders', repos.orders], ['order-lines', repos.orderLines],
+  ['billing-plan-items', repos.billingPlanItems], ['approval-requests', repos.approvalRequests],
+]);
 
 /** Find the current entity targeted by a `/collection/:id` request path. */
-function findAuditEntity(path: string): { id: string } | undefined {
+async function findAuditEntity(path: string): Promise<Entity | undefined> {
   const segments = path.split('/').filter(Boolean);
   if (segments.length < 2) return undefined;
-  const getItems = auditStores.get(segments[0]);
-  if (!getItems) return undefined;
-  const id = segments[1];
-  return getItems().find(x => x.id === id);
+  const repo = auditRepoBySegment.get(segments[0]);
+  return repo ? repo.get(segments[1]) : undefined;
 }
 
 /** Shallow clone of a plain entity for an immutable audit snapshot. */
@@ -132,9 +147,90 @@ function diffChangedKeys(before?: Record<string, unknown>, after?: Record<string
 }
 
 type UserRole = 'employee' | 'pm' | 'resource-manager' | 'delivery-executive' | 'finance' | 'sales' | 'admin';
-type TimeEntryStatus = 'Draft' | 'Submitted' | 'Approved' | 'Rejected';
-const actorId = (req: Request) => String(req.header('X-User-Id') || 'system');
-const actorRole = (req: Request) => String(req.header('X-User-Role') || 'unknown') as UserRole | 'unknown';
+
+/**
+ * Request-scoped, SERVER-VERIFIED principal.
+ *
+ * Populated by the async auth middleware ONLY when a valid `Authorization:
+ * Bearer <token>` is presented (verified against Keycloak's JWKS). When set,
+ * these win over the spoofable `X-User-*` demo headers everywhere downstream
+ * (roleGate + audit actor derivation). Module augmentation keeps this strongly
+ * typed without resorting to `any`.
+ */
+declare module 'express-serve-static-core' {
+  interface Request {
+    verifiedUserId?: string;
+    verifiedRole?: UserRole | 'unknown';
+  }
+}
+
+/**
+ * Highest-privilege ordering for UserRole. When a Keycloak token carries
+ * multiple realm roles we collapse them to the single most-privileged one,
+ * mirroring the client. Higher index == more privilege.
+ */
+const ROLE_PRIORITY: readonly UserRole[] = ['employee', 'sales', 'pm', 'resource-manager', 'finance', 'delivery-executive', 'admin'];
+const ALL_ROLES = new Set<string>(ROLE_PRIORITY);
+
+/** Collapse a list of realm roles to the single highest-privilege UserRole. */
+function highestRole(roles: readonly string[]): UserRole | 'unknown' {
+  let best: UserRole | 'unknown' = 'unknown';
+  let bestRank = -1;
+  for (const r of roles) {
+    if (!ALL_ROLES.has(r)) continue;
+    const rank = ROLE_PRIORITY.indexOf(r as UserRole);
+    if (rank > bestRank) { bestRank = rank; best = r as UserRole; }
+  }
+  return best;
+}
+
+// --- Keycloak / OIDC backend verification -----------------------------------
+
+const OIDC_ISSUER = process.env['OIDC_ISSUER'] || 'http://localhost:8081/realms/psa';
+/**
+ * Remote JWKS for the Keycloak realm. `createRemoteJWKSet` lazily fetches and
+ * caches the signing keys (with cooldown + rotation handling) so each request
+ * does not hit the network. Kept module-scoped so the cache is shared.
+ */
+const JWKS = createRemoteJWKSet(new URL(`${OIDC_ISSUER}/protocol/openid-connect/certs`));
+
+/** Shape of the Keycloak claims we read; everything else on the token is ignored. */
+interface KeycloakClaims extends JWTPayload {
+  preferred_username?: string;
+  realm_access?: { roles?: string[] };
+}
+
+/** Extract the bearer token from an Authorization header, or null if absent/malformed. */
+function bearerToken(req: Request): string | null {
+  const header = req.header('authorization') || req.header('Authorization');
+  if (!header) return null;
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  return match ? match[1].trim() : null;
+}
+
+/**
+ * Verify an incoming `Authorization: Bearer <token>` against the Keycloak realm
+ * JWKS and issuer. Returns the verified principal, or null when there is NO
+ * token. THROWS only on an INVALID token (so the caller can answer 401);
+ * absence of a token is not an error (the demo header fallback still applies).
+ *
+ * Role is derived from realm_access.roles via the highest-privilege mapping;
+ * userId prefers preferred_username, falling back to sub.
+ */
+async function verifyBearer(req: Request): Promise<{ userId: string; role: UserRole | 'unknown' } | null> {
+  const token = bearerToken(req);
+  if (!token) return null;
+  const { payload } = await jwtVerify(token, JWKS, { issuer: OIDC_ISSUER });
+  const claims = payload as KeycloakClaims;
+  const roles = Array.isArray(claims.realm_access?.roles) ? claims.realm_access.roles : [];
+  const sub = typeof claims.sub === 'string' ? claims.sub : '';
+  const userId = (typeof claims.preferred_username === 'string' && claims.preferred_username) || sub || 'unknown';
+  return { userId, role: highestRole(roles) };
+}
+
+const actorId = (req: Request) => req.verifiedUserId || String(req.header('X-User-Id') || 'system');
+const actorRole = (req: Request): UserRole | 'unknown' =>
+  req.verifiedRole ?? (String(req.header('X-User-Role') || 'unknown') as UserRole | 'unknown');
 
 /**
  * !!! SECURITY (HIGH) — DEMO-ONLY IDENTITY !!!
@@ -157,12 +253,45 @@ const bindHost = (process.env['HOST'] || 'localhost').trim();
 const isLoopbackHost = ['localhost', '127.0.0.1', '::1'].includes(bindHost);
 const trustHeaders = isLoopbackHost || process.env['AUTH_TRUST_HEADERS'] === 'true';
 
-/** Server-trusted role for the request. Falls back to 'unknown' when client headers are not trusted. */
-const trustedRole = (req: Request): UserRole | 'unknown' => (trustHeaders ? actorRole(req) : 'unknown');
+/**
+ * Server-trusted role for the request. A VERIFIED JWT role (set by the async
+ * auth middleware) is always trusted. Otherwise this falls back to the demo
+ * header role only on loopback/opted-in binds, else 'unknown'.
+ */
+const trustedRole = (req: Request): UserRole | 'unknown' => {
+  if (req.verifiedRole !== undefined) return req.verifiedRole;
+  return trustHeaders ? actorRole(req) : 'unknown';
+};
 
 const canMutate = (role: UserRole | 'unknown', allowed: UserRole[]) => allowed.includes(role as UserRole);
 
-function roleGate(req: Request, res: Response, next: NextFunction) {
+/**
+ * AUTH + AUTHORIZATION middleware (async).
+ *
+ * 1. Verify any `Authorization: Bearer <token>` against Keycloak's JWKS+issuer.
+ *    - Valid token  -> stash the verified principal on the request; it wins over
+ *      the demo X-User-* headers for both roleGate and audit actor derivation.
+ *    - Invalid token -> respond 401 (do NOT silently fall back to headers).
+ *    - No token      -> keep the existing loopback-trusted demo-header fallback.
+ * 2. Apply the role gating to mutating (POST/PUT/DELETE) requests.
+ *
+ * Async because JWT verification is async; on unexpected errors we delegate to
+ * Express via next(err). Handlers still return void.
+ */
+async function roleGate(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const principal = await verifyBearer(req);
+    if (principal) {
+      req.verifiedUserId = principal.userId;
+      req.verifiedRole = principal.role;
+    }
+  } catch {
+    // A Bearer token was present but failed verification (bad signature,
+    // wrong issuer, expired, ...). Reject rather than degrade to header trust.
+    res.status(401).json({ error: 'Invalid or expired bearer token' });
+    return;
+  }
+
   if (!['POST', 'PUT', 'DELETE'].includes(req.method)) {
     next();
     return;
@@ -202,34 +331,44 @@ function findInvalidNumericField(
   return null;
 }
 
-/** Generic hardened CRUD for a simple keyed-collection resource. */
+/**
+ * Generic hardened CRUD for a simple keyed-collection resource, now backed by a
+ * `Repository<T>` (async). Mounts the SAME 4 endpoints with the SAME behaviour as
+ * the prior array-backed helper — only the data access changed:
+ *   - GET    `/${path}`     -> repo.list()
+ *   - POST   `/${path}`     -> validate numerics, pick allow-list, repo.create()
+ *                              (id server-assigned via newId(); 200 json item)
+ *   - PUT    `/${path}/:id` -> 404 if missing, validate numerics, repo.update()
+ *   - DELETE `/${path}/:id` -> repo.remove() then 204 (unconditional, mirroring
+ *                              the prior filter-and-204 semantics — no 404)
+ */
 function crud<T extends { id: string }>(
   router: Router,
   path: string,
-  store: { items: T[] },
+  repo: Repository<T>,
   allowed: readonly string[],
   numericFields: readonly string[] = [],
 ) {
-  router.get(`/${path}`, (_req, res) => res.json(store.items));
-  router.post(`/${path}`, (req, res) => {
+  router.get(`/${path}`, async (_req, res) => { res.json(await repo.list()); });
+  router.post(`/${path}`, async (req, res) => {
     const data = pick(req.body, allowed);
     const bad = findInvalidNumericField(data, numericFields);
     if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
     const item = { id: newId(), ...data } as T;
-    store.items.push(item);
-    res.json(item);
+    const created = await repo.create(item);
+    res.json(created);
   });
-  router.put(`/${path}/:id`, (req, res) => {
-    const i = store.items.findIndex(x => x.id === req.params.id);
-    if (i === -1) { res.status(404).json({ error: 'Not found' }); return; }
+  router.put(`/${path}/:id`, async (req, res) => {
+    const existing = await repo.get(req.params.id);
+    if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
     const data = pick(req.body, allowed);
     const bad = findInvalidNumericField(data, numericFields);
     if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
-    store.items[i] = { ...store.items[i], ...data };
-    res.json(store.items[i]);
+    const updated = await repo.update(req.params.id, data as Partial<T>);
+    res.json(updated);
   });
-  router.delete(`/${path}/:id`, (req, res) => {
-    store.items = store.items.filter(x => x.id !== req.params.id);
+  router.delete(`/${path}/:id`, async (req, res) => {
+    await repo.remove(req.params.id);
     res.status(204).send();
   });
 }
@@ -240,161 +379,92 @@ apiRouter.use(rateLimit(300, 60_000)); // 300 req/min per client
 apiRouter.use(roleGate);
 apiRouter.use((req, res, next) => {
   // AUDIT INTEGRITY: snapshot the targeted entity BEFORE the handler runs so a
-  // PUT/DELETE can record a before/after diff. POST has no prior state.
-  const before = ['PUT', 'DELETE'].includes(req.method) ? cloneEntity(findAuditEntity(req.path)) : undefined;
-  res.on('finish', () => {
-    if (!['POST', 'PUT', 'DELETE'].includes(req.method) || res.statusCode >= 400) return;
-    const entry: AuditEntry = {
-      id: `AL${newId()}`,
-      at: new Date().toISOString(),
-      actorId: actorId(req),
-      actorRole: actorRole(req),
-      method: req.method,
-      path: req.originalUrl,
-      statusCode: res.statusCode,
-    };
-    if (req.method === 'PUT' || req.method === 'DELETE') {
-      // DELETE has no after-state; re-resolve the entity for PUT.
-      const after = req.method === 'DELETE' ? undefined : cloneEntity(findAuditEntity(req.path));
-      const changedKeys = diffChangedKeys(before, after);
-      entry.before = before;
-      entry.after = after;
-      entry.changedKeys = changedKeys;
-    }
-    // APPEND-ONLY: only ever prepend (newest-first) and cap; never edit prior entries.
-    auditLogStore.items.unshift(entry);
-    auditLogStore.items = auditLogStore.items.slice(0, AUDIT_LOG_CAP);
-    saveState();
-  });
-  next();
+  // PUT/DELETE can record a before/after diff. POST has no prior state. The
+  // before-snapshot read is async (repository-backed), so the middleware body
+  // runs in an async IIFE and only calls next() once the snapshot is taken.
+  void (async () => {
+    const before = ['PUT', 'DELETE'].includes(req.method) ? cloneEntity(await findAuditEntity(req.path)) : undefined;
+    res.on('finish', () => {
+      if (!['POST', 'PUT', 'DELETE'].includes(req.method) || res.statusCode >= 400) return;
+      // The after-snapshot read + persistence are async; audit is best-effort,
+      // so failures here never affect the already-sent response.
+      void (async () => {
+        const after = req.method === 'PUT' ? cloneEntity(await findAuditEntity(req.path)) : undefined;
+        const entry: AuditEntry = {
+          id: `AL${newId()}`,
+          at: new Date().toISOString(),
+          actorId: actorId(req),
+          actorRole: actorRole(req),
+          method: req.method,
+          path: req.originalUrl,
+          statusCode: res.statusCode,
+        };
+        if (req.method === 'PUT' || req.method === 'DELETE') {
+          entry.before = before;
+          entry.after = after;
+          entry.changedKeys = diffChangedKeys(before, after);
+        }
+        // APPEND-ONLY: persist via the repository; entries are never edited.
+        await repos.auditLogs.create(entry as unknown as AuditLog);
+      })().catch(() => { /* audit is best-effort */ });
+    });
+    next();
+  })().catch(() => next());
 });
-
-const resources = [
-  { id: '1', name: 'Julie Armstrong', role: 'Developer',
-    skills: [{ name: 'Java', level: 3 }, { name: 'Spring', level: 2 }],
-    projectRoles: ['Senior Developer', 'Backend Engineer'],
-    externalExperience: [{ projectName: 'E-commerce Migration', company: 'TechCorp', role: 'Java Developer', startDate: '2020-01-01', endDate: '2022-12-31', comment: 'Migrated legacy system to Spring Boot.' }],
-    profilePicture: '', resume: '', utilization: 85, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York, NY', costRate: 75, billRate: 140 },
-  { id: '2', name: 'John Miller', role: 'Consultant',
-    skills: [{ name: 'Project Management', level: 2 }], projectRoles: ['Business Consultant'],
-    externalExperience: [], profilePicture: '', resume: '', utilization: 100, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London, UK', costRate: 90, billRate: 180 },
-  { id: '3', name: 'Alice Smith', role: 'Designer',
-    skills: [{ name: 'Figma', level: 3 }], projectRoles: ['UX Designer'],
-    externalExperience: [], profilePicture: '', resume: '', utilization: 50, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', costRate: 65, billRate: 120 },
-];
-
-const users = [
-  { id: '1', resourceId: '1', name: 'Julie Armstrong', role: 'delivery-executive' },
-  { id: '2', resourceId: '2', name: 'John Miller', role: 'resource-manager' },
-  { id: '3', resourceId: '3', name: 'Alice Smith', role: 'pm' },
-  { id: '4', resourceId: '2', name: 'Finance Controller', role: 'finance' },
-  { id: '5', resourceId: '3', name: 'Sales Lead', role: 'sales' },
-  { id: '6', resourceId: '1', name: 'System Admin', role: 'admin' },
-] satisfies { id: string; resourceId: string; name: string; role: UserRole }[];
-
-// B9: request '1' is fully staffed (staffedEffort >= requiredEffort) so its status must be 'Fulfilled'.
-const requests = [
-  { id: '1', name: 'Project Alpha - Backend', requiredRole: 'Developer', requiredEffort: 20, staffedEffort: 20, status: 'Fulfilled', skills: ['Java'], description: 'Backend development for Project Alpha', startDate: '2026-04-01', endDate: '2026-06-30', requesterId: '1', projectId: '1' },
-  { id: '2', name: 'Project Beta - UI', requiredRole: 'Designer', requiredEffort: 15, staffedEffort: 0, status: 'Published', skills: ['Figma'], description: 'UI Design for Project Beta', startDate: '2026-05-01', endDate: '2026-07-31', requesterId: '1', projectId: '2' },
-];
-
-const assignments = [
-  { id: '1', requestId: '1', resourceId: '1', assignedHours: 20, status: 'hard-booked' },
-];
-
-const timeEntryStore: { items: { id: string; assignmentId: string; requestId: string; resourceId: string; projectId: string; date: string; hours: number; status: TimeEntryStatus; notes?: string; approvedBy?: string; approvedAt?: string }[] } = { items: [
-  { id: 'TE1', assignmentId: '1', requestId: '1', resourceId: '1', projectId: '1', date: '2026-04-06', hours: 8, status: 'Approved', notes: 'Backend integration', approvedBy: '1', approvedAt: '2026-04-07T09:00:00.000Z' },
-  { id: 'TE2', assignmentId: '1', requestId: '1', resourceId: '1', projectId: '1', date: '2026-04-07', hours: 8, status: 'Approved', notes: 'API hardening', approvedBy: '1', approvedAt: '2026-04-08T09:00:00.000Z' },
-  { id: 'TE3', assignmentId: '1', requestId: '1', resourceId: '1', projectId: '1', date: '2026-04-08', hours: 4, status: 'Submitted', notes: 'Defect fixing' },
-] };
-
-let languages = [
-  { code: 'en', name: 'English', isDefault: true },
-  { code: 'de', name: 'German', isDefault: false },
-  { code: 'es', name: 'Spanish', isDefault: false },
-  { code: 'fr', name: 'French', isDefault: false },
-];
-
-const skillCatalogs = [
-  { id: '1', name: 'Development Skills', description: 'Skills related to software development', skills: ['1', '2'] },
-];
-
-const proficiencySets = [
-  { id: '1', name: 'Standard IT Proficiency', description: 'Standard 1-5 level proficiency',
-    levels: [
-      { id: 'l1', level: 1, name: 'Beginner', description: 'Basic knowledge' },
-      { id: 'l2', level: 2, name: 'Intermediate', description: 'Practical application' },
-      { id: 'l3', level: 3, name: 'Advanced', description: 'Applied theory' },
-      { id: 'l4', level: 4, name: 'Expert', description: 'Recognized authority' },
-    ] },
-];
-
-const skills = [
-  { id: '1', conceptUri: 'sap-rm://skill/1', name: 'Java', description: 'Java programming', catalogs: ['1'], proficiencySetId: '1', restricted: false },
-  { id: '2', conceptUri: 'sap-rm://skill/2', name: 'JavaScript', description: 'JS programming', catalogs: ['1'], proficiencySetId: '1', restricted: false },
-];
-
-const projectRoles = [
-  { id: '1', code: 'DEV', name: 'Developer', description: 'Software Developer', restricted: false },
-  { id: '2', code: 'PM', name: 'Project Manager', description: 'Project Manager', restricted: false },
-];
-
-const serviceOrganizations = [
-  { id: '1', code: 'SO_DE', description: 'Service Org Germany', costCenters: ['CC_DE_1', 'CC_DE_2'] },
-];
-
-let resourceOrganizations = [
-  { id: '1', name: 'Res Org Germany', description: 'Resource Org for Germany', costCenters: ['CC_DE_1', 'CC_DE_2'], serviceOrganizationId: '1' },
-];
-
-let projects = [
-  { id: '1', name: 'Project Alpha', location: 'Berlin, Germany', startDate: '2026-04-01', endDate: '2026-12-31', status: 'In Planning', description: 'A major software development project.', ownerId: '1', contractId: 'CT1' },
-  { id: '2', name: 'Project Beta', location: 'Munich, Germany', startDate: '2026-05-01', endDate: '2027-05-01', status: 'In Execution', description: 'Infrastructure upgrade project.', ownerId: '1', contractId: 'CT2' },
-];
 
 // --- Core resources (custom logic, hardened) --------------------------------
 
 const RESOURCE_FIELDS = ['name', 'role', 'skills', 'projectRoles', 'externalExperience', 'profilePicture', 'resume', 'capacity', 'managerId', 'organization', 'location', 'costRate', 'billRate'] as const;
 
-apiRouter.get('/resources', (_req, res) => res.json(resources));
-apiRouter.get('/users', (_req, res) => res.json(users));
-apiRouter.get('/resources/:id', (req, res) => {
-  const resource = resources.find(r => r.id === req.params.id);
+/**
+ * Repository-backed equivalent of the array `exists()` helper: a value is a
+ * valid FK iff it is a non-empty string AND a row with that id exists in the
+ * target repository. Preserves the original string-guard semantics (a
+ * non-string / empty id is never a valid reference) while reading through the
+ * (seeded) persistence adapter, so it is correct regardless of conversion order.
+ */
+const existsRepo = async <T extends Entity>(repo: Repository<T>, id: unknown): Promise<boolean> =>
+  typeof id === 'string' && id.length > 0 && (await repo.get(id)) !== undefined;
+
+apiRouter.get('/resources', async (_req, res) => { res.json(await repos.resources.list()); });
+apiRouter.get('/users', async (_req, res) => { res.json(await repos.users.list()); });
+apiRouter.get('/resources/:id', async (req, res) => {
+  const resource = await repos.resources.get(req.params.id);
   return resource ? res.json(resource) : res.status(404).json({ error: 'Not found' });
 });
-apiRouter.put('/resources/:id', (req, res) => {
-  const index = resources.findIndex(r => r.id === req.params.id);
-  if (index === -1) { res.status(404).json({ error: 'Not found' }); return; }
-  const body = pick<typeof resources[number]>(req.body, RESOURCE_FIELDS);
+apiRouter.put('/resources/:id', async (req, res) => {
+  const existing = await repos.resources.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const body = pick<Resource>(req.body, RESOURCE_FIELDS);
   // B-DATA: capacity is a divisor in utilization math; never allow 0/negative/NaN.
   if (body.capacity !== undefined && !(isNonNegNumber(body.capacity) && body.capacity > 0)) {
     res.status(400).json({ error: 'capacity must be a positive number' });
     return;
   }
-  resources[index] = { ...resources[index], ...body };
-  res.json(resources[index]);
+  const updated = await repos.resources.update(req.params.id, body);
+  res.json(updated);
 });
 
 const REQUEST_FIELDS = ['name', 'requiredRole', 'requiredEffort', 'skills', 'description', 'startDate', 'endDate', 'status', 'requesterId', 'projectId'] as const;
 
-apiRouter.get('/requests', (_req, res) => res.json(requests));
-apiRouter.post('/requests', (req, res) => {
-  const body = pick<typeof requests[number]>(req.body, REQUEST_FIELDS);
+apiRouter.get('/requests', async (_req, res) => { res.json(await repos.requests.list()); });
+apiRouter.post('/requests', async (req, res) => {
+  const body = pick<ResourceRequest>(req.body, REQUEST_FIELDS);
   if (body.requiredEffort !== undefined && !isNonNegNumber(body.requiredEffort)) {
     { res.status(400).json({ error: 'requiredEffort must be a non-negative number' }); return; }
   }
-  const newReq = { id: newId(), staffedEffort: 0, ...body, status: 'Not Published' } as typeof requests[number];
-  requests.push(newReq);
-  res.json(newReq);
+  const newReq = { id: newId(), staffedEffort: 0, ...body, status: 'Not Published' } as ResourceRequest;
+  const created = await repos.requests.create(newReq);
+  res.json(created);
 });
 // B-DATA: client-settable request statuses are limited to the publish/withdraw
 // lifecycle. 'Fulfilled' is server-derived from assignment staffing and must
 // never be supplied by the client.
 const CLIENT_REQUEST_STATUSES = ['Not Published', 'Published', 'Open', 'Withdrawn'] as const;
-apiRouter.put('/requests/:id', (req, res) => {
-  const index = requests.findIndex(r => r.id === req.params.id);
-  if (index === -1) { res.status(404).json({ error: 'Not found' }); return; }
-  const body = pick<typeof requests[number]>(req.body, REQUEST_FIELDS);
+apiRouter.put('/requests/:id', async (req, res) => {
+  const existing = await repos.requests.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const body = pick<ResourceRequest>(req.body, REQUEST_FIELDS);
   if (body.requiredEffort !== undefined && !isNonNegNumber(body.requiredEffort)) {
     { res.status(400).json({ error: 'requiredEffort must be a non-negative number' }); return; }
   }
@@ -402,110 +472,111 @@ apiRouter.put('/requests/:id', (req, res) => {
     res.status(400).json({ error: `status must be one of: ${CLIENT_REQUEST_STATUSES.join(', ')}` });
     return;
   }
-  requests[index] = { ...requests[index], ...body };
-  res.json(requests[index]);
+  const updated = await repos.requests.update(req.params.id, body);
+  res.json(updated);
 });
-apiRouter.delete('/requests/:id', (req, res) => {
-  const index = requests.findIndex(r => r.id === req.params.id);
-  if (index === -1) { res.status(404).json({ error: 'Not found' }); return; }
-  requests.splice(index, 1);
+apiRouter.delete('/requests/:id', async (req, res) => {
+  const removed = await repos.requests.remove(req.params.id);
+  if (!removed) { res.status(404).json({ error: 'Not found' }); return; }
   res.status(204).send();
 });
 
-apiRouter.get('/assignments', (_req, res) => res.json(assignments));
-apiRouter.post('/assignments', (req, res) => {
-  const body = pick<typeof assignments[number]>(req.body, ['requestId', 'resourceId', 'assignedHours', 'status']);
+apiRouter.get('/assignments', async (_req, res) => { res.json(await repos.assignments.list()); });
+apiRouter.post('/assignments', async (req, res) => {
+  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'status']);
   if (!isNonNegNumber(body.assignedHours)) {
     { res.status(400).json({ error: 'assignedHours must be a non-negative number' }); return; }
   }
   // B-DATA: an assignment must reference an existing request and resource.
-  if (!exists(requests, body.requestId)) { res.status(400).json({ error: 'requestId must reference an existing request' }); return; }
-  if (!exists(resources, body.resourceId)) { res.status(400).json({ error: 'resourceId must reference an existing resource' }); return; }
-  const newAssig = { id: newId(), ...body } as typeof assignments[number];
-  assignments.push(newAssig);
+  if (!(await existsRepo(repos.requests, body.requestId))) { res.status(400).json({ error: 'requestId must reference an existing request' }); return; }
+  if (!(await existsRepo(repos.resources, body.resourceId))) { res.status(400).json({ error: 'resourceId must reference an existing resource' }); return; }
+  const newAssig = { id: newId(), ...body } as Assignment;
+  const created = await repos.assignments.create(newAssig);
 
-  const resource = resources.find(r => r.id === newAssig.resourceId);
+  const resource = await repos.resources.get(created.resourceId);
   // B-DATA: capacity is a divisor; skip the utilization recompute when it is not usable.
-  if (resource && resource.capacity > 0) resource.utilization = clampUtil(resource.utilization + (newAssig.assignedHours / resource.capacity) * 100);
+  if (resource && resource.capacity > 0) await repos.resources.update(resource.id, { utilization: clampUtil(resource.utilization + (created.assignedHours / resource.capacity) * 100) });
 
-  const request = requests.find(r => r.id === newAssig.requestId);
+  const request = await repos.requests.get(created.requestId);
   if (request) {
-    request.staffedEffort += newAssig.assignedHours;
-    if (request.staffedEffort >= request.requiredEffort) request.status = 'Fulfilled';
+    const staffedEffort = (request.staffedEffort ?? 0) + created.assignedHours;
+    const status = staffedEffort >= request.requiredEffort ? 'Fulfilled' : request.status;
+    await repos.requests.update(request.id, { staffedEffort, status });
   }
-  res.json(newAssig);
+  res.json(created);
 });
-apiRouter.put('/assignments/:id', (req, res) => {
-  const index = assignments.findIndex(a => a.id === req.params.id);
-  if (index === -1) { res.status(404).json({ error: 'Not found' }); return; }
-  const body = pick<typeof assignments[number]>(req.body, ['requestId', 'resourceId', 'assignedHours', 'status']);
+apiRouter.put('/assignments/:id', async (req, res) => {
+  const oldAssig = await repos.assignments.get(req.params.id);
+  if (oldAssig === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'status']);
   if (body.assignedHours !== undefined && !isNonNegNumber(body.assignedHours)) {
     { res.status(400).json({ error: 'assignedHours must be a non-negative number' }); return; }
   }
-  const oldAssig = assignments[index];
   // B-DATA: when the FK targets change, the new targets must exist.
-  if (body.resourceId !== undefined && body.resourceId !== oldAssig.resourceId && !exists(resources, body.resourceId)) {
+  if (body.resourceId !== undefined && body.resourceId !== oldAssig.resourceId && !(await existsRepo(repos.resources, body.resourceId))) {
     res.status(400).json({ error: 'resourceId must reference an existing resource' });
     return;
   }
-  if (body.requestId !== undefined && body.requestId !== oldAssig.requestId && !exists(requests, body.requestId)) {
+  if (body.requestId !== undefined && body.requestId !== oldAssig.requestId && !(await existsRepo(repos.requests, body.requestId))) {
     res.status(400).json({ error: 'requestId must reference an existing request' });
     return;
   }
   const newAssig = { ...oldAssig, ...body };
-  assignments[index] = newAssig;
+  await repos.assignments.update(req.params.id, body);
 
-  const resource = resources.find(r => r.id === newAssig.resourceId);
+  const resource = await repos.resources.get(newAssig.resourceId);
   // B-DATA: capacity is a divisor; skip the utilization recompute when it is not usable.
-  if (resource && resource.capacity > 0) resource.utilization = clampUtil(resource.utilization + ((newAssig.assignedHours - oldAssig.assignedHours) / resource.capacity) * 100);
+  if (resource && resource.capacity > 0) await repos.resources.update(resource.id, { utilization: clampUtil(resource.utilization + ((newAssig.assignedHours - oldAssig.assignedHours) / resource.capacity) * 100) });
 
-  const request = requests.find(r => r.id === newAssig.requestId);
+  const request = await repos.requests.get(newAssig.requestId);
   if (request) {
-    request.staffedEffort += (newAssig.assignedHours - oldAssig.assignedHours);
-    if (request.staffedEffort >= request.requiredEffort) request.status = 'Fulfilled';
-    else if (request.status === 'Fulfilled') request.status = 'Open';
+    const staffedEffort = (request.staffedEffort ?? 0) + (newAssig.assignedHours - oldAssig.assignedHours);
+    let status = request.status;
+    if (staffedEffort >= request.requiredEffort) status = 'Fulfilled';
+    else if (request.status === 'Fulfilled') status = 'Open';
+    await repos.requests.update(request.id, { staffedEffort, status });
   }
   res.json(newAssig);
 });
-apiRouter.delete('/assignments/:id', (req, res) => {
-  const index = assignments.findIndex(a => a.id === req.params.id);
-  if (index === -1) { res.status(404).json({ error: 'Not found' }); return; }
-  const oldAssig = assignments[index];
-  assignments.splice(index, 1);
+apiRouter.delete('/assignments/:id', async (req, res) => {
+  const oldAssig = await repos.assignments.get(req.params.id);
+  if (oldAssig === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  await repos.assignments.remove(req.params.id);
 
-  const resource = resources.find(r => r.id === oldAssig.resourceId);
+  const resource = await repos.resources.get(oldAssig.resourceId);
   // B-DATA: capacity is a divisor; skip the utilization recompute when it is not usable.
-  if (resource && resource.capacity > 0) resource.utilization = clampUtil(resource.utilization - (oldAssig.assignedHours / resource.capacity) * 100);
+  if (resource && resource.capacity > 0) await repos.resources.update(resource.id, { utilization: clampUtil(resource.utilization - (oldAssig.assignedHours / resource.capacity) * 100) });
 
-  const request = requests.find(r => r.id === oldAssig.requestId);
+  const request = await repos.requests.get(oldAssig.requestId);
   if (request) {
-    request.staffedEffort -= oldAssig.assignedHours;
-    if (request.status === 'Fulfilled' && request.staffedEffort < request.requiredEffort) request.status = 'Open';
+    const staffedEffort = (request.staffedEffort ?? 0) - oldAssig.assignedHours;
+    const status = request.status === 'Fulfilled' && staffedEffort < request.requiredEffort ? 'Open' : request.status;
+    await repos.requests.update(request.id, { staffedEffort, status });
   }
   res.status(204).send();
 });
 
-apiRouter.get('/time-entries', (_req, res) => res.json(timeEntryStore.items));
-apiRouter.post('/time-entries', (req, res) => {
-  const body = pick<typeof timeEntryStore.items[number]>(req.body, ['assignmentId', 'requestId', 'resourceId', 'projectId', 'date', 'hours', 'status', 'notes']);
+apiRouter.get('/time-entries', async (_req, res) => { res.json(await repos.timeEntries.list()); });
+apiRouter.post('/time-entries', async (req, res) => {
+  const body = pick<TimeEntry>(req.body, ['assignmentId', 'requestId', 'resourceId', 'projectId', 'date', 'hours', 'status', 'notes']);
   if (!isNonNegNumber(body.hours)) {
     res.status(400).json({ error: 'hours must be a non-negative number' });
     return;
   }
-  const reqRef = requests.find(r => r.id === body.requestId);
+  const reqRef = await repos.requests.get(body.requestId ?? '');
   const item = {
     id: `TE${newId()}`,
     status: 'Draft',
     ...body,
     projectId: body.projectId || reqRef?.projectId || '',
-  } as typeof timeEntryStore.items[number];
-  timeEntryStore.items.push(item);
-  res.json(item);
+  } as TimeEntry;
+  const created = await repos.timeEntries.create(item);
+  res.json(created);
 });
-apiRouter.put('/time-entries/:id', (req, res) => {
-  const i = timeEntryStore.items.findIndex(t => t.id === req.params.id);
-  if (i === -1) { res.status(404).json({ error: 'Not found' }); return; }
-  const body = pick<typeof timeEntryStore.items[number]>(req.body, ['assignmentId', 'requestId', 'resourceId', 'projectId', 'date', 'hours', 'status', 'notes', 'approvedBy', 'approvedAt']);
+apiRouter.put('/time-entries/:id', async (req, res) => {
+  const existing = await repos.timeEntries.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const body = pick<TimeEntry>(req.body, ['assignmentId', 'requestId', 'resourceId', 'projectId', 'date', 'hours', 'status', 'notes', 'approvedBy', 'approvedAt']);
   if (body.hours !== undefined && !isNonNegNumber(body.hours)) {
     res.status(400).json({ error: 'hours must be a non-negative number' });
     return;
@@ -514,195 +585,156 @@ apiRouter.put('/time-entries/:id', (req, res) => {
     body.approvedBy = body.approvedBy || actorId(req);
     body.approvedAt = body.approvedAt || new Date().toISOString();
   }
-  timeEntryStore.items[i] = { ...timeEntryStore.items[i], ...body };
-  res.json(timeEntryStore.items[i]);
+  const updated = await repos.timeEntries.update(req.params.id, body);
+  res.json(updated);
 });
-apiRouter.delete('/time-entries/:id', (req, res) => {
-  timeEntryStore.items = timeEntryStore.items.filter(t => t.id !== req.params.id);
+apiRouter.delete('/time-entries/:id', async (req, res) => {
+  await repos.timeEntries.remove(req.params.id);
   res.status(204).send();
 });
 
 // --- Configuration ----------------------------------------------------------
 
-apiRouter.get('/languages', (_req, res) => res.json(languages));
-apiRouter.post('/languages/default', (req, res) => {
+apiRouter.get('/languages', async (_req, res) => {
+  // The natural-key adapter carries a synthetic `id` mirroring `code`; project
+  // each row to the exact legacy client shape ({ code, name, isDefault }).
+  const all = await repos.languages.list();
+  res.json(all.map(l => ({ code: l.code, name: l.name, isDefault: l.isDefault })));
+});
+apiRouter.post('/languages/default', async (req, res) => {
   const code = pick<{ code: string }>(req.body, ['code']).code;
+  const all = await repos.languages.list();
   // B-DATA: only an existing language code may become the default.
-  if (typeof code !== 'string' || !languages.some(l => l.code === code)) {
+  if (typeof code !== 'string' || !all.some(l => l.code === code)) {
     res.status(400).json({ error: 'code must reference an existing language' });
     return;
   }
-  languages = languages.map(l => ({ ...l, isDefault: l.code === code }));
+  // Set isDefault so exactly the chosen code is the default. The synthetic `id`
+  // mirrors `code`, so each row is addressed by its code.
+  for (const l of all) {
+    const shouldDefault = l.code === code;
+    if (l.isDefault !== shouldDefault) await repos.languages.update(l.id, { isDefault: shouldDefault });
+  }
   res.status(204).send();
 });
 
-const skillCatalogStore = { items: skillCatalogs };
-apiRouter.get('/skill-catalogs', (_req, res) => res.json(skillCatalogStore.items));
-apiRouter.post('/skill-catalogs', (req, res) => {
-  const item = { id: newId(), skills: [], ...pick(req.body, ['name', 'description', 'skills']) } as typeof skillCatalogs[number];
-  skillCatalogStore.items.push(item);
-  res.json(item);
+apiRouter.get('/skill-catalogs', async (_req, res) => { res.json(await repos.skillCatalogs.list()); });
+apiRouter.post('/skill-catalogs', async (req, res) => {
+  const item = { id: newId(), skills: [], ...pick(req.body, ['name', 'description', 'skills']) } as SkillCatalog;
+  res.json(await repos.skillCatalogs.create(item));
 });
-apiRouter.put('/skill-catalogs/:id', (req, res) => {
-  const i = skillCatalogStore.items.findIndex(c => c.id === req.params.id);
-  if (i === -1) { res.status(404).json({ error: 'Not found' }); return; }
-  skillCatalogStore.items[i] = { ...skillCatalogStore.items[i], ...pick(req.body, ['name', 'description', 'skills']) };
-  res.json(skillCatalogStore.items[i]);
+apiRouter.put('/skill-catalogs/:id', async (req, res) => {
+  const existing = await repos.skillCatalogs.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const updated = await repos.skillCatalogs.update(req.params.id, pick(req.body, ['name', 'description', 'skills']));
+  res.json(updated);
 });
-apiRouter.delete('/skill-catalogs/:id', (req, res) => { skillCatalogStore.items = skillCatalogStore.items.filter(c => c.id !== req.params.id); res.status(204).send(); });
+apiRouter.delete('/skill-catalogs/:id', async (req, res) => { await repos.skillCatalogs.remove(req.params.id); res.status(204).send(); });
 
-const proficiencyStore = { items: proficiencySets };
-apiRouter.get('/proficiency-sets', (_req, res) => res.json(proficiencyStore.items));
-apiRouter.post('/proficiency-sets', (req, res) => {
-  const item = { id: newId(), levels: [], ...pick(req.body, ['name', 'description', 'levels']) } as typeof proficiencySets[number];
-  proficiencyStore.items.push(item);
-  res.json(item);
+apiRouter.get('/proficiency-sets', async (_req, res) => { res.json(await repos.proficiencySets.list()); });
+apiRouter.post('/proficiency-sets', async (req, res) => {
+  const item = { id: newId(), levels: [], ...pick(req.body, ['name', 'description', 'levels']) } as ProficiencySet;
+  res.json(await repos.proficiencySets.create(item));
 });
-apiRouter.delete('/proficiency-sets/:id', (req, res) => { proficiencyStore.items = proficiencyStore.items.filter(s => s.id !== req.params.id); res.status(204).send(); });
+apiRouter.delete('/proficiency-sets/:id', async (req, res) => { await repos.proficiencySets.remove(req.params.id); res.status(204).send(); });
 
-const skillStore = { items: skills };
-apiRouter.get('/skills', (_req, res) => res.json(skillStore.items));
-apiRouter.post('/skills', (req, res) => {
-  const item = { id: newId(), conceptUri: `sap-rm://skill/${newId()}`, catalogs: [], restricted: false, ...pick(req.body, ['name', 'description', 'catalogs', 'proficiencySetId', 'restricted']) } as typeof skills[number];
-  skillStore.items.push(item);
-  res.json(item);
+apiRouter.get('/skills', async (_req, res) => { res.json(await repos.skills.list()); });
+apiRouter.post('/skills', async (req, res) => {
+  const item = { id: newId(), conceptUri: `sap-rm://skill/${newId()}`, catalogs: [], restricted: false, ...pick(req.body, ['name', 'description', 'catalogs', 'proficiencySetId', 'restricted']) } as Skill;
+  res.json(await repos.skills.create(item));
 });
-apiRouter.put('/skills/:id', (req, res) => {
-  const i = skillStore.items.findIndex(s => s.id === req.params.id);
-  if (i === -1) { res.status(404).json({ error: 'Not found' }); return; }
-  skillStore.items[i] = { ...skillStore.items[i], ...pick(req.body, ['name', 'description', 'catalogs', 'proficiencySetId', 'restricted']) };
-  res.json(skillStore.items[i]);
+apiRouter.put('/skills/:id', async (req, res) => {
+  const existing = await repos.skills.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const updated = await repos.skills.update(req.params.id, pick(req.body, ['name', 'description', 'catalogs', 'proficiencySetId', 'restricted']));
+  res.json(updated);
 });
-apiRouter.delete('/skills/:id', (req, res) => { skillStore.items = skillStore.items.filter(s => s.id !== req.params.id); res.status(204).send(); });
+apiRouter.delete('/skills/:id', async (req, res) => { await repos.skills.remove(req.params.id); res.status(204).send(); });
 
-const roleStore = { items: projectRoles };
-apiRouter.get('/project-roles', (_req, res) => res.json(roleStore.items));
-apiRouter.post('/project-roles', (req, res) => {
-  const item = { id: newId(), restricted: false, ...pick(req.body, ['code', 'name', 'description', 'restricted']) } as typeof projectRoles[number];
-  roleStore.items.push(item);
-  res.json(item);
+apiRouter.get('/project-roles', async (_req, res) => { res.json(await repos.projectRoles.list()); });
+apiRouter.post('/project-roles', async (req, res) => {
+  const item = { id: newId(), restricted: false, ...pick(req.body, ['code', 'name', 'description', 'restricted']) } as ProjectRole;
+  res.json(await repos.projectRoles.create(item));
 });
-apiRouter.put('/project-roles/:id', (req, res) => {
-  const i = roleStore.items.findIndex(r => r.id === req.params.id);
-  if (i === -1) { res.status(404).json({ error: 'Not found' }); return; }
-  roleStore.items[i] = { ...roleStore.items[i], ...pick(req.body, ['code', 'name', 'description', 'restricted']) };
-  res.json(roleStore.items[i]);
+apiRouter.put('/project-roles/:id', async (req, res) => {
+  const existing = await repos.projectRoles.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const updated = await repos.projectRoles.update(req.params.id, pick(req.body, ['code', 'name', 'description', 'restricted']));
+  res.json(updated);
 });
 
-apiRouter.get('/service-organizations', (_req, res) => res.json(serviceOrganizations));
+apiRouter.get('/service-organizations', async (_req, res) => { res.json(await repos.serviceOrganizations.list()); });
 
-apiRouter.get('/resource-organizations', (_req, res) => res.json(resourceOrganizations));
-apiRouter.post('/resource-organizations', (req, res) => {
-  const item = { id: newId(), costCenters: [], ...pick(req.body, ['name', 'description', 'costCenters', 'serviceOrganizationId']) } as typeof resourceOrganizations[number];
-  resourceOrganizations.push(item);
-  res.json(item);
+apiRouter.get('/resource-organizations', async (_req, res) => { res.json(await repos.resourceOrganizations.list()); });
+apiRouter.post('/resource-organizations', async (req, res) => {
+  const item = { id: newId(), costCenters: [], ...pick(req.body, ['name', 'description', 'costCenters', 'serviceOrganizationId']) } as ResourceOrganization;
+  res.json(await repos.resourceOrganizations.create(item));
 });
-apiRouter.put('/resource-organizations/:id', (req, res) => {
-  const i = resourceOrganizations.findIndex(o => o.id === req.params.id);
-  if (i === -1) { res.status(404).json({ error: 'Not found' }); return; }
-  resourceOrganizations[i] = { ...resourceOrganizations[i], ...pick(req.body, ['name', 'description', 'costCenters', 'serviceOrganizationId']) };
-  res.json(resourceOrganizations[i]);
+apiRouter.put('/resource-organizations/:id', async (req, res) => {
+  const existing = await repos.resourceOrganizations.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const updated = await repos.resourceOrganizations.update(req.params.id, pick(req.body, ['name', 'description', 'costCenters', 'serviceOrganizationId']));
+  res.json(updated);
 });
-apiRouter.delete('/resource-organizations/:id', (req, res) => { resourceOrganizations = resourceOrganizations.filter(o => o.id !== req.params.id); res.status(204).send(); });
+apiRouter.delete('/resource-organizations/:id', async (req, res) => { await repos.resourceOrganizations.remove(req.params.id); res.status(204).send(); });
 
 const PROJECT_FIELDS = ['name', 'location', 'startDate', 'endDate', 'status', 'description', 'ownerId', 'contractId'] as const;
-apiRouter.get('/projects', (_req, res) => res.json(projects));
-apiRouter.post('/projects', (req, res) => {
-  const item = { id: newId(), ...pick(req.body, PROJECT_FIELDS) } as typeof projects[number];
-  projects.push(item);
-  res.json(item);
+apiRouter.get('/projects', async (_req, res) => { res.json(await repos.projects.list()); });
+apiRouter.post('/projects', async (req, res) => {
+  const item = { id: newId(), ...pick(req.body, PROJECT_FIELDS) } as Project;
+  res.json(await repos.projects.create(item));
 });
-apiRouter.put('/projects/:id', (req, res) => {
-  const i = projects.findIndex(p => p.id === req.params.id);
-  if (i === -1) { res.status(404).json({ error: 'Not found' }); return; }
-  projects[i] = { ...projects[i], ...pick(req.body, PROJECT_FIELDS) };
-  res.json(projects[i]);
+apiRouter.put('/projects/:id', async (req, res) => {
+  const existing = await repos.projects.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const updated = await repos.projects.update(req.params.id, pick(req.body, PROJECT_FIELDS));
+  res.json(updated);
 });
-apiRouter.delete('/projects/:id', (req, res) => { projects = projects.filter(p => p.id !== req.params.id); res.status(204).send(); });
+apiRouter.delete('/projects/:id', async (req, res) => { await repos.projects.remove(req.params.id); res.status(204).send(); });
 
 // --- B1: project sub-resources (real endpoints, seeded on REAL ids 1/2) -----
 
-const partnerStore = { items: [
-  { id: 'PT1', projectId: '1', company: 'TechCorp Inc.', role: 'Development Partner', contact: 'Jane Doe', status: 'Active' },
-  { id: 'PT2', projectId: '2', company: 'DesignStudio LLC', role: 'UI/UX Design', contact: 'John Smith', status: 'Invited' },
-] };
-crud(apiRouter, 'project-partners', partnerStore, ['projectId', 'company', 'role', 'contact', 'status']);
+crud(apiRouter, 'project-partners', repos.projectPartners, ['projectId', 'company', 'role', 'contact', 'status']);
 
-const documentStore = { items: [
-  { id: 'D1', projectId: '1', name: 'Project_Charter_v1.pdf', type: 'pdf', size: '2.4 MB', uploadedAt: '2 days ago', author: 'Jane Doe', authorInitials: 'JD' },
-  { id: 'D2', projectId: '2', name: 'Requirements_Spec.docx', type: 'word', size: '1.1 MB', uploadedAt: '5 days ago', author: 'John Smith', authorInitials: 'JS' },
-] };
-crud(apiRouter, 'project-documents', documentStore, ['projectId', 'name', 'type', 'size', 'uploadedAt', 'author', 'authorInitials']);
+crud(apiRouter, 'project-documents', repos.projectDocuments, ['projectId', 'name', 'type', 'size', 'uploadedAt', 'author', 'authorInitials']);
 
-const workPackageStore = { items: [
-  { id: 'WP-1.1', projectId: '1', name: 'Requirements Analysis', startDate: '2026-04-01', endDate: '2026-04-15', status: 'Completed', progress: 100, assignee: 'Alice Smith' },
-  { id: 'WP-1.2', projectId: '1', name: 'System Architecture Design', startDate: '2026-04-16', endDate: '2026-05-05', status: 'In Progress', progress: 60, assignee: 'Julie Armstrong' },
-  { id: 'WP-2.1', projectId: '2', name: 'Frontend Development', startDate: '2026-05-06', endDate: '2026-06-20', status: 'In Progress', progress: 40, assignee: 'Alice Smith' },
-] };
-crud(apiRouter, 'work-packages', workPackageStore, ['projectId', 'name', 'startDate', 'endDate', 'status', 'progress', 'assignee']);
+crud(apiRouter, 'work-packages', repos.workPackages, ['projectId', 'name', 'startDate', 'endDate', 'status', 'progress', 'assignee']);
 
 interface MilestoneEntry { id: string; projectId: string; name: string; date: string; status: 'Pending' | 'Achieved'; approvedBy?: string; approvedAt?: string }
-const milestoneStore = { items: [
-  { id: 'M1', projectId: '1', name: 'Project Kickoff', date: '2026-04-01', status: 'Achieved' },
-  { id: 'M2', projectId: '1', name: 'Go-Live', date: '2026-12-01', status: 'Pending' },
-  { id: 'M3', projectId: '2', name: 'Architecture Approved', date: '2026-05-20', status: 'Pending' },
-] as MilestoneEntry[] };
 const MILESTONE_FIELDS = ['projectId', 'name', 'date', 'status', 'approvedBy', 'approvedAt'] as const;
-apiRouter.get('/milestones', (_req, res) => res.json(milestoneStore.items));
-apiRouter.post('/milestones', (req, res) => {
+apiRouter.get('/milestones', async (_req, res) => { res.json(await repos.milestones.list()); });
+apiRouter.post('/milestones', async (req, res) => {
   const item = { id: newId(), ...pick<MilestoneEntry>(req.body, MILESTONE_FIELDS) } as MilestoneEntry;
-  milestoneStore.items.push(item);
-  res.json(item);
+  res.json(await repos.milestones.create(item));
 });
-apiRouter.put('/milestones/:id', (req, res) => {
-  const i = milestoneStore.items.findIndex(m => m.id === req.params.id);
-  if (i === -1) { res.status(404).json({ error: 'Not found' }); return; }
-  const previousStatus = milestoneStore.items[i].status;
+apiRouter.put('/milestones/:id', async (req, res) => {
+  const existing = await repos.milestones.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const previousStatus = existing.status;
   const body = pick<MilestoneEntry>(req.body, MILESTONE_FIELDS);
-  milestoneStore.items[i] = { ...milestoneStore.items[i], ...body };
-  const updated = milestoneStore.items[i];
+  const updated = await repos.milestones.update(req.params.id, body) as MilestoneEntry;
   // MILESTONE TRIGGER (SAL): when a milestone first transitions to 'Achieved',
   // make its fixed-price billing item billable by flipping every linked
   // BillingPlanItem still in 'Planned' to 'Ready'.
   if (updated.status === 'Achieved' && previousStatus !== 'Achieved') {
-    for (const bp of billingPlanStore.items) {
-      if (bp.milestoneId === updated.id && bp.status === 'Planned') bp.status = 'Ready';
+    for (const bp of await repos.billingPlanItems.list()) {
+      if (bp.milestoneId === updated.id && bp.status === 'Planned') await repos.billingPlanItems.update(bp.id, { status: 'Ready' });
     }
   }
   res.json(updated);
 });
-apiRouter.delete('/milestones/:id', (req, res) => {
-  milestoneStore.items = milestoneStore.items.filter(m => m.id !== req.params.id);
+apiRouter.delete('/milestones/:id', async (req, res) => {
+  await repos.milestones.remove(req.params.id);
   res.status(204).send();
 });
 
-const financialStore = { items: [
-  { id: 'F1', projectId: '1', category: 'Software Licenses', budget: 20000, actual: 18500 },
-  { id: 'F2', projectId: '1', category: 'Consulting Services', budget: 50000, actual: 25000 },
-  { id: 'F3', projectId: '2', category: 'Hardware', budget: 10000, actual: 11200 },
-] };
-crud(apiRouter, 'project-financials', financialStore, ['projectId', 'category', 'budget', 'actual'], ['budget', 'actual']);
+crud(apiRouter, 'project-financials', repos.projectFinancials, ['projectId', 'category', 'budget', 'actual'], ['budget', 'actual']);
 
-const projectCostCenterStore = { items: [
-  { id: 'CC-1001', projectId: '1', name: 'Engineering & Dev', manager: 'Alice Smith', allocated: 150000, actual: 125000 },
-  { id: 'CC-1002', projectId: '1', name: 'Design & UX', manager: 'Bob Jones', allocated: 50000, actual: 48000 },
-  { id: 'CC-1003', projectId: '2', name: 'Quality Assurance', manager: 'Charlie Brown', allocated: 40000, actual: 42000 },
-] };
-crud(apiRouter, 'project-cost-centers', projectCostCenterStore, ['projectId', 'name', 'manager', 'allocated', 'actual'], ['allocated', 'actual']);
+crud(apiRouter, 'project-cost-centers', repos.projectCostCenters, ['projectId', 'name', 'manager', 'allocated', 'actual'], ['allocated', 'actual']);
 
-const taskStore = { items: [
-  { id: 'T1', projectId: '1', name: 'Finalize Requirements Document', assignee: 'Jane Doe', assigneeType: 'Subcontractor', partnerId: 'PT1', dueDate: '2026-04-15', status: 'Done', priority: 'High' },
-  { id: 'T2', projectId: '1', name: 'Design Database Schema', assignee: 'John Smith', assigneeType: 'Internal', partnerId: '', dueDate: '2026-04-25', status: 'In Progress', priority: 'Medium' },
-  { id: 'T3', projectId: '2', name: 'Setup CI/CD Pipeline', assignee: 'Unassigned', assigneeType: 'Internal', partnerId: '', dueDate: '2026-05-05', status: 'To Do', priority: 'Medium' },
-] };
-crud(apiRouter, 'project-tasks', taskStore, ['projectId', 'name', 'assignee', 'assigneeType', 'partnerId', 'dueDate', 'status', 'priority']);
+crud(apiRouter, 'project-tasks', repos.projectTasks, ['projectId', 'name', 'assignee', 'assigneeType', 'partnerId', 'dueDate', 'status', 'priority']);
 
-const issueStore = { items: [
-  { id: 'I1', projectId: '1', title: 'API Rate Limiting', type: 'Bug', severity: 'High', status: 'Open', reportedBy: 'Jane Doe', owner: 'Julie Armstrong', dueDate: '2026-05-15', impact: 'May slow integration testing', actionPlan: 'Add rate-limit handling and retry policy', escalated: true },
-  { id: 'I2', projectId: '1', title: 'Delay in Hardware Delivery', type: 'Risk', severity: 'Medium', status: 'Mitigated', reportedBy: 'John Smith', owner: 'John Miller', dueDate: '2026-05-20', impact: 'Potential schedule slippage', actionPlan: 'Use cloud test environment until hardware arrives', escalated: false },
-  { id: 'I3', projectId: '2', title: 'UI Inconsistencies', type: 'Bug', severity: 'Low', status: 'Open', reportedBy: 'Alice Johnson', owner: 'Alice Smith', dueDate: '2026-06-01', impact: 'Client acceptance friction', actionPlan: 'Run design QA pass', escalated: false },
-] };
-crud(apiRouter, 'project-issues', issueStore, ['projectId', 'title', 'type', 'severity', 'status', 'reportedBy', 'owner', 'dueDate', 'impact', 'actionPlan', 'escalated']);
+crud(apiRouter, 'project-issues', repos.projectIssues, ['projectId', 'title', 'type', 'severity', 'status', 'reportedBy', 'owner', 'dueDate', 'impact', 'actionPlan', 'escalated']);
 
 interface ChangeRequestEntry {
   id: string;
@@ -720,24 +752,19 @@ interface ChangeRequestEntry {
   decidedBy?: string;
   decidedAt?: string;
 }
-const changeRequestStore = { items: [
-  { id: 'CR1', projectId: '1', title: 'Extend integration scope', description: 'Add one extra external API integration requested by the customer.', requestedBy: 'Julie Armstrong', owner: 'Alice Smith', status: 'Submitted', impactScope: 'Additional interface and test cycle', impactBudget: 12000, impactScheduleDays: 8, priority: 'High', createdAt: '2026-04-20T10:00:00.000Z' },
-  { id: 'CR2', projectId: '2', title: 'Defer reporting automation', description: 'Move reporting automation to phase 2 to protect go-live.', requestedBy: 'John Miller', owner: 'Julie Armstrong', status: 'Approved', impactScope: 'Scope moved to later release', impactBudget: -5000, impactScheduleDays: -3, priority: 'Medium', createdAt: '2026-05-05T11:30:00.000Z', decidedBy: '1', decidedAt: '2026-05-06T09:00:00.000Z' },
-] as ChangeRequestEntry[] };
 // impactBudget/impactScheduleDays are intentionally allowed to be negative
 // (a CR can reduce scope/budget), so they are NOT validated as non-negative.
 const CHANGE_REQUEST_FIELDS = ['projectId', 'title', 'description', 'requestedBy', 'owner', 'status', 'impactScope', 'impactBudget', 'impactScheduleDays', 'priority', 'createdAt'] as const;
-apiRouter.get('/change-requests', (_req, res) => res.json(changeRequestStore.items));
-apiRouter.post('/change-requests', (req, res) => {
+apiRouter.get('/change-requests', async (_req, res) => { res.json(await repos.changeRequests.list()); });
+apiRouter.post('/change-requests', async (req, res) => {
   const item = { id: newId(), createdAt: new Date().toISOString(), ...pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_FIELDS) } as ChangeRequestEntry;
-  changeRequestStore.items.push(item);
-  res.json(item);
+  res.json(await repos.changeRequests.create(item));
 });
-apiRouter.put('/change-requests/:id', (req, res) => {
-  const i = changeRequestStore.items.findIndex(c => c.id === req.params.id);
-  if (i === -1) { res.status(404).json({ error: 'Not found' }); return; }
+apiRouter.put('/change-requests/:id', async (req, res) => {
+  const existing = await repos.changeRequests.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   const body = pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_FIELDS);
-  const merged = { ...changeRequestStore.items[i], ...body };
+  const merged = { ...existing, ...body } as ChangeRequestEntry;
   // CR DECISION: when a CR reaches a terminal decision, stamp who/when (server
   // side, from the verified actor) if not already recorded. decidedBy/decidedAt
   // are not client-settable fields, so they cannot be forged via the body.
@@ -745,44 +772,24 @@ apiRouter.put('/change-requests/:id', (req, res) => {
     merged.decidedAt = new Date().toISOString();
     merged.decidedBy = merged.decidedBy || actorId(req);
   }
-  changeRequestStore.items[i] = merged;
-  res.json(changeRequestStore.items[i]);
+  const updated = await repos.changeRequests.update(req.params.id, merged);
+  res.json(updated);
 });
-apiRouter.delete('/change-requests/:id', (req, res) => {
-  changeRequestStore.items = changeRequestStore.items.filter(c => c.id !== req.params.id);
+apiRouter.delete('/change-requests/:id', async (req, res) => {
+  await repos.changeRequests.remove(req.params.id);
   res.status(204).send();
 });
 
 // Configuration-level cost centers (B16)
-const costCenterStore = { items: [
-  { id: 'CC-9001', name: 'Corporate IT', manager: 'Dana White', allocated: 200000, actual: 150000 },
-  { id: 'CC-9002', name: 'Shared Services', manager: 'Erik Stone', allocated: 80000, actual: 64000 },
-] };
-crud(apiRouter, 'cost-centers', costCenterStore, ['name', 'manager', 'allocated', 'actual'], ['allocated', 'actual']);
+crud(apiRouter, 'cost-centers', repos.costCenters, ['name', 'manager', 'allocated', 'actual'], ['allocated', 'actual']);
 
 // --- Commercial domain (ADR-0001): Customers, Contracts, Orders, OrderLines ---
 
-const customerStore = { items: [
-  { id: 'C1', name: 'Globex Corp', industry: 'Manufacturing', country: 'Germany' },
-  { id: 'C2', name: 'Initech', industry: 'Finance', country: 'United Kingdom' },
-] };
-crud(apiRouter, 'customers', customerStore, ['name', 'industry', 'country']);
+crud(apiRouter, 'customers', repos.customers, ['name', 'industry', 'country']);
 
 interface ContractEntry { id: string; customerId: string; name: string; type: string; totalValue: number; currency: string; status: string; startDate: string; endDate: string }
-const contractStore = { items: [
-  { id: 'CT1', customerId: 'C1', name: 'Globex Digital Transformation', type: 'Fixed Price', totalValue: 500000, currency: 'EUR', status: 'Active', startDate: '2026-01-01', endDate: '2026-12-31' },
-  // MULTI-CURRENCY DEMO: CT2 (and its orders + billing items below) is denominated
-  // in USD end-to-end, so portfolio rollups must convert via fx-rates before summing.
-  { id: 'CT2', customerId: 'C2', name: 'Initech T&M Framework', type: 'T&M', totalValue: 300000, currency: 'USD', status: 'Active', startDate: '2026-03-01', endDate: '2027-02-28' },
-] as ContractEntry[] };
 
 interface OrderEntry { id: string; contractId: string; type: string; partnerId: string; amount: number; currency: string; status: string; orderDate: string; invoiceNumber?: string; invoiceDate?: string }
-const orderStore = { items: [
-  { id: 'O1', contractId: 'CT1', type: 'Customer', partnerId: '', amount: 200000, currency: 'EUR', status: 'Invoiced', orderDate: '2026-02-01', invoiceNumber: 'INV-2026-0001', invoiceDate: '2026-02-01' },
-  { id: 'O2', contractId: 'CT1', type: 'Purchase', partnerId: 'PT1', amount: 50000, currency: 'EUR', status: 'Confirmed', orderDate: '2026-02-15' },
-  // MULTI-CURRENCY DEMO: O3 belongs to USD contract CT2, so it carries USD too.
-  { id: 'O3', contractId: 'CT2', type: 'Customer', partnerId: '', amount: 120000, currency: 'USD', status: 'Open', orderDate: '2026-03-10' },
-] as OrderEntry[] };
 
 // INVOICE NUMBERING: sequential server-side counter for compliant invoice
 // numbers (INV-<year>-<zero-padded seq>). The seeded invoiced order O1 already
@@ -802,118 +809,112 @@ function applyInvoiceNumbering(order: OrderEntry): void {
 }
 
 interface OrderLineEntry { id: string; orderId: string; projectId: string; description: string; amount: number }
-const orderLineStore = { items: [
-  { id: 'OL1', orderId: 'O1', projectId: '1', description: 'Phase 1 delivery', amount: 200000 },
-  { id: 'OL2', orderId: 'O2', projectId: '1', description: 'Subcontracted development', amount: 50000 },
-  { id: 'OL3', orderId: 'O3', projectId: '2', description: 'UI/UX work package', amount: 120000 },
-] as OrderLineEntry[] };
 
 // --- Commercial referential integrity: explicit handlers (crud() cannot express FK rules) ---
 
 const CONTRACT_FIELDS = ['customerId', 'name', 'type', 'totalValue', 'currency', 'status', 'startDate', 'endDate'] as const;
-const exists = (items: { id: string }[], id: unknown): boolean =>
-  typeof id === 'string' && id.length > 0 && items.some(x => x.id === id);
 
-apiRouter.get('/contracts', (_req, res) => res.json(contractStore.items));
-apiRouter.post('/contracts', (req, res) => {
+apiRouter.get('/contracts', async (_req, res) => { res.json(await repos.contracts.list()); });
+apiRouter.post('/contracts', async (req, res) => {
   const body = pick<ContractEntry>(req.body, CONTRACT_FIELDS);
-  if (!exists(customerStore.items, body.customerId)) { res.status(400).json({ error: 'customerId must reference an existing customer' }); return; }
+  if (!(await existsRepo(repos.customers, body.customerId))) { res.status(400).json({ error: 'customerId must reference an existing customer' }); return; }
   const bad = findInvalidNumericField(body, ['totalValue']);
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
   const item = { id: newId(), ...body } as ContractEntry;
-  contractStore.items.push(item);
-  res.json(item);
+  const created = await repos.contracts.create(item as unknown as Contract);
+  res.json(created);
 });
-apiRouter.put('/contracts/:id', (req, res) => {
-  const i = contractStore.items.findIndex(c => c.id === req.params.id);
-  if (i === -1) { res.status(404).json({ error: 'Not found' }); return; }
+apiRouter.put('/contracts/:id', async (req, res) => {
+  const existing = await repos.contracts.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   const body = pick<ContractEntry>(req.body, CONTRACT_FIELDS);
-  if (body.customerId !== undefined && !exists(customerStore.items, body.customerId)) { res.status(400).json({ error: 'customerId must reference an existing customer' }); return; }
+  if (body.customerId !== undefined && !(await existsRepo(repos.customers, body.customerId))) { res.status(400).json({ error: 'customerId must reference an existing customer' }); return; }
   const bad = findInvalidNumericField(body, ['totalValue']);
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
-  contractStore.items[i] = { ...contractStore.items[i], ...body };
-  res.json(contractStore.items[i]);
+  const updated = await repos.contracts.update(req.params.id, body as Partial<Contract>);
+  res.json(updated);
 });
-apiRouter.delete('/contracts/:id', (req, res) => {
-  contractStore.items = contractStore.items.filter(c => c.id !== req.params.id);
+apiRouter.delete('/contracts/:id', async (req, res) => {
+  await repos.contracts.remove(req.params.id);
   res.status(204).send();
 });
 
 const ORDER_FIELDS = ['contractId', 'type', 'partnerId', 'amount', 'currency', 'status', 'orderDate'] as const;
 
 /** Validate an order's contract FK and the Purchase/Customer partner rules. Returns an error string or null. */
-function validateOrder(body: Partial<OrderEntry>, current?: OrderEntry): string | null {
+async function validateOrder(body: Partial<OrderEntry>, current?: OrderEntry): Promise<string | null> {
   const type = body.type ?? current?.type;
   const partnerId = body.partnerId ?? current?.partnerId ?? '';
   if (body.contractId !== undefined || !current) {
-    if (!exists(contractStore.items, body.contractId ?? current?.contractId)) return 'contractId must reference an existing contract';
+    if (!(await existsRepo(repos.contracts, body.contractId ?? current?.contractId))) return 'contractId must reference an existing contract';
   }
   if (type === 'Purchase') {
-    if (!exists(partnerStore.items, partnerId)) return 'Purchase orders require an existing partnerId';
+    if (!(await existsRepo(repos.projectPartners, partnerId))) return 'Purchase orders require an existing partnerId';
   } else if (type === 'Customer') {
     if (partnerId !== '') return 'Customer orders must not set a partnerId';
   }
   return null;
 }
 
-apiRouter.get('/orders', (_req, res) => res.json(orderStore.items));
-apiRouter.post('/orders', (req, res) => {
+apiRouter.get('/orders', async (_req, res) => { res.json(await repos.orders.list()); });
+apiRouter.post('/orders', async (req, res) => {
   const body = pick<OrderEntry>(req.body, ORDER_FIELDS);
   const bad = findInvalidNumericField(body, ['amount']);
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
-  const fkError = validateOrder(body);
+  const fkError = await validateOrder(body);
   if (fkError) { res.status(400).json({ error: fkError }); return; }
   const item = { id: newId(), partnerId: '', ...body } as OrderEntry;
   // INVOICE NUMBERING: an order created directly as 'Invoiced' gets a number now.
   applyInvoiceNumbering(item);
-  orderStore.items.push(item);
-  res.json(item);
+  const created = await repos.orders.create(item as unknown as Order);
+  res.json(created);
 });
-apiRouter.put('/orders/:id', (req, res) => {
-  const i = orderStore.items.findIndex(o => o.id === req.params.id);
-  if (i === -1) { res.status(404).json({ error: 'Not found' }); return; }
+apiRouter.put('/orders/:id', async (req, res) => {
+  const existing = await repos.orders.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   const body = pick<OrderEntry>(req.body, ORDER_FIELDS);
   const bad = findInvalidNumericField(body, ['amount']);
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
-  const fkError = validateOrder(body, orderStore.items[i]);
+  const fkError = await validateOrder(body, existing as unknown as OrderEntry);
   if (fkError) { res.status(400).json({ error: fkError }); return; }
-  orderStore.items[i] = { ...orderStore.items[i], ...body };
+  const merged = { ...(existing as unknown as OrderEntry), ...body };
   // INVOICE NUMBERING: assign a sequential number/date on transition to
   // 'Invoiced'. invoiceNumber/invoiceDate are not in ORDER_FIELDS, so the
   // client can never set them; they are strictly server-assigned.
-  applyInvoiceNumbering(orderStore.items[i]);
-  res.json(orderStore.items[i]);
+  applyInvoiceNumbering(merged);
+  const updated = await repos.orders.update(req.params.id, merged as Partial<Order>);
+  res.json(updated);
 });
-apiRouter.delete('/orders/:id', (req, res) => {
-  orderStore.items = orderStore.items.filter(o => o.id !== req.params.id);
+apiRouter.delete('/orders/:id', async (req, res) => {
+  await repos.orders.remove(req.params.id);
   res.status(204).send();
 });
 
 const ORDER_LINE_FIELDS = ['orderId', 'projectId', 'description', 'amount'] as const;
-apiRouter.get('/order-lines', (_req, res) => res.json(orderLineStore.items));
-apiRouter.post('/order-lines', (req, res) => {
+apiRouter.get('/order-lines', async (_req, res) => { res.json(await repos.orderLines.list()); });
+apiRouter.post('/order-lines', async (req, res) => {
   const body = pick<OrderLineEntry>(req.body, ORDER_LINE_FIELDS);
   const bad = findInvalidNumericField(body, ['amount']);
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
-  if (!exists(orderStore.items, body.orderId)) { res.status(400).json({ error: 'orderId must reference an existing order' }); return; }
-  if (!exists(projects, body.projectId)) { res.status(400).json({ error: 'projectId must reference an existing project' }); return; }
+  if (!(await existsRepo(repos.orders, body.orderId))) { res.status(400).json({ error: 'orderId must reference an existing order' }); return; }
+  if (!(await existsRepo(repos.projects, body.projectId))) { res.status(400).json({ error: 'projectId must reference an existing project' }); return; }
   const item = { id: newId(), ...body } as OrderLineEntry;
-  orderLineStore.items.push(item);
-  res.json(item);
+  const created = await repos.orderLines.create(item as unknown as OrderLine);
+  res.json(created);
 });
-apiRouter.put('/order-lines/:id', (req, res) => {
-  const i = orderLineStore.items.findIndex(l => l.id === req.params.id);
-  if (i === -1) { res.status(404).json({ error: 'Not found' }); return; }
+apiRouter.put('/order-lines/:id', async (req, res) => {
+  const existing = await repos.orderLines.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   const body = pick<OrderLineEntry>(req.body, ORDER_LINE_FIELDS);
   const bad = findInvalidNumericField(body, ['amount']);
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
-  if (body.orderId !== undefined && !exists(orderStore.items, body.orderId)) { res.status(400).json({ error: 'orderId must reference an existing order' }); return; }
-  if (body.projectId !== undefined && !exists(projects, body.projectId)) { res.status(400).json({ error: 'projectId must reference an existing project' }); return; }
-  orderLineStore.items[i] = { ...orderLineStore.items[i], ...body };
-  res.json(orderLineStore.items[i]);
+  if (body.orderId !== undefined && !(await existsRepo(repos.orders, body.orderId))) { res.status(400).json({ error: 'orderId must reference an existing order' }); return; }
+  if (body.projectId !== undefined && !(await existsRepo(repos.projects, body.projectId))) { res.status(400).json({ error: 'projectId must reference an existing project' }); return; }
+  const updated = await repos.orderLines.update(req.params.id, body as Partial<OrderLine>);
+  res.json(updated);
 });
-apiRouter.delete('/order-lines/:id', (req, res) => {
-  orderLineStore.items = orderLineStore.items.filter(l => l.id !== req.params.id);
+apiRouter.delete('/order-lines/:id', async (req, res) => {
+  await repos.orderLines.remove(req.params.id);
   res.status(204).send();
 });
 
@@ -952,20 +953,6 @@ interface BillingPlanEntry {
   notes?: string;
 }
 
-// One representative item PER BillingType, tied to existing contracts/projects.
-// Milestone item points at an existing milestone ('M2' Go-Live on project '1').
-const billingPlanStore = { items: [
-  { id: 'BP1', contractId: 'CT1', projectId: '1', type: 'Milestone', label: 'SAL Go-Live milestone', milestoneId: 'M2', expectedDate: '2026-12-01', amount: 150000, retentionPct: 10, taxRatePct: 22, paymentTermsDays: 30, currency: 'EUR', status: 'Planned' },
-  // MULTI-CURRENCY DEMO: BP2/BP3/BP4/BP7 bill against USD contract CT2, so they are in USD.
-  { id: 'BP2', contractId: 'CT2', projectId: '2', type: 'Recurring', label: 'Monthly retainer', recurrence: 'Monthly', expectedDate: '2026-03-31', amount: 12000, taxRatePct: 22, paymentTermsDays: 30, currency: 'USD', status: 'Invoiced', issuedDate: '2026-03-31', dueDate: '2026-04-30', orderId: 'O3' },
-  { id: 'BP3', contractId: 'CT2', projectId: '2', type: 'TimeAndMaterials', label: 'T&M consuntivo Q1', expectedDate: '2026-04-15', amount: 28500, taxRatePct: 22, paymentTermsDays: 30, currency: 'USD', status: 'Ready' },
-  { id: 'BP4', contractId: 'CT2', projectId: '2', type: 'Capped', label: 'T&M capped work package', expectedDate: '2026-06-30', amount: 45000, capAmount: 50000, taxRatePct: 22, paymentTermsDays: 30, currency: 'USD', status: 'Planned' },
-  { id: 'BP5', contractId: 'CT1', projectId: '1', type: 'Advance', label: 'Down payment / acconto', expectedDate: '2026-01-15', amount: 100000, taxRatePct: 22, paymentTermsDays: 30, currency: 'EUR', status: 'Paid', issuedDate: '2026-01-15', dueDate: '2026-02-14', paidDate: '2026-02-10', orderId: 'O1' },
-  { id: 'BP6', contractId: 'CT1', projectId: '1', type: 'Progress', label: 'Progress billing (POC 60%)', progressPct: 60, expectedDate: '2026-07-01', amount: 90000, retentionPct: 10, taxRatePct: 22, paymentTermsDays: 30, currency: 'EUR', status: 'Ready' },
-  { id: 'BP7', contractId: 'CT2', projectId: '2', type: 'Expense', label: 'Re-billed travel expenses', markupPct: 5, expectedDate: '2026-05-10', amount: 3200, taxRatePct: 22, paymentTermsDays: 30, currency: 'USD', status: 'Planned' },
-  { id: 'BP8', contractId: 'CT1', projectId: '1', type: 'CreditNote', label: 'Credit note / nota di credito', expectedDate: '2026-08-01', amount: -5000, taxRatePct: 22, paymentTermsDays: 30, currency: 'EUR', status: 'Planned', notes: 'Adjustment for descoped feature' },
-] as BillingPlanEntry[] };
-
 const BILLING_PLAN_FIELDS = ['contractId', 'projectId', 'type', 'label', 'milestoneId', 'recurrence', 'expectedDate', 'amount', 'capAmount', 'progressPct', 'markupPct', 'retentionPct', 'taxRatePct', 'paymentTermsDays', 'currency', 'status', 'issuedDate', 'dueDate', 'paidDate', 'orderId', 'notes'] as const;
 const BILLING_PLAN_NUMERIC_FIELDS = ['amount', 'capAmount', 'progressPct', 'markupPct', 'retentionPct', 'taxRatePct', 'paymentTermsDays'] as const;
 
@@ -989,8 +976,107 @@ function findInvalidBillingNumericField(body: Partial<BillingPlanEntry>, type: B
   return null;
 }
 
-apiRouter.get('/billing-plan-items', (_req, res) => res.json(billingPlanStore.items));
-apiRouter.post('/billing-plan-items', (req, res) => {
+// --- #14 BILLING AUTOMATION -------------------------------------------------
+//
+// Two repo-backed automations layered on top of the existing billing-plan-item
+// validation/RBAC/audit (handlers stay async). Both are deliberately PRAGMATIC:
+// they enforce only what the persisted data model already supports and invent
+// no new fields. `notes` (an existing field) is reused to surface a cap-breach
+// flag; there is no `accruedAmount` column, so accrual is DERIVED on the fly.
+
+/** A "capped not-to-exceed" item is type 'Capped' OR any item carrying a capAmount. */
+function isCappedNature(item: Pick<BillingPlanEntry, 'type' | 'capAmount'>): boolean {
+  return item.type === 'Capped' || Number.isFinite(item.capAmount);
+}
+
+/** Marker prepended to `notes` when accrued T&M has breached the cap (idempotent). */
+const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
+
+/**
+ * Accrued T&M for a capped item, DERIVED as Σ(approved time-entry hours ×
+ * resource billRate) for the item's project — the same as-incurred rule the
+ * finance util's recognitionSchedule uses. Returns undefined when accrual is not
+ * derivable from the data (no projectId on the item), so the caller can skip the
+ * accrued<=cap check rather than treat "no data" as zero accrual. EUR/base only:
+ * we compare against capAmount in the item's own currency without FX (the cap and
+ * the resource rates are taken as-is, matching the single-currency util default).
+ */
+async function accruedTAndM(item: Pick<BillingPlanEntry, 'projectId'>): Promise<number | undefined> {
+  if (!item.projectId) return undefined;
+  const [entries, resources] = await Promise.all([repos.timeEntries.list(), repos.resources.list()]);
+  const billRateById = new Map(resources.map(r => [r.id, r.billRate ?? 0]));
+  let accrued = 0;
+  for (const t of entries) {
+    if (t.status !== 'Approved' || t.projectId !== item.projectId) continue;
+    const rate = billRateById.get(t.resourceId) ?? 0;
+    const hours = Number.isFinite(t.hours) ? t.hours : 0;
+    accrued += hours * rate;
+  }
+  return accrued;
+}
+
+/**
+ * CAPPED not-to-exceed enforcement for a fully-merged billing item.
+ *
+ * 1) Hard reject (returns an error string) when the item is capped and its
+ *    `amount` exceeds `capAmount` — the create/update must not persist an
+ *    overcap amount.
+ * 2) When accrued T&M is derivable, enforce accrued <= capAmount: if accrued has
+ *    breached the cap, flag the item by prepending CAP_EXCEEDED_FLAG to `notes`
+ *    (idempotent — only added once) so the breach is visible without inventing a
+ *    field. This is a FLAG, not a reject, because accrual comes from time entries
+ *    rather than the request body.
+ *
+ * Returns `{ error }` to reject, or `{ patch }` (possibly empty) to apply on top
+ * of the caller's merged item before persisting.
+ */
+async function enforceCappedBilling(
+  merged: BillingPlanEntry,
+): Promise<{ error: string } | { patch: Partial<BillingPlanEntry> }> {
+  if (!isCappedNature(merged) || !Number.isFinite(merged.capAmount)) return { patch: {} };
+  const cap = merged.capAmount as number;
+  // (1) amount must never exceed the cap.
+  if (Number.isFinite(merged.amount) && merged.amount > cap) {
+    return { error: `amount ${merged.amount} exceeds capAmount ${cap} (not-to-exceed)` };
+  }
+  // (2) accrued T&M must stay within the cap; flag (don't reject) when it breaks.
+  const accrued = await accruedTAndM(merged);
+  const hasFlag = (merged.notes ?? '').includes(CAP_EXCEEDED_FLAG);
+  if (accrued !== undefined && accrued > cap) {
+    if (hasFlag) return { patch: {} }; // already flagged -> idempotent no-op
+    const suffix = merged.notes ? ` ${merged.notes}` : '';
+    return { patch: { notes: `${CAP_EXCEEDED_FLAG} accrued ${Math.round(accrued)} > cap ${cap}${suffix}` } };
+  }
+  // Accrued back within the cap: clear a previously-set flag so it doesn't stick.
+  if (hasFlag) {
+    const cleaned = (merged.notes ?? '').replace(CAP_EXCEEDED_FLAG, '').replace(/\s+/g, ' ').trim();
+    return { patch: { notes: cleaned || undefined } };
+  }
+  return { patch: {} };
+}
+
+/**
+ * PROGRESS / POC auto-advance: when a Progress item's progressPct reaches 100%,
+ * advance a still-'Planned' item to 'Ready' — mirroring the milestone→'Ready'
+ * trigger above. Idempotent: only a 'Planned' item is advanced, and only when the
+ * incoming progressPct actually CHANGED (so re-PUTting 100% never churns status,
+ * and a manual Blocked/Invoiced state is never overwritten). Returns the status
+ * patch to apply, or an empty patch when nothing should change.
+ */
+function progressAutoAdvance(
+  merged: BillingPlanEntry,
+  incomingProgressPct: number | undefined,
+  previousProgressPct: number | undefined,
+): Partial<BillingPlanEntry> {
+  if (merged.type !== 'Progress') return {};
+  const changed = incomingProgressPct !== undefined && incomingProgressPct !== previousProgressPct;
+  if (!changed) return {};
+  if (incomingProgressPct >= 100 && merged.status === 'Planned') return { status: 'Ready' };
+  return {};
+}
+
+apiRouter.get('/billing-plan-items', async (_req, res) => { res.json(await repos.billingPlanItems.list()); });
+apiRouter.post('/billing-plan-items', async (req, res) => {
   const body = pick<BillingPlanEntry>(req.body, BILLING_PLAN_FIELDS);
   const bad = findInvalidBillingNumericField(body, body.type);
   if (bad) {
@@ -999,27 +1085,51 @@ apiRouter.post('/billing-plan-items', (req, res) => {
     return;
   }
   const item = { id: newId(), ...body } as BillingPlanEntry;
-  billingPlanStore.items.push(item);
-  res.json(item);
+  // #14 CAPPED not-to-exceed: reject an overcap amount on create; otherwise apply
+  // any cap-breach flag the accrued-T&M check produced before persisting.
+  const capResult = await enforceCappedBilling(item);
+  if ('error' in capResult) { res.status(400).json({ error: capResult.error }); return; }
+  Object.assign(item, capResult.patch);
+  const created = await repos.billingPlanItems.create(item as unknown as BillingPlanItem);
+  res.json(created);
 });
-apiRouter.put('/billing-plan-items/:id', (req, res) => {
-  const i = billingPlanStore.items.findIndex(b => b.id === req.params.id);
-  if (i === -1) { res.status(404).json({ error: 'Not found' }); return; }
+apiRouter.put('/billing-plan-items/:id', async (req, res) => {
+  const existing = await repos.billingPlanItems.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   const body = pick<BillingPlanEntry>(req.body, BILLING_PLAN_FIELDS);
   // Resolve the effective type for the negative-amount rule: an incoming type
   // overrides, otherwise fall back to the stored item's type.
-  const effectiveType = body.type ?? billingPlanStore.items[i].type;
+  const effectiveType = body.type ?? (existing as unknown as BillingPlanEntry).type;
   const bad = findInvalidBillingNumericField(body, effectiveType);
   if (bad) {
     const rule = bad === 'amount' ? 'amount must be a non-negative number (negative allowed only for CreditNote)' : `${bad} must be a non-negative number`;
     res.status(400).json({ error: rule });
     return;
   }
-  billingPlanStore.items[i] = { ...billingPlanStore.items[i], ...body };
-  res.json(billingPlanStore.items[i]);
+  const prev = existing as unknown as BillingPlanEntry;
+  // Merge the incoming patch onto the stored item so automations see the
+  // effective post-update state (effectiveType already resolved above).
+  const merged = { ...prev, ...body, type: effectiveType } as BillingPlanEntry;
+
+  // #14 PROGRESS auto-advance: when progressPct CHANGES and reaches 100%, advance
+  // a still-'Planned' Progress item to 'Ready' (same trigger pattern as the
+  // milestone→'Ready' flip). Idempotent — fold the status into the merged item
+  // first so the cap check below also sees the advanced status.
+  Object.assign(merged, progressAutoAdvance(merged, body.progressPct, prev.progressPct));
+
+  // #14 CAPPED not-to-exceed: reject an overcap amount; otherwise apply any
+  // accrued-T&M cap-breach flag (or clear a stale one) onto the merged item.
+  const capResult = await enforceCappedBilling(merged);
+  if ('error' in capResult) { res.status(400).json({ error: capResult.error }); return; }
+  Object.assign(merged, capResult.patch);
+
+  // Persist the full merged item so the automation-derived status/notes are
+  // written alongside the client patch in a single update.
+  const updated = await repos.billingPlanItems.update(req.params.id, merged as Partial<BillingPlanItem>);
+  res.json(updated);
 });
-apiRouter.delete('/billing-plan-items/:id', (req, res) => {
-  billingPlanStore.items = billingPlanStore.items.filter(b => b.id !== req.params.id);
+apiRouter.delete('/billing-plan-items/:id', async (req, res) => {
+  await repos.billingPlanItems.remove(req.params.id);
   res.status(204).send();
 });
 
@@ -1032,17 +1142,17 @@ apiRouter.delete('/billing-plan-items/:id', (req, res) => {
  */
 interface FxRateEntry { currency: string; rateToBase: number }
 const BASE_CURRENCY = 'EUR';
-const fxRateStore = { items: [
-  { currency: 'EUR', rateToBase: 1 },
-  { currency: 'USD', rateToBase: 0.92 },
-  { currency: 'GBP', rateToBase: 1.17 },
-] as FxRateEntry[] };
 
 // Read is open to everyone (a GET, so roleGate already lets it through). Writes
 // are optional and admin-only: an upsert keyed by currency that re-pegs or adds
 // a rate. The base currency's peg is fixed at 1 and cannot be changed.
-apiRouter.get('/fx-rates', (_req, res) => res.json(fxRateStore.items));
-apiRouter.put('/fx-rates/:currency', (req, res) => {
+apiRouter.get('/fx-rates', async (_req, res) => {
+  // The natural-key adapter carries a synthetic `id` mirroring `currency`;
+  // project each row to the exact legacy client shape ({ currency, rateToBase }).
+  const all = await repos.fxRates.list();
+  res.json(all.map(r => ({ currency: r.currency, rateToBase: r.rateToBase })));
+});
+apiRouter.put('/fx-rates/:currency', async (req, res) => {
   // ADMIN-ONLY: roleGate's generic rules don't cover '/fx-rates', so enforce here.
   if (trustedRole(req) !== 'admin') {
     res.status(403).json({ error: 'Only admin may modify FX rates' });
@@ -1059,10 +1169,19 @@ apiRouter.put('/fx-rates/:currency', (req, res) => {
     res.status(400).json({ error: 'rateToBase must be a positive number' });
     return;
   }
-  const i = fxRateStore.items.findIndex(r => r.currency === currency);
-  if (i === -1) fxRateStore.items.push({ currency, rateToBase: body.rateToBase });
-  else fxRateStore.items[i] = { currency, rateToBase: body.rateToBase };
-  res.json(fxRateStore.items.find(r => r.currency === currency));
+  // UPSERT keyed by currency: the natural-key adapter addresses rows by the
+  // `currency` column (its synthetic `id` mirrors `currency`). update() returns
+  // undefined when the row is absent, so add it via create() in that case.
+  const existing = await repos.fxRates.get(currency);
+  const row = existing === undefined
+    ? await repos.fxRates.create({ id: currency, currency, rateToBase: body.rateToBase } as FxRateRow)
+    : await repos.fxRates.update(currency, { rateToBase: body.rateToBase } as Partial<FxRateRow>);
+  // Echo the exact legacy shape ({ currency, rateToBase }); drop the synthetic id.
+  if (row) {
+    res.json({ currency: row.currency, rateToBase: row.rateToBase });
+  } else {
+    res.json(undefined);
+  }
 });
 
 // --- Approval workflow engine -----------------------------------------------
@@ -1125,25 +1244,10 @@ function slaDueFrom(createdAtIso: string): string {
   return new Date(new Date(createdAtIso).getTime() + APPROVAL_SLA_DAYS * 24 * 60 * 60 * 1000).toISOString();
 }
 
-const approvalRequestStore = { items: (() => {
-  const seed = (entry: Omit<ApprovalRequestEntry, 'steps' | 'currentStep' | 'status' | 'slaDueAt'>): ApprovalRequestEntry => ({
-    ...entry,
-    status: 'Pending',
-    steps: buildApprovalSteps(entry.kind, entry.amount),
-    currentStep: 0,
-    slaDueAt: slaDueFrom(entry.createdAt),
-  });
-  return [
-    seed({ id: 'AR1', kind: 'TimeEntry', refId: 'TE3', projectId: '1', requestedBy: '1', createdAt: '2026-04-08T16:00:00.000Z', note: 'Submitted hours pending approval' }),
-    seed({ id: 'AR2', kind: 'Invoice', refId: 'O3', projectId: '2', amount: 120000, requestedBy: '5', createdAt: '2026-03-11T09:00:00.000Z', note: 'Customer invoice over high-value threshold' }),
-    seed({ id: 'AR3', kind: 'ChangeRequest', refId: 'CR1', projectId: '1', amount: 12000, requestedBy: '3', createdAt: '2026-04-20T10:30:00.000Z', note: 'Scope extension awaiting delivery sign-off' }),
-  ];
-})() };
-
 const APPROVAL_REQUEST_FIELDS = ['kind', 'refId', 'projectId', 'amount', 'requestedBy', 'note'] as const;
 
-apiRouter.get('/approval-requests', (_req, res) => res.json(approvalRequestStore.items));
-apiRouter.post('/approval-requests', (req, res) => {
+apiRouter.get('/approval-requests', async (_req, res) => { res.json(await repos.approvalRequests.list()); });
+apiRouter.post('/approval-requests', async (req, res) => {
   const body = pick<ApprovalRequestEntry>(req.body, APPROVAL_REQUEST_FIELDS);
   if (typeof body.kind !== 'string' || !APPROVAL_KINDS.includes(body.kind as ApprovalKind)) {
     res.status(400).json({ error: `kind must be one of: ${APPROVAL_KINDS.join(', ')}` });
@@ -1172,19 +1276,18 @@ apiRouter.post('/approval-requests', (req, res) => {
     slaDueAt: slaDueFrom(createdAt),
     note: body.note,
   };
-  approvalRequestStore.items.push(item);
-  res.json(item);
+  const created = await repos.approvalRequests.create(item as ApprovalRequest);
+  res.json(created);
 });
-apiRouter.put('/approval-requests/:id/decision', (req, res) => {
-  const i = approvalRequestStore.items.findIndex(a => a.id === req.params.id);
-  if (i === -1) { res.status(404).json({ error: 'Not found' }); return; }
+apiRouter.put('/approval-requests/:id/decision', async (req, res) => {
+  const ar = await repos.approvalRequests.get(req.params.id) as ApprovalRequestEntry | undefined;
+  if (ar === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   const body = pick<{ decision: string; by: string }>(req.body, ['decision', 'by']);
   if (body.decision !== 'Approved' && body.decision !== 'Rejected') {
     res.status(400).json({ error: "decision must be 'Approved' or 'Rejected'" });
     return;
   }
   const by = typeof body.by === 'string' && body.by.length > 0 ? body.by : actorId(req);
-  const ar = approvalRequestStore.items[i];
   if (ar.status !== 'Pending') {
     res.status(400).json({ error: `approval request already ${ar.status}` });
     return;
@@ -1210,212 +1313,69 @@ apiRouter.put('/approval-requests/:id/decision', (req, res) => {
     ar.currentStep = ar.currentStep + 1;
     if (ar.currentStep >= ar.steps.length) ar.status = 'Approved';
   }
-  approvalRequestStore.items[i] = ar;
-  res.json(ar);
+  const updated = await repos.approvalRequests.update(ar.id, ar as ApprovalRequest);
+  res.json(updated ?? ar);
 });
 
-apiRouter.get('/audit-logs', (_req, res) => res.json(auditLogStore.items));
+apiRouter.get('/audit-logs', async (_req, res) => { res.json(await repos.auditLogs.list()); });
 apiRouter.get('/storage-status', (_req, res) => res.json({
-  provider: pgPool ? 'postgresql' : 'memory',
-  stateKey,
-  persistent: Boolean(pgPool),
+  provider: process.env['DATABASE_URL'] ? 'postgresql' : 'memory',
+  persistent: Boolean(process.env['DATABASE_URL']),
 }));
 
-const databaseUrl = process.env['DATABASE_URL'];
-const stateKey = process.env['APP_STATE_KEY'] || 'project-resource-mgmt';
-const pgPool = databaseUrl
-  ? new Pool({
-      connectionString: databaseUrl,
-      // S-HIGH (TLS): NEVER disable certificate verification. When PGSSL is
-      // enabled we always verify the server certificate, optionally pinning a
-      // trusted CA bundle supplied via PG_CA_CERT.
-      ssl: process.env['PGSSL'] === 'true'
-        ? {
-            rejectUnauthorized: true,
-            ca: process.env['PG_CA_CERT'] ? readFileSync(process.env['PG_CA_CERT'], 'utf8') : undefined,
-          }
-        : undefined,
-    })
-  : null;
-let saveQueue: Promise<unknown> = Promise.resolve();
+/**
+ * Make id generation safe across restarts by advancing the in-memory sequences
+ * past anything already persisted:
+ *
+ *  - `idSeq` is set to the largest PURELY-NUMERIC id (matching /^\d+$/) seen
+ *    across every repository. newId() only ever emits numeric ids, so prefixed
+ *    ids ('TE1', 'CT1', 'AL…', 'AR…', …) are deliberately ignored — they are not
+ *    produced by newId and must not move the counter.
+ *  - `invoiceSeq` is set to the largest INV-<INVOICE_YEAR>-NNNN across orders, so
+ *    a restart can never re-issue an invoice number that is already in use.
+ *
+ * Runs after initPersistence() so it reads the migrated/seeded state.
+ */
+async function seedSequences(): Promise<void> {
+  // Read side only: every Repository<T extends Entity> exposes list(): Promise<T[]>,
+  // and T[] is assignable to Entity[], so this typed array needs no `any`.
+  const allRepos: readonly { list(): Promise<Entity[]> }[] = [
+    repos.resources, repos.users, repos.requests, repos.assignments, repos.timeEntries,
+    repos.languages, repos.skillCatalogs, repos.proficiencySets, repos.skills, repos.projectRoles,
+    repos.resourceOrganizations, repos.projects, repos.projectPartners, repos.projectDocuments,
+    repos.workPackages, repos.milestones, repos.projectFinancials, repos.projectCostCenters,
+    repos.projectTasks, repos.projectIssues, repos.changeRequests, repos.costCenters,
+    repos.customers, repos.contracts, repos.orders, repos.orderLines, repos.billingPlanItems,
+    repos.fxRates, repos.approvalRequests, repos.auditLogs,
+  ];
 
-function replaceArray<T>(target: T[], source: T[] | undefined) {
-  if (!Array.isArray(source)) return;
-  target.splice(0, target.length, ...source);
-}
-
-function snapshotState() {
-  return {
-    idSeq,
-    invoiceSeq,
-    resources,
-    users,
-    requests,
-    assignments,
-    timeEntries: timeEntryStore.items,
-    languages,
-    skillCatalogs: skillCatalogStore.items,
-    proficiencySets: proficiencyStore.items,
-    skills: skillStore.items,
-    projectRoles: roleStore.items,
-    resourceOrganizations,
-    projects,
-    projectPartners: partnerStore.items,
-    projectDocuments: documentStore.items,
-    workPackages: workPackageStore.items,
-    milestones: milestoneStore.items,
-    projectFinancials: financialStore.items,
-    projectCostCenters: projectCostCenterStore.items,
-    projectTasks: taskStore.items,
-    projectIssues: issueStore.items,
-    changeRequests: changeRequestStore.items,
-    costCenters: costCenterStore.items,
-    customers: customerStore.items,
-    contracts: contractStore.items,
-    orders: orderStore.items,
-    orderLines: orderLineStore.items,
-    billingPlanItems: billingPlanStore.items,
-    fxRates: fxRateStore.items,
-    approvalRequests: approvalRequestStore.items,
-    auditLogs: auditLogStore.items,
-  };
-}
-
-async function ensureStateTable() {
-  if (!pgPool) return;
-  await pgPool.query(`
-    CREATE TABLE IF NOT EXISTS app_state (
-      key TEXT PRIMARY KEY,
-      value JSONB NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `);
-}
-
-function saveState() {
-  if (!pgPool) return;
-  const pool = pgPool;
-  const state = snapshotState();
-  saveQueue = saveQueue
-    .then(() => pool.query(
-      `INSERT INTO app_state (key, value, updated_at)
-       VALUES ($1, $2::jsonb, now())
-       ON CONFLICT (key)
-       DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-      [stateKey, JSON.stringify(state)],
-    ))
-    .catch(error => {
-      console.error('Failed to persist PostgreSQL app_state snapshot', error);
-    });
-}
-
-async function hydrateState() {
-  if (!pgPool) {
-    console.warn('DATABASE_URL is not set; using in-memory mock state only.');
-    return;
-  }
-  try {
-    await ensureStateTable();
-    const result = await pgPool.query<{ value: Partial<ReturnType<typeof snapshotState>> }>(
-      'SELECT value FROM app_state WHERE key = $1',
-      [stateKey],
-    );
-    if (!result.rows.length) {
-      saveState();
-      await saveQueue;
-      return;
+  // idSeq -> max purely-numeric id across all repositories.
+  let maxNumericId = idSeq;
+  const lists = await Promise.all(allRepos.map(r => r.list()));
+  for (const rows of lists) {
+    for (const row of rows) {
+      if (/^\d+$/.test(row.id)) {
+        const n = Number(row.id);
+        if (Number.isInteger(n) && n > maxNumericId) maxNumericId = n;
+      }
     }
-    const state = result.rows[0].value;
-    if (typeof state.idSeq === 'number') idSeq = state.idSeq;
-    if (typeof state.invoiceSeq === 'number') invoiceSeq = state.invoiceSeq;
-    replaceArray(resources, state.resources);
-    replaceArray(users, state.users);
-    replaceArray(requests, state.requests);
-    replaceArray(assignments, state.assignments);
-    replaceArray(timeEntryStore.items, state.timeEntries);
-    if (Array.isArray(state.languages)) languages = state.languages;
-    replaceArray(skillCatalogStore.items, state.skillCatalogs);
-    replaceArray(proficiencyStore.items, state.proficiencySets);
-    replaceArray(skillStore.items, state.skills);
-    replaceArray(roleStore.items, state.projectRoles);
-    if (Array.isArray(state.resourceOrganizations)) resourceOrganizations = state.resourceOrganizations;
-    if (Array.isArray(state.projects)) projects = state.projects;
-    replaceArray(partnerStore.items, state.projectPartners);
-    replaceArray(documentStore.items, state.projectDocuments);
-    replaceArray(workPackageStore.items, state.workPackages);
-    replaceArray(milestoneStore.items, state.milestones);
-    replaceArray(financialStore.items, state.projectFinancials);
-    replaceArray(projectCostCenterStore.items, state.projectCostCenters);
-    replaceArray(taskStore.items, state.projectTasks);
-    replaceArray(issueStore.items, state.projectIssues);
-    replaceArray(changeRequestStore.items, state.changeRequests);
-    replaceArray(costCenterStore.items, state.costCenters);
-    replaceArray(customerStore.items, state.customers);
-    replaceArray(contractStore.items, state.contracts);
-    replaceArray(orderStore.items, state.orders);
-    replaceArray(orderLineStore.items, state.orderLines);
-    replaceArray(billingPlanStore.items, state.billingPlanItems);
-    replaceArray(fxRateStore.items, state.fxRates);
-    replaceArray(approvalRequestStore.items, state.approvalRequests);
-    replaceArray(auditLogStore.items, state.auditLogs);
-    // INVOICE NUMBERING: reconcile the counter to the highest persisted invoice
-    // number for this year so a restart can never re-issue a used number, even
-    // if invoiceSeq was absent from an older snapshot.
-    reconcileInvoiceSeq();
-  } catch (error) {
-    console.error('Failed to hydrate PostgreSQL app_state; using seeded defaults in memory', error);
   }
-}
+  idSeq = maxNumericId;
 
-/** Bump invoiceSeq past the largest INV-<year>-NNNN currently stored. */
-function reconcileInvoiceSeq(): void {
+  // invoiceSeq -> max INV-<INVOICE_YEAR>-NNNN across orders.
   const prefix = `INV-${INVOICE_YEAR}-`;
   let maxSeq = invoiceSeq;
-  for (const o of orderStore.items) {
-    if (typeof o.invoiceNumber === 'string' && o.invoiceNumber.startsWith(prefix)) {
-      const n = Number(o.invoiceNumber.slice(prefix.length));
+  for (const order of await repos.orders.list()) {
+    if (typeof order.invoiceNumber === 'string' && order.invoiceNumber.startsWith(prefix)) {
+      const n = Number(order.invoiceNumber.slice(prefix.length));
       if (Number.isInteger(n) && n > maxSeq) maxSeq = n;
     }
   }
   invoiceSeq = maxSeq;
 }
 
-/**
- * AUDIT INTEGRITY: register every mutable collection so the audit middleware
- * can snapshot before/after on PUT/DELETE. Getters resolve the live binding so
- * `let`-reassigned collections (projects, languages, ...) stay correct.
- */
-function registerAuditStores(): void {
-  auditStores.set('resources', () => resources);
-  auditStores.set('requests', () => requests);
-  auditStores.set('assignments', () => assignments);
-  auditStores.set('time-entries', () => timeEntryStore.items);
-  auditStores.set('skill-catalogs', () => skillCatalogStore.items);
-  auditStores.set('proficiency-sets', () => proficiencyStore.items);
-  auditStores.set('skills', () => skillStore.items);
-  auditStores.set('project-roles', () => roleStore.items);
-  auditStores.set('resource-organizations', () => resourceOrganizations);
-  auditStores.set('projects', () => projects);
-  auditStores.set('project-partners', () => partnerStore.items);
-  auditStores.set('project-documents', () => documentStore.items);
-  auditStores.set('work-packages', () => workPackageStore.items);
-  auditStores.set('milestones', () => milestoneStore.items);
-  auditStores.set('project-financials', () => financialStore.items);
-  auditStores.set('project-cost-centers', () => projectCostCenterStore.items);
-  auditStores.set('project-tasks', () => taskStore.items);
-  auditStores.set('project-issues', () => issueStore.items);
-  auditStores.set('change-requests', () => changeRequestStore.items);
-  auditStores.set('cost-centers', () => costCenterStore.items);
-  auditStores.set('customers', () => customerStore.items);
-  auditStores.set('contracts', () => contractStore.items);
-  auditStores.set('orders', () => orderStore.items);
-  auditStores.set('order-lines', () => orderLineStore.items);
-  auditStores.set('billing-plan-items', () => billingPlanStore.items);
-  auditStores.set('approval-requests', () => approvalRequestStore.items);
-}
-registerAuditStores();
-
-await hydrateState();
+await initPersistence();
+await seedSequences();
 
 app.use('/api', apiRouter);
 // ------------------

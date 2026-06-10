@@ -22,6 +22,9 @@ import {
 import {
   computeProjectFinancials,
   FinanceData,
+  JournalEntry,
+  journalTotals,
+  recognitionJournal,
   recognitionSchedule,
   RecognitionPeriod,
 } from '../../services/finance.util';
@@ -441,6 +444,81 @@ interface BillingControlRow {
           }
         </div>
 
+        <!-- Journal Preview (#10) -->
+        <div class="command-card overflow-hidden">
+          <div class="command-card-header">
+            <div>
+              <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Journal Preview</h2>
+              <p class="mt-1 text-sm text-[var(--cc-muted)]">
+                Per-period double-entry postings derived from the recognition schedule above — preview before posting.
+                Revenue earned is <span class="font-semibold">Dr Unbilled AR / Cr Revenue</span>; advances are
+                <span class="font-semibold">Dr Cash / Cr Deferred Revenue</span> and amortise as work is earned.
+                Every entry is balanced by construction.
+              </p>
+            </div>
+            <span class="command-status shrink-0"
+                  [class.green]="journalTotalsRow().balanced"
+                  [class.red]="!journalTotalsRow().balanced">
+              <mat-icon class="text-[16px] w-[16px] h-[16px]">
+                {{ journalTotalsRow().balanced ? 'check_circle' : 'error' }}
+              </mat-icon>
+              {{ journalTotalsRow().balanced ? 'Balanced' : 'Out of balance' }}
+            </span>
+          </div>
+
+          @if (journalEntries().length) {
+            <div class="overflow-x-auto">
+              <table class="command-data-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Memo</th>
+                    <th>Account</th>
+                    <th class="text-right">Debit</th>
+                    <th class="text-right">Credit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (entry of journalEntries(); track entry.date) {
+                    @for (line of entry.lines; track $index; let first = $first) {
+                      <tr [class.border-t-2]="first" [class.border-slate-200]="first">
+                        <td class="font-mono font-semibold align-top">{{ first ? entry.date : '' }}</td>
+                        <td class="text-[var(--cc-muted)] align-top">{{ first ? entry.memo : '' }}</td>
+                        <td class="text-slate-700">{{ line.account }}</td>
+                        <td class="text-right font-mono tabular-nums"
+                            [class.text-slate-700]="line.debit > 0"
+                            [class.text-slate-300]="line.debit === 0">
+                          {{ line.debit > 0 ? (line.debit | currency: c.currency) : '—' }}
+                        </td>
+                        <td class="text-right font-mono tabular-nums"
+                            [class.text-slate-700]="line.credit > 0"
+                            [class.text-slate-300]="line.credit === 0">
+                          {{ line.credit > 0 ? (line.credit | currency: c.currency) : '—' }}
+                        </td>
+                      </tr>
+                    }
+                  }
+                </tbody>
+                <tfoot>
+                  <tr class="border-t-2 border-slate-300">
+                    <td class="font-semibold text-slate-700" colspan="3">Totals</td>
+                    <td class="text-right font-mono tabular-nums font-semibold text-slate-900">{{ journalTotalsRow().debit | currency: c.currency }}</td>
+                    <td class="text-right font-mono tabular-nums font-semibold text-slate-900">{{ journalTotalsRow().credit | currency: c.currency }}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+            <p class="command-note px-4 py-3">
+              Σ Debit {{ journalTotalsRow().debit | currency: c.currency }} = Σ Credit {{ journalTotalsRow().credit | currency: c.currency }}.
+              These entries are a preview and have not been posted to the ledger.
+            </p>
+          } @else {
+            <div class="command-empty px-6 sm:px-8 py-10 text-center text-slate-500">
+              No journal movement to preview — there is nothing recognized or deferred for this contract yet.
+            </div>
+          }
+        </div>
+
         <!-- Orders -->
         <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden transition-shadow hover:shadow-md">
           <div class="px-6 sm:px-8 py-5 border-b border-slate-200">
@@ -829,6 +907,20 @@ export class ContractDetails {
     if (max <= 0) return 0;
     return Math.max(0, Math.min(100, (Math.abs(row.recognized) / max) * 100));
   }
+
+  /**
+   * Balanced double-entry journal preview for this contract's rev-rec schedule —
+   * one entry per period with movement, built from the same window/filters as
+   * recognitionPeriods() so the postings reconcile with the schedule above.
+   */
+  journalEntries = computed<JournalEntry[]>(() => {
+    const window = this.recognitionWindow();
+    if (!window) return [];
+    return recognitionJournal(this.data(), window, { contractId: this.id() });
+  });
+
+  /** Σ debit / Σ credit across the whole preview, plus the balanced flag (within ε). */
+  journalTotalsRow = computed(() => journalTotals(this.journalEntries()));
 
   openBillingPlanForm(contract: Contract): void {
     this.billingPlanForm.reset({

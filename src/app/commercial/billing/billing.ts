@@ -62,7 +62,27 @@ interface BillingRow {
   readonly overdueDays: number;
   /** Compliant invoice number from the linked Order (server-set), when available. */
   readonly invoiceNumber: string | null;
+  /** Invoice date from the linked Order (server-set), when available. */
+  readonly invoiceDate: string | null;
+  /**
+   * #14 Capped not-to-exceed: true when the server flagged accrued T&M as having
+   * breached the cap (encoded as a `[CAP-EXCEEDED]` marker prefixing item.notes).
+   */
+  readonly capExceeded: boolean;
 }
+
+/**
+ * Issuer (supplier) identity printed on the invoice artifact. Static client-side
+ * stand-in for company master data — no new service dependency.
+ */
+const INVOICE_ISSUER = {
+  name: 'Key2 Consulting S.r.l.',
+  addressLines: ['Via Roma 1', '20121 Milano (MI)', 'Italia'],
+  vatId: 'IT01234567890',
+} as const;
+
+/** Marker the server (#14) prepends to `notes` when accrued T&M breaches the cap. */
+const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
 
 @Component({
   selector: 'app-billing',
@@ -283,6 +303,14 @@ interface BillingRow {
                           Overdue {{ row.overdueDays }}d
                         </span>
                       }
+                      @if (row.capExceeded) {
+                        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 ring-1 ring-amber-300"
+                              aria-label="Accrued time and materials exceeded the not-to-exceed cap"
+                              title="Accrued T&amp;M exceeded the not-to-exceed cap">
+                          <mat-icon class="text-[14px] w-[14px] h-[14px] leading-none" aria-hidden="true">warning</mat-icon>
+                          Cap exceeded
+                        </span>
+                      }
                     </div>
                   </td>
                   <td class="font-mono tabular-nums">
@@ -305,6 +333,13 @@ interface BillingRow {
                               (click)="openEdit(row.item)" [attr.aria-label]="'Edit ' + row.item.label" title="Edit">
                         <mat-icon class="text-[18px] w-[18px] h-[18px]">edit</mat-icon>
                       </button>
+                      @if (row.invoiceNumber) {
+                        <button type="button" class="p-1.5 rounded-lg text-slate-500 hover:text-indigo-700 hover:bg-indigo-50 transition-colors"
+                                (click)="openInvoice(row)"
+                                [attr.aria-label]="'View invoice ' + row.invoiceNumber + ' for ' + row.item.label" title="View invoice">
+                          <mat-icon class="text-[18px] w-[18px] h-[18px]">description</mat-icon>
+                        </button>
+                      }
                       @if (row.item.status === 'Ready') {
                         <button type="button" class="p-1.5 rounded-lg text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 transition-colors"
                                 (click)="generateInvoice(row.item)" [disabled]="busyId() === row.item.id"
@@ -493,6 +528,156 @@ interface BillingRow {
         </div>
       </div>
     }
+
+    <!-- #5 INVOICE DOCUMENT — printable artifact (window.print → PDF) -->
+    @if (invoiceRow(); as inv) {
+      <div class="invoice-overlay fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
+           role="dialog" aria-modal="true" aria-labelledby="invoiceDocTitle">
+        <div class="invoice-shell bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[92vh]">
+          <!-- Toolbar (screen only) -->
+          <div class="invoice-toolbar px-6 sm:px-8 py-4 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
+            <div>
+              <p class="command-eyebrow">Invoice document</p>
+              <h2 id="invoiceDocTitle" class="text-lg font-bold text-slate-900 tracking-tight">{{ inv.invoiceNumber }}</h2>
+            </div>
+            <div class="flex items-center gap-2">
+              <button type="button" class="command-button" (click)="printInvoice()"
+                      [attr.aria-label]="'Print invoice ' + inv.invoiceNumber + ' to PDF'">
+                <mat-icon class="text-[18px] w-[18px] h-[18px]">print</mat-icon>
+                Print / Save PDF
+              </button>
+              <button type="button" (click)="closeInvoice()" class="p-2 rounded-full text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-colors" aria-label="Close invoice">
+                <mat-icon>close</mat-icon>
+              </button>
+            </div>
+          </div>
+
+          <!-- The artifact (this is what prints) -->
+          <div class="invoice-scroll overflow-y-auto flex-1">
+            <article id="invoiceArtifact" class="invoice-doc p-8 sm:p-10 text-slate-900">
+              <!-- Header: issuer + invoice meta -->
+              <header class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-6 pb-6 border-b border-slate-200">
+                <div>
+                  <p class="text-xl font-bold tracking-tight">{{ issuer.name }}</p>
+                  <address class="not-italic text-sm text-slate-600 mt-1 leading-relaxed">
+                    @for (line of issuer.addressLines; track line) {
+                      <span class="block">{{ line }}</span>
+                    }
+                    <span class="block">VAT {{ issuer.vatId }}</span>
+                  </address>
+                </div>
+                <div class="sm:text-right">
+                  <p class="text-2xl font-bold tracking-tight">INVOICE</p>
+                  <dl class="mt-2 text-sm">
+                    <div class="flex sm:justify-end gap-2">
+                      <dt class="text-slate-500">No.</dt>
+                      <dd class="font-mono font-semibold tabular-nums">{{ inv.invoiceNumber }}</dd>
+                    </div>
+                    <div class="flex sm:justify-end gap-2">
+                      <dt class="text-slate-500">Date</dt>
+                      <dd class="font-mono tabular-nums">
+                        @if (inv.invoiceDate) { {{ inv.invoiceDate | date: 'mediumDate' }} } @else { &mdash; }
+                      </dd>
+                    </div>
+                    @if (inv.due) {
+                      <div class="flex sm:justify-end gap-2">
+                        <dt class="text-slate-500">Due</dt>
+                        <dd class="font-mono tabular-nums">{{ inv.due | date: 'mediumDate' }}</dd>
+                      </div>
+                    }
+                  </dl>
+                </div>
+              </header>
+
+              <!-- Bill-to + references -->
+              <section class="grid grid-cols-1 sm:grid-cols-2 gap-6 py-6">
+                <div>
+                  <p class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1.5">Bill to</p>
+                  @if (invoiceCustomer(); as customer) {
+                    <p class="text-sm font-semibold text-slate-900">{{ customer.name }}</p>
+                    @if (customer.country) {
+                      <p class="text-sm text-slate-600">{{ customer.country }}</p>
+                    }
+                  } @else {
+                    <p class="text-sm text-slate-500">&mdash;</p>
+                  }
+                </div>
+                <div class="sm:text-right">
+                  <p class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1.5">References</p>
+                  <p class="text-sm text-slate-700">{{ inv.contractName }}</p>
+                  @if (inv.projectName && inv.projectName !== '—') {
+                    <p class="text-sm text-slate-600">Project: {{ inv.projectName }}</p>
+                  }
+                </div>
+              </section>
+
+              <!-- Cap-exceeded notice (#14), if flagged -->
+              @if (inv.capExceeded) {
+                <p class="invoice-warn flex items-center gap-2 text-sm font-medium text-amber-800 bg-amber-50 ring-1 ring-amber-300 rounded-lg px-3 py-2 mb-4">
+                  <mat-icon class="text-[18px] w-[18px] h-[18px]" aria-hidden="true">warning</mat-icon>
+                  Accrued time &amp; materials have exceeded the not-to-exceed cap for this engagement.
+                </p>
+              }
+
+              <!-- Line items -->
+              <table class="w-full text-sm border-collapse">
+                <thead>
+                  <tr class="border-y border-slate-200 text-left">
+                    <th scope="col" class="py-2 pr-3 font-semibold text-slate-700">Description</th>
+                    <th scope="col" class="py-2 px-3 font-semibold text-slate-700">Type</th>
+                    <th scope="col" class="py-2 pl-3 text-right font-semibold text-slate-700">Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr class="border-b border-slate-100 align-top">
+                    <td class="py-3 pr-3">
+                      <p class="font-medium text-slate-900">{{ inv.item.label }}</p>
+                      <p class="text-xs text-slate-500 mt-0.5">{{ inv.trigger }}</p>
+                    </td>
+                    <td class="py-3 px-3 text-slate-600">{{ inv.meta.label }}</td>
+                    <td class="py-3 pl-3 text-right font-semibold tabular-nums"
+                        [class.text-rose-600]="inv.item.type === 'CreditNote'">
+                      {{ inv.item.amount | currency: inv.item.currency : 'symbol' : '1.2-2' }}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <!-- Totals -->
+              <section class="mt-6 flex justify-end">
+                <dl class="w-full sm:w-80 text-sm space-y-1.5">
+                  <div class="flex justify-between">
+                    <dt class="text-slate-600">Net</dt>
+                    <dd class="tabular-nums">{{ inv.item.amount | currency: inv.item.currency : 'symbol' : '1.2-2' }}</dd>
+                  </div>
+                  @if (inv.retention > 0) {
+                    <div class="flex justify-between text-slate-600">
+                      <dt>Retention ({{ (inv.item.retentionPct ?? 0) / 100 | percent: '1.0-0' }})</dt>
+                      <dd class="tabular-nums">-{{ inv.retention | currency: inv.item.currency : 'symbol' : '1.2-2' }}</dd>
+                    </div>
+                  }
+                  <div class="flex justify-between text-slate-600">
+                    <dt>Tax / IVA ({{ (inv.item.taxRatePct ?? 0) / 100 | percent: '1.0-0' }})</dt>
+                    <dd class="tabular-nums">{{ inv.tax | currency: inv.item.currency : 'symbol' : '1.2-2' }}</dd>
+                  </div>
+                  <div class="flex justify-between border-t border-slate-300 pt-2 mt-1 text-base font-bold text-slate-900">
+                    <dt>Total due</dt>
+                    <dd class="tabular-nums">{{ inv.netPayable | currency: inv.item.currency : 'symbol' : '1.2-2' }}</dd>
+                  </div>
+                </dl>
+              </section>
+
+              <footer class="mt-10 pt-4 border-t border-slate-200 text-xs text-slate-500">
+                <p>Invoice {{ inv.invoiceNumber }} &middot; {{ issuer.name }} &middot; VAT {{ issuer.vatId }}</p>
+                @if (inv.item.paymentTermsDays) {
+                  <p class="mt-0.5">Payment terms: net {{ inv.item.paymentTermsDays }} days.</p>
+                }
+              </footer>
+            </article>
+          </div>
+        </div>
+      </div>
+    }
   `,
   styles: [`
     .cc-input {
@@ -525,6 +710,41 @@ interface BillingRow {
       outline-offset: 2px;
     }
     .cc-checkbox:disabled { cursor: not-allowed; opacity: 0.5; }
+
+    /* #5 Invoice document — print-to-PDF. On screen it is a normal modal; when
+       printing, everything except the artifact is hidden so a single clean
+       invoice page is produced. */
+    @media print {
+      /* Hide the whole app shell; the overlay below is re-shown unstyled. */
+      :host { display: contents; }
+      .command-page { display: none !important; }
+      .invoice-overlay {
+        position: static !important;
+        inset: auto !important;
+        padding: 0 !important;
+        background: #ffffff !important;
+        backdrop-filter: none !important;
+        overflow: visible !important;
+        display: block !important;
+        z-index: auto !important;
+      }
+      .invoice-shell {
+        max-width: none !important;
+        width: auto !important;
+        max-height: none !important;
+        border: 0 !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        overflow: visible !important;
+      }
+      .invoice-toolbar { display: none !important; }
+      .invoice-scroll { overflow: visible !important; }
+      .invoice-doc {
+        padding: 0 !important;
+        color: #000000 !important;
+      }
+      @page { margin: 16mm; }
+    }
   `],
 })
 export class Billing {
@@ -585,6 +805,18 @@ export class Billing {
   readonly saving = signal(false);
   readonly busyId = signal<string | null>(null);
 
+  // --- #5 invoice document (printable) ---
+  readonly issuer = INVOICE_ISSUER;
+  /** The row whose invoice artifact is currently shown for print-to-PDF, or null. */
+  readonly invoiceRow = signal<BillingRow | null>(null);
+  /** Customer (bill-to) resolved for the open invoice, via contract → customer. */
+  readonly invoiceCustomer = computed<Customer | null>(() => {
+    const row = this.invoiceRow();
+    if (!row) return null;
+    const contract = this.contractsById().get(row.item.contractId);
+    return contract ? this.customersById().get(contract.customerId) ?? null : null;
+  });
+
   // --- batch invoicing selection (Ready rows only) ---
   readonly selectedIds = signal<ReadonlySet<string>>(new Set<string>());
   readonly batchRunning = signal(false);
@@ -639,6 +871,7 @@ export class Billing {
         const contractName = contract
           ? customerName ? `${contract.name} · ${customerName}` : contract.name
           : item.contractId;
+        const order = item.orderId ? orders.get(item.orderId) : undefined;
         return {
           item,
           meta: this.metaByType.get(item.type) ?? TYPE_META[0],
@@ -650,7 +883,9 @@ export class Billing {
           netPayable: item.amount - retention + tax,
           due: this.dueOf(item),
           overdueDays: this.overdueDaysOf(item),
-          invoiceNumber: item.orderId ? orders.get(item.orderId)?.invoiceNumber ?? null : null,
+          invoiceNumber: order?.invoiceNumber ?? null,
+          invoiceDate: order?.invoiceDate ?? null,
+          capExceeded: (item.notes ?? '').includes(CAP_EXCEEDED_FLAG),
         };
       });
   });
@@ -805,6 +1040,27 @@ export class Billing {
   closeForm(): void {
     this.showForm.set(false);
     this.editingId.set(null);
+  }
+
+  // --- #5 invoice document lifecycle ---
+  /** Open the printable invoice artifact for a row that carries an invoice number. */
+  openInvoice(row: BillingRow): void {
+    if (!row.invoiceNumber) return;
+    this.invoiceRow.set(row);
+  }
+
+  closeInvoice(): void {
+    this.invoiceRow.set(null);
+  }
+
+  /**
+   * Trigger the browser's print-to-PDF for the invoice artifact. The @media print
+   * rules below hide the rest of the app so only the invoice prints. Browser-only
+   * (SSR-safe): no-op on the server where window is unavailable.
+   */
+  printInvoice(): void {
+    if (!this.isBrowser) return;
+    window.print();
   }
 
   save(): void {

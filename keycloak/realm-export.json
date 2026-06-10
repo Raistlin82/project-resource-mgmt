@@ -1,0 +1,111 @@
+{
+  "realm": "psa",
+  "enabled": true,
+  "displayName": "PSA (Professional Services Automation)",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "roles": {
+    "realm": [
+      { "name": "employee", "description": "Base role: any authenticated employee." },
+      { "name": "pm", "description": "Project manager." },
+      { "name": "resource-manager", "description": "Resource manager." },
+      { "name": "delivery-executive", "description": "Delivery executive (broad approval authority)." },
+      { "name": "finance", "description": "Finance / financial approver." },
+      { "name": "sales", "description": "Sales / commercial." },
+      { "name": "admin", "description": "Administrator (highest privilege)." }
+    ]
+  },
+  "defaultRole": {
+    "name": "default-roles-psa",
+    "description": "${role_default-roles}",
+    "composite": true,
+    "composites": {
+      "realm": ["employee"],
+      "client": {
+        "account": ["view-profile", "manage-account"]
+      }
+    }
+  },
+  "requiredCredentials": ["password"],
+  "clients": [
+    {
+      "clientId": "psa-web",
+      "name": "PSA Web (Angular SPA)",
+      "description": "Public SPA client. Authorization Code Flow + PKCE (S256).",
+      "enabled": true,
+      "publicClient": true,
+      "protocol": "openid-connect",
+      "rootUrl": "http://localhost:3000",
+      "baseUrl": "http://localhost:3000",
+      "adminUrl": "http://localhost:3000",
+      "redirectUris": ["http://localhost:3000/*"],
+      "webOrigins": ["http://localhost:3000", "+"],
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "fullScopeAllowed": true,
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:3000/*"
+      },
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "offline_access"
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "julie",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Julie",
+      "lastName": "Delivery",
+      "email": "julie@example.com",
+      "credentials": [
+        { "type": "password", "value": "julie", "temporary": false }
+      ],
+      "realmRoles": ["default-roles-psa", "delivery-executive"]
+    },
+    {
+      "username": "john",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "John",
+      "lastName": "Finance",
+      "email": "john@example.com",
+      "credentials": [
+        { "type": "password", "value": "john", "temporary": false }
+      ],
+      "realmRoles": ["default-roles-psa", "finance"]
+    },
+    {
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Manager",
+      "email": "alice@example.com",
+      "credentials": [
+        { "type": "password", "value": "alice", "temporary": false }
+      ],
+      "realmRoles": ["default-roles-psa", "pm"]
+    }
+  ]
+}

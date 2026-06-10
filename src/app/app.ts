@@ -10,7 +10,6 @@ import {
   Issue,
   Resource,
   ResourceRequest,
-  User,
 } from './services/api.service';
 import { AuthService } from './services/auth.service';
 import { NotificationService } from './services/notification.service';
@@ -172,16 +171,33 @@ interface NavState {
         </nav>
 
         <div class="sticky bottom-0 border-t border-slate-200 bg-white p-4">
-          <label for="demoUser" class="command-section-label mb-2 block px-1">Demo Identity</label>
-          <select
-            id="demoUser"
-            [value]="selectedUserKey()"
-            (change)="switchUser($event)"
-            class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/25">
-            @for (user of users(); track user.id) {
-              <option [value]="user.resourceId + '|' + user.role">{{ user.name }} · {{ user.role }}</option>
-            }
-          </select>
+          @if (isAuthenticated()) {
+            <div class="flex items-center gap-3">
+              <span class="grid size-9 shrink-0 place-items-center rounded-full border border-blue-200 bg-blue-50 text-blue-600 ring-1 ring-blue-200">
+                <mat-icon class="text-[20px] w-[20px] h-[20px]">account_circle</mat-icon>
+              </span>
+              <div class="min-w-0 flex-1">
+                <div class="truncate text-sm font-semibold text-slate-900">{{ displayName() }}</div>
+                <div class="truncate text-[11px] uppercase tracking-wide text-slate-500">{{ role() }}</div>
+              </div>
+              <button
+                type="button"
+                (click)="signOut()"
+                class="grid size-9 shrink-0 place-items-center rounded-md border border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-900 transition-colors"
+                aria-label="Sign out"
+                title="Sign out">
+                <mat-icon class="text-[20px] w-[20px] h-[20px]">logout</mat-icon>
+              </button>
+            </div>
+          } @else {
+            <button
+              type="button"
+              (click)="signIn()"
+              class="flex w-full items-center justify-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white outline-none transition-colors hover:bg-blue-700 focus:ring-2 focus:ring-blue-500/40">
+              <mat-icon class="text-[20px] w-[20px] h-[20px]">login</mat-icon>
+              Sign in
+            </button>
+          }
         </div>
       </aside>
 
@@ -282,7 +298,6 @@ export class App {
     },
   ];
 
-  private usersRes = rxResource({ stream: () => this.api.getUsers(), defaultValue: [] as User[] });
   private navRes = rxResource<NavState, unknown>({
     stream: () => forkJoin({
       requests: this.api.getRequests(),
@@ -293,7 +308,11 @@ export class App {
     defaultValue: { requests: [], issues: [], changes: [], resources: [] },
   });
 
-  users = this.usersRes.value;
+  // Auth state surfaced to the sidebar footer control.
+  readonly isAuthenticated = this.auth.isAuthenticated;
+  readonly displayName = this.auth.displayName;
+  readonly role = this.auth.role;
+
   isMobileMenuOpen = signal(false);
 
   // Live filter for the nav.
@@ -392,14 +411,12 @@ export class App {
     this.notifications.dismiss(id);
   }
 
-  selectedUserKey(): string {
-    return `${this.auth.userId()}|${this.auth.role()}`;
+  signIn(): void {
+    this.auth.login();
   }
 
-  switchUser(event: Event): void {
-    const [resourceId, role] = (event.target as HTMLSelectElement).value.split('|') as [string, User['role']];
-    this.auth.setUser(resourceId, role);
-    this.notifications.show(`Demo identity switched to ${role}`, 'info');
+  signOut(): void {
+    this.auth.logout();
   }
 
   badgeValue(key?: NavBadge): number {

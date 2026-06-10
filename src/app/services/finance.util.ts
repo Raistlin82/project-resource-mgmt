@@ -920,3 +920,683 @@ export function portfolioTotalsInBase(d: FinanceData): PortfolioTotals {
     retentionHeld: finite(retention),
   };
 }
+
+// --- Revenue-recognition JOURNAL preview (#10) -------------------------------
+//
+// Turns the dated recognitionSchedule into a double-entry journal so a finance
+// reviewer can see the postings BEFORE they are booked. The schedule already
+// resolves the period in which revenue is earned per obligation pattern (POC,
+// straight-line, as-incurred, …); this layer expresses each period's movement
+// as balanced Dr/Cr lines. The accounting model (simplified, ASC 606 / IFRS 15
+// shaped) is:
+//
+//   • Revenue earned in a period         -> Dr Unbilled AR   / Cr Revenue
+//     (POC / Milestone / Recurring slice / T&M-as-incurred / Expense pass-through;
+//      a CreditNote earns negative revenue, i.e. Dr Revenue / Cr Unbilled AR — it
+//      is the same line with a negative `recognized`, so signs flip naturally.)
+//   • Advance (down payment) billed/paid -> Dr Cash          / Cr Deferred Revenue
+//   • As revenue is earned against a held -> Dr Deferred Rev. / Cr Unbilled AR
+//     advance, the prepayment is amortised   (capped at the deferred balance and
+//     at the revenue earned this period, so deferred never goes negative)
+//
+// Because every JournalLine pair within an entry is equal-and-opposite, the
+// whole preview is balanced by construction: Σ debit === Σ credit. Expense
+// pass-through "with markup" is carried by the schedule's as-incurred billRate
+// (billRate already embeds margin over costRate), so the recognised revenue here
+// reconciles exactly with recognitionSchedule / recognizedRevenue.
+
+/** Canonical ledger account names used by the rev-rec journal preview. */
+export const JOURNAL_ACCOUNTS = {
+  unbilledAr: 'Unbilled AR',
+  revenue: 'Revenue',
+  cash: 'Cash/AR',
+  deferredRevenue: 'Deferred Revenue',
+} as const;
+
+export interface JournalLine {
+  account: string;
+  /** Debit amount (>= 0). Exactly one of debit/credit is non-zero on a line. */
+  debit: number;
+  /** Credit amount (>= 0). */
+  credit: number;
+}
+
+export interface JournalEntry {
+  /** Period the posting lands in (YYYY-MM, from the recognition schedule). */
+  date: string;
+  memo: string;
+  lines: JournalLine[];
+}
+
+/**
+ * Emit a debit and an equal credit as two lines. A NEGATIVE amount (e.g. a
+ * CreditNote's negative revenue) is normalised by swapping the accounts so both
+ * line amounts stay non-negative while preserving the economic direction.
+ */
+function balancedPair(debitAccount: string, creditAccount: string, amount: number): JournalLine[] {
+  const a = finite(amount);
+  if (a >= 0) {
+    return [
+      { account: debitAccount, debit: a, credit: 0 },
+      { account: creditAccount, debit: 0, credit: a },
+    ];
+  }
+  const abs = -a;
+  return [
+    { account: creditAccount, debit: abs, credit: 0 },
+    { account: debitAccount, debit: 0, credit: abs },
+  ];
+}
+
+/**
+ * Per-period advance amounts billed (Invoiced/Paid) within the schedule window,
+ * using the SAME placement rule as recognitionSchedule (recognitionPeriodFor,
+ * clamped into range) and the SAME raw-amount basis (the schedule itself is
+ * currency-naive — it sums item amounts as-is — so the journal stays exactly
+ * reconciled with it). Returned aligned to `periodList`.
+ */
+function advanceBilledByPeriod(data: FinanceData, periodList: readonly string[], opts: ScheduleOpts): number[] {
+  const out = new Array<number>(periodList.length).fill(0);
+  const index = new Map(periodList.map((p, i) => [p, i]));
+  const items = (data.billingItems ?? []).filter(
+    i =>
+      i.type === 'Advance' &&
+      BILLED_STATUSES.has(i.status) &&
+      (opts.projectId === undefined || i.projectId === opts.projectId) &&
+      (opts.contractId === undefined || i.contractId === opts.contractId),
+  );
+  for (const item of items) {
+    const p = clampPeriod(recognitionPeriodFor(item, data), [...periodList]);
+    const i = index.get(p);
+    if (i !== undefined) out[i] += finite(item.amount);
+  }
+  return out;
+}
+
+/**
+ * Build a balanced double-entry journal PREVIEW for the rev-rec schedule over
+ * `periods` (an explicit YYYY-MM list, or a {from,to} pair). One entry per
+ * period that has movement; periods with no recognition and no advance activity
+ * are omitted. Amounts use the SAME basis as recognitionSchedule — which sums
+ * billing-item amounts as-is — so the per-period revenue here reconciles exactly
+ * with recognitionSchedule run over the same window/filters. (Per the source's
+ * design, the dated schedule is currency-naive; FX normalisation lives in the
+ * snapshot rollups such as recognizedRevenue / portfolioTotalsInBase.)
+ *
+ * Guarantee: Σ of all debits === Σ of all credits (see journalIsBalanced).
+ */
+export function recognitionJournal(
+  data: FinanceData,
+  periods: readonly string[] | { from: string; to: string },
+  opts: ScheduleOpts = {},
+): JournalEntry[] {
+  const rows = recognitionSchedule(data, periods, opts);
+  if (rows.length === 0) return [];
+  const advances = advanceBilledByPeriod(data, rows.map(r => r.period), opts);
+
+  const entries: JournalEntry[] = [];
+  let deferredBalance = 0; // unearned advance carried forward
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const recognized = finite(row.recognized);
+    const advanceBilled = finite(advances[i]);
+    const lines: JournalLine[] = [];
+
+    // 1) Advance billed this period: cash in, deferred (unearned) revenue up.
+    if (advanceBilled !== 0) {
+      lines.push(...balancedPair(JOURNAL_ACCOUNTS.cash, JOURNAL_ACCOUNTS.deferredRevenue, advanceBilled));
+      deferredBalance += advanceBilled;
+    }
+
+    // 2) Revenue earned this period: unbilled AR up, revenue up (signs flip for
+    //    a credit note via balancedPair).
+    if (recognized !== 0) {
+      lines.push(...balancedPair(JOURNAL_ACCOUNTS.unbilledAr, JOURNAL_ACCOUNTS.revenue, recognized));
+    }
+
+    // 3) Amortise held advance against revenue earned this period (only positive
+    //    recognition draws down a prepayment; capped so deferred never < 0).
+    if (recognized > 0 && deferredBalance > 0) {
+      const amortised = Math.min(recognized, deferredBalance);
+      lines.push(...balancedPair(JOURNAL_ACCOUNTS.deferredRevenue, JOURNAL_ACCOUNTS.unbilledAr, amortised));
+      deferredBalance -= amortised;
+    }
+
+    if (lines.length > 0) {
+      entries.push({
+        date: row.period,
+        memo: `Revenue recognition ${row.period}`,
+        lines,
+      });
+    }
+  }
+  return entries;
+}
+
+/** Σ debit and Σ credit across a journal, plus whether they balance (within ε). */
+export function journalTotals(entries: readonly JournalEntry[]): { debit: number; credit: number; balanced: boolean } {
+  let debit = 0;
+  let credit = 0;
+  for (const e of entries) {
+    for (const l of e.lines) {
+      debit += finite(l.debit);
+      credit += finite(l.credit);
+    }
+  }
+  return { debit: finite(debit), credit: finite(credit), balanced: Math.abs(debit - credit) < 1e-6 };
+}
+
+/** True when Σ debit === Σ credit across the whole journal (within floating-point ε). */
+export function journalIsBalanced(entries: readonly JournalEntry[]): boolean {
+  return journalTotals(entries).balanced;
+}
+
+// --- Realization & productivity ----------------------------------------------
+//
+// Realization measures how much of the standard ("rack rate") bill value of
+// delivered effort is actually turning into revenue — the classic services lever
+// where discounts, write-offs, fixed-price overruns and unbilled WIP erode the
+// theoretical value of hours worked. Revenue-per-FTE is a headline productivity
+// metric (revenue divided by people, however "people" is measured).
+//
+//   standardBillValue = Σ approved hours × resource billRate   (the rate card)
+//   realizationPct    = recognised (earned) revenue / standardBillValue × 100
+//   revenuePerFte     = revenue / FTE  (FTE = headcount, or capacity-derived)
+
+export interface RealizationMetrics {
+  /** Revenue used as the numerator (recognised revenue for the project). */
+  revenue: number;
+  /** Σ approved time-entry hours for the project. */
+  hours: number;
+  /** Σ approved hours × resource billRate (rate-card value of the effort). */
+  standardBillValue: number;
+  /** revenue / standardBillValue × 100 (0 when there is no standard value). */
+  realizationPct: number;
+  /** Distinct resources that logged approved time on the project. */
+  headcount: number;
+  /**
+   * Full-time-equivalents implied by approved hours over `hoursPerFte`
+   * (0 when hoursPerFte <= 0). Lets revenue-per-FTE use a delivery-effort FTE
+   * rather than a raw headcount when a period basis is supplied.
+   */
+  fte: number;
+  /** revenue / headcount (0 when no headcount). */
+  revenuePerHead: number;
+  /** revenue / fte (falls back to revenue/headcount when no hours basis given). */
+  revenuePerFte: number;
+}
+
+/**
+ * Realization and productivity for a project. `revenue` defaults to recognised
+ * revenue (POC/realised) — the value actually earned — which is the right
+ * numerator for "how much of the rate-card did we realise". Pass a different
+ * basis (e.g. billedToDate) via `revenueOverride` if a cash/billed view is
+ * wanted. `hoursPerFte` (e.g. 160/month, 1800/year) converts approved hours into
+ * an FTE denominator; omit it and revenue-per-FTE falls back to revenue-per-head.
+ */
+export function realizationMetrics(
+  projectId: string,
+  d: FinanceData,
+  opts: { hoursPerFte?: number; revenueOverride?: number } = {},
+): RealizationMetrics {
+  const approved = (d.timeEntries ?? []).filter(t => t.projectId === projectId && t.status === 'Approved');
+  const hours = sum(approved.map(t => finite(t.hours)));
+  const standardBillValue = sum(
+    approved.map(t => finite(t.hours) * (d.resources.find(r => r.id === t.resourceId)?.billRate ?? 0)),
+  );
+  const headcount = new Set(approved.map(t => t.resourceId)).size;
+  const revenue = finite(opts.revenueOverride ?? recognizedRevenue(projectId, d));
+
+  const hoursPerFte = finite(opts.hoursPerFte ?? 0);
+  const fte = hoursPerFte > 0 ? hours / hoursPerFte : 0;
+
+  const revenuePerHead = headcount > 0 ? revenue / headcount : 0;
+  const revenuePerFte = fte > 0 ? revenue / fte : revenuePerHead;
+
+  return {
+    revenue,
+    hours,
+    standardBillValue: finite(standardBillValue),
+    realizationPct: standardBillValue > 0 ? finite((revenue / standardBillValue) * 100) : 0,
+    headcount,
+    fte: finite(fte),
+    revenuePerHead: finite(revenuePerHead),
+    revenuePerFte: finite(revenuePerFte),
+  };
+}
+
+// --- Customer profitability & concentration ----------------------------------
+//
+// Rolls project-level financials up to the CUSTOMER by walking
+// project -> contract -> customer (Project.contractId -> Contract.customerId).
+// Projects whose customer cannot be resolved are grouped under a synthetic
+// 'unknown' customer so no revenue/cost is dropped. Concentration then measures
+// how lopsided the customer revenue base is (single-customer dependency risk).
+
+export interface CustomerProfitabilityRow {
+  customerId: string;
+  customerName: string;
+  revenue: number;
+  cost: number;       // actualCost (labor + external) across the customer's projects
+  margin: number;     // revenue − cost
+  marginPct: number;  // margin / revenue × 100 (0 when no revenue)
+  projectIds: string[];
+}
+
+/** Resolve the universe of project ids referenced anywhere in the finance data. */
+function allProjectIds(d: FinanceData): string[] {
+  const ids = new Set<string>();
+  for (const f of d.financials) ids.add(f.projectId);
+  for (const l of d.orderLines) ids.add(l.projectId);
+  for (const r of d.requests) { if (r.projectId) ids.add(r.projectId); }
+  for (const i of d.billingItems ?? []) { if (i.projectId) ids.add(i.projectId); }
+  for (const c of d.changeRequests ?? []) ids.add(c.projectId);
+  return [...ids];
+}
+
+/**
+ * Per-customer revenue / cost / margin across every project attributable to the
+ * customer. Revenue and cost reuse computeProjectFinancials (so FX, POC, planned
+ * vs actual labor all behave identically). Projects with no resolvable customer
+ * land under 'unknown'. Rows are sorted by descending revenue.
+ */
+export function customerProfitability(d: FinanceData): CustomerProfitabilityRow[] {
+  const projectToContract = new Map((d.projects ?? []).map(p => [p.id, p.contractId]));
+  const contractToCustomer = new Map((d.contracts ?? []).map(c => [c.id, c.customerId]));
+  const customerName = new Map((d.customers ?? []).map(c => [c.id, c.name]));
+
+  const acc = new Map<string, { revenue: number; cost: number; projectIds: string[] }>();
+  for (const projectId of allProjectIds(d)) {
+    const contractId = projectToContract.get(projectId);
+    const customerId = (contractId && contractToCustomer.get(contractId)) || 'unknown';
+    const f = computeProjectFinancials(projectId, d);
+    const entry = acc.get(customerId) ?? { revenue: 0, cost: 0, projectIds: [] };
+    entry.revenue += finite(f.revenue);
+    entry.cost += finite(f.actualCost);
+    entry.projectIds.push(projectId);
+    acc.set(customerId, entry);
+  }
+
+  return [...acc.entries()]
+    .map(([customerId, e]) => {
+      const margin = e.revenue - e.cost;
+      return {
+        customerId,
+        customerName: customerName.get(customerId) ?? (customerId === 'unknown' ? 'Unknown' : customerId),
+        revenue: finite(e.revenue),
+        cost: finite(e.cost),
+        margin: finite(margin),
+        marginPct: e.revenue > 0 ? finite((margin / e.revenue) * 100) : 0,
+        projectIds: e.projectIds.sort(),
+      };
+    })
+    .sort((a, b) => b.revenue - a.revenue);
+}
+
+export interface CustomerConcentration {
+  /** Σ revenue across all customers (base currency when fxRates present). */
+  totalRevenue: number;
+  /** Number of customers with non-zero revenue. */
+  customerCount: number;
+  /** Customer id with the largest revenue (undefined when nothing to measure). */
+  topCustomerId?: string;
+  topCustomerName?: string;
+  /** Largest customer's revenue share of the total, 0-100 (0 when no revenue). */
+  topCustomerSharePct: number;
+  /** Combined share of the top-3 customers, 0-100. */
+  top3SharePct: number;
+  /**
+   * Herfindahl-Hirschman Index of revenue shares, on a 0-10000 scale (Σ share²
+   * with shares in percent). 10000 = a single customer (100%²); lower = more
+   * diversified. 0 when there is no revenue.
+   */
+  hhi: number;
+}
+
+/**
+ * Revenue-concentration risk across customers. Shares are computed on POSITIVE
+ * customer revenue only (a customer net-negative from credit notes contributes 0
+ * to concentration rather than a nonsensical negative share). With a single
+ * paying customer the top share and HHI are both maxed (100% / 10000).
+ */
+export function customerConcentration(d: FinanceData): CustomerConcentration {
+  const rows = customerProfitability(d)
+    .map(r => ({ ...r, revenue: Math.max(0, finite(r.revenue)) }))
+    .filter(r => r.revenue > 0)
+    .sort((a, b) => b.revenue - a.revenue);
+
+  const totalRevenue = sum(rows.map(r => r.revenue));
+  if (totalRevenue <= 0 || rows.length === 0) {
+    return { totalRevenue: 0, customerCount: 0, topCustomerSharePct: 0, top3SharePct: 0, hhi: 0 };
+  }
+
+  const shares = rows.map(r => (r.revenue / totalRevenue) * 100);
+  const hhi = sum(shares.map(s => s * s));
+  const top3SharePct = sum(shares.slice(0, 3));
+
+  return {
+    totalRevenue: finite(totalRevenue),
+    customerCount: rows.length,
+    topCustomerId: rows[0].customerId,
+    topCustomerName: rows[0].customerName,
+    topCustomerSharePct: finite(shares[0]),
+    top3SharePct: finite(top3SharePct),
+    hhi: finite(hhi),
+  };
+}
+
+// --- Margin-compression alerts -----------------------------------------------
+//
+// Flags projects (and customers) whose profitability is thin or eroding. Two
+// independent triggers, each graded:
+//   • marginPct at/below a target  -> the further below, the more severe
+//   • bill-vs-cost spread thin     -> (revenue − cost) / revenue, i.e. the same
+//     gross-margin ratio; a project barely clearing cost is fragile even if it
+//     technically meets a low target.
+// Severity escalates with how far below target the margin sits.
+
+export type AlertSeverity = 'none' | 'low' | 'medium' | 'high';
+
+export interface MarginCompressionConfig {
+  /** Margin % at or below which a project is flagged (default 15%). */
+  marginTargetPct: number;
+  /** Gross spread % below which the bill-vs-cost spread is "thin" (default 10%). */
+  thinSpreadPct: number;
+  /** Margin gap (target − actual, in pts) at/above which severity is 'high' (default 15). */
+  highGapPts: number;
+  /** Margin gap at/above which severity is 'medium' (default 7). */
+  mediumGapPts: number;
+}
+
+export const DEFAULT_MARGIN_COMPRESSION_CONFIG: MarginCompressionConfig = {
+  marginTargetPct: 15,
+  thinSpreadPct: 10,
+  highGapPts: 15,
+  mediumGapPts: 7,
+};
+
+export interface MarginCompressionAlert {
+  scope: 'project' | 'customer';
+  id: string;
+  name?: string;
+  revenue: number;
+  cost: number;
+  marginPct: number;
+  /** target − marginPct in points; positive means below target. */
+  gapPts: number;
+  belowTarget: boolean;
+  thinSpread: boolean;
+  severity: AlertSeverity;
+  reasons: string[];
+}
+
+/** Grade severity from how many points margin sits below target (and thin-spread). */
+function gradeSeverity(gapPts: number, thinSpread: boolean, cfg: MarginCompressionConfig): AlertSeverity {
+  if (gapPts >= cfg.highGapPts) return 'high';
+  if (gapPts >= cfg.mediumGapPts) return 'medium';
+  if (gapPts > 0 || thinSpread) return 'low';
+  return 'none';
+}
+
+function evaluateCompression(
+  scope: 'project' | 'customer',
+  id: string,
+  name: string | undefined,
+  revenue: number,
+  cost: number,
+  marginPct: number,
+  cfg: MarginCompressionConfig,
+): MarginCompressionAlert | null {
+  // No revenue => nothing to compress (consistent with projectAlerts).
+  if (revenue <= 0) return null;
+  const spreadPct = ((revenue - cost) / revenue) * 100;
+  const gapPts = cfg.marginTargetPct - marginPct;
+  const belowTarget = marginPct <= cfg.marginTargetPct;
+  const thinSpread = spreadPct < cfg.thinSpreadPct;
+  if (!belowTarget && !thinSpread) return null;
+
+  const reasons: string[] = [];
+  if (belowTarget) reasons.push(`Margin ${marginPct.toFixed(1)}% is at or below target ${cfg.marginTargetPct}%`);
+  if (thinSpread) reasons.push(`Bill-vs-cost spread ${spreadPct.toFixed(1)}% is thin (< ${cfg.thinSpreadPct}%)`);
+
+  return {
+    scope,
+    id,
+    name,
+    revenue: finite(revenue),
+    cost: finite(cost),
+    marginPct: finite(marginPct),
+    gapPts: finite(gapPts),
+    belowTarget,
+    thinSpread,
+    severity: gradeSeverity(gapPts, thinSpread, cfg),
+    reasons,
+  };
+}
+
+/**
+ * Scan projects and/or customers for margin compression. By default both scopes
+ * are evaluated; pass `scopes` to restrict. Project rows are labelled from
+ * d.projects, customer rows from d.customers. Results are sorted most-severe
+ * first (high→low), then by largest margin gap, so the worst offenders surface.
+ */
+export function marginCompressionAlerts(
+  d: FinanceData,
+  config: Partial<MarginCompressionConfig> = {},
+  scopes: readonly ('project' | 'customer')[] = ['project', 'customer'],
+): MarginCompressionAlert[] {
+  const cfg: MarginCompressionConfig = { ...DEFAULT_MARGIN_COMPRESSION_CONFIG, ...config };
+  const projectName = new Map((d.projects ?? []).map(p => [p.id, p.name]));
+  const out: MarginCompressionAlert[] = [];
+
+  if (scopes.includes('project')) {
+    for (const projectId of allProjectIds(d).sort()) {
+      const f = computeProjectFinancials(projectId, d);
+      const alert = evaluateCompression('project', projectId, projectName.get(projectId), f.revenue, f.actualCost, f.marginPct, cfg);
+      if (alert) out.push(alert);
+    }
+  }
+
+  if (scopes.includes('customer')) {
+    for (const row of customerProfitability(d)) {
+      const alert = evaluateCompression('customer', row.customerId, row.customerName, row.revenue, row.cost, row.marginPct, cfg);
+      if (alert) out.push(alert);
+    }
+  }
+
+  const rank: Record<AlertSeverity, number> = { high: 3, medium: 2, low: 1, none: 0 };
+  return out.sort((a, b) => rank[b.severity] - rank[a.severity] || b.gapPts - a.gapPts);
+}
+
+// --- Real period deltas (#15 support) ----------------------------------------
+//
+// Trend helpers that NEVER fabricate a prior value. periodDelta computes the
+// change between a current and a previous reading; when the previous value is
+// genuinely unknown (null) it returns a delta of null and trend 'flat' is NOT
+// implied — callers should HIDE the trend indicator entirely. The companion
+// derivers compute a prior-period figure only from dated source rows; when the
+// requested prior window has no data to compute from, they return null so the
+// distinction between "no change" (0) and "no prior data" (null) is preserved.
+
+export type TrendDirection = 'up' | 'down' | 'flat';
+
+export interface PeriodDelta {
+  current: number;
+  /** Previous reading, or null when not derivable. */
+  previous: number | null;
+  /** current − previous, or null when previous is null. */
+  delta: number | null;
+  /** Percentage change vs previous, or null when previous is null/0. */
+  deltaPct: number | null;
+  /** Direction of change, or null when previous is null (caller should hide). */
+  direction: TrendDirection | null;
+}
+
+/**
+ * Compare a current reading against a previous one WITHOUT inventing data. When
+ * `previous` is null (no prior period available) every derived field is null and
+ * `direction` is null — the caller must render "no trend" rather than a flat or
+ * fabricated arrow. `epsilon` (default 0) is the dead-band within which a change
+ * counts as 'flat'. deltaPct is null when previous is 0 (undefined growth).
+ */
+export function periodDelta(current: number, previous: number | null, epsilon = 0): PeriodDelta {
+  const cur = finite(current);
+  if (previous === null || previous === undefined || !Number.isFinite(previous)) {
+    return { current: cur, previous: null, delta: null, deltaPct: null, direction: null };
+  }
+  const prev = previous;
+  const delta = cur - prev;
+  const eps = Math.abs(finite(epsilon));
+  const direction: TrendDirection = delta > eps ? 'up' : delta < -eps ? 'down' : 'flat';
+  return {
+    current: cur,
+    previous: prev,
+    delta: finite(delta),
+    deltaPct: prev !== 0 ? finite((delta / Math.abs(prev)) * 100) : null,
+    direction,
+  };
+}
+
+/**
+ * Σ approved time-entry hours for a project in the half-open ISO window
+ * [fromIso, toIso). Returns null when no time-entry data exists at all for the
+ * project (so a caller can tell "genuinely zero" from "we have no basis"); 0
+ * when there is data but none falls in the window.
+ */
+export function approvedHoursInWindow(
+  projectId: string,
+  d: FinanceData,
+  fromIso: string,
+  toIso: string,
+): number | null {
+  const all = (d.timeEntries ?? []).filter(t => t.projectId === projectId && t.status === 'Approved');
+  if (all.length === 0) return null; // no basis to derive a prior value
+  const from = Date.parse(fromIso);
+  const to = Date.parse(toIso);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+  let hours = 0;
+  for (const t of all) {
+    const at = Date.parse(t.date);
+    if (Number.isFinite(at) && at >= from && at < to) hours += finite(t.hours);
+  }
+  return finite(hours);
+}
+
+/**
+ * Σ billing-item amount billed (Invoiced/Paid) for a project whose issuedDate
+ * falls in the half-open window [fromIso, toIso), in base currency when
+ * d.fxRates is present. Returns null when the project has NO issued, billed
+ * items at all (no basis); 0 when there are issued items but none in the window.
+ * Items without an issuedDate are excluded from windowing but still count toward
+ * "has a basis" only if billed — an unbilled plan gives null.
+ */
+export function billedAmountInWindow(
+  projectId: string,
+  d: FinanceData,
+  fromIso: string,
+  toIso: string,
+): number | null {
+  const billedIssued = (d.billingItems ?? []).filter(
+    i => i.projectId === projectId && BILLED_STATUSES.has(i.status) && !!i.issuedDate,
+  );
+  if (billedIssued.length === 0) return null;
+  const from = Date.parse(fromIso);
+  const to = Date.parse(toIso);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+  let amount = 0;
+  for (const i of billedIssued) {
+    const at = Date.parse(i.issuedDate as string);
+    if (Number.isFinite(at) && at >= from && at < to) amount += convertToBase(i.amount, i.currency, d.fxRates);
+  }
+  return finite(amount);
+}
+
+/**
+ * Recognised-revenue trend for two adjacent windows derived from dated
+ * time/billing inputs. The current reading is the revenue recognised WITHIN
+ * `currentPeriods`; the previous reading is the revenue recognised within the
+ * immediately preceding block of equal length. Both are obtained by running
+ * recognitionSchedule over the COMBINED span and summing each sub-window's
+ * `recognized` — running it over a sub-window alone would clamp earlier items
+ * into the first period and inflate it, so the combined pass is what keeps each
+ * period's figure true to its own dates.
+ *
+ * Returns a PeriodDelta whose `previous`/`delta`/`direction` are null when the
+ * prior window cannot be derived (no periods before `currentPeriods`, or no
+ * dated source data in that earlier span). This is intentionally conservative:
+ * we never invent a trend; a 0 baseline is reported only when the prior window
+ * is genuinely measurable, otherwise the caller should HIDE the trend.
+ */
+export function recognizedRevenueTrend(
+  d: FinanceData,
+  currentPeriods: readonly string[],
+  opts: ScheduleOpts = {},
+): PeriodDelta {
+  if (currentPeriods.length === 0) return periodDelta(0, null);
+
+  const current = [...currentPeriods].sort();
+  const prior = priorPeriods(current);
+
+  // No prior window at all -> only the current reading is known.
+  if (prior.length === 0) {
+    const span = recognitionSchedule(d, current, opts);
+    return periodDelta(sumRecognizedIn(span, current), null);
+  }
+
+  // Single combined pass so each period reflects its own dates (no clamping bias).
+  const combined = recognitionSchedule(d, [...prior, ...current], opts);
+  const currentValue = sumRecognizedIn(combined, current);
+
+  // Only treat the prior window as measurable if dated source data could land in
+  // it; otherwise hide the trend (don't fake a 0 baseline).
+  if (!hasDatedDataInPeriods(d, prior, opts)) return periodDelta(currentValue, null);
+
+  const previousValue = sumRecognizedIn(combined, prior);
+  return periodDelta(currentValue, previousValue);
+}
+
+/** Σ of `recognized` for the schedule rows whose period is in `window`. */
+function sumRecognizedIn(rows: readonly RecognitionPeriod[], window: readonly string[]): number {
+  const set = new Set(window);
+  return finite(rows.filter(r => set.has(r.period)).reduce((a, r) => a + finite(r.recognized), 0));
+}
+
+/** The block of YYYY-MM periods of equal length immediately preceding `periods`. */
+function priorPeriods(periods: readonly string[]): string[] {
+  if (periods.length === 0) return [];
+  const first = periods[0];
+  const [y, m] = first.split('-').map(Number);
+  if (!Number.isFinite(y) || !Number.isFinite(m)) return [];
+  // Walk back one month per period in the window, starting from the first.
+  const out: string[] = [];
+  let yy = y;
+  let mm = m;
+  let remaining = periods.length;
+  while (remaining-- > 0) {
+    mm -= 1;
+    if (mm < 1) { mm = 12; yy -= 1; }
+    out.unshift(`${yy}-${String(mm).padStart(2, '0')}`);
+  }
+  return out;
+}
+
+/** True when any dated billing item or time entry (matching opts) lands in `periods`. */
+function hasDatedDataInPeriods(d: FinanceData, periods: readonly string[], opts: ScheduleOpts): boolean {
+  const set = new Set(periods);
+  const matchItem = (i: BillingPlanItem) =>
+    (opts.projectId === undefined || i.projectId === opts.projectId) &&
+    (opts.contractId === undefined || i.contractId === opts.contractId);
+  for (const i of d.billingItems ?? []) {
+    if (!matchItem(i)) continue;
+    const p = recognitionPeriodFor(i, d);
+    if (p && set.has(p)) return true;
+  }
+  // T&M/Expense recognition is driven by time entries; check those too.
+  for (const t of d.timeEntries ?? []) {
+    if (t.status !== 'Approved') continue;
+    if (opts.projectId !== undefined && t.projectId !== opts.projectId) continue;
+    if (set.has(periodOf(t.date))) return true;
+  }
+  return false;
+}

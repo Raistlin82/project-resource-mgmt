@@ -26,6 +26,20 @@ import {
   portfolioAlerts,
   convertToBase,
   portfolioTotalsInBase,
+  recognitionJournal,
+  journalTotals,
+  journalIsBalanced,
+  JOURNAL_ACCOUNTS,
+  realizationMetrics,
+  customerProfitability,
+  customerConcentration,
+  marginCompressionAlerts,
+  DEFAULT_MARGIN_COMPRESSION_CONFIG,
+  periodDelta,
+  approvedHoursInWindow,
+  billedAmountInWindow,
+  recognizedRevenueTrend,
+  JournalEntry,
   FinanceData,
 } from './finance.util';
 import { Resource, ResourceRequest, Assignment, Order, OrderLine, FinancialItem, TimeEntry, BillingPlanItem, Contract, Customer, Milestone, ChangeRequest, Project, FxRate } from './api.service';
@@ -866,5 +880,583 @@ describe('finance.util mixed-currency rollups', () => {
     expect(t.customerRevenue).toBe(15000); // 10000 + 5000 raw
     expect(t.externalCost).toBe(3000);
     expect(t.billed).toBe(0);
+  });
+});
+
+// --- helpers for the new suites ----------------------------------------------
+
+/** Project carrying an explicit contractId (the base `proj` helper omits it). */
+function projC(id: string, name: string, contractId?: string): Project {
+  return { id, name, location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'Active', contractId };
+}
+
+/** Sum every debit and credit on a single entry. */
+function entrySums(e: JournalEntry): { debit: number; credit: number } {
+  return e.lines.reduce((acc, l) => ({ debit: acc.debit + l.debit, credit: acc.credit + l.credit }), { debit: 0, credit: 0 });
+}
+
+describe('finance.util recognitionJournal (rev-rec journal preview)', () => {
+  const periods = ['2026-01', '2026-02', '2026-03', '2026-04'];
+
+  it('books a simple milestone as Dr Unbilled AR / Cr Revenue in its period', () => {
+    const d: FinanceData = {
+      ...data,
+      billingItems: [bill('m1', 'P', 'Milestone', 10000, 'Invoiced', { issuedDate: '2026-02-10' })],
+    };
+    const entries = recognitionJournal(d, periods, { projectId: 'P' });
+    expect(entries.length).toBe(1);
+    expect(entries[0].date).toBe('2026-02');
+    expect(entries[0].lines).toEqual([
+      { account: JOURNAL_ACCOUNTS.unbilledAr, debit: 10000, credit: 0 },
+      { account: JOURNAL_ACCOUNTS.revenue, debit: 0, credit: 10000 },
+    ]);
+    expect(journalIsBalanced(entries)).toBe(true);
+  });
+
+  it('models an advance: cash/deferred on receipt, then amortises deferred as work is earned', () => {
+    const d: FinanceData = {
+      ...data,
+      billingItems: [
+        bill('a1', 'P', 'Advance', 12000, 'Paid', { issuedDate: '2026-01-05', paidDate: '2026-01-10' }),
+        bill('p1', 'P', 'Progress', 5000, 'Ready', { progressPct: 100, expectedDate: '2026-02-12' }),
+        bill('p2', 'P', 'Progress', 4000, 'Ready', { progressPct: 100, expectedDate: '2026-03-12' }),
+      ],
+    };
+    const entries = recognitionJournal(d, periods, { projectId: 'P' });
+    expect(entries.map(e => e.date)).toEqual(['2026-01', '2026-02', '2026-03']); // Apr has no movement
+
+    // Jan: advance received only.
+    expect(entries[0].lines).toEqual([
+      { account: JOURNAL_ACCOUNTS.cash, debit: 12000, credit: 0 },
+      { account: JOURNAL_ACCOUNTS.deferredRevenue, debit: 0, credit: 12000 },
+    ]);
+    // Feb: recognise 5000 + amortise 5000 of the advance.
+    expect(entries[1].lines).toEqual([
+      { account: JOURNAL_ACCOUNTS.unbilledAr, debit: 5000, credit: 0 },
+      { account: JOURNAL_ACCOUNTS.revenue, debit: 0, credit: 5000 },
+      { account: JOURNAL_ACCOUNTS.deferredRevenue, debit: 5000, credit: 0 },
+      { account: JOURNAL_ACCOUNTS.unbilledAr, debit: 0, credit: 5000 },
+    ]);
+    // Mar: recognise 4000 + amortise remaining 4000.
+    expect(entries[2].lines).toEqual([
+      { account: JOURNAL_ACCOUNTS.unbilledAr, debit: 4000, credit: 0 },
+      { account: JOURNAL_ACCOUNTS.revenue, debit: 0, credit: 4000 },
+      { account: JOURNAL_ACCOUNTS.deferredRevenue, debit: 4000, credit: 0 },
+      { account: JOURNAL_ACCOUNTS.unbilledAr, debit: 0, credit: 4000 },
+    ]);
+
+    const totals = journalTotals(entries);
+    expect(totals.balanced).toBe(true);
+    expect(totals.debit).toBe(30000); // 12000 + 10000 + 8000
+    expect(totals.credit).toBe(30000);
+  });
+
+  it('a credit note posts a NEGATIVE revenue line (accounts swap to stay non-negative) and still balances', () => {
+    const d: FinanceData = {
+      ...data,
+      billingItems: [
+        bill('m1', 'P', 'Milestone', 10000, 'Invoiced', { issuedDate: '2026-01-10' }),
+        bill('cn', 'P', 'CreditNote', -2000, 'Invoiced', { issuedDate: '2026-03-10' }),
+      ],
+    };
+    const entries = recognitionJournal(d, periods, { projectId: 'P' });
+    const march = entries.find(e => e.date === '2026-03')!;
+    // negative recognized -> Dr Revenue / Cr Unbilled AR (the reversal), amounts positive
+    expect(march.lines).toEqual([
+      { account: JOURNAL_ACCOUNTS.revenue, debit: 2000, credit: 0 },
+      { account: JOURNAL_ACCOUNTS.unbilledAr, debit: 0, credit: 2000 },
+    ]);
+    expect(journalIsBalanced(entries)).toBe(true);
+  });
+
+  it('carries T&M / expense pass-through (as-incurred billRate) through to balanced revenue postings', () => {
+    const d: FinanceData = {
+      ...data,
+      timeEntries: [
+        time('t1', 'a1', 'r1', '1', 'P', 10, 'Approved'),                               // Jan -> 1400
+        { ...time('t2', 'a1', 'r1', '1', 'P', 20, 'Approved'), date: '2026-03-09' },     // Mar -> 2800
+      ],
+      billingItems: [bill('tm1', 'P', 'TimeAndMaterials', 0, 'Ready')],
+    };
+    const entries = recognitionJournal(d, periods, { projectId: 'P' });
+    const jan = entries.find(e => e.date === '2026-01')!;
+    expect(jan.lines).toEqual([
+      { account: JOURNAL_ACCOUNTS.unbilledAr, debit: 1400, credit: 0 },
+      { account: JOURNAL_ACCOUNTS.revenue, debit: 0, credit: 1400 },
+    ]);
+    const totals = journalTotals(entries);
+    expect(totals.debit).toBe(4200); // 1400 + 2800 recognised
+    expect(totals.balanced).toBe(true);
+  });
+
+  it('reconciles exactly with recognitionSchedule (same amount basis) over the same window', () => {
+    const d: FinanceData = {
+      ...data,
+      billingItems: [
+        bill('m1', 'P', 'Milestone', 10000, 'Invoiced', { issuedDate: '2026-01-10' }),
+        bill('p1', 'P', 'Progress', 8000, 'Ready', { progressPct: 25, expectedDate: '2026-03-12' }), // 2000
+      ],
+    };
+    const sched = recognitionSchedule(d, periods, { projectId: 'P' });
+    const entries = recognitionJournal(d, periods, { projectId: 'P' });
+    // The credited Revenue across the whole journal equals Σ recognised on the schedule.
+    let revenueCredited = 0;
+    let revenueDebited = 0;
+    for (const e of entries) {
+      for (const l of e.lines) {
+        if (l.account === JOURNAL_ACCOUNTS.revenue) { revenueCredited += l.credit; revenueDebited += l.debit; }
+      }
+    }
+    const scheduleRecognised = sched.reduce((a, r) => a + r.recognized, 0);
+    expect(revenueCredited - revenueDebited).toBeCloseTo(scheduleRecognised, 9); // 12000
+    expect(journalIsBalanced(entries)).toBe(true);
+  });
+
+  it('returns [] for an empty period list and for a window with no movement', () => {
+    expect(recognitionJournal(data, [])).toEqual([]);
+    expect(recognitionJournal(data, periods, { projectId: 'P' })).toEqual([]); // base data has no billing items
+    expect(journalIsBalanced([])).toBe(true); // 0 === 0
+    expect(journalTotals([])).toEqual({ debit: 0, credit: 0, balanced: true });
+  });
+
+  it('every emitted entry is internally balanced (debit === credit per entry)', () => {
+    const d: FinanceData = {
+      ...data,
+      billingItems: [
+        bill('a1', 'P', 'Advance', 6000, 'Paid', { issuedDate: '2026-01-05' }),
+        bill('p1', 'P', 'Progress', 8000, 'Ready', { progressPct: 50, expectedDate: '2026-02-12' }), // 4000
+        bill('m1', 'P', 'Milestone', 3000, 'Invoiced', { issuedDate: '2026-03-10' }),
+        bill('cn', 'P', 'CreditNote', -1000, 'Invoiced', { issuedDate: '2026-04-10' }),
+      ],
+    };
+    const entries = recognitionJournal(d, periods, { projectId: 'P' });
+    for (const e of entries) {
+      const s = entrySums(e);
+      expect(s.debit).toBeCloseTo(s.credit, 9);
+    }
+    expect(journalIsBalanced(entries)).toBe(true);
+  });
+});
+
+describe('finance.util realizationMetrics', () => {
+  it('computes realization % (recognised vs standard bill value) and revenue-per-head', () => {
+    // resource 1 billRate 140, costRate 75. 40 approved hours -> standard 5600.
+    // Milestone 5000 recognised (Invoiced). realization = 5000/5600 ≈ 89.29%.
+    const d: FinanceData = {
+      ...data,
+      timeEntries: [time('t1', 'a1', 'r1', '1', 'P', 40, 'Approved'), time('t2', 'a1', 'r1', '1', 'P', 10, 'Submitted')],
+      billingItems: [bill('m1', 'P', 'Milestone', 5000, 'Invoiced')],
+    };
+    const m = realizationMetrics('P', d);
+    expect(m.hours).toBe(40);                       // only approved
+    expect(m.standardBillValue).toBe(5600);         // 40 × 140
+    expect(m.revenue).toBe(5000);                   // recognised
+    expect(m.realizationPct).toBeCloseTo((5000 / 5600) * 100, 6);
+    expect(m.headcount).toBe(1);
+    expect(m.revenuePerHead).toBe(5000);
+    expect(m.revenuePerFte).toBe(5000);             // no hoursPerFte -> falls back to per-head
+  });
+
+  it('derives FTE from hoursPerFte and divides revenue by it', () => {
+    const d: FinanceData = {
+      ...data,
+      timeEntries: [
+        time('t1', 'a1', 'r1', '1', 'P', 80, 'Approved'),
+        time('t2', 'a2', 'r2', '2', 'P', 80, 'Approved'),
+      ],
+      billingItems: [bill('m1', 'P', 'Milestone', 32000, 'Invoiced')],
+    };
+    // 160 approved hours / 160 hoursPerFte = 1 FTE; revenue 32000 -> 32000/FTE.
+    const m = realizationMetrics('P', d, { hoursPerFte: 160 });
+    expect(m.fte).toBeCloseTo(1, 9);
+    expect(m.headcount).toBe(2);
+    expect(m.revenuePerFte).toBeCloseTo(32000, 6);
+    expect(m.revenuePerHead).toBeCloseTo(16000, 6); // 32000 / 2 heads
+  });
+
+  it('honours a revenueOverride (e.g. billed view) as the numerator', () => {
+    const d: FinanceData = {
+      ...data,
+      timeEntries: [time('t1', 'a1', 'r1', '1', 'P', 40, 'Approved')],
+    };
+    const m = realizationMetrics('P', d, { revenueOverride: 7000 });
+    expect(m.revenue).toBe(7000);
+    expect(m.realizationPct).toBeCloseTo((7000 / 5600) * 100, 6); // > 100% (over-realised)
+  });
+
+  it('edge: no approved hours -> zero standard value, realization 0, no divide-by-zero', () => {
+    const m = realizationMetrics('P', { ...data, billingItems: [bill('m1', 'P', 'Milestone', 5000, 'Invoiced')] });
+    expect(m.hours).toBe(0);
+    expect(m.standardBillValue).toBe(0);
+    expect(m.realizationPct).toBe(0); // guarded (no standard value to realise against)
+    expect(m.headcount).toBe(0);
+    expect(m.revenuePerHead).toBe(0); // guarded (no heads)
+    expect(m.revenuePerFte).toBe(0);
+    expect(Number.isFinite(m.realizationPct)).toBe(true);
+  });
+
+  it('edge: zero capacity / zero hoursPerFte falls back to per-head (no Infinity)', () => {
+    const d: FinanceData = {
+      ...data,
+      timeEntries: [time('t1', 'a1', 'r1', '1', 'P', 40, 'Approved')],
+      billingItems: [bill('m1', 'P', 'Milestone', 5000, 'Invoiced')],
+    };
+    const m = realizationMetrics('P', d, { hoursPerFte: 0 });
+    expect(m.fte).toBe(0);
+    expect(m.revenuePerFte).toBe(m.revenuePerHead); // fell back
+    expect(Number.isFinite(m.revenuePerFte)).toBe(true);
+  });
+});
+
+describe('finance.util customerProfitability', () => {
+  // P (contract CT1 -> Acme) and Q (contract CT2 -> Globex).
+  const d: FinanceData = {
+    resources: [res('1', 75, 140), res('2', 90, 180)],
+    requests: [req('r1', 'P'), req('r2', 'Q')],
+    assignments: [assign('a1', 'r1', '1', 100), assign('a2', 'r2', '2', 50)],
+    orders: [order('o1', 'Customer', 'Invoiced'), order('o3', 'Purchase', 'Confirmed')],
+    orderLines: [line('l1', 'o1', 'P', 25000), line('l3', 'o3', 'P', 3000)],
+    financials: [fin('f1', 'P', 30000, 0), fin('fq', 'Q', 1000, 0)],
+    projects: [projC('P', 'Phoenix', 'CT1'), projC('Q', 'Quasar', 'CT2')],
+    contracts: [contract('CT1', 'CUS1'), contract('CT2', 'CUS2')],
+    customers: [customer('CUS1', 'Acme'), customer('CUS2', 'Globex')],
+  };
+
+  it('rolls revenue/cost/margin up to the customer via project->contract->customer', () => {
+    const rows = customerProfitability(d);
+    const acme = rows.find(r => r.customerId === 'CUS1')!;
+    // P: revenue 25000; cost = labor (100×75=7500) + external 3000 = 10500
+    expect(acme.customerName).toBe('Acme');
+    expect(acme.revenue).toBe(25000);
+    expect(acme.cost).toBe(10500);
+    expect(acme.margin).toBe(14500);
+    expect(acme.marginPct).toBeCloseTo((14500 / 25000) * 100, 6);
+    expect(acme.projectIds).toEqual(['P']);
+
+    const globex = rows.find(r => r.customerId === 'CUS2')!;
+    // Q: no revenue; cost = labor 50×90 = 4500
+    expect(globex.revenue).toBe(0);
+    expect(globex.cost).toBe(4500);
+    expect(globex.marginPct).toBe(0); // no revenue -> 0, not NaN
+  });
+
+  it('sorts rows by descending revenue', () => {
+    const rows = customerProfitability(d);
+    expect(rows[0].customerId).toBe('CUS1'); // 25000 first
+    expect([...rows].map(r => r.revenue)).toEqual([...rows].map(r => r.revenue).sort((a, b) => b - a));
+  });
+
+  it('groups projects with no resolvable customer under Unknown (nothing dropped)', () => {
+    const orphan: FinanceData = {
+      ...data, // base `data` has no projects/contracts/customers wired up
+    };
+    const rows = customerProfitability(orphan);
+    expect(rows.length).toBe(1);
+    expect(rows[0].customerId).toBe('unknown');
+    expect(rows[0].customerName).toBe('Unknown');
+    // P revenue 25000 still attributed
+    expect(rows[0].revenue).toBe(25000);
+    expect(rows[0].projectIds.sort()).toEqual(['P', 'Q']);
+  });
+
+  it('normalises currencies to base when fxRates present', () => {
+    const fxData: FinanceData = {
+      ...d,
+      assignments: [],
+      orders: [orderC('oc1', 'Customer', 'Invoiced', 'USD')],
+      orderLines: [line('l1', 'oc1', 'P', 10000)], // USD 10000 -> 9000 base
+      fxRates: fx(),
+    };
+    const acme = customerProfitability(fxData).find(r => r.customerId === 'CUS1')!;
+    expect(acme.revenue).toBeCloseTo(9000, 6);
+  });
+});
+
+describe('finance.util customerConcentration', () => {
+  it('measures top-customer share and HHI across customers', () => {
+    // Acme 30000, Globex 10000 -> total 40000; shares 75% / 25%.
+    const d: FinanceData = {
+      resources: [res('1', 75, 140)],
+      requests: [req('r1', 'P'), req('r2', 'Q')],
+      assignments: [],
+      orders: [order('o1', 'Customer', 'Invoiced'), order('o2', 'Customer', 'Invoiced')],
+      orderLines: [line('l1', 'o1', 'P', 30000), line('l2', 'o2', 'Q', 10000)],
+      financials: [],
+      projects: [projC('P', 'Phoenix', 'CT1'), projC('Q', 'Quasar', 'CT2')],
+      contracts: [contract('CT1', 'CUS1'), contract('CT2', 'CUS2')],
+      customers: [customer('CUS1', 'Acme'), customer('CUS2', 'Globex')],
+    };
+    const c = customerConcentration(d);
+    expect(c.totalRevenue).toBe(40000);
+    expect(c.customerCount).toBe(2);
+    expect(c.topCustomerName).toBe('Acme');
+    expect(c.topCustomerSharePct).toBeCloseTo(75, 6);
+    expect(c.top3SharePct).toBeCloseTo(100, 6);     // only 2 customers
+    expect(c.hhi).toBeCloseTo(75 * 75 + 25 * 25, 6); // 5625 + 625 = 6250
+  });
+
+  it('edge: a single customer is 100% concentration / HHI 10000', () => {
+    const d: FinanceData = {
+      resources: [], requests: [req('r1', 'P')], assignments: [],
+      orders: [order('o1', 'Customer', 'Invoiced')],
+      orderLines: [line('l1', 'o1', 'P', 50000)],
+      financials: [],
+      projects: [projC('P', 'Phoenix', 'CT1')],
+      contracts: [contract('CT1', 'CUS1')],
+      customers: [customer('CUS1', 'Acme')],
+    };
+    const c = customerConcentration(d);
+    expect(c.customerCount).toBe(1);
+    expect(c.topCustomerSharePct).toBe(100);
+    expect(c.hhi).toBe(10000); // 100²
+  });
+
+  it('edge: no revenue -> zeroed concentration, no NaN', () => {
+    const c = customerConcentration({ ...data, orderLines: [] });
+    expect(c.totalRevenue).toBe(0);
+    expect(c.customerCount).toBe(0);
+    expect(c.topCustomerSharePct).toBe(0);
+    expect(c.hhi).toBe(0);
+    expect(c.topCustomerId).toBeUndefined();
+  });
+
+  it('ignores net-negative customers (credit notes) rather than producing negative shares', () => {
+    // CUS1 net revenue from order lines 20000; a separate customer with only negative order lines is impossible here,
+    // so simulate by giving Globex a Purchase-only project (no customer revenue) -> excluded from shares.
+    const d: FinanceData = {
+      resources: [], requests: [req('r1', 'P'), req('r2', 'Q')], assignments: [],
+      orders: [order('o1', 'Customer', 'Invoiced'), order('o3', 'Purchase', 'Confirmed')],
+      orderLines: [line('l1', 'o1', 'P', 20000), line('l3', 'o3', 'Q', 9000)],
+      financials: [],
+      projects: [projC('P', 'Phoenix', 'CT1'), projC('Q', 'Quasar', 'CT2')],
+      contracts: [contract('CT1', 'CUS1'), contract('CT2', 'CUS2')],
+      customers: [customer('CUS1', 'Acme'), customer('CUS2', 'Globex')],
+    };
+    const c = customerConcentration(d);
+    expect(c.customerCount).toBe(1);       // Globex has no positive customer revenue
+    expect(c.topCustomerName).toBe('Acme');
+    expect(c.topCustomerSharePct).toBe(100);
+  });
+});
+
+describe('finance.util marginCompressionAlerts', () => {
+  it('flags a thin-margin project below target with graded severity and reasons', () => {
+    // P: revenue 25000, cost 10500 -> margin 58%. Set a high target to force a large gap -> 'high'.
+    const alerts = marginCompressionAlerts(data, { marginTargetPct: 80 }, ['project']);
+    const p = alerts.find(a => a.id === 'P')!;
+    expect(p).toBeDefined();
+    expect(p.scope).toBe('project');
+    expect(p.belowTarget).toBe(true);
+    expect(p.gapPts).toBeCloseTo(80 - 58, 6); // 22 pts below
+    expect(p.severity).toBe('high');          // gap >= 15
+    expect(p.reasons.some(r => r.includes('Margin'))).toBe(true);
+  });
+
+  it('flags a thin bill-vs-cost spread even when the margin target is met', () => {
+    // revenue 25000, but push cost up so the spread is < 10%. Use a project with revenue 25000 and cost 24000.
+    const d: FinanceData = {
+      ...data,
+      // labor 100×75=7500, external 3000 -> base actualCost 10500. Add expense via financial actual? actualCost uses labor+external only.
+      // Instead lift external cost: a 14000 purchase line pushes actualCost to 7500+14000=21500; revenue 25000 -> spread 14%.
+      orders: [order('o1', 'Customer', 'Invoiced'), order('o2', 'Customer', 'Open'), order('o3', 'Purchase', 'Confirmed')],
+      orderLines: [line('l1', 'o1', 'P', 20000), line('l2', 'o2', 'P', 5000), line('l3', 'o3', 'P', 21500)],
+    };
+    // actualCost = 7500 + 21500 = 29000; revenue 25000 -> margin negative, spread negative -> thin + below target
+    const alerts = marginCompressionAlerts(d, { marginTargetPct: 15, thinSpreadPct: 10 }, ['project']);
+    const p = alerts.find(a => a.id === 'P')!;
+    expect(p.thinSpread).toBe(true);
+    expect(p.belowTarget).toBe(true);
+    expect(p.severity).toBe('high'); // deeply below target
+    expect(p.reasons.some(r => r.includes('spread'))).toBe(true);
+  });
+
+  it('does not flag a healthy project (good margin, healthy spread)', () => {
+    // P at default config: margin 58%, spread 58% -> healthy.
+    const alerts = marginCompressionAlerts(data, {}, ['project']);
+    expect(alerts.find(a => a.id === 'P')).toBeUndefined();
+  });
+
+  it('never flags a project with no revenue (nothing to compress)', () => {
+    const alerts = marginCompressionAlerts({ ...data, orderLines: [] }, { marginTargetPct: 90 }, ['project']);
+    expect(alerts.length).toBe(0);
+  });
+
+  it('evaluates the customer scope and labels rows from customers', () => {
+    const d: FinanceData = {
+      ...data,
+      projects: [projC('P', 'Phoenix', 'CT1')],
+      contracts: [contract('CT1', 'CUS1')],
+      customers: [customer('CUS1', 'Acme')],
+    };
+    const alerts = marginCompressionAlerts(d, { marginTargetPct: 80 }, ['customer']);
+    const acme = alerts.find(a => a.scope === 'customer' && a.id === 'CUS1')!;
+    expect(acme).toBeDefined();
+    expect(acme.name).toBe('Acme');
+    expect(acme.belowTarget).toBe(true);
+  });
+
+  it('sorts most-severe first then by largest gap, across both scopes by default', () => {
+    const d: FinanceData = {
+      ...data,
+      projects: [projC('P', 'Phoenix', 'CT1')],
+      contracts: [contract('CT1', 'CUS1')],
+      customers: [customer('CUS1', 'Acme')],
+    };
+    const alerts = marginCompressionAlerts(d, { marginTargetPct: 80 });
+    const rank: Record<string, number> = { high: 3, medium: 2, low: 1, none: 0 };
+    for (let i = 1; i < alerts.length; i++) {
+      expect(rank[alerts[i - 1].severity]).toBeGreaterThanOrEqual(rank[alerts[i].severity]);
+    }
+    // project + customer scopes both present (same underlying P/Acme economics)
+    expect(alerts.some(a => a.scope === 'project')).toBe(true);
+    expect(alerts.some(a => a.scope === 'customer')).toBe(true);
+  });
+
+  it('exposes sane defaults', () => {
+    expect(DEFAULT_MARGIN_COMPRESSION_CONFIG.marginTargetPct).toBe(15);
+    expect(DEFAULT_MARGIN_COMPRESSION_CONFIG.thinSpreadPct).toBe(10);
+  });
+});
+
+describe('finance.util periodDelta (real trends, no fabrication)', () => {
+  it('computes delta, deltaPct and direction when a previous value exists', () => {
+    const up = periodDelta(120, 100);
+    expect(up.delta).toBe(20);
+    expect(up.deltaPct).toBeCloseTo(20, 6);
+    expect(up.direction).toBe('up');
+
+    const down = periodDelta(80, 100);
+    expect(down.delta).toBe(-20);
+    expect(down.deltaPct).toBeCloseTo(-20, 6);
+    expect(down.direction).toBe('down');
+
+    const flat = periodDelta(100, 100);
+    expect(flat.delta).toBe(0);
+    expect(flat.direction).toBe('flat');
+  });
+
+  it('returns ALL-null (hide trend) when previous is null — never fabricates flat/0', () => {
+    const p = periodDelta(120, null);
+    expect(p.current).toBe(120);
+    expect(p.previous).toBeNull();
+    expect(p.delta).toBeNull();
+    expect(p.deltaPct).toBeNull();
+    expect(p.direction).toBeNull(); // caller must HIDE, not render flat
+  });
+
+  it('deltaPct is null when previous is 0 (undefined growth) but delta/direction still resolve', () => {
+    const p = periodDelta(50, 0);
+    expect(p.delta).toBe(50);
+    expect(p.deltaPct).toBeNull();
+    expect(p.direction).toBe('up');
+  });
+
+  it('honours an epsilon dead-band for flat', () => {
+    expect(periodDelta(103, 100, 5).direction).toBe('flat');  // within ±5
+    expect(periodDelta(106, 100, 5).direction).toBe('up');    // beyond +5
+  });
+
+  it('guards non-finite current and previous', () => {
+    expect(periodDelta(Number.NaN, 100).current).toBe(0);
+    const p = periodDelta(100, Number.POSITIVE_INFINITY);
+    expect(p.previous).toBeNull(); // non-finite previous treated as not-derivable
+  });
+});
+
+describe('finance.util dated prior-period derivers', () => {
+  it('approvedHoursInWindow sums approved hours in [from,to) and distinguishes null (no basis) from 0', () => {
+    const d: FinanceData = {
+      ...data,
+      timeEntries: [
+        { ...time('t1', 'a1', 'r1', '1', 'P', 10, 'Approved'), date: '2026-01-10' },
+        { ...time('t2', 'a1', 'r1', '1', 'P', 20, 'Approved'), date: '2026-02-10' },
+        { ...time('t3', 'a1', 'r1', '1', 'P', 99, 'Submitted'), date: '2026-01-15' }, // not approved
+      ],
+    };
+    expect(approvedHoursInWindow('P', d, '2026-01-01', '2026-02-01')).toBe(10); // only t1
+    expect(approvedHoursInWindow('P', d, '2026-02-01', '2026-03-01')).toBe(20); // only t2
+    expect(approvedHoursInWindow('P', d, '2026-05-01', '2026-06-01')).toBe(0);  // has data, none in window
+    expect(approvedHoursInWindow('P', data, '2026-01-01', '2026-02-01')).toBeNull(); // no time entries at all -> null
+    expect(approvedHoursInWindow('P', d, 'not-a-date', '2026-02-01')).toBeNull();    // unparseable bounds -> null
+  });
+
+  it('billedAmountInWindow sums billed issued amounts in window, null when no billed basis', () => {
+    const d: FinanceData = {
+      ...data,
+      billingItems: [
+        bill('b1', 'P', 'Milestone', 1000, 'Invoiced', { issuedDate: '2026-01-10' }),
+        bill('b2', 'P', 'Milestone', 2000, 'Paid', { issuedDate: '2026-02-10' }),
+        bill('b3', 'P', 'Milestone', 9000, 'Planned', { issuedDate: '2026-01-12' }), // not billed -> excluded
+      ],
+    };
+    expect(billedAmountInWindow('P', d, '2026-01-01', '2026-02-01')).toBe(1000);
+    expect(billedAmountInWindow('P', d, '2026-02-01', '2026-03-01')).toBe(2000);
+    expect(billedAmountInWindow('P', d, '2026-06-01', '2026-07-01')).toBe(0);   // billed basis exists, none in window
+    // a project whose only items are Planned (never billed/issued) -> no basis -> null
+    const planned: FinanceData = { ...data, billingItems: [bill('x', 'P', 'Milestone', 5000, 'Planned')] };
+    expect(billedAmountInWindow('P', planned, '2026-01-01', '2026-02-01')).toBeNull();
+    expect(billedAmountInWindow('P', data, '2026-01-01', '2026-02-01')).toBeNull(); // no billing items at all
+  });
+
+  it('billedAmountInWindow normalises to base currency when fxRates present', () => {
+    const d: FinanceData = {
+      ...data,
+      billingItems: [billC('b1', 'CT', 'P', 'Milestone', 10000, 'Invoiced', { currency: 'USD', issuedDate: '2026-01-10' })],
+      fxRates: fx(),
+    };
+    expect(billedAmountInWindow('P', d, '2026-01-01', '2026-02-01')).toBeCloseTo(9000, 6); // 10000 USD -> 9000
+  });
+});
+
+describe('finance.util recognizedRevenueTrend', () => {
+  const periods = ['2026-03', '2026-04']; // current window; prior = ['2026-01','2026-02']
+
+  it('reports a real delta when the prior window has derivable recognition', () => {
+    const d: FinanceData = {
+      ...data,
+      billingItems: [
+        bill('m0', 'P', 'Milestone', 4000, 'Invoiced', { issuedDate: '2026-01-10' }),  // prior window
+        bill('m1', 'P', 'Milestone', 10000, 'Invoiced', { issuedDate: '2026-03-10' }), // current window
+      ],
+    };
+    const t = recognizedRevenueTrend(d, periods, { projectId: 'P' });
+    expect(t.current).toBe(10000);  // cumulative over Mar-Apr
+    expect(t.previous).toBe(4000);  // cumulative over Jan-Feb
+    expect(t.delta).toBe(6000);
+    expect(t.direction).toBe('up');
+  });
+
+  it('HIDES the trend (previous null) when there is no dated data in the prior window', () => {
+    const d: FinanceData = {
+      ...data,
+      // all recognition is in the current window; nothing dated in Jan-Feb
+      billingItems: [bill('m1', 'P', 'Milestone', 10000, 'Invoiced', { issuedDate: '2026-03-10' })],
+    };
+    const t = recognizedRevenueTrend(d, periods, { projectId: 'P' });
+    expect(t.current).toBe(10000);
+    expect(t.previous).toBeNull();   // not derivable -> do NOT fabricate a 0 baseline
+    expect(t.delta).toBeNull();
+    expect(t.direction).toBeNull();
+  });
+
+  it('returns previous=null for an empty current period list', () => {
+    const t = recognizedRevenueTrend(data, [], { projectId: 'P' });
+    expect(t.current).toBe(0);
+    expect(t.previous).toBeNull();
+  });
+
+  it('derives the prior window from time entries too (as-incurred T&M)', () => {
+    const d: FinanceData = {
+      ...data,
+      timeEntries: [
+        { ...time('t0', 'a1', 'r1', '1', 'P', 10, 'Approved'), date: '2026-02-05' }, // prior -> 1400
+        { ...time('t1', 'a1', 'r1', '1', 'P', 20, 'Approved'), date: '2026-03-05' }, // current -> 2800
+      ],
+      billingItems: [bill('tm1', 'P', 'TimeAndMaterials', 0, 'Ready')],
+    };
+    const t = recognizedRevenueTrend(d, periods, { projectId: 'P' });
+    expect(t.previous).toBe(1400);
+    expect(t.current).toBe(2800);
+    expect(t.direction).toBe('up');
   });
 });
