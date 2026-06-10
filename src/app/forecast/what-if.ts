@@ -298,7 +298,7 @@ interface TimelineRow {
                       </span>
                     </td>
                     <td class="num font-semibold"
-                        [style.color]="row.demandDelta > 0 ? 'var(--cc-red)' : (row.demandDelta < 0 ? 'var(--cc-green)' : 'var(--cc-muted)')">
+                        [style.color]="row.demandDelta > 0 ? 'var(--cc-red)' : (row.demandDelta < 0 ? 'var(--cc-green-text)' : 'var(--cc-muted)')">
                       {{ row.demandDelta > 0 ? '+' : '' }}{{ row.demandDelta | number: '1.0-0' }}
                     </td>
                   </tr>

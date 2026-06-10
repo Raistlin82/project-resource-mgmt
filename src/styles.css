@@ -30,6 +30,13 @@
   --cc-amber: #d97706;
   --cc-red: #dc2626;
   --cc-green: #059669;
+  /* Green/amber TEXT tokens — emerald-700 (#047857, ~5.5:1 on white) and amber-700
+     (#b45309, ~5.0:1 on white) for financial figures rendered as readable TEXT on light
+     surfaces. Use these, NOT --cc-green (#059669, ~3.8:1) / --cc-amber (#d97706, ~3.2:1)
+     which fail AA for normal text. Keep --cc-green/--cc-amber for borders/backgrounds only.
+     Mirrors the chips (.command-status.green/.amber) which already use these -700 shades. */
+  --cc-green-text: #047857;
+  --cc-amber-text: #b45309;
   --cc-violet: #7c3aed;
   --cc-shadow: 0 1px 2px rgb(16 18 34 / 4%), 0 12px 32px -14px rgb(16 18 34 / 16%);
   --cc-shadow-sm: 0 1px 2px rgb(16 18 34 / 4%), 0 8px 24px -12px rgb(16 18 34 / 10%);
@@ -299,9 +306,9 @@ textarea:focus-visible,
 }
 
 .command-nav-badge.danger {
-  /* red-50 fill, red-600 text */
+  /* red-50 fill, red-700 text (~5.9:1 on #fef2f2 — passes AA; red-600 was 4.41:1) */
   background: #fef2f2;
-  color: #dc2626;
+  color: #b91c1c;
 }
 
 /* ============================================================
@@ -335,7 +342,7 @@ textarea:focus-visible,
 }
 
 .command-nav-search input::placeholder {
-  color: #94a3b8;
+  color: #64748b;
 }
 
 .command-nav-search input:focus {
@@ -351,7 +358,7 @@ textarea:focus-visible,
   border-radius: 4px;
   background: #f8fafc;
   padding: 0.05rem 0.35rem;
-  color: #94a3b8;
+  color: #64748b;
   font-family: var(--font-mono);
   font-size: 0.62rem;
   line-height: 1.1;
@@ -513,6 +520,7 @@ textarea:focus-visible,
 
 .command-kpi {
   position: relative;
+  min-width: 0;
   border: 1px solid var(--cc-line);
   border-top: 3px solid var(--cc-primary);
   border-radius: 8px;
@@ -530,7 +538,7 @@ textarea:focus-visible,
 }
 
 .command-kpi.warning .command-kpi-value {
-  color: var(--cc-amber);
+  color: var(--cc-amber-text);
 }
 
 .command-kpi.danger {
@@ -554,7 +562,7 @@ textarea:focus-visible,
 }
 
 .command-kpi.green .command-kpi-value {
-  color: var(--cc-green);
+  color: var(--cc-green-text);
 }
 
 .command-kpi-label {
@@ -570,11 +578,14 @@ textarea:focus-visible,
   margin-top: var(--space-3xs);
   color: var(--cc-ink);
   font-family: var(--font-mono);
-  font-size: clamp(1.6rem, 3vw, 2.65rem);
+  /* Smaller, fluid size so long currency amounts (e.g. €310,400) fit inside
+     narrow KPI cards without overflowing. Pairs with min-width:0 on the card. */
+  font-size: clamp(1.2rem, 0.95rem + 1vw, 1.85rem);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  line-height: 1;
+  line-height: 1.05;
   letter-spacing: -0.02em;
+  min-width: 0;
 }
 
 .command-kpi-note {

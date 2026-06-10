@@ -4,10 +4,11 @@ import { ReactiveFormsModule, FormBuilder, FormGroup, Validators, FormArray } fr
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, ResourceOrganization } from '../services/api.service';
 import { NotificationService } from '../services/notification.service';
+import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 
 @Component({
   selector: 'app-manage-resource-organizations',
-  imports: [ReactiveFormsModule, MatIconModule],
+  imports: [ReactiveFormsModule, MatIconModule, ModalDialogDirective],
   template: `
     <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden hover:shadow-md transition-all">
       <div class="p-6 sm:p-8 border-b border-slate-200 flex justify-between items-center bg-slate-50">
@@ -100,13 +101,14 @@ import { NotificationService } from '../services/notification.service';
     </div>
 
     @if (deletingId()) {
-      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+           appModal ariaLabelledby="resourceOrgDeleteTitle" (dismiss)="cancelDelete()">
         <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden flex flex-col transform transition-all">
           <div class="p-8 text-center">
             <div class="w-20 h-20 bg-red-50 ring-1 ring-red-200 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner">
               <mat-icon class="text-red-600 text-4xl">warning</mat-icon>
             </div>
-            <h3 class="text-2xl font-bold text-slate-900 mb-2 tracking-tight">Delete Resource Organization</h3>
+            <h3 id="resourceOrgDeleteTitle" class="text-2xl font-bold text-slate-900 mb-2 tracking-tight">Delete Resource Organization</h3>
             <p class="text-slate-500 text-sm">Are you sure you want to delete this resource organization? This action cannot be undone.</p>
           </div>
           <div class="p-5 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">

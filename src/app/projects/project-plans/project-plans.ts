@@ -6,11 +6,12 @@ import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } 
 import { ApiService, Project, WorkPackage, Milestone } from '../../services/api.service';
 import { NotificationService } from '../../services/notification.service';
 import { AuthService } from '../../services/auth.service';
+import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
 @Component({
   selector: 'app-project-plans',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DatePipe, FormsModule, ReactiveFormsModule],
+  imports: [MatIconModule, DatePipe, FormsModule, ReactiveFormsModule, ModalDialogDirective],
   template: `
     <div [class]="projectId() ? '' : 'max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8'">
       <div class="space-y-8">
@@ -106,7 +107,7 @@ import { AuthService } from '../../services/auth.service';
                       </div>
                     </td>
                     <td class="py-4 px-4 text-right">
-                      <button (click)="openEditWpForm(wp)" class="text-slate-400 hover:text-blue-700 transition-colors opacity-0 group-hover:opacity-100">
+                      <button type="button" (click)="openEditWpForm(wp)" [attr.aria-label]="'Edit ' + wp.name" [attr.title]="'Edit ' + wp.name" class="text-slate-400 hover:text-blue-700 transition-colors opacity-0 group-hover:opacity-100">
                         <mat-icon class="text-sm">edit</mat-icon>
                       </button>
                     </td>
@@ -206,11 +207,12 @@ import { AuthService } from '../../services/auth.service';
 
       <!-- Add Milestone Modal -->
       @if (showMilestoneForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6">
+        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+             appModal ariaLabelledby="milestoneModalTitle" (dismiss)="closeMilestoneForm()">
           <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
             <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-              <h2 class="text-2xl font-bold text-slate-900 tracking-tight">Add Milestone</h2>
-              <button (click)="closeMilestoneForm()" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <h2 id="milestoneModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">Add Milestone</h2>
+              <button type="button" (click)="closeMilestoneForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -241,11 +243,12 @@ import { AuthService } from '../../services/auth.service';
 
       <!-- Add Work Package Modal -->
       @if (showWpForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6">
+        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+             appModal ariaLabelledby="wpModalTitle" (dismiss)="closeWpForm()">
           <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
             <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-              <h2 class="text-2xl font-bold text-slate-900 tracking-tight">Add Work Package</h2>
-              <button (click)="closeWpForm()" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <h2 id="wpModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">Add Work Package</h2>
+              <button type="button" (click)="closeWpForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -287,11 +290,12 @@ import { AuthService } from '../../services/auth.service';
 
       <!-- Edit Work Package Modal -->
       @if (showEditWpForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6">
+        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+             appModal ariaLabelledby="editWpModalTitle" (dismiss)="closeEditWpForm()">
           <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
             <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-              <h2 class="text-2xl font-bold text-slate-900 tracking-tight">Edit Work Package</h2>
-              <button (click)="closeEditWpForm()" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <h2 id="editWpModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">Edit Work Package</h2>
+              <button type="button" (click)="closeEditWpForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>

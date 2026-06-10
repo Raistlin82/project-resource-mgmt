@@ -475,6 +475,48 @@ describe('finance.util recognitionSchedule', () => {
     expect(rows[3].cumulative).toBe(2000);
   });
 
+  it('contract-level T&M (no projectId) recognizes only its own contract\'s projects, not company-wide', () => {
+    const d: FinanceData = {
+      ...data,
+      // P belongs to CT1, Q to CT2.
+      projects: [{ ...proj('P', 'P'), contractId: 'CT1' }, { ...proj('Q', 'Q'), contractId: 'CT2' }],
+      timeEntries: [
+        time('t1', 'a1', 'r1', '1', 'P', 10, 'Approved'),                            // CT1 -> 1400 (Jan)
+        { ...time('t2', 'a2', 'r2', '2', 'Q', 20, 'Approved'), date: '2026-02-09' },  // CT2 -> must NOT leak in
+      ],
+      // Contract-level T&M obligation on CT1 with no projectId.
+      billingItems: [billC('tm', 'CT1', undefined, 'TimeAndMaterials', 0, 'Ready')],
+    };
+    const rows = recognitionSchedule(d, periods, { contractId: 'CT1' });
+    // Only CT1's project P hours (1400) are recognized; CT2's 3600 stays out.
+    expect(rows.map(r => r.recognized)).toEqual([1400, 0, 0, 0]);
+    expect(rows[3].cumulative).toBe(1400);
+  });
+
+  it('contract-level T&M with no resolvable projects recognizes nothing (no company-wide leak)', () => {
+    const d: FinanceData = {
+      ...data,
+      // No projects map to CT1.
+      projects: [{ ...proj('P', 'P'), contractId: 'CT2' }],
+      timeEntries: [time('t1', 'a1', 'r1', '1', 'P', 10, 'Approved')],
+      billingItems: [billC('tm', 'CT1', undefined, 'TimeAndMaterials', 0, 'Ready')],
+    };
+    const rows = recognitionSchedule(d, periods, { contractId: 'CT1' });
+    expect(rows.every(r => r.recognized === 0)).toBe(true);
+  });
+
+  it('Capped T&M fills the cap chronologically regardless of time-entry array order', () => {
+    const jan = time('t1', 'a1', 'r1', '1', 'P', 10, 'Approved');                       // 1400 (Jan)
+    const feb = { ...time('t2', 'a1', 'r1', '1', 'P', 20, 'Approved'), date: '2026-02-09' }; // 2800 (Feb)
+    const billing = [bill('c1', 'P', 'Capped', 0, 'Ready', { capAmount: 2000 })];
+    const inOrder = recognitionSchedule({ ...data, timeEntries: [jan, feb], billingItems: billing }, periods, { projectId: 'P' });
+    const reversed = recognitionSchedule({ ...data, timeEntries: [feb, jan], billingItems: billing }, periods, { projectId: 'P' });
+    // Earliest month (Jan) is recognized first up to the cap; later month is truncated.
+    expect(inOrder.map(r => r.recognized)).toEqual([1400, 600, 0, 0]);
+    // Result is identical whichever order the entries arrive in.
+    expect(reversed.map(r => r.recognized)).toEqual(inOrder.map(r => r.recognized));
+  });
+
   it('Advance is deferred (never recognized) and rolls off as work is recognized', () => {
     const d: FinanceData = {
       ...data,
@@ -764,6 +806,25 @@ describe('finance.util convertToBase', () => {
     // a non-finite (e.g. negative/zero) rate in the table is treated as a no-op
     const badRate: FxRate[] = [{ currency: 'EUR', rateToBase: 1 }, { currency: 'USD', rateToBase: Number.NaN }];
     expect(convertToBase(1000, 'USD', badRate)).toBe(1000);
+  });
+
+  // Regression for the #14 Capped not-to-exceed FLAG (server enforceCappedBilling):
+  // accrued T&M is summed from EUR-denominated resource billRates (a BASE figure),
+  // while capAmount is in the item's own currency. The cap MUST be converted to
+  // base before the accrued>cap comparison, otherwise a USD cap is compared
+  // apples-to-oranges against EUR accrual and the flag fires (or hides) wrongly.
+  it('normalises a non-base capAmount before an accrued-vs-cap comparison', () => {
+    // A 10,000 USD cap is worth 9,000 EUR at 0.9. Accrued T&M (EUR) = 9,500.
+    const capUsd = 10_000;
+    const accruedEur = 9_500;
+    const capInBase = convertToBase(capUsd, 'USD', rates); // -> 9000 EUR
+    // Correct (currency-normalised) comparison: 9500 EUR accrued DOES exceed the
+    // 9000 EUR cap -> breached.
+    expect(capInBase).toBeCloseTo(9_000, 9);
+    expect(accruedEur > capInBase).toBe(true);
+    // The buggy same-currency comparison would have used the raw 10,000 USD cap,
+    // wrongly concluding 9500 <= 10000 (NOT breached).
+    expect(accruedEur > capUsd).toBe(false);
   });
 });
 

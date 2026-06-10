@@ -5,11 +5,12 @@ import { ReactiveFormsModule, FormControl, FormGroup, Validators, AbstractContro
 import { rxResource, toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { ApiService, Order, Contract, Partner, Project, OrderLine } from '../../services/api.service';
 import { NotificationService } from '../../services/notification.service';
+import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
 @Component({
   selector: 'app-orders',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, CurrencyPipe, DatePipe, ReactiveFormsModule],
+  imports: [MatIconModule, CurrencyPipe, DatePipe, ReactiveFormsModule, ModalDialogDirective],
   template: `
     <div class="max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -98,11 +99,12 @@ import { NotificationService } from '../../services/notification.service';
     </div>
 
     @if (showForm()) {
-      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6">
+      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+           appModal ariaLabelledby="orderModalTitle" (dismiss)="closeForm()">
         <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
           <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-            <h2 class="text-2xl font-bold text-slate-900 tracking-tight">New Order</h2>
-            <button (click)="closeForm()" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
+            <h2 id="orderModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">New Order</h2>
+            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
               <mat-icon>close</mat-icon>
             </button>
           </div>

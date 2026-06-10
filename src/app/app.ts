@@ -143,7 +143,7 @@ interface NavState {
                 class="command-nav-group-body"
                 [class.open]="isGroupOpen(group.label)"
                 [id]="'navgroup-' + group.label"
-                [attr.aria-hidden]="!isGroupOpen(group.label)">
+                [inert]="!isGroupOpen(group.label)">
                 <div class="space-y-1 pt-1">
                   @for (item of group.items; track item.route) {
                     <a
@@ -207,22 +207,39 @@ interface NavState {
         </div>
       </main>
 
-      <div class="fixed bottom-4 right-4 z-[100] flex w-full max-w-sm flex-col gap-2 pointer-events-none">
-        @for (toast of toasts(); track toast.id) {
-          <div class="pointer-events-auto flex items-start gap-3 rounded-md border p-4 text-sm font-semibold shadow-lg ring-1 animate-in"
-               [class.bg-red-50]="toast.type === 'error'" [class.border-red-200]="toast.type === 'error'" [class.ring-red-200]="toast.type === 'error'" [class.text-red-700]="toast.type === 'error'"
-               [class.bg-emerald-50]="toast.type === 'success'" [class.border-emerald-200]="toast.type === 'success'" [class.ring-emerald-200]="toast.type === 'success'" [class.text-emerald-700]="toast.type === 'success'"
-               [class.bg-white]="toast.type === 'info'" [class.border-slate-200]="toast.type === 'info'" [class.ring-slate-200]="toast.type === 'info'" [class.text-slate-700]="toast.type === 'info'"
-               role="status" aria-live="polite">
-            <mat-icon class="text-[20px] w-[20px] h-[20px] shrink-0">
-              {{ toast.type === 'error' ? 'error' : toast.type === 'success' ? 'check_circle' : 'info' }}
-            </mat-icon>
-            <span class="flex-1">{{ toast.message }}</span>
-            <button (click)="dismiss(toast.id)" class="shrink-0 hover:opacity-70 transition-opacity" aria-label="Dismiss notification">
-              <mat-icon class="text-[18px] w-[18px] h-[18px]">close</mat-icon>
-            </button>
-          </div>
-        }
+      <!--
+        Toasts are split across two live regions so severity maps to the right
+        politeness: errors interrupt (role="alert"/assertive) so a screen-reader
+        user is told immediately that an action failed; success/info are polite.
+        Both sit in the same fixed wrapper so the visual stack is unchanged.
+      -->
+      <div class="fixed bottom-4 right-4 z-[100] flex w-full max-w-sm flex-col pointer-events-none">
+        <div role="alert" aria-live="assertive" class="flex flex-col gap-2">
+          @for (toast of errorToasts(); track toast.id) {
+            <div class="pointer-events-auto flex items-start gap-3 rounded-md border p-4 text-sm font-semibold shadow-lg ring-1 animate-in bg-red-50 border-red-200 ring-red-200 text-red-700">
+              <mat-icon class="text-[20px] w-[20px] h-[20px] shrink-0">error</mat-icon>
+              <span class="flex-1">{{ toast.message }}</span>
+              <button (click)="dismiss(toast.id)" class="shrink-0 hover:opacity-70 transition-opacity" aria-label="Dismiss notification">
+                <mat-icon class="text-[18px] w-[18px] h-[18px]">close</mat-icon>
+              </button>
+            </div>
+          }
+        </div>
+        <div role="status" aria-live="polite" class="flex flex-col gap-2" [class.mt-2]="errorToasts().length && statusToasts().length">
+          @for (toast of statusToasts(); track toast.id) {
+            <div class="pointer-events-auto flex items-start gap-3 rounded-md border p-4 text-sm font-semibold shadow-lg ring-1 animate-in"
+                 [class.bg-emerald-50]="toast.type === 'success'" [class.border-emerald-200]="toast.type === 'success'" [class.ring-emerald-200]="toast.type === 'success'" [class.text-emerald-700]="toast.type === 'success'"
+                 [class.bg-white]="toast.type === 'info'" [class.border-slate-200]="toast.type === 'info'" [class.ring-slate-200]="toast.type === 'info'" [class.text-slate-700]="toast.type === 'info'">
+              <mat-icon class="text-[20px] w-[20px] h-[20px] shrink-0">
+                {{ toast.type === 'success' ? 'check_circle' : 'info' }}
+              </mat-icon>
+              <span class="flex-1">{{ toast.message }}</span>
+              <button (click)="dismiss(toast.id)" class="shrink-0 hover:opacity-70 transition-opacity" aria-label="Dismiss notification">
+                <mat-icon class="text-[18px] w-[18px] h-[18px]">close</mat-icon>
+              </button>
+            </div>
+          }
+        </div>
       </div>
     </div>
   `,
@@ -235,6 +252,10 @@ export class App {
   private router = inject(Router);
 
   readonly toasts = this.notifications.items;
+  // Split by severity so each maps to a live region with the right politeness
+  // (assertive for errors, polite for the rest) — see the toast markup.
+  readonly errorToasts = computed(() => this.toasts().filter(t => t.type === 'error'));
+  readonly statusToasts = computed(() => this.toasts().filter(t => t.type !== 'error'));
   readonly exactActiveOptions = { exact: true };
   readonly defaultActiveOptions = { exact: false };
 

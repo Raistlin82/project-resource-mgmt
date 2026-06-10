@@ -14,6 +14,7 @@ import {
 } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
+import { ListStateComponent } from '../shared/list-state.component';
 
 interface ApprovalsData {
   approvals: ApprovalRequest[];
@@ -53,7 +54,7 @@ interface ApprovalRow {
 @Component({
   selector: 'app-approvals',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CurrencyPipe, DatePipe, MatIconModule],
+  imports: [CurrencyPipe, DatePipe, MatIconModule, ListStateComponent],
   template: `
     <div class="max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -84,6 +85,7 @@ interface ApprovalRow {
         </div>
       </div>
 
+      <app-list-state [loading]="res.isLoading()" [error]="res.status() === 'error'" label="approvals" (retry)="res.reload()">
       <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden">
         <div class="overflow-x-auto">
           <table class="w-full text-sm text-left border-collapse min-w-[960px]">
@@ -174,7 +176,7 @@ interface ApprovalRow {
                         </button>
                       </div>
                     } @else {
-                      <span class="text-xs font-medium text-slate-400">Decided</span>
+                      <span class="text-xs font-medium text-slate-500">Decided</span>
                     }
                   </td>
                 </tr>
@@ -197,6 +199,7 @@ interface ApprovalRow {
           </table>
         </div>
       </div>
+      </app-list-state>
     </div>
   `,
 })
@@ -206,7 +209,7 @@ export class Approvals {
   private notifications = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
-  private res = rxResource<ApprovalsData, unknown>({
+  protected res = rxResource<ApprovalsData, unknown>({
     stream: () =>
       forkJoin({
         approvals: this.api.getApprovalRequests(),

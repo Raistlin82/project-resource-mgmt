@@ -21,6 +21,7 @@ import {
 import { NotificationService } from '../../services/notification.service';
 import { convertToBase, daysOverdue } from '../../services/finance.util';
 import { CsvColumn, downloadCsv, toCsv } from '../../services/export.util';
+import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
 type BillingStatus = BillingPlanItem['status'];
 type Recurrence = NonNullable<BillingPlanItem['recurrence']>;
@@ -89,7 +90,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
 @Component({
   selector: 'app-billing',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CurrencyPipe, DatePipe, PercentPipe, MatIconModule, ReactiveFormsModule],
+  imports: [CurrencyPipe, DatePipe, PercentPipe, MatIconModule, ReactiveFormsModule, ModalDialogDirective],
   template: `
     <div class="command-page space-y-6 p-4 sm:p-6 lg:p-8">
       <!-- HEADER -->
@@ -379,7 +380,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
     <!-- CREATE / EDIT MODAL -->
     @if (showForm()) {
       <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
-           role="dialog" aria-modal="true" aria-labelledby="billingModalTitle">
+           appModal ariaLabelledby="billingModalTitle" (dismiss)="closeForm()">
         <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
           <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
             <div>
@@ -534,7 +535,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
     <!-- #5 INVOICE DOCUMENT — printable artifact (window.print → PDF) -->
     @if (invoiceRow(); as inv) {
       <div class="invoice-overlay fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
-           role="dialog" aria-modal="true" aria-labelledby="invoiceDocTitle">
+           appModal ariaLabelledby="invoiceDocTitle" (dismiss)="closeInvoice()">
         <div class="invoice-shell bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[92vh]">
           <!-- Toolbar (screen only) -->
           <div class="invoice-toolbar px-6 sm:px-8 py-4 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">

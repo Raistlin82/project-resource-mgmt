@@ -107,3 +107,39 @@ describe('staffing.util time-entry transition whitelist', () => {
     expect(TIME_ENTRY_TRANSITIONS.Approved).toHaveLength(0);
   });
 });
+
+// B-UTILIZATION regression: utilization must be DERIVED from the source of truth
+// (the sum of a resource's assigned hours) and only clamped/rounded once, not
+// mutated by per-step ±contribution with a clamp on every step. The latter is
+// lossy: a near-/over-saturated resource that gains then loses an assignment
+// permanently loses magnitude. These tests use the same `utilizationContribution`
+// the server recompute uses, with the same final clamp[0,100]+round.
+describe('staffing.util utilization recompute (derive from source of truth)', () => {
+  const clampUtil = (v: number) => Math.round(Math.max(0, Math.min(100, v)));
+  // Recompute as the server does: clampUtil(contribution(Σ hours, capacity)).
+  const recompute = (totalHours: number, capacity: number) => clampUtil(utilizationContribution(totalHours, capacity));
+
+  it('is lossless across an add-then-remove cycle on a saturated resource', () => {
+    const capacity = 40;
+    // Resource already loaded to 100% by 40h, then a 20h assignment is added and
+    // immediately removed. Source-of-truth recompute returns to exactly 100.
+    expect(recompute(40, capacity)).toBe(100);          // baseline
+    expect(recompute(40 + 20, capacity)).toBe(100);     // after add (clamped at 100)
+    expect(recompute(40, capacity)).toBe(100);          // after remove -> back to 100, no loss
+
+    // Contrast: the buggy incremental counter (clamp on every step) loses 20%.
+    const contrib = utilizationContribution(20, capacity); // 50
+    const buggyAfterAdd = clampUtil(100 + contrib);        // clamped to 100
+    const buggyAfterRemove = clampUtil(buggyAfterAdd - contrib); // 100 - 50 = 50
+    expect(buggyAfterRemove).toBe(50); // demonstrates the drift the fix removes
+  });
+
+  it('never goes negative and reflects the true remaining load after an over-removal', () => {
+    const capacity = 40;
+    // Remaining assignments sum to 8h -> 20%. A derived recompute can never be
+    // driven below 0 by subtracting more than is present (the bug clamped to 0
+    // and destroyed magnitude).
+    expect(recompute(8, capacity)).toBe(20);
+    expect(recompute(0, capacity)).toBe(0);
+  });
+});

@@ -4,11 +4,13 @@ import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angula
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { ApiService, Customer, Contract } from '../../services/api.service';
 import { NotificationService } from '../../services/notification.service';
+import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { ListStateComponent } from '../../shared/list-state.component';
 
 @Component({
   selector: 'app-customers',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, ReactiveFormsModule],
+  imports: [MatIconModule, ReactiveFormsModule, ModalDialogDirective, ListStateComponent],
   template: `
     <div class="max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -22,6 +24,7 @@ import { NotificationService } from '../../services/notification.service';
       </div>
 
       <!-- Customers Table -->
+      <app-list-state [loading]="customersRes.isLoading()" [error]="customersRes.status() === 'error'" label="customers" (retry)="customersRes.reload()">
       <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden hover:shadow-md transition-shadow">
         <div class="overflow-x-auto">
           <table class="w-full text-sm">
@@ -61,15 +64,17 @@ import { NotificationService } from '../../services/notification.service';
           </table>
         </div>
       </div>
+      </app-list-state>
     </div>
 
     <!-- Create Modal -->
     @if (showForm()) {
-      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6">
+      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+           appModal ariaLabelledby="customerModalTitle" (dismiss)="closeForm()">
         <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-xl overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
           <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-            <h2 class="text-2xl font-bold text-slate-900 tracking-tight">New Customer</h2>
-            <button (click)="closeForm()" class="text-slate-400 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
+            <h2 id="customerModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">New Customer</h2>
+            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-slate-400 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
               <mat-icon>close</mat-icon>
             </button>
           </div>
@@ -109,7 +114,7 @@ export class Customers {
   private notifications = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
-  private customersRes = rxResource({ stream: () => this.api.getCustomers(), defaultValue: [] as Customer[] });
+  protected customersRes = rxResource({ stream: () => this.api.getCustomers(), defaultValue: [] as Customer[] });
   private contractsRes = rxResource({ stream: () => this.api.getContracts(), defaultValue: [] as Contract[] });
 
   customers = this.customersRes.value;

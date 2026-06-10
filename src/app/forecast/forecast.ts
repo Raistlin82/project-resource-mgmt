@@ -154,7 +154,7 @@ interface PeriodRow extends CapacityPeriod {
                         {{ row.utilizationPct | number: '1.0-0' }}%
                       </span>
                     </td>
-                    <td class="num font-semibold" [style.color]="row.gap < 0 ? 'var(--cc-red)' : 'var(--cc-green)'">
+                    <td class="num font-semibold" [style.color]="row.gap < 0 ? 'var(--cc-red)' : 'var(--cc-green-text)'">
                       {{ row.gap | number: '1.0-0' }}
                     </td>
                   </tr>
@@ -190,7 +190,7 @@ interface PeriodRow extends CapacityPeriod {
                       <td class="font-semibold text-[var(--cc-ink)]">{{ b.name }}</td>
                       <td class="text-[var(--cc-muted)]">{{ b.role }}</td>
                       <td class="num">{{ b.utilization | number: '1.0-0' }}%</td>
-                      <td class="num font-semibold" style="color: var(--cc-green)">{{ b.availableHours | number: '1.0-0' }}h</td>
+                      <td class="num font-semibold" style="color: var(--cc-green-text)">{{ b.availableHours | number: '1.0-0' }}h</td>
                     </tr>
                   } @empty {
                     <tr>

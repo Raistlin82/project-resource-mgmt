@@ -3,7 +3,8 @@ import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/c
 import { rxResource } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { Router, RouterLink } from '@angular/router';
-import { forkJoin } from 'rxjs';
+import { forkJoin, of } from 'rxjs';
+import { AuthService } from '../services/auth.service';
 import {
   ApiService,
   Assignment,
@@ -72,7 +73,7 @@ interface ProjectCommandRow {
           <div class="command-eyebrow">Portfolio Delivery Control</div>
           <h1 class="command-title">Delivery Command Center</h1>
           <p class="command-subtitle">
-            Vista unica per presidiare margine, EAC, rischi, change control, domanda risorse e saturazione del team.
+            A single view to govern margin, EAC, risks, change control, resource demand and team utilization.
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-2 pt-1">
@@ -186,7 +187,7 @@ interface ProjectCommandRow {
         <div class="command-card-header">
           <div>
             <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Delivery Alerts</h2>
-            <p class="mt-1 text-sm text-[var(--cc-muted)]">Progetti che sforano soglie di margine, burn o EAC (budget CR-adjusted).</p>
+            <p class="mt-1 text-sm text-[var(--cc-muted)]">Projects breaching margin, burn or EAC thresholds (CR-adjusted budget).</p>
           </div>
           <a routerLink="/reporting" class="command-status" [class.red]="portfolioAlertRows().length > 0" [class.green]="portfolioAlertRows().length === 0">
             {{ portfolioAlertRows().length }} flagged
@@ -227,7 +228,7 @@ interface ProjectCommandRow {
           <div class="command-card-header">
             <div>
               <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Portfolio Control Board</h2>
-              <p class="mt-1 text-sm text-[var(--cc-muted)]">Progetti ordinati per attenzione richiesta.</p>
+              <p class="mt-1 text-sm text-[var(--cc-muted)]">Projects ordered by attention required.</p>
             </div>
             <a routerLink="/projects" class="command-status">Open Project 360</a>
           </div>
@@ -256,7 +257,7 @@ interface ProjectCommandRow {
                       <div class="mt-1 command-meter"><span [style.width.%]="meter(project.marginPct, 40)"></span></div>
                     </td>
                     <td class="font-mono">{{ project.eac | currency:'EUR':'symbol':'1.0-0' }}</td>
-                    <td class="font-mono font-semibold" [style.color]="project.vac < 0 ? 'var(--cc-red)' : 'var(--cc-green)'">{{ project.vac | currency:'EUR':'symbol':'1.0-0' }}</td>
+                    <td class="font-mono font-semibold" [style.color]="project.vac < 0 ? 'var(--cc-red)' : 'var(--cc-green-text)'">{{ project.vac | currency:'EUR':'symbol':'1.0-0' }}</td>
                     <td>
                       <span class="font-mono font-semibold">{{ project.openRisks }}</span>
                       <span class="text-[var(--cc-muted)]"> / </span>
@@ -372,7 +373,7 @@ interface ProjectCommandRow {
           <div class="command-card-header">
             <div>
               <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Capacity Exceptions</h2>
-              <p class="mt-1 text-sm text-[var(--cc-muted)]">Risorse oltre soglia di controllo.</p>
+              <p class="mt-1 text-sm text-[var(--cc-muted)]">Resources over the control threshold.</p>
             </div>
             <a routerLink="/utilization" class="command-status" [class.red]="overbookedResources() > 0" [class.green]="overbookedResources() === 0">Load</a>
           </div>
@@ -403,44 +404,60 @@ interface ProjectCommandRow {
 export class DashboardComponent {
   private api = inject(ApiService);
   private router = inject(Router);
+  private auth = inject(AuthService);
 
   /** Reporting/base currency for portfolio money KPIs (see EUR caption). */
   protected readonly baseCurrency = BASE_CURRENCY;
 
+  private static readonly EMPTY_DATA: DashboardData = {
+    resources: [],
+    requests: [],
+    projects: [],
+    assignments: [],
+    orders: [],
+    orderLines: [],
+    financials: [],
+    timeEntries: [],
+    billingItems: [],
+    issues: [],
+    changeRequests: [],
+  };
+
   // FX rates feed FinanceData so portfolio rollups (margin, revenue, EAC, VAC)
   // are normalised to base currency; empty default => no-op conversion until loaded.
-  private fxRes = rxResource<FxRate[], unknown>({
-    stream: () => this.api.getFxRates(),
+  // Keyed on auth readiness so it (re)runs together with the gated data load.
+  private fxRes = rxResource<FxRate[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getFxRates() : of<FxRate[]>([])),
     defaultValue: [],
   });
 
-  private dataRes = rxResource<DashboardData, unknown>({
-    stream: () => forkJoin({
-      resources: this.api.getResources(),
-      requests: this.api.getRequests(),
-      projects: this.api.getProjects(),
-      assignments: this.api.getAssignments(),
-      orders: this.api.getOrders(),
-      orderLines: this.api.getOrderLines(),
-      financials: this.api.getProjectFinancials(),
-      timeEntries: this.api.getTimeEntries(),
-      billingItems: this.api.getBillingPlanItems(),
-      issues: this.api.getProjectIssues(),
-      changeRequests: this.api.getChangeRequests(),
-    }),
-    defaultValue: {
-      resources: [],
-      requests: [],
-      projects: [],
-      assignments: [],
-      orders: [],
-      orderLines: [],
-      financials: [],
-      timeEntries: [],
-      billingItems: [],
-      issues: [],
-      changeRequests: [],
-    },
+  // Several of these reads are principal-gated server-side (resources,
+  // time-entries, orders, order-lines, billing-plan-items). Keying the load on
+  // auth readiness ensures the forkJoin fires only AFTER the OAuth bootstrap has
+  // settled and the bearer token is attached by the interceptor; firing earlier
+  // (e.g. on the post-login redirect) sent unauthenticated requests that 401'd,
+  // and forkJoin's fail-fast then collapsed the entire dashboard to empty. When
+  // authReady flips false->true the params change re-runs the stream.
+  private dataRes = rxResource<DashboardData, boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) =>
+      ready
+        ? forkJoin({
+            resources: this.api.getResources(),
+            requests: this.api.getRequests(),
+            projects: this.api.getProjects(),
+            assignments: this.api.getAssignments(),
+            orders: this.api.getOrders(),
+            orderLines: this.api.getOrderLines(),
+            financials: this.api.getProjectFinancials(),
+            timeEntries: this.api.getTimeEntries(),
+            billingItems: this.api.getBillingPlanItems(),
+            issues: this.api.getProjectIssues(),
+            changeRequests: this.api.getChangeRequests(),
+          })
+        : of(DashboardComponent.EMPTY_DATA),
+    defaultValue: DashboardComponent.EMPTY_DATA,
   });
 
   private data = this.dataRes.value;

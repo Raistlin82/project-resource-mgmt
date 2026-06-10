@@ -664,11 +664,19 @@ export function recognitionSchedule(
     }
 
     if (item.type === 'TimeAndMaterials' || item.type === 'Capped' || item.type === 'Expense') {
-      // As-incurred: approved time entries for the obligation's project × billRate.
-      const projectId = item.projectId;
-      const entries = (data.timeEntries ?? []).filter(
-        t => t.status === 'Approved' && (projectId === undefined || t.projectId === projectId),
-      );
+      // As-incurred: approved time entries for the obligation × billRate. Scope to
+      // the item's project when set; otherwise to every project on the item's
+      // contract — never company-wide (an undated/cross-contract leak would let one
+      // contract-level item recognize hours logged on unrelated contracts). A
+      // contract with no resolvable projects recognizes nothing.
+      const projectIds = item.projectId
+        ? new Set([item.projectId])
+        : new Set((data.projects ?? []).filter(p => p.contractId === item.contractId).map(p => p.id));
+      const entries = (data.timeEntries ?? [])
+        .filter(t => t.status === 'Approved' && projectIds.has(t.projectId))
+        // Fill the cap chronologically (earliest hours first) so the dated schedule
+        // is independent of time-entry array order.
+        .sort((a, b) => (Date.parse(a.date) || 0) - (Date.parse(b.date) || 0));
       let booked = 0;
       const cap = Number.isFinite(item.capAmount) ? (item.capAmount as number) : Infinity;
       for (const t of entries) {

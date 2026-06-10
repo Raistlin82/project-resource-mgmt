@@ -5,11 +5,12 @@ import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angula
 import { toSignal, rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { RouterLink } from '@angular/router';
 import { ApiService, Project, Contract } from '../../services/api.service';
+import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
 @Component({
   selector: 'app-projects',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DatePipe, ReactiveFormsModule, RouterLink],
+  imports: [MatIconModule, DatePipe, ReactiveFormsModule, RouterLink, ModalDialogDirective],
   template: `
     <div class="max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -105,11 +106,12 @@ import { ApiService, Project, Contract } from '../../services/api.service';
 
     <!-- Create/Edit Modal -->
     @if (showForm()) {
-      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6">
+      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+           appModal ariaLabelledby="projectModalTitle" (dismiss)="closeForm()">
         <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
           <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-            <h2 class="text-2xl font-bold text-slate-900 tracking-tight">{{ editingId() ? 'Edit Project' : 'Create Collaborative Project' }}</h2>
-            <button (click)="closeForm()" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
+            <h2 id="projectModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">{{ editingId() ? 'Edit Project' : 'Create Collaborative Project' }}</h2>
+            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
               <mat-icon>close</mat-icon>
             </button>
           </div>
@@ -177,13 +179,14 @@ import { ApiService, Project, Contract } from '../../services/api.service';
 
     <!-- Delete Confirmation Modal -->
     @if (deletingId()) {
-      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+           appModal ariaLabelledby="projectDeleteTitle" (dismiss)="cancelDelete()">
         <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden flex flex-col transform transition-all">
           <div class="p-8 text-center">
             <div class="w-20 h-20 bg-red-50 ring-1 ring-red-200 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner">
               <mat-icon class="text-red-700 text-4xl">warning</mat-icon>
             </div>
-            <h3 class="text-2xl font-bold text-slate-900 mb-2 tracking-tight">Delete Project</h3>
+            <h3 id="projectDeleteTitle" class="text-2xl font-bold text-slate-900 mb-2 tracking-tight">Delete Project</h3>
             <p class="text-slate-500 text-sm">Are you sure you want to delete this project? This action cannot be undone.</p>
           </div>
           <div class="p-5 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">

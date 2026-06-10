@@ -6,6 +6,7 @@ import { AuthService } from '../services/auth.service';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { DecimalPipe } from '@angular/common';
 import { forkJoin } from 'rxjs';
+import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 
 interface RequestsData {
   requests: ResourceRequest[];
@@ -16,7 +17,7 @@ interface RequestsData {
 @Component({
   selector: 'app-resource-requests',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, ReactiveFormsModule, DecimalPipe],
+  imports: [MatIconModule, ReactiveFormsModule, DecimalPipe, ModalDialogDirective],
   template: `
     <div class="max-w-7xl mx-auto space-y-8">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -301,17 +302,18 @@ interface RequestsData {
       }
 
       @if (trackingDetails()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 sm:p-6">
+        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 sm:p-6"
+             appModal ariaLabelledby="trackingModalTitle" (dismiss)="closeTracking()">
           <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
             <div class="p-6 sm:p-8 border-b border-slate-200 flex items-start justify-between bg-gradient-to-br from-slate-50 to-transparent">
               <div>
-                <h2 class="text-2xl font-bold text-slate-900 tracking-tight">Staffing Progress</h2>
+                <h2 id="trackingModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">Staffing Progress</h2>
                 <p class="text-sm font-medium text-slate-500 mt-1.5 flex items-center gap-1.5">
                   <mat-icon class="text-[16px] w-[16px] h-[16px]">work_outline</mat-icon>
                   {{ trackingDetails()?.request?.name }}
                 </p>
               </div>
-              <button (click)="closeTracking()" class="text-slate-400 hover:text-slate-600 hover:bg-slate-50 p-2 rounded-full transition-colors">
+              <button type="button" (click)="closeTracking()" aria-label="Close dialog" title="Close" class="text-slate-400 hover:text-slate-600 hover:bg-slate-50 p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>

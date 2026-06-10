@@ -1,5 +1,5 @@
-import { ChangeDetectionStrategy, Component, inject, signal, computed } from '@angular/core';
-import { rxResource } from '@angular/core/rxjs-interop';
+import { ChangeDetectionStrategy, Component, DestroyRef, inject, signal, computed } from '@angular/core';
+import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, ResourceRequest, Resource } from '../services/api.service';
 import { DecimalPipe } from '@angular/common';
@@ -12,6 +12,7 @@ import {
   type CandidateScore,
   type MatchDimension,
 } from '../services/match.util';
+import { ListStateComponent } from '../shared/list-state.component';
 
 interface DimensionMeter {
   key: MatchDimension;
@@ -25,24 +26,30 @@ interface DimensionMeter {
 @Component({
   selector: 'app-staffing',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DecimalPipe, FormsModule],
+  imports: [MatIconModule, DecimalPipe, FormsModule, ListStateComponent],
   template: `
     <div class="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
       <h1 class="text-3xl sm:text-4xl font-bold text-slate-900 tracking-tight mb-8">Staff Resource Requests</h1>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8">
         <!-- Requests List -->
-        <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden flex flex-col h-[800px] hover:shadow-md transition-all">
+        <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden flex flex-col h-[min(800px,80vh)] hover:shadow-md transition-all">
           <div class="p-6 sm:p-8 border-b border-slate-200 bg-slate-50">
             <h2 class="text-xl font-bold text-slate-900 tracking-tight">Open Requests</h2>
             <p class="text-sm font-medium text-slate-500 mt-2">Select a request to find matching resources</p>
           </div>
-          <div class="overflow-y-auto flex-1 divide-y divide-slate-100">
+          <div class="overflow-y-auto flex-1">
+            <app-list-state [loading]="res.isLoading()" [error]="res.status() === 'error'" label="requests" (retry)="res.reload()">
+            <div class="divide-y divide-slate-100">
             @for (req of openRequests(); track req.id) {
               <div class="p-6 sm:p-8 hover:bg-slate-50 transition-all cursor-pointer group relative"
                    [class.bg-blue-50]="selectedRequest()?.id === req.id"
+                   role="button"
                    tabindex="0"
+                   [attr.aria-label]="'Select request ' + req.name"
+                   [attr.aria-pressed]="selectedRequest()?.id === req.id"
                    (keydown.enter)="selectRequest(req)"
+                   (keydown.space)="selectRequest(req); $event.preventDefault()"
                    (click)="selectRequest(req)">
                 @if (selectedRequest()?.id === req.id) {
                   <div class="absolute left-0 top-0 bottom-0 w-1.5 bg-blue-600 rounded-r-full"></div>
@@ -64,11 +71,13 @@ interface DimensionMeter {
             @if (openRequests().length === 0) {
               <div class="p-12 text-center text-slate-500 font-medium italic">No open requests available for staffing.</div>
             }
+            </div>
+            </app-list-state>
           </div>
         </div>
 
         <!-- Resources List -->
-        <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden flex flex-col h-[800px] hover:shadow-md transition-all">
+        <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden flex flex-col h-[min(800px,80vh)] hover:shadow-md transition-all">
           <div class="p-6 sm:p-8 border-b border-slate-200 bg-slate-50">
             <div class="flex items-center justify-between mb-6">
               <div>
@@ -138,8 +147,8 @@ interface DimensionMeter {
                       @if (assigningResourceId() === cand.resourceId) {
                         <div class="flex items-center gap-2 w-full sm:w-auto">
                           <input type="number" [ngModel]="assignHours()" (ngModelChange)="assignHours.set($event)" class="w-20 px-3 py-2 border border-slate-300 rounded-xl text-sm font-bold font-mono tabular-nums text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none shadow-inner" min="1" [max]="selectedRequest()?.requiredEffort || 1">
-                          <button (click)="confirmAssign(cand.resourceId)" class="flex-1 sm:flex-none bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm hover:-translate-y-0.5">Confirm</button>
-                          <button (click)="cancelAssign()" class="p-2 text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition-colors flex items-center justify-center"><mat-icon class="text-[20px] w-[20px] h-[20px]">close</mat-icon></button>
+                          <button (click)="confirmAssign(cand.resourceId)" [disabled]="assigning()" class="flex-1 sm:flex-none bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl text-sm font-semibold transition-all shadow-sm hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:translate-y-0">Confirm</button>
+                          <button type="button" (click)="cancelAssign()" aria-label="Cancel assignment" title="Cancel assignment" class="p-2 text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition-colors flex items-center justify-center"><mat-icon class="text-[20px] w-[20px] h-[20px]">close</mat-icon></button>
                         </div>
                       } @else {
                         <button (click)="startAssign(cand.resourceId)" class="w-full sm:w-auto bg-slate-50 border border-slate-200 text-slate-700 px-4 py-2 rounded-xl text-sm font-bold hover:bg-slate-100 hover:border-slate-300 transition-all shadow-sm flex items-center justify-center gap-2">
@@ -153,7 +162,7 @@ interface DimensionMeter {
                   <div class="mt-5 rounded-2xl bg-slate-50 ring-1 ring-slate-200 p-4">
                     <div class="flex items-center justify-between mb-2">
                       <span class="text-[10px] font-bold tracking-wider uppercase text-slate-500">Match score</span>
-                      <span class="text-sm font-bold font-mono tabular-nums" [class]="scoreTextClass(cand.score)">{{ cand.score | number:'1.0-1' }}<span class="text-slate-400"> / 100</span></span>
+                      <span class="text-sm font-bold font-mono tabular-nums" [class]="scoreTextClass(cand.score)">{{ cand.score | number:'1.0-1' }}<span class="text-slate-500"> / 100</span></span>
                     </div>
                     <div class="h-2 w-full rounded-full bg-slate-200 overflow-hidden" [title]="scoreTooltip(cand)">
                       <div class="h-full rounded-full transition-all" [class]="scoreBarClass(cand.score)" [style.width.%]="cand.score"></div>
@@ -166,7 +175,7 @@ interface DimensionMeter {
                           <div class="h-1.5 w-full rounded-full bg-slate-200 overflow-hidden">
                             <div class="h-full rounded-full bg-blue-600" [style.width.%]="m.pct"></div>
                           </div>
-                          <span class="text-[11px] font-bold font-mono tabular-nums text-slate-700 mt-1.5">{{ m.value | number:'1.0-1' }}<span class="text-slate-400">/{{ m.weight }}</span></span>
+                          <span class="text-[11px] font-bold font-mono tabular-nums text-slate-700 mt-1.5">{{ m.value | number:'1.0-1' }}<span class="text-slate-500">/{{ m.weight }}</span></span>
                         </div>
                       }
                     </div>
@@ -219,8 +228,9 @@ interface DimensionMeter {
 })
 export class StaffingComponent {
   private api = inject(ApiService);
+  private destroyRef = inject(DestroyRef);
 
-  private res = rxResource({
+  protected res = rxResource({
     stream: () => forkJoin({
       requests: this.api.getRequests(),
       resources: this.api.getResources()
@@ -237,6 +247,9 @@ export class StaffingComponent {
 
   assigningResourceId = signal<string | null>(null);
   assignHours = signal<number>(0);
+
+  /** True while a createAssignment request is in flight, to block duplicate submits (double-staffing). */
+  assigning = signal(false);
 
   /** Resources after applying the free-text search box (name / role / skills). */
   private searchedResources = computed(() => {
@@ -344,18 +357,26 @@ export class StaffingComponent {
   }
 
   confirmAssign(resourceId: string) {
+    if (this.assigning()) return;
     const req = this.selectedRequest();
     const hours = this.assignHours();
     if (req && hours > 0) {
+      this.assigning.set(true);
       this.api.createAssignment({
         requestId: req.id,
         resourceId: resourceId,
         assignedHours: hours,
         status: 'hard-booked'
-      }).subscribe(() => {
-        this.cancelAssign();
-        this.selectedRequest.set(null);
-        this.res.reload();
+      }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+        next: () => {
+          this.assigning.set(false);
+          this.cancelAssign();
+          this.selectedRequest.set(null);
+          this.res.reload();
+        },
+        error: () => {
+          this.assigning.set(false);
+        }
       });
     }
   }

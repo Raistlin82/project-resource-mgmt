@@ -4,11 +4,12 @@ import { MatIconModule } from '@angular/material/icon';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { ApiService, Project, Issue } from '../../services/api.service';
 import { NotificationService } from '../../services/notification.service';
+import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
 @Component({
   selector: 'app-project-issues',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, FormsModule, ReactiveFormsModule],
+  imports: [MatIconModule, FormsModule, ReactiveFormsModule, ModalDialogDirective],
   template: `
     <div [class]="projectId() ? '' : 'max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8'">
       <div class="space-y-6">
@@ -109,11 +110,12 @@ import { NotificationService } from '../../services/notification.service';
 
       <!-- Report Issue Modal -->
       @if (showForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6">
+        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+             appModal ariaLabelledby="issueModalTitle" (dismiss)="closeForm()">
           <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
             <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-              <h2 class="text-2xl font-bold text-slate-900 tracking-tight">Report Issue</h2>
-              <button (click)="closeForm()" class="text-slate-400 hover:text-slate-600 hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <h2 id="issueModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">Report Issue</h2>
+              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-slate-400 hover:text-slate-600 hover:bg-slate-100 p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>

@@ -107,10 +107,10 @@ import { NotificationService } from '../services/notification.service';
                     }
                   </td>
                   <td class="py-5 text-right">
-                    <button (click)="toggleRestrict(skill)" class="w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-amber-700 hover:border-amber-200 hover:bg-amber-50 transition-all inline-flex items-center justify-center shadow-sm mr-2" [title]="skill.restricted ? 'Unrestrict' : 'Restrict'">
+                    <button type="button" (click)="toggleRestrict(skill)" class="w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-amber-700 hover:border-amber-200 hover:bg-amber-50 transition-all inline-flex items-center justify-center shadow-sm mr-2" [attr.aria-label]="(skill.restricted ? 'Unrestrict ' : 'Restrict ') + skill.name" [title]="skill.restricted ? 'Unrestrict' : 'Restrict'">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">{{ skill.restricted ? 'lock_open' : 'block' }}</mat-icon>
                     </button>
-                    <button (click)="deleteSkill(skill.id)" class="w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-red-700 hover:border-red-200 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm" title="Delete">
+                    <button type="button" (click)="deleteSkill(skill.id)" class="w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-red-700 hover:border-red-200 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm" [attr.aria-label]="'Delete ' + skill.name" [attr.title]="'Delete ' + skill.name">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                     </button>
                   </td>

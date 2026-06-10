@@ -132,7 +132,7 @@ import { forkJoin } from 'rxjs';
                       </div>
                     }
                   </div>
-                  <button (click)="removeSkill(skill.name)" class="ml-2 text-slate-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-all focus-within:opacity-100">
+                  <button type="button" (click)="removeSkill(skill.name)" [attr.aria-label]="'Remove ' + skill.name" [attr.title]="'Remove ' + skill.name" class="ml-2 text-slate-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-all focus-within:opacity-100">
                     <mat-icon class="text-[16px] w-[16px] h-[16px]">close</mat-icon>
                   </button>
                 </div>
@@ -163,7 +163,7 @@ import { forkJoin } from 'rxjs';
               @for (role of profile()?.projectRoles; track role) {
                 <div class="flex items-center gap-2 px-3 py-1.5 bg-slate-100 rounded-lg border border-slate-200">
                   <span class="font-medium text-slate-700 text-sm">{{ role }}</span>
-                  <button (click)="removeRole(role)" class="text-slate-400 hover:text-red-600 transition-colors ml-1">
+                  <button type="button" (click)="removeRole(role)" [attr.aria-label]="'Remove ' + role" [attr.title]="'Remove ' + role" class="text-slate-400 hover:text-red-600 transition-colors ml-1">
                     <mat-icon class="text-[16px] w-[16px] h-[16px]">close</mat-icon>
                   </button>
                 </div>
@@ -224,7 +224,7 @@ import { forkJoin } from 'rxjs';
             <div class="space-y-4">
               @for (exp of profile()?.externalExperience; track exp.projectName) {
                 <div class="p-4 rounded-xl border border-slate-200 bg-slate-50 relative group">
-                  <button (click)="removeExtExp(exp)" class="absolute top-4 right-4 text-slate-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <button type="button" (click)="removeExtExp(exp)" [attr.aria-label]="'Remove ' + exp.projectName" [attr.title]="'Remove ' + exp.projectName" class="absolute top-4 right-4 text-slate-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity">
                     <mat-icon>delete</mat-icon>
                   </button>
                   <h4 class="font-medium text-slate-900">{{ exp.projectName }}</h4>
@@ -283,10 +283,10 @@ import { forkJoin } from 'rxjs';
                   </div>
                 </div>
                 <div class="flex items-center gap-2">
-                  <a [href]="profile()?.resume" download="Resume" class="text-slate-400 hover:text-blue-600 transition-colors">
+                  <a [href]="profile()?.resume" download="Resume" aria-label="Download resume" title="Download resume" class="text-slate-400 hover:text-blue-600 transition-colors">
                     <mat-icon>download</mat-icon>
                   </a>
-                  <button (click)="removeResume()" class="text-slate-400 hover:text-red-600 transition-colors">
+                  <button type="button" (click)="removeResume()" aria-label="Remove resume" title="Remove resume" class="text-slate-400 hover:text-red-600 transition-colors">
                     <mat-icon>delete</mat-icon>
                   </button>
                 </div>

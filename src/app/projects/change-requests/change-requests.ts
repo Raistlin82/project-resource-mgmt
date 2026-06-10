@@ -6,11 +6,12 @@ import { rxResource, toSignal } from '@angular/core/rxjs-interop';
 import { ApiService, ChangeRequest, Project } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
+import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
 @Component({
   selector: 'app-change-requests',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CurrencyPipe, MatIconModule, ReactiveFormsModule],
+  imports: [CurrencyPipe, MatIconModule, ReactiveFormsModule, ModalDialogDirective],
   template: `
     <div [class]="projectId() ? '' : 'max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8'">
       <div class="space-y-6">
@@ -39,19 +40,19 @@ import { NotificationService } from '../../services/notification.service';
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm hover:shadow-md transition-shadow p-5">
             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Open</p>
-            <p class="text-3xl font-bold font-mono tabular-nums text-slate-900 mt-1">{{ openCount() }}</p>
+            <p class="text-2xl font-bold font-mono tabular-nums text-slate-900 mt-1">{{ openCount() }}</p>
           </div>
           <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm hover:shadow-md transition-shadow p-5">
             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Approved Impact</p>
-            <p class="text-3xl font-bold font-mono tabular-nums text-slate-900 mt-1">{{ approvedBudgetImpact() | currency:'EUR':'symbol':'1.0-0' }}</p>
+            <p class="text-2xl font-bold font-mono tabular-nums text-slate-900 mt-1">{{ approvedBudgetImpact() | currency:'EUR':'symbol':'1.0-0' }}</p>
           </div>
           <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm hover:shadow-md transition-shadow p-5">
             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Schedule Impact</p>
-            <p class="text-3xl font-bold font-mono tabular-nums text-slate-900 mt-1">{{ approvedScheduleImpact() }}d</p>
+            <p class="text-2xl font-bold font-mono tabular-nums text-slate-900 mt-1">{{ approvedScheduleImpact() }}d</p>
           </div>
           <div class="bg-white rounded-2xl border border-slate-200 ring-1 ring-slate-900/5 shadow-sm hover:shadow-md transition-shadow p-5">
             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">High/Critical</p>
-            <p class="text-3xl font-bold font-mono tabular-nums text-slate-900 mt-1">{{ severeCount() }}</p>
+            <p class="text-2xl font-bold font-mono tabular-nums text-slate-900 mt-1">{{ severeCount() }}</p>
           </div>
         </div>
 
@@ -154,11 +155,12 @@ import { NotificationService } from '../../services/notification.service';
       </div>
 
       @if (showForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6">
+        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+             appModal ariaLabelledby="changeRequestModalTitle" (dismiss)="closeForm()">
           <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
             <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-              <h3 class="text-2xl font-bold text-slate-900">New Change Request</h3>
-              <button (click)="closeForm()" class="p-2 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100">
+              <h3 id="changeRequestModalTitle" class="text-2xl font-bold text-slate-900">New Change Request</h3>
+              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100">
                 <mat-icon>close</mat-icon>
               </button>
             </div>

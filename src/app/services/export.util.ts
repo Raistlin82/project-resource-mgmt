@@ -21,13 +21,21 @@ const QUOTE_NEEDED = /[",\n\r]/;
  * Escapes a single CSV cell.
  *
  * 1. Formula-injection guard: if the (stringified) value starts with `= + - @`, TAB, or
- *    CR, prefix a single quote so it renders as inert text.
+ *    CR, prefix a single quote so it renders as inert text. This applies only to
+ *    strings — a finite number is never a spreadsheet formula, and prefixing it (e.g.
+ *    a negative `-1500`) would corrupt it into a text label that breaks SUM/aggregation.
  * 2. RFC-4180 quoting: if the value contains a comma, double-quote, CR, or LF, wrap it in
  *    double quotes and double any embedded double-quotes.
  *
  * `null`/`undefined` become an empty string. Numbers/booleans are stringified.
  */
 export function escapeCsv(value: unknown): string {
+  // A finite number can never be interpreted as a formula, so emit it verbatim — never
+  // apply the injection prefix (which would turn e.g. -1500 into the text "'-1500").
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+
   let s = value === null || value === undefined ? '' : String(value);
 
   if (s.length > 0 && FORMULA_TRIGGERS.has(s[0])) {

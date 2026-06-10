@@ -3,11 +3,12 @@ import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { ApiService, CostCenter } from '../services/api.service';
+import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 
 @Component({
   selector: 'app-manage-cost-centers',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, ReactiveFormsModule, FormsModule],
+  imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective],
   template: `
     <div class="max-w-5xl mx-auto space-y-8">
       <div class="flex items-center justify-between">
@@ -48,10 +49,10 @@ import { ApiService, CostCenter } from '../services/api.service';
                 <td class="py-4 px-6 text-right font-mono tabular-nums text-blue-700">{{ cc.allocated }}</td>
                 <td class="py-4 px-6 text-right font-mono tabular-nums text-slate-900">{{ cc.actual }}</td>
                 <td class="py-4 px-6 text-right">
-                  <button (click)="openForm(cc)" class="text-slate-400 hover:text-blue-700 transition-colors p-1">
+                  <button type="button" (click)="openForm(cc)" [attr.aria-label]="'Edit ' + cc.name" [attr.title]="'Edit ' + cc.name" class="text-slate-400 hover:text-blue-700 transition-colors p-1">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                   </button>
-                  <button (click)="deleteCostCenter(cc.id)" class="text-slate-400 hover:text-red-600 transition-colors p-1 ml-2">
+                  <button type="button" (click)="deleteCostCenter(cc.id)" [attr.aria-label]="'Delete ' + cc.name" [attr.title]="'Delete ' + cc.name" class="text-slate-400 hover:text-red-600 transition-colors p-1 ml-2">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                   </button>
                 </td>
@@ -68,11 +69,12 @@ import { ApiService, CostCenter } from '../services/api.service';
 
       <!-- Form Modal -->
       @if (showForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+             appModal ariaLabelledby="costCenterModalTitle" (dismiss)="closeForm()">
           <div class="bg-white border border-slate-200 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden flex flex-col">
             <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-gradient-to-r from-slate-50 to-transparent">
-              <h2 class="text-lg font-semibold text-slate-900">{{ editingId() ? 'Edit Cost Center' : 'Add Cost Center' }}</h2>
-              <button (click)="closeForm()" class="text-slate-400 hover:text-slate-600 transition-colors">
+              <h2 id="costCenterModalTitle" class="text-lg font-semibold text-slate-900">{{ editingId() ? 'Edit Cost Center' : 'Add Cost Center' }}</h2>
+              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-slate-400 hover:text-slate-600 transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -110,13 +112,14 @@ import { ApiService, CostCenter } from '../services/api.service';
       }
       <!-- Delete Confirmation Modal -->
       @if (deletingId()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+             appModal ariaLabelledby="costCenterDeleteTitle" (dismiss)="cancelDelete()">
           <div class="bg-white border border-slate-200 rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden flex flex-col">
             <div class="p-6 text-center">
               <div class="w-16 h-16 bg-red-50 ring-1 ring-red-200 rounded-full flex items-center justify-center mx-auto mb-4">
                 <mat-icon class="text-red-700 text-3xl">warning</mat-icon>
               </div>
-              <h3 class="text-lg font-semibold text-slate-900 mb-2">Delete Cost Center</h3>
+              <h3 id="costCenterDeleteTitle" class="text-lg font-semibold text-slate-900 mb-2">Delete Cost Center</h3>
               <p class="text-slate-500 text-sm">Are you sure you want to delete this cost center? This action cannot be undone.</p>
             </div>
             <div class="p-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">

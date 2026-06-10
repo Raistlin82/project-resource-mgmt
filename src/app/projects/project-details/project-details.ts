@@ -135,49 +135,49 @@ import { ChangeRequests } from '../change-requests/change-requests';
             <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
               <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Contract Revenue</p>
-                <p class="text-3xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.revenue | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="text-2xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.revenue | currency:'EUR':'symbol':'1.0-0' }}</p>
                 <p class="text-xs text-slate-500 mt-1">Invoiced <span class="font-mono">{{ f.invoiced | currency:'EUR':'symbol':'1.0-0' }}</span></p>
               </div>
               <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Actual Cost</p>
-                <p class="text-3xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.actualCost | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="text-2xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.actualCost | currency:'EUR':'symbol':'1.0-0' }}</p>
                 <p class="text-xs text-slate-500 mt-1">Labor <span class="font-mono">{{ f.laborCost | currency:'EUR':'symbol':'1.0-0' }}</span> · External <span class="font-mono">{{ f.externalCost | currency:'EUR':'symbol':'1.0-0' }}</span></p>
               </div>
               <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Margin</p>
-                <p class="text-3xl font-bold tracking-tight font-mono tabular-nums" [class.text-emerald-700]="f.margin >= 0" [class.text-red-700]="f.margin < 0">{{ f.margin | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="text-2xl font-bold tracking-tight font-mono tabular-nums" [class.text-emerald-700]="f.margin >= 0" [class.text-red-700]="f.margin < 0">{{ f.margin | currency:'EUR':'symbol':'1.0-0' }}</p>
                 <p class="text-xs font-semibold mt-1" [class.text-emerald-700]="f.margin >= 0" [class.text-red-700]="f.margin < 0">{{ f.marginPct | number:'1.0-1' }}% margin</p>
               </div>
               <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Backlog</p>
-                <p class="text-3xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.backlog | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="text-2xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.backlog | currency:'EUR':'symbol':'1.0-0' }}</p>
                 <p class="text-xs text-slate-500 mt-1">Revenue not yet invoiced</p>
               </div>
               <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Budget</p>
-                <p class="text-3xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.budget | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="text-2xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.budget | currency:'EUR':'symbol':'1.0-0' }}</p>
                 <p class="text-xs text-slate-500 mt-1">Planned cost</p>
               </div>
               <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Budget Burn</p>
-                <p class="text-3xl font-bold tracking-tight font-mono tabular-nums" [class.text-emerald-700]="f.burnPct <= 100" [class.text-red-700]="f.burnPct > 100">{{ f.burnPct | number:'1.0-0' }}%</p>
+                <p class="text-2xl font-bold tracking-tight font-mono tabular-nums" [class.text-emerald-700]="f.burnPct <= 100" [class.text-red-700]="f.burnPct > 100">{{ f.burnPct | number:'1.0-0' }}%</p>
                 <div class="w-full bg-slate-100 rounded-full h-2 overflow-hidden mt-2">
                   <div class="h-2 rounded-full" [class.bg-gradient-to-r]="f.burnPct <= 100" [class.from-blue-500]="f.burnPct <= 100" [class.to-blue-600]="f.burnPct <= 100" [class.bg-red-500]="f.burnPct > 100" [style.width.%]="f.burnPct < 100 ? f.burnPct : 100"></div>
                 </div>
               </div>
               <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">EAC</p>
-                <p class="text-3xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.eac | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="text-2xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.eac | currency:'EUR':'symbol':'1.0-0' }}</p>
                 <p class="text-xs text-slate-500 mt-1">Estimate at completion</p>
               </div>
               <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">ETC</p>
-                <p class="text-3xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.etc | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="text-2xl font-bold text-slate-900 tracking-tight font-mono tabular-nums">{{ f.etc | currency:'EUR':'symbol':'1.0-0' }}</p>
                 <p class="text-xs text-slate-500 mt-1">Estimated remaining cost</p>
               </div>
               <div class="bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 p-6 transition-shadow hover:shadow-md">
                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">VAC</p>
-                <p class="text-3xl font-bold tracking-tight font-mono tabular-nums" [class.text-emerald-700]="f.varianceAtCompletion >= 0" [class.text-red-700]="f.varianceAtCompletion < 0">{{ f.varianceAtCompletion | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="text-2xl font-bold tracking-tight font-mono tabular-nums" [class.text-emerald-700]="f.varianceAtCompletion >= 0" [class.text-red-700]="f.varianceAtCompletion < 0">{{ f.varianceAtCompletion | currency:'EUR':'symbol':'1.0-0' }}</p>
                 <p class="text-xs text-slate-500 mt-1">Budget minus EAC</p>
               </div>
             </div>

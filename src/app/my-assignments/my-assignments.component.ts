@@ -6,11 +6,12 @@ import { AuthService } from '../services/auth.service';
 import { DecimalPipe } from '@angular/common';
 import { forkJoin } from 'rxjs';
 import { FormsModule } from '@angular/forms';
+import { ListStateComponent } from '../shared/list-state.component';
 
 @Component({
   selector: 'app-my-assignments',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DecimalPipe, FormsModule],
+  imports: [MatIconModule, DecimalPipe, FormsModule, ListStateComponent],
   template: `
     <div class="max-w-6xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -87,11 +88,11 @@ import { FormsModule } from '@angular/forms';
             {{ viewMode() === 'week' ? 'Weekly Schedule' : 'Monthly Overview' }}
           </h2>
           <div class="flex items-center gap-3">
-            <button (click)="periodOffset.set(periodOffset() - 1)" class="w-8 h-8 rounded-full hover:bg-slate-50 flex items-center justify-center text-slate-500 transition-colors">
+            <button type="button" (click)="periodOffset.set(periodOffset() - 1)" [attr.aria-label]="'Previous ' + viewMode()" [attr.title]="'Previous ' + viewMode()" class="w-8 h-8 rounded-full hover:bg-slate-50 flex items-center justify-center text-slate-500 transition-colors">
               <mat-icon class="text-[20px] w-[20px] h-[20px]">chevron_left</mat-icon>
             </button>
             <span class="text-sm font-bold tracking-wide text-slate-700 uppercase">{{ periodLabel() }}</span>
-            <button (click)="periodOffset.set(periodOffset() + 1)" class="w-8 h-8 rounded-full hover:bg-slate-50 flex items-center justify-center text-slate-500 transition-colors">
+            <button type="button" (click)="periodOffset.set(periodOffset() + 1)" [attr.aria-label]="'Next ' + viewMode()" [attr.title]="'Next ' + viewMode()" class="w-8 h-8 rounded-full hover:bg-slate-50 flex items-center justify-center text-slate-500 transition-colors">
               <mat-icon class="text-[20px] w-[20px] h-[20px]">chevron_right</mat-icon>
             </button>
           </div>
@@ -184,6 +185,7 @@ import { FormsModule } from '@angular/forms';
           <h2 class="text-lg font-medium text-slate-900">Assignment Details</h2>
         </div>
         <div class="p-6">
+          <app-list-state [loading]="dataRes.isLoading()" [error]="dataRes.status() === 'error'" label="assignments" (retry)="dataRes.reload()">
           <div class="space-y-4">
             @for (assignment of myAssignments(); track assignment.id) {
               <div class="p-5 rounded-xl border border-slate-200 bg-slate-50 hover:border-blue-300 hover:shadow-md transition-all">
@@ -201,10 +203,10 @@ import { FormsModule } from '@angular/forms';
                       <div class="flex items-center gap-2">
                         <input type="number" [ngModel]="editHours()" (ngModelChange)="editHours.set($event)" class="w-20 px-3 py-1.5 rounded-lg bg-white focus:bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none text-sm font-mono tabular-nums">
                         <span class="text-sm text-slate-500">hours</span>
-                        <button (click)="saveAssignment(assignment)" class="p-1.5 text-emerald-700 hover:bg-emerald-50 rounded-lg transition-colors">
+                        <button type="button" (click)="saveAssignment(assignment)" aria-label="Save hours" title="Save hours" class="p-1.5 text-emerald-700 hover:bg-emerald-50 rounded-lg transition-colors">
                           <mat-icon>check</mat-icon>
                         </button>
-                        <button (click)="cancelEdit()" class="p-1.5 text-slate-400 hover:bg-slate-50 rounded-lg transition-colors">
+                        <button type="button" (click)="cancelEdit()" aria-label="Cancel editing" title="Cancel editing" class="p-1.5 text-slate-400 hover:bg-slate-50 rounded-lg transition-colors">
                           <mat-icon>close</mat-icon>
                         </button>
                       </div>
@@ -214,10 +216,10 @@ import { FormsModule } from '@angular/forms';
                         <div class="text-xs text-slate-500 uppercase tracking-wider">Total Assigned</div>
                         <div class="text-xs text-emerald-700 font-semibold mt-1 font-mono tabular-nums">{{ approvedHours(assignment.id) }}h approved actual</div>
                       </div>
-                      <button (click)="startEdit(assignment)" class="p-2 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors" title="Edit Hours">
+                      <button type="button" (click)="startEdit(assignment)" class="p-2 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors" aria-label="Edit Hours" title="Edit Hours">
                         <mat-icon>edit</mat-icon>
                       </button>
-                      <button (click)="startTimeEntry(assignment)" class="p-2 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition-colors" title="Log actual time">
+                      <button type="button" (click)="startTimeEntry(assignment)" class="p-2 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition-colors" aria-label="Log actual time" title="Log actual time">
                         <mat-icon>more_time</mat-icon>
                       </button>
                     }
@@ -240,7 +242,7 @@ import { FormsModule } from '@angular/forms';
                       </div>
                       <div class="flex gap-2">
                         <button (click)="saveTimeEntry(assignment)" class="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-bold hover:bg-blue-700 shadow-sm">Submit</button>
-                        <button (click)="cancelTimeEntry()" class="p-2 rounded-lg text-slate-500 hover:bg-slate-50"><mat-icon>close</mat-icon></button>
+                        <button type="button" (click)="cancelTimeEntry()" aria-label="Cancel time entry" title="Cancel time entry" class="p-2 rounded-lg text-slate-500 hover:bg-slate-50"><mat-icon>close</mat-icon></button>
                       </div>
                     </div>
                   </div>
@@ -282,6 +284,7 @@ import { FormsModule } from '@angular/forms';
               </div>
             }
           </div>
+          </app-list-state>
         </div>
       </div>
     </div>
@@ -294,7 +297,7 @@ export class MyAssignmentsComponent {
   // (e.g. inject(AuthService).currentUserId()) once authentication is implemented.
   private currentUserId = inject(AuthService).userId();
 
-  private dataRes = rxResource<{ assignments: Assignment[]; requests: ResourceRequest[]; profile: Resource | null; timeEntries: TimeEntry[] }, unknown>({
+  protected dataRes = rxResource<{ assignments: Assignment[]; requests: ResourceRequest[]; profile: Resource | null; timeEntries: TimeEntry[] }, unknown>({
     stream: () => forkJoin({
       assignments: this.api.getAssignments(),
       requests: this.api.getRequests(),

@@ -29,6 +29,7 @@ import {
   RecognitionPeriod,
 } from '../../services/finance.util';
 import { NotificationService } from '../../services/notification.service';
+import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
 interface BillingActualEvent {
   period: string;
@@ -53,7 +54,7 @@ interface BillingControlRow {
 @Component({
   selector: 'app-contract-details',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CurrencyPipe, DatePipe, MatIconModule, ReactiveFormsModule, RouterLink],
+  imports: [CurrencyPipe, DatePipe, MatIconModule, ReactiveFormsModule, RouterLink, ModalDialogDirective],
   template: `
     <div class="max-w-7xl mx-auto space-y-8 p-4 sm:p-6 lg:p-8">
       @if (contract(); as c) {
@@ -91,7 +92,7 @@ interface BillingControlRow {
             </div>
             <div class="text-right shrink-0">
               <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Total Value</p>
-              <p class="text-3xl font-bold text-slate-900 mt-1 font-mono tabular-nums">{{ c.totalValue | currency: c.currency }}</p>
+              <p class="text-2xl font-bold text-slate-900 mt-1 font-mono tabular-nums">{{ c.totalValue | currency: c.currency }}</p>
             </div>
           </div>
         </div>
@@ -572,10 +573,11 @@ interface BillingControlRow {
         </div>
 
         @if (showBillingPlanForm()) {
-          <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6">
+          <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+               appModal ariaLabelledby="billingPlanModalTitle" (dismiss)="closeBillingPlanForm()">
             <div class="bg-white border border-slate-200 rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
               <div class="px-6 sm:px-8 py-6 border-b border-slate-200 flex items-center justify-between bg-gradient-to-br from-slate-50 to-transparent">
-                <h2 class="text-2xl font-bold text-slate-900 tracking-tight">Expected Billing</h2>
+                <h2 id="billingPlanModalTitle" class="text-2xl font-bold text-slate-900 tracking-tight">Expected Billing</h2>
                 <button type="button" (click)="closeBillingPlanForm()" class="text-slate-400 hover:text-slate-600 hover:bg-slate-50 p-2 rounded-full transition-colors" aria-label="Close">
                   <mat-icon>close</mat-icon>
                 </button>

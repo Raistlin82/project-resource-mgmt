@@ -1,6 +1,9 @@
 import { inject, PLATFORM_ID } from '@angular/core';
+import { toObservable } from '@angular/core/rxjs-interop';
 import { isPlatformBrowser } from '@angular/common';
-import { CanMatchFn, Router, UrlTree } from '@angular/router';
+import { CanMatchFn, GuardResult, Router } from '@angular/router';
+import { Observable } from 'rxjs';
+import { filter, map, take } from 'rxjs/operators';
 import { AuthService } from '../services/auth.service';
 
 /**
@@ -20,13 +23,29 @@ import { AuthService } from '../services/auth.service';
  * this same guard re-run authoritatively in the browser after hydration. Data
  * stays protected because the server JWKS-verifies the Bearer on every `/api`
  * call regardless of which route rendered.
+ *
+ * Browser hydration timing: the OAuth bootstrap is async — claims are only
+ * populated after `loadDiscoveryDocumentAndTryLogin()` resolves (see
+ * {@link AuthService.authReady}). A synchronous check at hydration would run
+ * against the anonymous default role and wrongly redirect an authorized user
+ * who hard-refreshed / deep-linked / bookmarked a guarded route. We therefore
+ * return an Observable that WAITS for `authReady` before evaluating `check`,
+ * so the predicate sees the real (post-login) role. `CanMatchFn` natively
+ * accepts an `Observable<GuardResult>`.
  */
 export function roleGuard(check: (auth: AuthService) => boolean, redirect = '/'): CanMatchFn {
-  return (): boolean | UrlTree => {
+  return (): GuardResult | Observable<GuardResult> => {
     if (!isPlatformBrowser(inject(PLATFORM_ID))) return true;
     const auth = inject(AuthService);
     const router = inject(Router);
-    return check(auth) ? true : router.parseUrl(redirect);
+    // Defer the decision until the OAuth bootstrap has settled, then evaluate
+    // the predicate against the resolved identity. authReady is monotonic
+    // (false -> true, once), so this emits exactly one GuardResult and completes.
+    return toObservable(auth.authReady).pipe(
+      filter(ready => ready),
+      take(1),
+      map(() => (check(auth) ? true : router.parseUrl(redirect))),
+    );
   };
 }
 

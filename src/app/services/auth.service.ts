@@ -87,6 +87,21 @@ export class AuthService {
   /** Raw OIDC claims for the signed-in user; null while anonymous. */
   private readonly _claims = signal<Record<string, unknown> | null>(null);
 
+  /**
+   * Becomes true once the OAuth bootstrap has SETTLED — i.e. after
+   * loadDiscoveryDocumentAndTryLogin() resolves (token restored / confirmed
+   * absent) or fails (Keycloak unreachable → anonymous). Data loads that hit
+   * principal-gated endpoints must key off this so they fire only AFTER any
+   * post-login token has been restored into storage; otherwise the request
+   * races the bootstrap and goes out with no Authorization header (401).
+   *
+   * Stays false on the server (afterNextRender never runs), which is correct:
+   * SSR has no token, so gated loads should resolve to their empty default
+   * rather than fire and fail.
+   */
+  private readonly _authReady = signal(false);
+  readonly authReady = this._authReady.asReadonly();
+
   /** Stable user id: resource id derived from the username (data is keyed by it). */
   readonly userId = computed<string>(() => {
     const claims = this._claims();
@@ -183,6 +198,12 @@ export class AuthService {
       .catch(() => {
         // Keycloak unreachable / misconfigured: stay anonymous, never throw.
         this._claims.set(null);
+      })
+      .finally(() => {
+        // Token (if any) is now restored into storage and claims are synced.
+        // Releasing authReady here lets principal-gated data loads fire with a
+        // valid Authorization header instead of racing the bootstrap.
+        this._authReady.set(true);
       });
   }
 

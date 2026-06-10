@@ -8,11 +8,26 @@ import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
 import type { AuditLog, Resource, ResourceRequest, Assignment, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Project } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition } from './app/services/staffing.util';
+import { convertToBase } from './app/services/finance.util';
+import type { FxRate } from './app/services/api.service';
 
 const serverDistFolder = dirname(fileURLToPath(import.meta.url));
 const browserDistFolder = resolve(serverDistFolder, '../browser');
 
 const app = express();
+/**
+ * S6 (rate-limit correctness): make `req.ip` the REAL client IP, not the
+ * proxy's socket address. The security model assumes a reverse proxy / TLS
+ * terminator in front of us; with `trust proxy` unset every external client
+ * collapses into ONE rate-limit bucket (a single client can then starve all
+ * others). Configure the EXACT number of trusted proxy hops via TRUST_PROXY so
+ * Express derives the client IP from the trusted tail of X-Forwarded-For only.
+ * Default 0 (off) — the safe no-proxy default: when there is no proxy in front,
+ * XFF is fully attacker-controlled and must NOT be trusted. Set TRUST_PROXY to
+ * the number of hops you control in production (typically 1).
+ */
+const trustProxyHops = Number(process.env['TRUST_PROXY'] ?? 0);
+app.set('trust proxy', Number.isInteger(trustProxyHops) && trustProxyHops > 0 ? trustProxyHops : false);
 const allowedHosts = (process.env['NG_ALLOWED_HOSTS'] || 'localhost,127.0.0.1')
   .split(',')
   .map(host => host.trim())
@@ -73,12 +88,17 @@ function withLock<R>(key: string, fn: () => Promise<R>): Promise<R> {
   return run;
 }
 
-/** S6: minimal in-memory fixed-window rate limiter (no external dependency). */
-function rateLimit(maxPerWindow: number, windowMs: number) {
+/**
+ * S6: minimal in-memory fixed-window rate limiter (no external dependency).
+ * `keyOf` selects the bucket key (defaults to the real client IP — correct only
+ * once `trust proxy` is configured for the deployment); pass a constant to build
+ * a single GLOBAL bucket that caps total throughput across all clients.
+ */
+function rateLimit(maxPerWindow: number, windowMs: number, keyOf: (req: Request) => string = req => req.ip || 'unknown') {
   const hits = new Map<string, { count: number; reset: number }>();
   let lastSweep = 0;
   return (req: Request, res: Response, next: NextFunction) => {
-    const key = req.ip || 'unknown';
+    const key = keyOf(req);
     const now = Date.now();
     // S6 (memory growth): lazily evict expired entries so the map cannot grow
     // unbounded as new client IPs appear. Full sweep at most once per window;
@@ -115,8 +135,10 @@ const newId = () => `${++idSeq}`;
 const repos = getRepositories();
 
 /**
- * AUDIT INTEGRITY: the audit log is APPEND-ONLY. Entries are only ever
- * prepended (newest-first) and capped; existing entries are never edited.
+ * AUDIT INTEGRITY: the audit log is APPEND-ONLY — entries are created in
+ * insertion order and are never edited or deleted. The READ endpoint
+ * (`GET /audit-logs`) sorts newest-first and applies a bounded default page
+ * size (so the response and per-request work stay O(page), not O(whole log)).
  * For PUT/DELETE mutations we additionally capture which keys changed plus
  * before/after snapshots of just those keys.
  */
@@ -270,6 +292,24 @@ const actorRole = (req: Request): UserRole | 'unknown' =>
   req.verifiedRole ?? (String(req.header('X-User-Role') || 'unknown') as UserRole | 'unknown');
 
 /**
+ * Resolve the request's actor to a RESOURCE id (the namespace time entries /
+ * assignments key on), or undefined when it can't be mapped.
+ *
+ * `actorId(req)` is a User identity — under real OIDC it is the Keycloak
+ * `preferred_username` or `sub`, while resources are keyed by their own ids
+ * ('1','2',...). Comparing those two namespaces directly is always false, so a
+ * SoD check like `actorId === existing.resourceId` is dead under JWT auth. We
+ * map via the User directory: match the actor against a user's id OR name, and
+ * return that user's `resourceId`. (In trusted-header demo mode the interceptor
+ * already sends the mapped resourceId as X-User-Id, which also matches by id.)
+ */
+async function actorResourceId(req: Request): Promise<string | undefined> {
+  const id = actorId(req);
+  const user = (await repos.users.list()).find(u => u.id === id || u.name === id);
+  return user?.resourceId ?? (id || undefined);
+}
+
+/**
  * !!! SECURITY (HIGH) — DEMO-ONLY IDENTITY !!!
  *
  * Authentication/authorization here is derived from the CLIENT-SUPPLIED
@@ -379,10 +419,20 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
  * and is rejected with 401.
  *   - /audit-logs            -> the integrity/audit trail: admin/delivery-executive only.
  *   - commercial collections -> contracts/orders/billing/etc.: sales/finance/delivery-executive/admin.
+ *   - /resources, /users     -> expose confidential margin data (costRate/billRate)
+ *                               and the user->role directory: management/finance/pm.
+ *   - /time-entries          -> the whole org's timesheets: any authenticated role.
  */
 const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   { test: p => p.startsWith('/audit-logs'), roles: ['admin', 'delivery-executive'] },
   { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
+  // costRate/billRate live on resources and the user directory carries role
+  // mappings — both need-to-know. Mirror the resource WRITE sensitivity, plus pm
+  // and finance who legitimately read staffing/margin.
+  { test: p => p === '/resources' || p.startsWith('/resources/') || p.startsWith('/users'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
+  // Timesheets for the whole org: require an authenticated principal (any role),
+  // never served to an unauthenticated ('unknown') caller.
+  { test: p => p.startsWith('/time-entries'), roles: ['employee', 'pm', 'resource-manager', 'delivery-executive', 'finance', 'sales', 'admin'] },
 ];
 
 /**
@@ -448,7 +498,12 @@ function crud<T extends { id: string }>(
 
 // --- API Routes -------------------------------------------------------------
 const apiRouter = express.Router();
-apiRouter.use(rateLimit(300, 60_000)); // 300 req/min per client
+// S6: two-tier limiting so one client cannot exhaust the whole budget and lock
+// everyone else out. The per-client limiter keys on req.ip (the REAL client IP
+// once TRUST_PROXY is configured for the deployment's proxy hop count); the
+// global limiter caps total throughput regardless of source.
+apiRouter.use(rateLimit(300, 60_000)); // 300 req/min per client (keyed on req.ip)
+apiRouter.use(rateLimit(3000, 60_000, () => 'global')); // 3000 req/min overall
 apiRouter.use(roleGate);
 apiRouter.use((req, res, next) => {
   // AUDIT INTEGRITY: snapshot the targeted entity BEFORE the handler runs so a
@@ -463,11 +518,18 @@ apiRouter.use((req, res, next) => {
       // so failures here never affect the already-sent response.
       void (async () => {
         const after = req.method === 'PUT' ? cloneEntity(await findAuditEntity(req.path)) : undefined;
+        // AUDIT ATTRIBUTION INTEGRITY: record only TRUSTED identity. actorRole/
+        // actorId must use the same trust gate as authorization (trustedRole),
+        // never the raw spoofable X-User-* headers — otherwise an unauthenticated
+        // caller could forge the recorded actor (e.g. role 'admin') in the
+        // append-only forensics log even when header trust is disabled.
+        const auditActorRole = trustedRole(req);
+        const auditActorId = req.verifiedUserId ?? (trustHeaders ? req.header('X-User-Id') : undefined) ?? 'unknown';
         const entry: AuditEntry = {
           id: `AL${newId()}`,
           at: new Date().toISOString(),
-          actorId: actorId(req),
-          actorRole: actorRole(req),
+          actorId: auditActorId,
+          actorRole: auditActorRole,
           method: req.method,
           path: req.originalUrl,
           statusCode: res.statusCode,
@@ -499,6 +561,29 @@ const RESOURCE_FIELDS = ['name', 'role', 'skills', 'projectRoles', 'externalExpe
 const existsRepo = async <T extends Entity>(repo: Repository<T>, id: unknown): Promise<boolean> =>
   typeof id === 'string' && id.length > 0 && (await repo.get(id)) !== undefined;
 
+/**
+ * B-UTILIZATION: recompute a resource's utilization FROM THE SOURCE OF TRUTH
+ * (the sum of its assigned hours across all assignments) rather than mutating a
+ * stored counter by deltas. Incremental ±contribution with a per-step
+ * round+clamp[0,100] is lossy: a 100%→add→remove cycle permanently loses the
+ * over-100 magnitude, an over-removal clamped at 0 destroys magnitude, and
+ * Math.round on every step accumulates drift — so the stored number diverges
+ * from reality and saturates irreversibly. We round/clamp only the final derived
+ * value here. MUST be called inside `withLock('res:<id>')` so the read of all
+ * assignments + the single write are serialized against concurrent changes.
+ */
+async function recomputeResourceUtilization(resourceId: string): Promise<void> {
+  const resource = await repos.resources.get(resourceId);
+  if (!resource) return;
+  const assignments = await repos.assignments.list();
+  let totalHours = 0;
+  for (const a of assignments) {
+    if (a.resourceId !== resourceId) continue;
+    totalHours += Number.isFinite(a.assignedHours) ? a.assignedHours : 0;
+  }
+  await repos.resources.update(resourceId, { utilization: clampUtil(utilizationContribution(totalHours, resource.capacity)) });
+}
+
 apiRouter.get('/resources', async (_req, res) => { res.json(await repos.resources.list()); });
 apiRouter.get('/users', async (_req, res) => { res.json(await repos.users.list()); });
 apiRouter.get('/resources/:id', async (req, res) => {
@@ -523,8 +608,14 @@ const REQUEST_FIELDS = ['name', 'requiredRole', 'requiredEffort', 'skills', 'des
 apiRouter.get('/requests', async (_req, res) => { res.json(await repos.requests.list()); });
 apiRouter.post('/requests', async (req, res) => {
   const body = pick<ResourceRequest>(req.body, REQUEST_FIELDS);
-  if (body.requiredEffort !== undefined && !isNonNegNumber(body.requiredEffort)) {
-    { res.status(400).json({ error: 'requiredEffort must be a non-negative number' }); return; }
+  // B-STAFFING: requiredEffort is REQUIRED and must be positive. The Fulfilled
+  // status is server-derived as `staffedEffort >= requiredEffort`; an absent
+  // (undefined) requiredEffort makes that comparison always false so the request
+  // can NEVER be Fulfilled, and a 0 makes it Fulfilled with zero staffing. Reject
+  // both, mirroring the resource `capacity` guard.
+  if (!(isNonNegNumber(body.requiredEffort) && body.requiredEffort > 0)) {
+    res.status(400).json({ error: 'requiredEffort must be a positive number' });
+    return;
   }
   const newReq = { id: newId(), staffedEffort: 0, ...body, status: 'Not Published' } as ResourceRequest;
   const created = await repos.requests.create(newReq);
@@ -566,14 +657,9 @@ apiRouter.post('/assignments', async (req, res) => {
   const newAssig = { id: newId(), ...body } as Assignment;
   const created = await repos.assignments.create(newAssig);
 
-  // B-CONCURRENCY: serialize the per-resource / per-request read-modify-write so
-  // two concurrent assignment creates can't both read the same pre-state and
-  // lose one increment.
-  await withLock(`res:${created.resourceId}`, async () => {
-    const resource = await repos.resources.get(created.resourceId);
-    // B-DATA: utilizationContribution returns 0 when capacity is not usable.
-    if (resource) await repos.resources.update(resource.id, { utilization: clampUtil(resource.utilization + utilizationContribution(created.assignedHours, resource.capacity)) });
-  });
+  // B-CONCURRENCY + B-UTILIZATION: serialize per-resource and recompute
+  // utilization from the full set of assignments (never a lossy running delta).
+  await withLock(`res:${created.resourceId}`, () => recomputeResourceUtilization(created.resourceId));
 
   await withLock(`req:${created.requestId}`, async () => {
     const request = await repos.requests.get(created.requestId);
@@ -606,27 +692,16 @@ apiRouter.put('/assignments/:id', async (req, res) => {
   const resourceChanged = newAssig.resourceId !== oldAssig.resourceId;
   const requestChanged = newAssig.requestId !== oldAssig.requestId;
 
-  // B-STAFFING-RECALC: the recalc must account for FK retargeting. When the
-  // resource (or request) is unchanged we apply only the hours DELTA to the
-  // single target; when it changes we must FULLY REVERSE the old target's
-  // contribution and apply the new target's FULL contribution — otherwise the
-  // old target keeps phantom load forever and the new target is under-counted.
-  // Each aggregate read-modify-write is serialized per key (B-CONCURRENCY).
+  // B-UTILIZATION: recompute utilization from the full set of assignments for
+  // every affected resource (the source of truth), so FK retargeting and hours
+  // changes are reflected exactly with no lossy running delta. When the resource
+  // changes, BOTH the old and new resource are recomputed. Each recompute is
+  // serialized per resource key (B-CONCURRENCY).
   if (resourceChanged) {
-    await withLock(`res:${oldAssig.resourceId}`, async () => {
-      const oldRes = await repos.resources.get(oldAssig.resourceId);
-      if (oldRes) await repos.resources.update(oldRes.id, { utilization: clampUtil(oldRes.utilization - utilizationContribution(oldAssig.assignedHours, oldRes.capacity)) });
-    });
-    await withLock(`res:${newAssig.resourceId}`, async () => {
-      const newRes = await repos.resources.get(newAssig.resourceId);
-      if (newRes) await repos.resources.update(newRes.id, { utilization: clampUtil(newRes.utilization + utilizationContribution(newAssig.assignedHours, newRes.capacity)) });
-    });
+    await withLock(`res:${oldAssig.resourceId}`, () => recomputeResourceUtilization(oldAssig.resourceId));
+    await withLock(`res:${newAssig.resourceId}`, () => recomputeResourceUtilization(newAssig.resourceId));
   } else {
-    await withLock(`res:${newAssig.resourceId}`, async () => {
-      const resource = await repos.resources.get(newAssig.resourceId);
-      // B-DATA: utilizationContribution returns 0 when capacity is not usable.
-      if (resource) await repos.resources.update(resource.id, { utilization: clampUtil(resource.utilization + utilizationContribution(newAssig.assignedHours - oldAssig.assignedHours, resource.capacity)) });
-    });
+    await withLock(`res:${newAssig.resourceId}`, () => recomputeResourceUtilization(newAssig.resourceId));
   }
 
   if (requestChanged) {
@@ -662,12 +737,10 @@ apiRouter.delete('/assignments/:id', async (req, res) => {
   if (oldAssig === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   await repos.assignments.remove(req.params.id);
 
-  // B-CONCURRENCY: serialize the per-resource / per-request read-modify-write.
-  await withLock(`res:${oldAssig.resourceId}`, async () => {
-    const resource = await repos.resources.get(oldAssig.resourceId);
-    // B-DATA: utilizationContribution returns 0 when capacity is not usable.
-    if (resource) await repos.resources.update(resource.id, { utilization: clampUtil(resource.utilization - utilizationContribution(oldAssig.assignedHours, resource.capacity)) });
-  });
+  // B-CONCURRENCY + B-UTILIZATION: serialize per-resource and recompute
+  // utilization from the remaining assignments (an over-removal can no longer
+  // clamp the stored counter to 0 and destroy magnitude).
+  await withLock(`res:${oldAssig.resourceId}`, () => recomputeResourceUtilization(oldAssig.resourceId));
 
   await withLock(`req:${oldAssig.requestId}`, async () => {
     const request = await repos.requests.get(oldAssig.requestId);
@@ -699,7 +772,11 @@ apiRouter.post('/time-entries', async (req, res) => {
 apiRouter.put('/time-entries/:id', async (req, res) => {
   const existing = await repos.timeEntries.get(req.params.id);
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
-  const body = pick<TimeEntry>(req.body, ['assignmentId', 'requestId', 'resourceId', 'projectId', 'date', 'hours', 'status', 'notes', 'approvedBy', 'approvedAt']);
+  // B-TIME-ENTRY SoD: `resourceId` (the entry's OWNER) is NOT reassignable after
+  // creation. Allowing it on PUT let an owner re-own their entry to a dummy id in
+  // a Draft PUT and then approve it (the self-approval guard keyed on the
+  // now-stale owner), so it is deliberately excluded from the allow-list.
+  const body = pick<TimeEntry>(req.body, ['assignmentId', 'requestId', 'projectId', 'date', 'hours', 'status', 'notes', 'approvedBy', 'approvedAt']);
   if (body.hours !== undefined && !isNonNegNumber(body.hours)) {
     res.status(400).json({ error: 'hours must be a non-negative number' });
     return;
@@ -716,13 +793,15 @@ apiRouter.put('/time-entries/:id', async (req, res) => {
     // SEGREGATION OF DUTIES: the approver is the TRUSTED actor (never a
     // client-supplied approvedBy) and must differ from the entry's owner
     // (its resourceId) so a resource cannot approve their own time and inflate
-    // accrued T&M. Mirrors the approval engine's SoD check.
-    const approver = actorId(req);
-    if (approver === existing.resourceId) {
-      res.status(400).json({ error: 'Segregation of duties: a resource cannot approve their own time entry' });
+    // accrued T&M. The actor is a USER identity, so resolve it to the user's
+    // RESOURCE id before comparing — comparing the raw username/sub against a
+    // resourceId is always false under real JWT auth and silently disables SoD.
+    const approverResourceId = await actorResourceId(req);
+    if (approverResourceId !== undefined && approverResourceId === existing.resourceId) {
+      res.status(403).json({ error: 'Segregation of duties: a resource cannot approve their own time entry' });
       return;
     }
-    body.approvedBy = approver;
+    body.approvedBy = actorId(req);
     body.approvedAt = new Date().toISOString();
   }
   const updated = await repos.timeEntries.update(req.params.id, body);
@@ -856,9 +935,17 @@ apiRouter.put('/milestones/:id', async (req, res) => {
   // MILESTONE TRIGGER (SAL): when a milestone first transitions to 'Achieved',
   // make its fixed-price billing item billable by flipping every linked
   // BillingPlanItem still in 'Planned' to 'Ready'.
+  // B-CONCURRENCY: serialize per billing item against the billing-plan-item PUT
+  // (which writes the whole merged item) so this targeted status flip and a
+  // concurrent PUT can't clobber each other. Re-read INSIDE the lock and re-check
+  // the 'Planned' precondition against the freshest state.
   if (updated.status === 'Achieved' && previousStatus !== 'Achieved') {
     for (const bp of await repos.billingPlanItems.list()) {
-      if (bp.milestoneId === updated.id && bp.status === 'Planned') await repos.billingPlanItems.update(bp.id, { status: 'Ready' });
+      if (bp.milestoneId !== updated.id) continue;
+      await withLock(`billing:${bp.id}`, async () => {
+        const fresh = await repos.billingPlanItems.get(bp.id);
+        if (fresh && fresh.status === 'Planned') await repos.billingPlanItems.update(bp.id, { status: 'Ready' });
+      });
     }
   }
   res.json(updated);
@@ -905,12 +992,31 @@ apiRouter.put('/change-requests/:id', async (req, res) => {
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   const body = pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_FIELDS);
   const merged = { ...existing, ...body } as ChangeRequestEntry;
+  // CR APPROVAL — SEGREGATION OF DUTIES + AUTHORIZATION. Approved CRs feed
+  // effectiveBudgetForProject (finance.util), so unilateral self-approval lets a
+  // requester inflate their own project budget and mask an over-budget state.
+  // Mirror the approval-engine / time-entry SoD: on the transition INTO
+  // 'Approved', (1) only delivery-executive/admin may approve, and (2) the
+  // approver may be neither the CR's requester nor its owner.
+  const approving = merged.status === 'Approved' && existing.status !== 'Approved';
+  if (approving) {
+    const role = trustedRole(req);
+    if (role !== 'delivery-executive' && role !== 'admin') {
+      res.status(403).json({ error: 'Only delivery-executive or admin may approve a change request' });
+      return;
+    }
+    const decider = actorId(req);
+    if (decider === existing.requestedBy || decider === existing.owner) {
+      res.status(403).json({ error: 'Segregation of duties: the requester/owner cannot approve their own change request' });
+      return;
+    }
+  }
   // CR DECISION: when a CR reaches a terminal decision, stamp who/when (server
   // side, from the verified actor) if not already recorded. decidedBy/decidedAt
   // are not client-settable fields, so they cannot be forged via the body.
   if ((merged.status === 'Approved' || merged.status === 'Rejected') && !merged.decidedAt) {
     merged.decidedAt = new Date().toISOString();
-    merged.decidedBy = merged.decidedBy || actorId(req);
+    merged.decidedBy = actorId(req);
   }
   const updated = await repos.changeRequests.update(req.params.id, merged);
   res.json(updated);
@@ -1145,13 +1251,13 @@ function isCappedNature(item: Pick<BillingPlanEntry, 'type' | 'capAmount'>): boo
 const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
 
 /**
- * Accrued T&M for a capped item, DERIVED as Σ(approved time-entry hours ×
- * resource billRate) for the item's project — the same as-incurred rule the
- * finance util's recognitionSchedule uses. Returns undefined when accrual is not
- * derivable from the data (no projectId on the item), so the caller can skip the
- * accrued<=cap check rather than treat "no data" as zero accrual. EUR/base only:
- * we compare against capAmount in the item's own currency without FX (the cap and
- * the resource rates are taken as-is, matching the single-currency util default).
+ * Accrued T&M for a project, DERIVED as Σ(approved time-entry hours × resource
+ * billRate) — the same as-incurred rule the finance util's recognitionSchedule
+ * uses. Resource billRates are denominated in the base currency (EUR), so the
+ * returned accrual is a BASE-currency figure; the caller converts a per-item cap
+ * into base before comparing. Returns undefined when accrual is not derivable
+ * (no projectId), so the caller can skip the accrued<=cap check rather than
+ * treat "no data" as zero accrual.
  */
 async function accruedTAndM(item: Pick<BillingPlanEntry, 'projectId'>): Promise<number | undefined> {
   if (!item.projectId) return undefined;
@@ -1168,16 +1274,34 @@ async function accruedTAndM(item: Pick<BillingPlanEntry, 'projectId'>): Promise<
 }
 
 /**
+ * Count the cap-bearing billing items on a project. The accrued-vs-cap FLAG is
+ * only meaningful when a project has EXACTLY ONE cap-bearing item: accrual is
+ * derived from the project's whole approved time (time entries link to a project,
+ * not to a specific billing item), so with multiple caps the same hours would be
+ * counted against every cap and the flag would fire too eagerly. We therefore
+ * scope the flag to the single-cap case (the amount>cap hard reject is unaffected
+ * and always applies). `excludeId` skips the item under update so a re-PUT of the
+ * only capped item still counts as one.
+ */
+async function cappedItemCountForProject(projectId: string, excludeId?: string): Promise<number> {
+  const all = (await repos.billingPlanItems.list()) as unknown as BillingPlanEntry[];
+  return all.filter(bp => bp.projectId === projectId && bp.id !== excludeId && isCappedNature(bp)).length;
+}
+
+/**
  * CAPPED not-to-exceed enforcement for a fully-merged billing item.
  *
  * 1) Hard reject (returns an error string) when the item is capped and its
  *    `amount` exceeds `capAmount` — the create/update must not persist an
  *    overcap amount.
- * 2) When accrued T&M is derivable, enforce accrued <= capAmount: if accrued has
+ * 2) When accrued T&M is derivable AND the project has exactly one cap-bearing
+ *    item (see cappedItemCountForProject), enforce accrued <= cap: if accrued has
  *    breached the cap, flag the item by prepending CAP_EXCEEDED_FLAG to `notes`
  *    (idempotent — only added once) so the breach is visible without inventing a
  *    field. This is a FLAG, not a reject, because accrual comes from time entries
- *    rather than the request body.
+ *    rather than the request body. Accrued (base currency, from EUR-denominated
+ *    resource rates) is compared against the cap CONVERTED to base via the FX
+ *    table, so a non-base-currency cap is no longer apples-to-oranges.
  *
  * Returns `{ error }` to reject, or `{ patch }` (possibly empty) to apply on top
  * of the caller's merged item before persisting.
@@ -1187,19 +1311,30 @@ async function enforceCappedBilling(
 ): Promise<{ error: string } | { patch: Partial<BillingPlanEntry> }> {
   if (!isCappedNature(merged) || !Number.isFinite(merged.capAmount)) return { patch: {} };
   const cap = merged.capAmount as number;
-  // (1) amount must never exceed the cap.
+  // (1) amount must never exceed the cap (raw, same-currency comparison: both
+  //     `amount` and `capAmount` are in the item's own currency).
   if (Number.isFinite(merged.amount) && merged.amount > cap) {
     return { error: `amount ${merged.amount} exceeds capAmount ${cap} (not-to-exceed)` };
   }
-  // (2) accrued T&M must stay within the cap; flag (don't reject) when it breaks.
-  const accrued = await accruedTAndM(merged);
   const hasFlag = (merged.notes ?? '').includes(CAP_EXCEEDED_FLAG);
-  if (accrued !== undefined && accrued > cap) {
-    if (hasFlag) return { patch: {} }; // already flagged -> idempotent no-op
-    const suffix = merged.notes ? ` ${merged.notes}` : '';
-    return { patch: { notes: `${CAP_EXCEEDED_FLAG} accrued ${Math.round(accrued)} > cap ${cap}${suffix}` } };
+  // (2) accrued T&M must stay within the cap; flag (don't reject) when it breaks.
+  // Only attribute project accrual to THIS cap when it is the project's sole cap
+  // (otherwise the same hours would breach every cap). With multiple caps we skip
+  // the flag entirely (and clear any stale flag below).
+  const soleCap = merged.projectId ? (await cappedItemCountForProject(merged.projectId, merged.id)) === 0 : false;
+  const accrued = soleCap ? await accruedTAndM(merged) : undefined;
+  if (accrued !== undefined) {
+    // Normalise the cap to base currency to match the base-denominated accrual.
+    const fxRows = (await repos.fxRates.list()) as unknown as FxRate[];
+    const capInBase = convertToBase(cap, merged.currency, fxRows);
+    if (accrued > capInBase) {
+      if (hasFlag) return { patch: {} }; // already flagged -> idempotent no-op
+      const suffix = merged.notes ? ` ${merged.notes}` : '';
+      return { patch: { notes: `${CAP_EXCEEDED_FLAG} accrued ${Math.round(accrued)} > cap ${Math.round(capInBase)} (${BASE_CURRENCY})${suffix}` } };
+    }
   }
-  // Accrued back within the cap: clear a previously-set flag so it doesn't stick.
+  // Accrued back within the cap (or flag no longer applicable): clear a
+  // previously-set flag so it doesn't stick.
   if (hasFlag) {
     const cleaned = (merged.notes ?? '').replace(CAP_EXCEEDED_FLAG, '').replace(/\s+/g, ' ').trim();
     return { patch: { notes: cleaned || undefined } };
@@ -1246,6 +1381,8 @@ apiRouter.post('/billing-plan-items', async (req, res) => {
   res.json(created);
 });
 apiRouter.put('/billing-plan-items/:id', async (req, res) => {
+  // Cheap, shared-state-free validation up front (existence is re-checked under
+  // the lock against the freshest state below).
   const existing = await repos.billingPlanItems.get(req.params.id);
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   const body = pick<BillingPlanEntry>(req.body, BILLING_PLAN_FIELDS);
@@ -1258,27 +1395,38 @@ apiRouter.put('/billing-plan-items/:id', async (req, res) => {
     res.status(400).json({ error: rule });
     return;
   }
-  const prev = existing as unknown as BillingPlanEntry;
-  // Merge the incoming patch onto the stored item so automations see the
-  // effective post-update state (effectiveType already resolved above).
-  const merged = { ...prev, ...body, type: effectiveType } as BillingPlanEntry;
 
-  // #14 PROGRESS auto-advance: when progressPct CHANGES and reaches 100%, advance
-  // a still-'Planned' Progress item to 'Ready' (same trigger pattern as the
-  // milestone→'Ready' flip). Idempotent — fold the status into the merged item
-  // first so the cap check below also sees the advanced status.
-  Object.assign(merged, progressAutoAdvance(merged, body.progressPct, prev.progressPct));
+  // B-CONCURRENCY: serialize the read-merge-write per billing item against the
+  // milestone→'Ready' trigger (which also writes this item) AND other concurrent
+  // PUTs, so the full-object write below can't clobber a status another path
+  // just set. Re-read the item INSIDE the lock so we merge onto the freshest
+  // state rather than the snapshot read before the lock.
+  const result = await withLock(`billing:${req.params.id}`, async (): Promise<{ status: number; body: unknown }> => {
+    const fresh = await repos.billingPlanItems.get(req.params.id);
+    if (fresh === undefined) return { status: 404, body: { error: 'Not found' } };
+    const prev = fresh as unknown as BillingPlanEntry;
+    // Merge the incoming patch onto the stored item so automations see the
+    // effective post-update state (effectiveType already resolved above).
+    const merged = { ...prev, ...body, type: effectiveType } as BillingPlanEntry;
 
-  // #14 CAPPED not-to-exceed: reject an overcap amount; otherwise apply any
-  // accrued-T&M cap-breach flag (or clear a stale one) onto the merged item.
-  const capResult = await enforceCappedBilling(merged);
-  if ('error' in capResult) { res.status(400).json({ error: capResult.error }); return; }
-  Object.assign(merged, capResult.patch);
+    // #14 PROGRESS auto-advance: when progressPct CHANGES and reaches 100%, advance
+    // a still-'Planned' Progress item to 'Ready' (same trigger pattern as the
+    // milestone→'Ready' flip). Idempotent — fold the status into the merged item
+    // first so the cap check below also sees the advanced status.
+    Object.assign(merged, progressAutoAdvance(merged, body.progressPct, prev.progressPct));
 
-  // Persist the full merged item so the automation-derived status/notes are
-  // written alongside the client patch in a single update.
-  const updated = await repos.billingPlanItems.update(req.params.id, merged as Partial<BillingPlanItem>);
-  res.json(updated);
+    // #14 CAPPED not-to-exceed: reject an overcap amount; otherwise apply any
+    // accrued-T&M cap-breach flag (or clear a stale one) onto the merged item.
+    const capResult = await enforceCappedBilling(merged);
+    if ('error' in capResult) return { status: 400, body: { error: capResult.error } };
+    Object.assign(merged, capResult.patch);
+
+    // Persist the full merged item so the automation-derived status/notes are
+    // written alongside the client patch in a single update.
+    const updated = await repos.billingPlanItems.update(req.params.id, merged as Partial<BillingPlanItem>);
+    return { status: 200, body: updated };
+  });
+  res.status(result.status).json(result.body);
 });
 apiRouter.delete('/billing-plan-items/:id', async (req, res) => {
   await repos.billingPlanItems.remove(req.params.id);
@@ -1432,44 +1580,84 @@ apiRouter.post('/approval-requests', async (req, res) => {
   res.json(created);
 });
 apiRouter.put('/approval-requests/:id/decision', async (req, res) => {
-  const ar = await repos.approvalRequests.get(req.params.id) as ApprovalRequestEntry | undefined;
-  if (ar === undefined) { res.status(404).json({ error: 'Not found' }); return; }
-  const body = pick<{ decision: string; by: string }>(req.body, ['decision', 'by']);
+  // Validate the decision up front (cheap, no shared state).
+  const body = pick<{ decision: string }>(req.body, ['decision']);
   if (body.decision !== 'Approved' && body.decision !== 'Rejected') {
     res.status(400).json({ error: "decision must be 'Approved' or 'Rejected'" });
     return;
   }
-  const by = typeof body.by === 'string' && body.by.length > 0 ? body.by : actorId(req);
-  if (ar.status !== 'Pending') {
-    res.status(400).json({ error: `approval request already ${ar.status}` });
+  // SEGREGATION OF DUTIES / AUTHORIZATION: the deciding actor is the SERVER-
+  // VERIFIED principal, NEVER a client-supplied `by`. A client-controlled `by`
+  // would let the requester forge a different decider and defeat the SoD check
+  // below, and forge who is recorded as the approver. Require a recognised
+  // principal (a JWT role, or a trusted demo header) — an unauthenticated
+  // caller ('unknown') can never drive the financial approval chain.
+  const decidingRole = trustedRole(req);
+  if (decidingRole === 'unknown') {
+    res.status(401).json({ error: 'A verified principal is required to decide an approval request' });
     return;
   }
-  // SEGREGATION OF DUTIES: the requester may never approve/reject their own item.
-  if (by === ar.requestedBy) {
-    res.status(400).json({ error: 'Segregation of duties: the requester cannot decide their own approval request' });
-    return;
-  }
-  const step = ar.steps[ar.currentStep];
-  if (!step) { res.status(400).json({ error: 'No pending step to decide' }); return; }
-  const decidedAt = new Date().toISOString();
-  step.decidedBy = by;
-  step.decidedAt = decidedAt;
-  if (body.decision === 'Rejected') {
-    // A rejection at any step fails the whole chain and steps back currentStep.
-    step.status = 'Rejected';
-    ar.status = 'Rejected';
-    ar.currentStep = Math.max(0, ar.currentStep - 1);
-  } else {
-    step.status = 'Approved';
-    // Advance; when the chain is exhausted the overall request is Approved.
-    ar.currentStep = ar.currentStep + 1;
-    if (ar.currentStep >= ar.steps.length) ar.status = 'Approved';
-  }
-  const updated = await repos.approvalRequests.update(ar.id, ar as ApprovalRequest);
-  res.json(updated ?? ar);
+  const by = actorId(req);
+  const decision = body.decision;
+
+  // B-CONCURRENCY: serialize the read-decide-write so two concurrent decisions
+  // on the same multi-step request can't both read the same currentStep and
+  // double-advance / clobber each other's decision. Re-read INSIDE the lock so
+  // the decision is applied to the freshest state (mirrors the invoice-seq
+  // critical section).
+  const result = await withLock(`approval:${req.params.id}`, async (): Promise<{ status: number; body: unknown }> => {
+    const ar = await repos.approvalRequests.get(req.params.id) as ApprovalRequestEntry | undefined;
+    if (ar === undefined) return { status: 404, body: { error: 'Not found' } };
+    if (ar.status !== 'Pending') return { status: 400, body: { error: `approval request already ${ar.status}` } };
+    // SoD: the requester may never approve/reject their own item. Meaningful now
+    // that `by` is the trusted principal rather than a forgeable body field.
+    if (by === ar.requestedBy) {
+      return { status: 403, body: { error: 'Segregation of duties: the requester cannot decide their own approval request' } };
+    }
+    const step = ar.steps[ar.currentStep];
+    if (!step) return { status: 400, body: { error: 'No pending step to decide' } };
+    // STEP-ROLE ENFORCEMENT: only an actor holding the role the routing assigned
+    // to the CURRENT step may decide it (admin may decide any step). Without this
+    // the coarse roleGate lets e.g. a pm decide a step routed to finance/
+    // delivery-executive, defeating the built (incl. high-value 2-step) chain.
+    if (decidingRole !== step.role && decidingRole !== 'admin') {
+      return { status: 403, body: { error: `Role ${decidingRole} cannot decide a step assigned to ${step.role}` } };
+    }
+    const decidedAt = new Date().toISOString();
+    step.decidedBy = by;
+    step.decidedAt = decidedAt;
+    if (decision === 'Rejected') {
+      // A rejection at any step fails the whole chain and steps back currentStep.
+      step.status = 'Rejected';
+      ar.status = 'Rejected';
+      ar.currentStep = Math.max(0, ar.currentStep - 1);
+    } else {
+      step.status = 'Approved';
+      // Advance; when the chain is exhausted the overall request is Approved.
+      ar.currentStep = ar.currentStep + 1;
+      if (ar.currentStep >= ar.steps.length) ar.status = 'Approved';
+    }
+    const updated = await repos.approvalRequests.update(ar.id, ar as ApprovalRequest);
+    return { status: 200, body: updated ?? ar };
+  });
+  res.status(result.status).json(result.body);
 });
 
-apiRouter.get('/audit-logs', async (_req, res) => { res.json(await repos.auditLogs.list()); });
+/** Default + maximum page size for the (unbounded) audit log read. */
+const AUDIT_LOG_DEFAULT_LIMIT = 200;
+const AUDIT_LOG_MAX_LIMIT = 1000;
+apiRouter.get('/audit-logs', async (req, res) => {
+  // AUDIT READ: never stream the entire ever-growing log. Sort newest-first
+  // (by `at`, stable) and return a bounded page. `limit`/`offset` query params
+  // allow pagination; both are clamped so a client cannot request the whole log.
+  const all = (await repos.auditLogs.list()) as unknown as AuditEntry[];
+  const sorted = [...all].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  const rawLimit = Number(req.query['limit']);
+  const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, AUDIT_LOG_MAX_LIMIT) : AUDIT_LOG_DEFAULT_LIMIT;
+  const rawOffset = Number(req.query['offset']);
+  const offset = Number.isInteger(rawOffset) && rawOffset > 0 ? rawOffset : 0;
+  res.json(sorted.slice(offset, offset + limit));
+});
 apiRouter.get('/storage-status', (_req, res) => res.json({
   provider: process.env['DATABASE_URL'] ? 'postgresql' : 'memory',
   persistent: Boolean(process.env['DATABASE_URL']),

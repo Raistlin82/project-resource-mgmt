@@ -67,7 +67,7 @@ import { NotificationService } from '../services/notification.service';
                     }
                   </td>
                   <td class="py-5 text-right">
-                    <button (click)="toggleRestrict(role)" class="w-10 h-10 rounded-full bg-slate-50 border border-slate-200 text-slate-500 hover:text-amber-700 hover:border-amber-200 hover:bg-amber-50 transition-all inline-flex items-center justify-center shadow-sm" [title]="role.restricted ? 'Unrestrict' : 'Restrict'">
+                    <button type="button" (click)="toggleRestrict(role)" class="w-10 h-10 rounded-full bg-slate-50 border border-slate-200 text-slate-500 hover:text-amber-700 hover:border-amber-200 hover:bg-amber-50 transition-all inline-flex items-center justify-center shadow-sm" [attr.aria-label]="(role.restricted ? 'Unrestrict ' : 'Restrict ') + role.name" [title]="role.restricted ? 'Unrestrict' : 'Restrict'">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">{{ role.restricted ? 'lock_open' : 'block' }}</mat-icon>
                     </button>
                   </td>

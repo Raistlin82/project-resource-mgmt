@@ -32,7 +32,7 @@ interface UtilizationData {
 
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 sm:gap-8">
         <!-- Left Pane: Managed Resources -->
-        <div class="lg:col-span-1 bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden flex flex-col h-[800px] hover:shadow-md transition-all">
+        <div class="lg:col-span-1 bg-white rounded-3xl shadow-sm ring-1 ring-slate-900/5 border border-slate-200 overflow-hidden flex flex-col h-[min(800px,80vh)] hover:shadow-md transition-all">
           <div class="p-6 sm:p-8 border-b border-slate-200 bg-slate-50">
             <h2 class="text-xl font-bold text-slate-900 tracking-tight">My Team</h2>
             <p class="text-sm font-medium text-slate-500 mt-2">Resources you manage</p>

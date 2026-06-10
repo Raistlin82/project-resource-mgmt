@@ -22,6 +22,18 @@ describe('export.util — escapeCsv', () => {
     expect(escapeCsv('\rCR')).toBe('"\'\rCR"');
   });
 
+  it('emits finite numbers verbatim — never as injection-prefixed text', () => {
+    // A negative number is a value, not a formula: it must stay numeric so spreadsheet
+    // SUM/aggregation keeps working on margin/VAC/gap/credit-note columns.
+    expect(escapeCsv(-2)).toBe('-2');
+    expect(escapeCsv(-1500.5)).toBe('-1500.5');
+    expect(escapeCsv(0)).toBe('0');
+    expect(escapeCsv(42)).toBe('42');
+    // Non-finite numbers fall through to the string path (String(NaN) === 'NaN', etc.).
+    expect(escapeCsv(NaN)).toBe('NaN');
+    expect(escapeCsv(Infinity)).toBe('Infinity');
+  });
+
   it('quotes and prefixes a dangerous value that also needs quoting', () => {
     // Leading '=' triggers the quote prefix; the embedded comma forces RFC-4180 quoting.
     expect(escapeCsv('=1,2')).toBe('"\'=1,2"');
