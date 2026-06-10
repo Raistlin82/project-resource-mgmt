@@ -235,7 +235,7 @@ declare module 'express-serve-static-core' {
  * multiple realm roles we collapse them to the single most-privileged one,
  * mirroring the client. Higher index == more privilege.
  */
-const ROLE_PRIORITY: readonly UserRole[] = ['employee', 'sales', 'pm', 'resource-manager', 'finance', 'delivery-executive', 'admin'];
+const ROLE_PRIORITY: readonly UserRole[] = ['employee', 'pm', 'resource-manager', 'sales', 'finance', 'delivery-executive', 'admin'];
 const ALL_ROLES = new Set<string>(ROLE_PRIORITY);
 
 /** Collapse a list of realm roles to the single highest-privilege UserRole. */

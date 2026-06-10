@@ -9,6 +9,7 @@
  * registrations and src/app/services/api.service.ts method URLs.
  *
  * Usage:
+ *   AUTH_TRUST_HEADERS=true npm run serve:ssr:app
  *   node scripts/smoke-api.mjs
  *   SMOKE_BASE=http://localhost:3000 node scripts/smoke-api.mjs
  *   SMOKE_CREATE_ONLY=1 node scripts/smoke-api.mjs   # only POST a row, print id+segment
@@ -22,9 +23,10 @@ const BASE = (process.env.SMOKE_BASE || 'http://localhost:3000').replace(/\/+$/,
 const API = `${BASE}/api`;
 const CREATE_ONLY = process.env.SMOKE_CREATE_ONLY === '1';
 
-// RBAC: src/server.ts trusts the spoofable X-User-* demo headers on loopback
-// binds. cost-centers mutations require role finance|delivery-executive|admin,
-// so we present admin to pass roleGate.
+// RBAC: src/server.ts trusts the spoofable X-User-* demo headers only when the
+// server is explicitly started with AUTH_TRUST_HEADERS=true. Sensitive reads
+// and cost-centers mutations require an authenticated/authorized identity, so
+// the smoke harness consistently presents the demo admin principal.
 const RBAC_HEADERS = { 'X-User-Id': '1', 'X-User-Role': 'admin' };
 
 // The CRUD round-trip targets the configuration-level cost-centers collection
@@ -51,6 +53,7 @@ async function req(method, path, { headers, body } = {}) {
   const res = await fetch(`${API}${path}`, {
     method,
     headers: {
+      ...RBAC_HEADERS,
       ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       ...headers,
     },
