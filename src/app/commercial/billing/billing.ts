@@ -3,7 +3,7 @@ import { CurrencyPipe, DatePipe, isPlatformBrowser, PercentPipe } from '@angular
 import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
-import { concatMap, from, switchMap, toArray } from 'rxjs';
+import { concatMap, from, of, switchMap, toArray } from 'rxjs';
 import {
   ApiService,
   BASE_CURRENCY,
@@ -18,6 +18,7 @@ import {
   Resource,
   TimeEntry,
 } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { convertToBase, daysOverdue } from '../../services/finance.util';
 import { CsvColumn, downloadCsv, toCsv } from '../../services/export.util';
@@ -754,6 +755,7 @@ export class Billing {
   private readonly api = inject(ApiService);
   private readonly notifications = inject(NotificationService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly auth = inject(AuthService);
 
   /** True only in the browser — gates the CSV export (DOM download) per SSR-safety. */
   readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
@@ -767,16 +769,53 @@ export class Billing {
   private readonly today = new Date().toISOString();
 
   // --- data via rxResource ---
-  private readonly itemsRes = rxResource({ stream: () => this.api.getBillingPlanItems(), defaultValue: [] as BillingPlanItem[] });
-  private readonly contractsRes = rxResource({ stream: () => this.api.getContracts(), defaultValue: [] as Contract[] });
-  private readonly customersRes = rxResource({ stream: () => this.api.getCustomers(), defaultValue: [] as Customer[] });
+  // Principal-gated reads (billing-plan-items, contracts, customers, orders,
+  // time-entries, resources) 401 until the OAuth bootstrap restores the bearer
+  // token. On reload the OIDC token restores async, so firing immediately 401s
+  // and the rxResource latches its empty state forever. Keying each on
+  // auth.authReady() defers the request until the token is attached; when
+  // authReady flips false->true the params change re-runs the stream (reload()
+  // still works for the mutation flows below). Open reads (projects, milestones,
+  // fx-rates) would not 401, but fx-rates is gated too so the KPI rollups it
+  // normalises re-run together with the gated data.
+  private readonly itemsRes = rxResource<BillingPlanItem[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getBillingPlanItems() : of<BillingPlanItem[]>([])),
+    defaultValue: [] as BillingPlanItem[],
+  });
+  private readonly contractsRes = rxResource<Contract[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getContracts() : of<Contract[]>([])),
+    defaultValue: [] as Contract[],
+  });
+  private readonly customersRes = rxResource<Customer[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getCustomers() : of<Customer[]>([])),
+    defaultValue: [] as Customer[],
+  });
   private readonly projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
   private readonly milestonesRes = rxResource({ stream: () => this.api.getMilestones(), defaultValue: [] as Milestone[] });
-  private readonly ordersRes = rxResource({ stream: () => this.api.getOrders(), defaultValue: [] as Order[] });
-  private readonly timeEntriesRes = rxResource({ stream: () => this.api.getTimeEntries(), defaultValue: [] as TimeEntry[] });
-  private readonly resourcesRes = rxResource({ stream: () => this.api.getResources(), defaultValue: [] as Resource[] });
-  /** FX rate table (base-currency value of 1 unit of each currency); normalises mixed-currency KPI rollups. */
-  private readonly fxRatesRes = rxResource({ stream: () => this.api.getFxRates(), defaultValue: [] as FxRate[] });
+  private readonly ordersRes = rxResource<Order[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getOrders() : of<Order[]>([])),
+    defaultValue: [] as Order[],
+  });
+  private readonly timeEntriesRes = rxResource<TimeEntry[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getTimeEntries() : of<TimeEntry[]>([])),
+    defaultValue: [] as TimeEntry[],
+  });
+  private readonly resourcesRes = rxResource<Resource[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
+    defaultValue: [] as Resource[],
+  });
+  /** FX rate table (base-currency value of 1 unit of each currency); normalises mixed-currency KPI rollups. Keyed on auth readiness so it re-runs with the gated data load. */
+  private readonly fxRatesRes = rxResource<FxRate[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getFxRates() : of<FxRate[]>([])),
+    defaultValue: [] as FxRate[],
+  });
 
   readonly items = this.itemsRes.value;
   readonly contracts = this.contractsRes.value;

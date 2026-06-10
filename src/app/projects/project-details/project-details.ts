@@ -3,7 +3,9 @@ import { rxResource } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { CurrencyPipe, DatePipe, DecimalPipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
+import { of } from 'rxjs';
 import { ApiService, Project, Order, OrderLine, ResourceRequest, Assignment, Resource, FinancialItem, TimeEntry, Issue, ChangeRequest } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
 import { computeProjectFinancials, FinanceData } from '../../services/finance.util';
 import { ProjectPartners } from '../project-partners/project-partners';
 import { ProjectDocuments } from '../project-documents/project-documents';
@@ -244,22 +246,52 @@ import { ChangeRequests } from '../change-requests/change-requests';
 })
 export class ProjectDetailsComponent {
   private api = inject(ApiService);
+  private auth = inject(AuthService);
 
   // Route param ':id' bound via withComponentInputBinding()
   id = input.required<string>();
 
+  // getProjects is an OPEN read (no principal gate) — leave ungated.
   private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
   project = computed(() => this.projectsRes.value().find(p => p.id === this.id()) ?? null);
 
-  // Data for the 360° financial rollup
-  private ordersRes = rxResource({ stream: () => this.api.getOrders(), defaultValue: [] as Order[] });
-  private orderLinesRes = rxResource({ stream: () => this.api.getOrderLines(), defaultValue: [] as OrderLine[] });
+  // Data for the 360° financial rollup. Reads of principal-gated collections
+  // (resources, orders, order-lines, project-financials, time-entries) 401 until
+  // the OIDC token is restored on reload; key them on auth.authReady() so they
+  // fire only AFTER the OAuth bootstrap settles, returning the empty default in
+  // the meantime instead of latching on the 401.
+  private ordersRes = rxResource<Order[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getOrders() : of<Order[]>([])),
+    defaultValue: [] as Order[],
+  });
+  private orderLinesRes = rxResource<OrderLine[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getOrderLines() : of<OrderLine[]>([])),
+    defaultValue: [] as OrderLine[],
+  });
+  // getRequests is an OPEN read (no principal gate) — leave ungated.
   private requestsRes = rxResource({ stream: () => this.api.getRequests(), defaultValue: [] as ResourceRequest[] });
+  // getAssignments is an OPEN read (no principal gate) — leave ungated.
   private assignmentsRes = rxResource({ stream: () => this.api.getAssignments(), defaultValue: [] as Assignment[] });
-  private resourcesRes = rxResource({ stream: () => this.api.getResources(), defaultValue: [] as Resource[] });
-  private financialsRes = rxResource({ stream: () => this.api.getProjectFinancials(), defaultValue: [] as FinancialItem[] });
-  private timeEntriesRes = rxResource({ stream: () => this.api.getTimeEntries(), defaultValue: [] as TimeEntry[] });
+  private resourcesRes = rxResource<Resource[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
+    defaultValue: [] as Resource[],
+  });
+  private financialsRes = rxResource<FinancialItem[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getProjectFinancials() : of<FinancialItem[]>([])),
+    defaultValue: [] as FinancialItem[],
+  });
+  private timeEntriesRes = rxResource<TimeEntry[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getTimeEntries() : of<TimeEntry[]>([])),
+    defaultValue: [] as TimeEntry[],
+  });
+  // getProjectIssues is an OPEN read (no principal gate) — leave ungated.
   private issuesRes = rxResource({ stream: () => this.api.getProjectIssues(), defaultValue: [] as Issue[] });
+  // getChangeRequests is an OPEN read (no principal gate) — leave ungated.
   private changesRes = rxResource({ stream: () => this.api.getChangeRequests(), defaultValue: [] as ChangeRequest[] });
 
   private financeData = computed<FinanceData>(() => ({

@@ -1,9 +1,10 @@
 import { ChangeDetectionStrategy, Component, inject, signal, computed, PLATFORM_ID } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { isPlatformBrowser, CurrencyPipe, DecimalPipe } from '@angular/common';
-import { forkJoin } from 'rxjs';
+import { forkJoin, of } from 'rxjs';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, OrderLine, FinancialItem, TimeEntry, Issue, ChangeRequest, Milestone, BillingPlanItem, Contract, Customer, FxRate, BASE_CURRENCY } from '../services/api.service';
+import { AuthService } from '../services/auth.service';
 import { computeProjectFinancials, FinanceData, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, realizationMetrics, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity } from '../services/finance.util';
 import { NotificationService } from '../services/notification.service';
 import { toCsv, downloadCsv } from '../services/export.util';
@@ -624,6 +625,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
 })
 export class Reporting {
   private api = inject(ApiService);
+  private auth = inject(AuthService);
   private notificationService = inject(NotificationService);
   private platformId = inject(PLATFORM_ID);
 
@@ -643,29 +645,47 @@ export class Reporting {
    */
   protected readonly hoursPerFte = 160;
 
-  private dataRes = rxResource<ReportingData, unknown>({
-    stream: () => forkJoin({
-      resources: this.api.getResources(),
-      assignments: this.api.getAssignments(),
-      requests: this.api.getRequests(),
-      projects: this.api.getProjects(),
-      orders: this.api.getOrders(),
-      orderLines: this.api.getOrderLines(),
-      financials: this.api.getProjectFinancials(),
-      timeEntries: this.api.getTimeEntries(),
-      issues: this.api.getProjectIssues(),
-      changeRequests: this.api.getChangeRequests(),
-      milestones: this.api.getMilestones(),
-      billingItems: this.api.getBillingPlanItems(),
-      contracts: this.api.getContracts(),
-      customers: this.api.getCustomers(),
-    }),
+  // This forkJoin pulls several principal-gated collections (resources, orders,
+  // order-lines, project-financials, time-entries, billing-plan-items, contracts,
+  // customers) that 401 until the OIDC token is restored. On reload the token
+  // restores async, so firing immediately would 401 and forkJoin's fail-fast would
+  // latch the whole report to its empty default. Key the load on auth.authReady()
+  // so it fires only AFTER the OAuth bootstrap settles (bearer token attached);
+  // until then it resolves to the same empty default. authReady false->true re-runs
+  // the stream.
+  private dataRes = rxResource<ReportingData, boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) =>
+      ready
+        ? forkJoin({
+            resources: this.api.getResources(),
+            assignments: this.api.getAssignments(),
+            requests: this.api.getRequests(),
+            projects: this.api.getProjects(),
+            orders: this.api.getOrders(),
+            orderLines: this.api.getOrderLines(),
+            financials: this.api.getProjectFinancials(),
+            timeEntries: this.api.getTimeEntries(),
+            issues: this.api.getProjectIssues(),
+            changeRequests: this.api.getChangeRequests(),
+            milestones: this.api.getMilestones(),
+            billingItems: this.api.getBillingPlanItems(),
+            contracts: this.api.getContracts(),
+            customers: this.api.getCustomers(),
+          })
+        : of<ReportingData>({ resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [] }),
     defaultValue: { resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [] },
   });
 
-  /** FX rate table (base-currency value of 1 unit of each currency) for multi-currency rollups. */
-  private fxRes = rxResource<FxRate[], unknown>({
-    stream: () => this.api.getFxRates(),
+  /**
+   * FX rate table (base-currency value of 1 unit of each currency) for
+   * multi-currency rollups. Gated on auth readiness so it (re)runs together with
+   * the gated data load above and never feeds stale/empty FX into the rollups
+   * while the post-reload token is still being restored.
+   */
+  private fxRes = rxResource<FxRate[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getFxRates() : of<FxRate[]>([])),
     defaultValue: [],
   });
 

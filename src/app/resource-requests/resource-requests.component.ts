@@ -5,7 +5,7 @@ import { ApiService, ResourceRequest, Assignment, Resource } from '../services/a
 import { AuthService } from '../services/auth.service';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { DecimalPipe } from '@angular/common';
-import { forkJoin } from 'rxjs';
+import { forkJoin, of } from 'rxjs';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 
 interface RequestsData {
@@ -395,17 +395,24 @@ interface RequestsData {
 })
 export class ResourceRequestsComponent {
   private api = inject(ApiService);
+  private auth = inject(AuthService);
 
-  // NOTE: Mock-only hardcoded user ID. Replace with a real AuthService
-  // (e.g. inject(AuthService).currentUserId()) once authentication exists.
-  private currentUserId = inject(AuthService).userId();
+  private currentUserId = this.auth.userId();
 
-  private res = rxResource<RequestsData, unknown>({
-    stream: () => forkJoin({
-      requests: this.api.getRequests(),
-      assignments: this.api.getAssignments(),
-      resources: this.api.getResources()
-    }),
+  // The resources read is principal-gated server-side (401 until the Keycloak JWT
+  // is restored). On reload the OIDC token restores async; firing the forkJoin
+  // immediately 401s and the rxResource latches on the error. Key the load on auth
+  // readiness so it fires only AFTER the OAuth bootstrap has settled and the bearer
+  // token is attached.
+  private res = rxResource<RequestsData, boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => ready
+      ? forkJoin({
+          requests: this.api.getRequests(),
+          assignments: this.api.getAssignments(),
+          resources: this.api.getResources()
+        })
+      : of<RequestsData>({ requests: [], assignments: [], resources: [] }),
     defaultValue: { requests: [], assignments: [], resources: [] }
   });
 

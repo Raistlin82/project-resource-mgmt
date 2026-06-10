@@ -2,9 +2,10 @@ import { ChangeDetectionStrategy, Component, DestroyRef, inject, signal, compute
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, ResourceRequest, Resource } from '../services/api.service';
+import { AuthService } from '../services/auth.service';
 import { DecimalPipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { forkJoin } from 'rxjs';
+import { forkJoin, of } from 'rxjs';
 import {
   rankCandidates,
   requestSkillGap,
@@ -229,12 +230,20 @@ interface DimensionMeter {
 export class StaffingComponent {
   private api = inject(ApiService);
   private destroyRef = inject(DestroyRef);
+  private auth = inject(AuthService);
 
-  protected res = rxResource({
-    stream: () => forkJoin({
-      requests: this.api.getRequests(),
-      resources: this.api.getResources()
-    }),
+  // resources is principal-gated server-side (401 until the Keycloak JWT is
+  // restored). On reload the OIDC token restores async, so firing the forkJoin
+  // immediately 401s and the rxResource latches on the error. Key the load on
+  // auth readiness so it fires only AFTER the OAuth bootstrap has settled.
+  protected res = rxResource<{ requests: ResourceRequest[]; resources: Resource[] }, boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => ready
+      ? forkJoin({
+          requests: this.api.getRequests(),
+          resources: this.api.getResources()
+        })
+      : of({ requests: [] as ResourceRequest[], resources: [] as Resource[] }),
     defaultValue: { requests: [] as ResourceRequest[], resources: [] as Resource[] }
   });
 

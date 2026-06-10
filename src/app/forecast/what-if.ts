@@ -8,8 +8,9 @@ import {
 import { rxResource } from '@angular/core/rxjs-interop';
 import { DecimalPipe } from '@angular/common';
 import { AbstractControl, FormControl, FormGroup, ReactiveFormsModule, ValidationErrors, Validators } from '@angular/forms';
-import { forkJoin } from 'rxjs';
+import { forkJoin, of } from 'rxjs';
 import { ApiService, Resource, ResourceRequest, Project } from '../services/api.service';
+import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import {
   ForecastData,
@@ -388,6 +389,7 @@ interface TimelineRow {
 })
 export class WhatIf {
   private readonly api = inject(ApiService);
+  private readonly auth = inject(AuthService);
   private readonly notify = inject(NotificationService);
 
   /** Fixed comparison horizon, in weeks. */
@@ -398,13 +400,20 @@ export class WhatIf {
 
   // --- BASE: loaded once, treated as immutable -------------------------------
 
-  private readonly dataRes = rxResource<ForecastData, unknown>({
-    stream: () =>
-      forkJoin({
-        resources: this.api.getResources(),
-        requests: this.api.getRequests(),
-        assignments: this.api.getAssignments(),
-      }),
+  // resources is principal-gated server-side: key the forkJoin on auth readiness
+  // so it fires only AFTER the OAuth bootstrap has settled and the bearer token is
+  // attached; firing earlier (e.g. on a reload/deep-link) sent an unauthenticated
+  // request that 401'd and forkJoin's fail-fast collapsed the baseline to empty.
+  private readonly dataRes = rxResource<ForecastData, boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) =>
+      ready
+        ? forkJoin({
+            resources: this.api.getResources(),
+            requests: this.api.getRequests(),
+            assignments: this.api.getAssignments(),
+          })
+        : of<ForecastData>({ resources: [], requests: [], assignments: [] }),
     defaultValue: { resources: [], requests: [], assignments: [] },
   });
 

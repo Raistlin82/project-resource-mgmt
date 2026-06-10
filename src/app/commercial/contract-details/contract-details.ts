@@ -4,6 +4,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { RouterLink } from '@angular/router';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
+import { of } from 'rxjs';
 import {
   ApiService,
   Assignment,
@@ -19,6 +20,7 @@ import {
   ResourceRequest,
   TimeEntry,
 } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
 import {
   computeProjectFinancials,
   FinanceData,
@@ -662,20 +664,57 @@ interface BillingControlRow {
 export class ContractDetails {
   private api = inject(ApiService);
   private notification = inject(NotificationService);
+  private auth = inject(AuthService);
 
   id = input.required<string>();
 
-  private contractsRes = rxResource({ stream: () => this.api.getContracts(), defaultValue: [] as Contract[] });
-  private customersRes = rxResource({ stream: () => this.api.getCustomers(), defaultValue: [] as Customer[] });
+  // Principal-gated reads (contracts, customers, orders, order-lines, resources,
+  // time-entries, billing-plan-items) 401 until the OAuth bootstrap restores the
+  // bearer token. On reload the OIDC token restores async, so firing immediately
+  // 401s and the rxResource latches its error/empty state forever. Keying each on
+  // auth.authReady() defers the request until the token is attached; when
+  // authReady flips false->true the params change re-runs the stream. Open reads
+  // (projects, requests, assignments, project-financials, milestones) are left
+  // ungated.
+  private contractsRes = rxResource<Contract[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getContracts() : of<Contract[]>([])),
+    defaultValue: [] as Contract[],
+  });
+  private customersRes = rxResource<Customer[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getCustomers() : of<Customer[]>([])),
+    defaultValue: [] as Customer[],
+  });
   private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
-  private ordersRes = rxResource({ stream: () => this.api.getOrders(), defaultValue: [] as Order[] });
-  private orderLinesRes = rxResource({ stream: () => this.api.getOrderLines(), defaultValue: [] as OrderLine[] });
+  private ordersRes = rxResource<Order[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getOrders() : of<Order[]>([])),
+    defaultValue: [] as Order[],
+  });
+  private orderLinesRes = rxResource<OrderLine[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getOrderLines() : of<OrderLine[]>([])),
+    defaultValue: [] as OrderLine[],
+  });
   private requestsRes = rxResource({ stream: () => this.api.getRequests(), defaultValue: [] as ResourceRequest[] });
   private assignmentsRes = rxResource({ stream: () => this.api.getAssignments(), defaultValue: [] as Assignment[] });
-  private resourcesRes = rxResource({ stream: () => this.api.getResources(), defaultValue: [] as Resource[] });
+  private resourcesRes = rxResource<Resource[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
+    defaultValue: [] as Resource[],
+  });
   private financialsRes = rxResource({ stream: () => this.api.getProjectFinancials(), defaultValue: [] as FinancialItem[] });
-  private timeEntriesRes = rxResource({ stream: () => this.api.getTimeEntries(), defaultValue: [] as TimeEntry[] });
-  private billingPlanRes = rxResource({ stream: () => this.api.getBillingPlanItems(), defaultValue: [] as BillingPlanItem[] });
+  private timeEntriesRes = rxResource<TimeEntry[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getTimeEntries() : of<TimeEntry[]>([])),
+    defaultValue: [] as TimeEntry[],
+  });
+  private billingPlanRes = rxResource<BillingPlanItem[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getBillingPlanItems() : of<BillingPlanItem[]>([])),
+    defaultValue: [] as BillingPlanItem[],
+  });
   private milestonesRes = rxResource({ stream: () => this.api.getMilestones(), defaultValue: [] as Milestone[] });
 
   contracts = this.contractsRes.value;

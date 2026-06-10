@@ -4,7 +4,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { ApiService, Assignment, ResourceRequest, Resource, TimeEntry } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { DecimalPipe } from '@angular/common';
-import { forkJoin } from 'rxjs';
+import { forkJoin, of } from 'rxjs';
 import { FormsModule } from '@angular/forms';
 import { ListStateComponent } from '../shared/list-state.component';
 
@@ -292,18 +292,25 @@ import { ListStateComponent } from '../shared/list-state.component';
 })
 export class MyAssignmentsComponent {
   private api = inject(ApiService);
+  private auth = inject(AuthService);
 
-  // MOCK ONLY: hard-coded current user ID. Replace with a real AuthService
-  // (e.g. inject(AuthService).currentUserId()) once authentication is implemented.
-  private currentUserId = inject(AuthService).userId();
+  private currentUserId = this.auth.userId();
 
-  protected dataRes = rxResource<{ assignments: Assignment[]; requests: ResourceRequest[]; profile: Resource | null; timeEntries: TimeEntry[] }, unknown>({
-    stream: () => forkJoin({
-      assignments: this.api.getAssignments(),
-      requests: this.api.getRequests(),
-      profile: this.api.getResource(this.currentUserId),
-      timeEntries: this.api.getTimeEntries(),
-    }),
+  // The resource profile (getResource) and time-entries reads are principal-gated
+  // server-side (401 until the Keycloak JWT is restored). On reload the OIDC token
+  // restores async; firing the forkJoin immediately 401s and the rxResource latches
+  // on the error (page shows zeros forever). Key the load on auth readiness so it
+  // fires only AFTER the OAuth bootstrap has settled and the bearer token is attached.
+  protected dataRes = rxResource<{ assignments: Assignment[]; requests: ResourceRequest[]; profile: Resource | null; timeEntries: TimeEntry[] }, boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => ready
+      ? forkJoin({
+          assignments: this.api.getAssignments(),
+          requests: this.api.getRequests(),
+          profile: this.api.getResource(this.currentUserId),
+          timeEntries: this.api.getTimeEntries(),
+        })
+      : of({ assignments: [], requests: [], profile: null, timeEntries: [] }),
     defaultValue: { assignments: [], requests: [], profile: null, timeEntries: [] },
   });
 

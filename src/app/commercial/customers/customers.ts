@@ -2,7 +2,9 @@ import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, signa
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { of } from 'rxjs';
 import { ApiService, Customer, Contract } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { ListStateComponent } from '../../shared/list-state.component';
@@ -113,9 +115,23 @@ export class Customers {
   private api = inject(ApiService);
   private notifications = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
+  private auth = inject(AuthService);
 
-  protected customersRes = rxResource({ stream: () => this.api.getCustomers(), defaultValue: [] as Customer[] });
-  private contractsRes = rxResource({ stream: () => this.api.getContracts(), defaultValue: [] as Contract[] });
+  // customers + contracts are principal-gated server-side (401 until a verified
+  // JWT is attached). Gate each read on authReady() so the request fires only
+  // AFTER the OAuth bootstrap has settled and the interceptor can attach the
+  // bearer token; firing earlier (on a reload/deep-link) 401'd and latched the
+  // resource into an error/empty state. authReady false->true re-runs the stream.
+  protected customersRes = rxResource<Customer[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getCustomers() : of<Customer[]>([])),
+    defaultValue: [] as Customer[],
+  });
+  private contractsRes = rxResource<Contract[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getContracts() : of<Contract[]>([])),
+    defaultValue: [] as Contract[],
+  });
 
   customers = this.customersRes.value;
   contracts = this.contractsRes.value;

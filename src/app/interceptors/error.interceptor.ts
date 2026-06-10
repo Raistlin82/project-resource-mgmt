@@ -8,6 +8,13 @@ import { AuthService } from '../services/auth.service';
  * Surfaces failed HTTP requests as global error notifications, then rethrows so
  * callers can still react.
  *
+ * Exception: a 401 (Unauthorized) on our own same-origin `/api` requests is NOT
+ * toasted. During OIDC bootstrap and for anonymous users these same-origin `/api`
+ * GETs transiently 401 as the auth state settles; they are auth-state transitions,
+ * not user-actionable errors (rxResources already fall back to empty defaults).
+ * The error is still rethrown so callers/resources observe it. Genuine failures —
+ * other 4xx, any 5xx, and any failure on non-`/api` requests — are still toasted.
+ *
  * It also stamps the demo identity headers (`X-User-Id` / `X-User-Role`) — but
  * ONLY on our own same-origin `/api` calls. Cross-origin requests (notably the
  * Keycloak OIDC discovery/token endpoints) must NOT carry these headers: they
@@ -19,8 +26,10 @@ import { AuthService } from '../services/auth.service';
 export const errorInterceptor: HttpInterceptorFn = (req, next) => {
   const notifications = inject(NotificationService);
 
+  const ownApiRequest = isOwnApiRequest(req.url);
+
   let outgoing = req;
-  if (isOwnApiRequest(req.url)) {
+  if (ownApiRequest) {
     const auth = inject(AuthService);
     outgoing = req.clone({
       setHeaders: {
@@ -32,6 +41,12 @@ export const errorInterceptor: HttpInterceptorFn = (req, next) => {
 
   return next(outgoing).pipe(
     catchError((error: HttpErrorResponse) => {
+      // Swallow the toast for transient auth-state transitions: a 401 on our own
+      // /api requests. Still rethrow so callers/resources can react.
+      if (ownApiRequest && error.status === 401) {
+        return throwError(() => error);
+      }
+
       const serverMessage =
         error.error && typeof error.error === 'object' ? error.error.error : null;
       const message =

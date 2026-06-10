@@ -6,7 +6,7 @@ import { AuthService } from '../services/auth.service';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { DecimalPipe } from '@angular/common';
 import { NotificationService } from '../services/notification.service';
-import { forkJoin } from 'rxjs';
+import { forkJoin, of } from 'rxjs';
 
 @Component({
   selector: 'app-my-profile',
@@ -309,17 +309,24 @@ import { forkJoin } from 'rxjs';
 export class MyProfileComponent {
   private api = inject(ApiService);
   private notify = inject(NotificationService);
+  private auth = inject(AuthService);
 
-  // MOCK ONLY: hard-coded current user ID. Replace with a real AuthService
-  // (e.g. inject(AuthService).currentUserId()) once authentication is implemented.
-  private currentUserId = inject(AuthService).userId();
+  private currentUserId = this.auth.userId();
 
-  private dataRes = rxResource<{ profile: Resource | null; assignments: Assignment[]; requests: ResourceRequest[] }, unknown>({
-    stream: () => forkJoin({
-      profile: this.api.getResource(this.currentUserId),
-      assignments: this.api.getAssignments(),
-      requests: this.api.getRequests(),
-    }),
+  // The resource profile read (getResource) is principal-gated server-side (401
+  // until the Keycloak JWT is restored). On reload the OIDC token restores async;
+  // firing the forkJoin immediately 401s and the rxResource latches on the error
+  // (profile never renders). Key the load on auth readiness so it fires only AFTER
+  // the OAuth bootstrap has settled and the bearer token is attached.
+  private dataRes = rxResource<{ profile: Resource | null; assignments: Assignment[]; requests: ResourceRequest[] }, boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => ready
+      ? forkJoin({
+          profile: this.api.getResource(this.currentUserId),
+          assignments: this.api.getAssignments(),
+          requests: this.api.getRequests(),
+        })
+      : of({ profile: null, assignments: [], requests: [] }),
     defaultValue: { profile: null, assignments: [], requests: [] },
   });
 

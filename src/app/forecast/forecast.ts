@@ -1,8 +1,9 @@
 import { ChangeDetectionStrategy, Component, PLATFORM_ID, computed, inject, signal } from '@angular/core';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { DecimalPipe, isPlatformBrowser } from '@angular/common';
-import { forkJoin } from 'rxjs';
+import { forkJoin, of } from 'rxjs';
 import { ApiService } from '../services/api.service';
+import { AuthService } from '../services/auth.service';
 import {
   ForecastData,
   CapacityPeriod,
@@ -310,6 +311,7 @@ interface PeriodRow extends CapacityPeriod {
 })
 export class Forecast {
   private api = inject(ApiService);
+  private auth = inject(AuthService);
   private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
 
   /** True only in the browser, where the CSV download primitives are available. */
@@ -321,13 +323,20 @@ export class Forecast {
   /** Selected rolling horizon (weeks). */
   readonly horizon = signal<Horizon>(8);
 
-  private readonly dataRes = rxResource<ForecastData, unknown>({
-    stream: () =>
-      forkJoin({
-        resources: this.api.getResources(),
-        requests: this.api.getRequests(),
-        assignments: this.api.getAssignments(),
-      }),
+  // resources is principal-gated server-side: key the forkJoin on auth readiness
+  // so it fires only AFTER the OAuth bootstrap has settled and the bearer token is
+  // attached; firing earlier (e.g. on a reload/deep-link) sent an unauthenticated
+  // request that 401'd and forkJoin's fail-fast collapsed the forecast to empty.
+  private readonly dataRes = rxResource<ForecastData, boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) =>
+      ready
+        ? forkJoin({
+            resources: this.api.getResources(),
+            requests: this.api.getRequests(),
+            assignments: this.api.getAssignments(),
+          })
+        : of<ForecastData>({ resources: [], requests: [], assignments: [] }),
     defaultValue: { resources: [], requests: [], assignments: [] },
   });
 

@@ -5,7 +5,7 @@ import { ApiService, Resource, Assignment, ResourceRequest, TimeEntry } from '..
 import { AuthService } from '../services/auth.service';
 import { DecimalPipe } from '@angular/common';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { forkJoin } from 'rxjs';
+import { forkJoin, of } from 'rxjs';
 
 interface UtilizationData {
   resources: Resource[];
@@ -227,20 +227,27 @@ interface UtilizationData {
 })
 export class UtilizationComponent {
   private api = inject(ApiService);
+  private auth = inject(AuthService);
 
-  // MOCK ONLY: hardcoded current user (Resource Manager) id used for authorization.
-  // TODO: replace with an AuthService providing the authenticated user and
-  // role-based access control once authentication is implemented.
-  private currentManagerId = inject(AuthService).userId();
+  // Current authenticated user (Resource Manager) id used for authorization.
+  private currentManagerId = this.auth.userId();
 
-  private dataResource = rxResource<UtilizationData, unknown>({
-    stream: () =>
-      forkJoin({
-        resources: this.api.getResources(),
-        assignments: this.api.getAssignments(),
-        requests: this.api.getRequests(),
-        timeEntries: this.api.getTimeEntries()
-      }),
+  // resources and time-entries are principal-gated server-side: key the forkJoin
+  // on auth readiness so it fires only AFTER the OAuth bootstrap has settled and
+  // the bearer token is attached; firing earlier (e.g. on a reload/deep-link) sent
+  // unauthenticated requests that 401'd and forkJoin's fail-fast collapsed the
+  // whole view to empty (and never recovered).
+  private dataResource = rxResource<UtilizationData, boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) =>
+      ready
+        ? forkJoin({
+            resources: this.api.getResources(),
+            assignments: this.api.getAssignments(),
+            requests: this.api.getRequests(),
+            timeEntries: this.api.getTimeEntries()
+          })
+        : of<UtilizationData>({ resources: [], assignments: [], requests: [], timeEntries: [] }),
     defaultValue: { resources: [], assignments: [], requests: [], timeEntries: [] }
   });
 

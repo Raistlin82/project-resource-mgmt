@@ -2,7 +2,7 @@ import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signa
 import { CurrencyPipe, DatePipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { forkJoin } from 'rxjs';
+import { forkJoin, of } from 'rxjs';
 import {
   ApiService,
   ApprovalKind,
@@ -209,14 +209,22 @@ export class Approvals {
   private notifications = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
-  protected res = rxResource<ApprovalsData, unknown>({
-    stream: () =>
-      forkJoin({
-        approvals: this.api.getApprovalRequests(),
-        projects: this.api.getProjects(),
-        resources: this.api.getResources(),
-        users: this.api.getUsers(),
-      }),
+  // resources and users are principal-gated server-side (401 until the Keycloak
+  // JWT is restored). On reload the OIDC token restores async; firing the forkJoin
+  // immediately 401s and the rxResource latches on the error (inbox shows empty
+  // forever). Key the load on auth readiness so it fires only AFTER the OAuth
+  // bootstrap has settled and the bearer token is attached.
+  protected res = rxResource<ApprovalsData, boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) =>
+      ready
+        ? forkJoin({
+            approvals: this.api.getApprovalRequests(),
+            projects: this.api.getProjects(),
+            resources: this.api.getResources(),
+            users: this.api.getUsers(),
+          })
+        : of<ApprovalsData>({ approvals: [], projects: [], resources: [], users: [] }),
     defaultValue: { approvals: [], projects: [], resources: [], users: [] },
   });
 

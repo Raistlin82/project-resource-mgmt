@@ -3,7 +3,9 @@ import { MatIconModule } from '@angular/material/icon';
 import { CurrencyPipe, DatePipe } from '@angular/common';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators, AbstractControl, ValidationErrors } from '@angular/forms';
 import { rxResource, toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { of } from 'rxjs';
 import { ApiService, Order, Contract, Partner, Project, OrderLine } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
@@ -200,12 +202,30 @@ export class Orders {
   private api = inject(ApiService);
   private notifications = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
+  private auth = inject(AuthService);
 
-  private ordersRes = rxResource({ stream: () => this.api.getOrders(), defaultValue: [] as Order[] });
-  private contractsRes = rxResource({ stream: () => this.api.getContracts(), defaultValue: [] as Contract[] });
+  // orders, contracts and order-lines are principal-gated server-side (401 until
+  // a verified JWT is attached). Gate each on authReady() so the request fires
+  // only AFTER the OAuth bootstrap has settled and the interceptor can attach the
+  // bearer token; firing earlier (on a reload/deep-link) 401'd and latched the
+  // resource into an error/empty state. authReady false->true re-runs the stream.
+  private ordersRes = rxResource<Order[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getOrders() : of<Order[]>([])),
+    defaultValue: [] as Order[],
+  });
+  private contractsRes = rxResource<Contract[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getContracts() : of<Contract[]>([])),
+    defaultValue: [] as Contract[],
+  });
   private partnersRes = rxResource({ stream: () => this.api.getProjectPartners(), defaultValue: [] as Partner[] });
   private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
-  private orderLinesRes = rxResource({ stream: () => this.api.getOrderLines(), defaultValue: [] as OrderLine[] });
+  private orderLinesRes = rxResource<OrderLine[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getOrderLines() : of<OrderLine[]>([])),
+    defaultValue: [] as OrderLine[],
+  });
 
   orders = this.ordersRes.value;
   contracts = this.contractsRes.value;
