@@ -1,8 +1,12 @@
-import { ChangeDetectionStrategy, Component, inject, signal, OnInit } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, signal, input, computed } from '@angular/core';
+import { rxResource } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
-import { CommonModule } from '@angular/common';
-import { ActivatedRoute, RouterLink } from '@angular/router';
-import { ApiService, Project } from '../../services/api.service';
+import { CurrencyPipe, DatePipe, DecimalPipe } from '@angular/common';
+import { RouterLink } from '@angular/router';
+import { of } from 'rxjs';
+import { ApiService, Project, Order, OrderLine, ResourceRequest, Assignment, Resource, FinancialItem, TimeEntry, Issue, ChangeRequest } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
+import { computeProjectFinancials, FinanceData } from '../../services/finance.util';
 import { ProjectPartners } from '../project-partners/project-partners';
 import { ProjectDocuments } from '../project-documents/project-documents';
 import { ProjectPlans } from '../project-plans/project-plans';
@@ -10,13 +14,16 @@ import { FinancialPlans } from '../financial-plans/financial-plans';
 import { ProjectCostCenters } from '../project-cost-centers/project-cost-centers';
 import { ProjectTasks } from '../project-tasks/project-tasks';
 import { ProjectIssues } from '../project-issues/project-issues';
+import { ChangeRequests } from '../change-requests/change-requests';
 
 @Component({
   selector: 'app-project-details',
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
-    MatIconModule, 
-    CommonModule, 
+    MatIconModule,
+    CurrencyPipe,
+    DatePipe,
+    DecimalPipe,
     RouterLink,
     ProjectPartners,
     ProjectDocuments,
@@ -24,68 +31,73 @@ import { ProjectIssues } from '../project-issues/project-issues';
     FinancialPlans,
     ProjectCostCenters,
     ProjectTasks,
-    ProjectIssues
+    ProjectIssues,
+    ChangeRequests
   ],
   template: `
-    <div class="max-w-7xl mx-auto space-y-6 sm:space-y-8 p-4 sm:p-6 lg:p-8">
+    <div class="command-page space-y-6">
       <!-- Header & Main Info -->
-      <div class="bg-white/80 backdrop-blur-md rounded-3xl shadow-sm border border-slate-200/60 overflow-hidden p-6 sm:p-8">
+      <div class="command-card overflow-hidden p-6 sm:p-8">
         <div class="flex flex-col sm:flex-row sm:items-start gap-6">
-          <a routerLink="/projects" class="w-12 h-12 bg-slate-50 rounded-2xl border border-slate-200/60 flex items-center justify-center text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 hover:border-indigo-100 transition-all shrink-0 mt-1">
+          <a routerLink="/projects" class="command-button secondary w-12 h-12 p-0 shrink-0 mt-1" aria-label="Back to projects">
             <mat-icon>arrow_back</mat-icon>
           </a>
           <div class="flex-1 min-w-0 space-y-6">
-            <div>
-              <div class="flex flex-wrap items-center gap-3 mb-2">
-                <h1 class="text-2xl sm:text-3xl lg:text-4xl font-bold text-slate-900 tracking-tight truncate">{{ project()?.name || 'Loading...' }}</h1>
-                @if (project()) {
-                  <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-wide"
-                        [class.bg-blue-100]="project()!.status === 'In Planning'"
-                        [class.text-blue-800]="project()!.status === 'In Planning'"
-                        [class.bg-emerald-100]="project()!.status === 'In Execution'"
-                        [class.text-emerald-800]="project()!.status === 'In Execution'"
-                        [class.bg-slate-100]="project()!.status === 'Completed'"
-                        [class.text-slate-800]="project()!.status === 'Completed'">
-                    {{ project()!.status }}
+            @if (project(); as p) {
+              <div>
+                <div class="flex flex-wrap items-center gap-3 mb-2">
+                  <h1 class="font-display text-3xl sm:text-4xl font-bold text-[var(--cc-ink)] truncate">{{ p.name }}</h1>
+                  <span class="command-status"
+                        [class.amber]="p.status === 'In Planning'"
+                        [class.green]="p.status === 'In Execution'"
+                        [class.text-slate-700]="p.status === 'Completed'">
+                    {{ p.status }}
                   </span>
-                }
+                  <span class="command-status"
+                        [class.green]="deliveryHealth() === 'green'"
+                        [class.amber]="deliveryHealth() === 'amber'"
+                        [class.red]="deliveryHealth() === 'red'">
+                    {{ deliveryHealthLabel() }}
+                  </span>
+                </div>
+                <p class="text-sm text-[var(--cc-muted)] font-mono bg-[var(--cc-panel-muted)] inline-block px-2.5 py-1 rounded-md">{{ p.id }}</p>
               </div>
-              <p class="text-sm text-slate-500 font-mono bg-slate-100 inline-block px-2.5 py-1 rounded-lg">{{ project()?.id }}</p>
-            </div>
 
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-6 border-t border-slate-100">
-              <div class="md:col-span-2">
-                <h3 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Description</h3>
-                <p class="text-slate-700 leading-relaxed">{{ project()?.description || 'No description provided.' }}</p>
-              </div>
-              <div class="space-y-4">
-                <div>
-                  <h3 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Location</h3>
-                  <div class="flex items-center gap-2 text-slate-700 font-medium">
-                    <mat-icon class="text-indigo-500 text-[18px] w-[18px] h-[18px]">location_on</mat-icon>
-                    {{ project()?.location }}
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-6 border-t border-[var(--cc-line)]">
+                <div class="md:col-span-2">
+                  <h3 class="command-kpi-label mb-2">Description</h3>
+                  <p class="text-[var(--cc-ink)] leading-relaxed">{{ p.description || 'No description provided.' }}</p>
+                </div>
+                <div class="space-y-4">
+                  <div>
+                    <h3 class="command-kpi-label mb-1">Location</h3>
+                    <div class="flex items-center gap-2 text-[var(--cc-ink)] font-medium">
+                      <mat-icon class="text-[var(--cc-primary)] text-[18px] w-[18px] h-[18px]">location_on</mat-icon>
+                      {{ p.location }}
+                    </div>
+                  </div>
+                  <div>
+                    <h3 class="command-kpi-label mb-1">Timeline</h3>
+                    <div class="flex items-center gap-2 text-[var(--cc-ink)] font-medium">
+                      <mat-icon class="text-[var(--cc-green)] text-[18px] w-[18px] h-[18px]">date_range</mat-icon>
+                      {{ p.startDate | date:'mediumDate' }} - {{ p.endDate | date:'mediumDate' }}
+                    </div>
                   </div>
                 </div>
-                <div>
-                  <h3 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Timeline</h3>
-                  <div class="flex items-center gap-2 text-slate-700 font-medium">
-                    <mat-icon class="text-emerald-500 text-[18px] w-[18px] h-[18px]">date_range</mat-icon>
-                    {{ project()?.startDate | date:'mediumDate' }} - {{ project()?.endDate | date:'mediumDate' }}
-                  </div>
-                </div>
               </div>
-            </div>
+            } @else {
+              <div class="py-8 text-[var(--cc-muted)] font-medium">Loading...</div>
+            }
           </div>
         </div>
       </div>
 
       <!-- Tabs Navigation -->
-      <div class="flex overflow-x-auto hide-scrollbar border-b border-slate-200/60 bg-white/50 backdrop-blur-sm rounded-t-2xl px-2 sm:px-4">
+      <div class="command-card flex overflow-x-auto hide-scrollbar px-2 sm:px-4">
         @for (tab of tabs; track tab.id) {
           <button (click)="activeTab.set(tab.id)"
                   class="px-4 py-4 text-sm font-semibold whitespace-nowrap border-b-2 transition-colors"
-                  [class.border-indigo-600]="activeTab() === tab.id"
-                  [class.text-indigo-600]="activeTab() === tab.id"
+                  [class.project-tab-active]="activeTab() === tab.id"
                   [class.border-transparent]="activeTab() !== tab.id"
                   [class.text-slate-500]="activeTab() !== tab.id"
                   [class.hover:text-slate-700]="activeTab() !== tab.id"
@@ -97,6 +109,100 @@ import { ProjectIssues } from '../project-issues/project-issues';
 
       <!-- Tab Content -->
       <div class="mt-6">
+        @if (activeTab() === 'overview') {
+          @let f = financials();
+          <div class="space-y-6">
+            <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+              <div class="command-kpi" [class.green]="deliveryHealth() === 'green'" [class.warning]="deliveryHealth() === 'amber'" [class.danger]="deliveryHealth() === 'red'">
+                <p class="command-kpi-label">Delivery Health</p>
+                <p class="command-kpi-value">{{ deliveryHealthLabel() }}</p>
+                <p class="command-kpi-note">Based on VAC, burn, risks and change control</p>
+              </div>
+              <div class="command-kpi" [class.danger]="openIssues() > 0">
+                <p class="command-kpi-label">Open Critical Issues</p>
+                <p class="command-kpi-value">{{ openIssues() }}</p>
+                <p class="command-kpi-note">High, critical or escalated</p>
+              </div>
+              <div class="command-kpi warning">
+                <p class="command-kpi-label">Open Change Requests</p>
+                <p class="command-kpi-value">{{ openChanges() }}</p>
+                <p class="command-kpi-note">Draft or submitted</p>
+              </div>
+              <div class="command-kpi info">
+                <p class="command-kpi-label">EAC Basis</p>
+                <p class="command-kpi-value">{{ f.eac | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Actual cost + planned residual</p>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+              <div class="command-kpi">
+                <p class="command-kpi-label">Contract Revenue</p>
+                <p class="command-kpi-value font-mono tabular-nums">{{ f.revenue | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Invoiced <span class="font-mono">{{ f.invoiced | currency:'EUR':'symbol':'1.0-0' }}</span></p>
+              </div>
+              <div class="command-kpi">
+                <p class="command-kpi-label">Actual Cost</p>
+                <p class="command-kpi-value font-mono tabular-nums">{{ f.actualCost | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Labor <span class="font-mono">{{ f.laborCost | currency:'EUR':'symbol':'1.0-0' }}</span> · External <span class="font-mono">{{ f.externalCost | currency:'EUR':'symbol':'1.0-0' }}</span></p>
+              </div>
+              <div class="command-kpi" [class.danger]="f.margin < 0">
+                <p class="command-kpi-label">Margin</p>
+                <p class="command-kpi-value font-mono tabular-nums" [class.text-emerald-700]="f.margin >= 0" [class.text-red-700]="f.margin < 0">{{ f.margin | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note font-semibold" [class.text-emerald-700]="f.margin >= 0" [class.text-red-700]="f.margin < 0">{{ f.marginPct | number:'1.0-1' }}% margin</p>
+              </div>
+              <div class="command-kpi info">
+                <p class="command-kpi-label">Backlog</p>
+                <p class="command-kpi-value font-mono tabular-nums">{{ f.backlog | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Revenue not yet invoiced</p>
+              </div>
+              <div class="command-kpi">
+                <p class="command-kpi-label">Budget</p>
+                <p class="command-kpi-value font-mono tabular-nums">{{ f.budget | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Planned cost</p>
+              </div>
+              <div class="command-kpi" [class.danger]="f.burnPct > 100">
+                <p class="command-kpi-label">Budget Burn</p>
+                <p class="command-kpi-value font-mono tabular-nums" [class.text-emerald-700]="f.burnPct <= 100" [class.text-red-700]="f.burnPct > 100">{{ f.burnPct | number:'1.0-0' }}%</p>
+                <div class="w-full bg-slate-100 rounded-full h-2 overflow-hidden mt-2">
+                  <div class="h-2 rounded-full" [class.bg-gradient-to-r]="f.burnPct <= 100" [class.from-blue-500]="f.burnPct <= 100" [class.to-blue-600]="f.burnPct <= 100" [class.bg-red-500]="f.burnPct > 100" [style.width.%]="f.burnPct < 100 ? f.burnPct : 100"></div>
+                </div>
+              </div>
+              <div class="command-kpi info">
+                <p class="command-kpi-label">EAC</p>
+                <p class="command-kpi-value font-mono tabular-nums">{{ f.eac | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Estimate at completion</p>
+              </div>
+              <div class="command-kpi">
+                <p class="command-kpi-label">ETC</p>
+                <p class="command-kpi-value font-mono tabular-nums">{{ f.etc | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Estimated remaining cost</p>
+              </div>
+              <div class="command-kpi" [class.danger]="f.varianceAtCompletion < 0">
+                <p class="command-kpi-label">VAC</p>
+                <p class="command-kpi-value font-mono tabular-nums" [class.text-emerald-700]="f.varianceAtCompletion >= 0" [class.text-red-700]="f.varianceAtCompletion < 0">{{ f.varianceAtCompletion | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note">Budget minus EAC</p>
+              </div>
+            </div>
+
+            <div class="command-card p-6 sm:p-8">
+              <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] tracking-tight mb-6">Revenue breakdown</h3>
+              @if (f.revenue > 0) {
+                <div class="flex h-9 w-full rounded-xl overflow-hidden text-xs font-bold ring-1 ring-slate-200">
+                  <div class="bg-amber-100 text-amber-700 flex items-center justify-center min-w-0" [style.width.%]="f.laborCost / f.revenue * 100">Labor</div>
+                  <div class="bg-orange-100 text-orange-700 flex items-center justify-center min-w-0" [style.width.%]="f.externalCost / f.revenue * 100">Ext</div>
+                  <div class="flex items-center justify-center min-w-0" [class.bg-emerald-100]="f.margin >= 0" [class.text-emerald-700]="f.margin >= 0" [class.bg-red-100]="f.margin < 0" [class.text-red-700]="f.margin < 0" [style.width.%]="f.marginPct > 0 ? f.marginPct : 0">Margin</div>
+                </div>
+                <div class="flex flex-wrap gap-4 mt-3 text-xs text-[var(--cc-muted)]">
+                  <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-amber-500"></span> Labor</span>
+                  <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-orange-500"></span> External</span>
+                  <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-emerald-500"></span> Margin</span>
+                </div>
+              } @else {
+                <p class="text-sm text-[var(--cc-muted)]">No customer revenue recorded for this project yet. Add a Customer order with a line imputed to this project (Commercial → Orders).</p>
+              }
+            </div>
+          </div>
+        }
         @if (activeTab() === 'partners') {
           <app-project-partners [projectId]="project()?.id" />
         }
@@ -118,6 +224,9 @@ import { ProjectIssues } from '../project-issues/project-issues';
         @if (activeTab() === 'issues') {
           <app-project-issues [projectId]="project()?.id" />
         }
+        @if (activeTab() === 'changes') {
+          <app-change-requests [projectId]="project()?.id" />
+        }
       </div>
     </div>
   `,
@@ -129,34 +238,103 @@ import { ProjectIssues } from '../project-issues/project-issues';
       -ms-overflow-style: none;
       scrollbar-width: none;
     }
+    .project-tab-active {
+      border-color: var(--cc-primary);
+      color: var(--cc-primary);
+    }
   `
 })
-export class ProjectDetailsComponent implements OnInit {
-  private route = inject(ActivatedRoute);
+export class ProjectDetailsComponent {
   private api = inject(ApiService);
+  private auth = inject(AuthService);
 
-  project = signal<Project | null>(null);
-  activeTab = signal('partners');
+  // Route param ':id' bound via withComponentInputBinding()
+  id = input.required<string>();
+
+  // getProjects is an OPEN read (no principal gate) — leave ungated.
+  private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
+  project = computed(() => this.projectsRes.value().find(p => p.id === this.id()) ?? null);
+
+  // Data for the 360° financial rollup. Reads of principal-gated collections
+  // (resources, orders, order-lines, project-financials, time-entries) 401 until
+  // the OIDC token is restored on reload; key them on auth.authReady() so they
+  // fire only AFTER the OAuth bootstrap settles, returning the empty default in
+  // the meantime instead of latching on the 401.
+  private ordersRes = rxResource<Order[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getOrders() : of<Order[]>([])),
+    defaultValue: [] as Order[],
+  });
+  private orderLinesRes = rxResource<OrderLine[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getOrderLines() : of<OrderLine[]>([])),
+    defaultValue: [] as OrderLine[],
+  });
+  // getRequests is an OPEN read (no principal gate) — leave ungated.
+  private requestsRes = rxResource({ stream: () => this.api.getRequests(), defaultValue: [] as ResourceRequest[] });
+  // getAssignments is an OPEN read (no principal gate) — leave ungated.
+  private assignmentsRes = rxResource({ stream: () => this.api.getAssignments(), defaultValue: [] as Assignment[] });
+  private resourcesRes = rxResource<Resource[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
+    defaultValue: [] as Resource[],
+  });
+  private financialsRes = rxResource<FinancialItem[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getProjectFinancials() : of<FinancialItem[]>([])),
+    defaultValue: [] as FinancialItem[],
+  });
+  private timeEntriesRes = rxResource<TimeEntry[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getTimeEntries() : of<TimeEntry[]>([])),
+    defaultValue: [] as TimeEntry[],
+  });
+  // getProjectIssues is an OPEN read (no principal gate) — leave ungated.
+  private issuesRes = rxResource({ stream: () => this.api.getProjectIssues(), defaultValue: [] as Issue[] });
+  // getChangeRequests is an OPEN read (no principal gate) — leave ungated.
+  private changesRes = rxResource({ stream: () => this.api.getChangeRequests(), defaultValue: [] as ChangeRequest[] });
+
+  private financeData = computed<FinanceData>(() => ({
+    requests: this.requestsRes.value(),
+    assignments: this.assignmentsRes.value(),
+    resources: this.resourcesRes.value(),
+    orders: this.ordersRes.value(),
+    orderLines: this.orderLinesRes.value(),
+    financials: this.financialsRes.value(),
+    timeEntries: this.timeEntriesRes.value(),
+  }));
+  financials = computed(() => computeProjectFinancials(this.id(), this.financeData()));
+  openIssues = computed(() =>
+    this.issuesRes.value().filter(i => i.projectId === this.id() && i.status !== 'Resolved' && i.status !== 'Closed' && (i.severity === 'High' || i.severity === 'Critical' || i.escalated)).length,
+  );
+  openChanges = computed(() =>
+    this.changesRes.value().filter(c => c.projectId === this.id() && (c.status === 'Draft' || c.status === 'Submitted')).length,
+  );
+  deliveryHealth = computed<'green' | 'amber' | 'red'>(() => {
+    const f = this.financials();
+    if (f.varianceAtCompletion < 0 || this.openIssues() > 0) return 'red';
+    if (f.burnPct > 85 || this.openChanges() > 0) return 'amber';
+    return 'green';
+  });
+
+  activeTab = signal('overview');
 
   tabs = [
+    { id: 'overview', label: 'Overview' },
     { id: 'partners', label: 'Partners' },
     { id: 'documents', label: 'Documents' },
     { id: 'plans', label: 'Plans' },
     { id: 'financials', label: 'Financials' },
     { id: 'cost-centers', label: 'Cost Centers' },
     { id: 'tasks', label: 'Tasks' },
-    { id: 'issues', label: 'Issues' }
+    { id: 'issues', label: 'Issues' },
+    { id: 'changes', label: 'Changes' }
   ];
 
-  ngOnInit() {
-    const id = this.route.snapshot.paramMap.get('id');
-    if (id) {
-      this.api.getProjects().subscribe(projects => {
-        const proj = projects.find(p => p.id === id);
-        if (proj) {
-          this.project.set(proj);
-        }
-      });
-    }
+  deliveryHealthLabel(): string {
+    const health = this.deliveryHealth();
+    if (health === 'red') return 'Critical';
+    if (health === 'amber') return 'Watch';
+    return 'On Track';
   }
 }

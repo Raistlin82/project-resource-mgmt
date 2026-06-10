@@ -1,0 +1,94 @@
+# Local prod-parity infrastructure for project-resource-mgmt.
+#
+# Brings up:
+#   - postgres   : PostgreSQL 17, hosts BOTH the app database and a separate
+#                  'keycloak' database (created by ./postgres/init/01-create-keycloak-db.sql).
+#   - keycloak   : Keycloak 26.1 in PRODUCTION mode, backed by Postgres, with
+#                  the 'psa' realm imported from ./keycloak/realm-export.json.
+#
+# Quick start:
+#   docker compose up -d
+#   Keycloak admin console -> http://localhost:8081  (admin / admin by default)
+#   Realm 'psa' issuer      -> http://localhost:8081/realms/psa
+#
+# IMPORTANT: Keycloak is published on host port 8081, NOT 8080. Port 8080 on the
+# host is owned by the user's openHAB. Inside the container Keycloak still listens
+# on 8080 (KC_HTTP_PORT=8080); only the host-side mapping is 8081.
+#
+# All credentials/values come from the *_compose vars in .env (see .env.example).
+# docker compose auto-loads a sibling .env file; the ${VAR:-default} fallbacks
+# below keep `docker compose up` working even without one.
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: prm-postgres
+    restart: unless-stopped
+    environment:
+      # App database. Keycloak's separate DB is created by the init script.
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-project_resource_mgmt}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # Persistence across restarts.
+      - postgres-data:/var/lib/postgresql/data
+      # Init scripts run alphabetically, once, on a fresh volume only.
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Gate Keycloak on Postgres actually being ready to accept connections
+      # for the configured superuser (not just the port being open).
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-project_resource_mgmt}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.1
+    container_name: prm-keycloak
+    restart: unless-stopped
+    # Production mode (`start`, NOT `start-dev`). --optimized skips the build
+    # step at boot; the build below pre-bakes the Postgres provider so --optimized
+    # is valid. --import-realm imports any realm files in /opt/keycloak/data/import
+    # (only when the realm does not already exist).
+    command: ["start", "--import-realm", "--optimized"]
+    environment:
+      # --- Database (separate 'keycloak' db in the shared Postgres) ---------
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${KC_DB_NAME:-keycloak}
+      KC_DB_USERNAME: ${KC_DB_USERNAME:-postgres}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:-postgres}
+
+      # --- Bootstrap admin (temporary admin for the master realm) -----------
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:-admin}
+
+      # --- Hostname / HTTP --------------------------------------------------
+      # KC_HOSTNAME must match the externally reachable URL so issuer/redirects
+      # are emitted as http://localhost:8081/... even though the container port
+      # is 8080 (mapped to host 8081). HTTP is enabled for local dev only.
+      KC_HOSTNAME: ${KC_HOSTNAME:-http://localhost:8081}
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: "8080"
+      # Health/metrics are handy locally; harmless if unused.
+      KC_HEALTH_ENABLED: "true"
+    # Pre-build the optimized server image with the Postgres provider so the
+    # runtime `start --optimized` does not need to (re)build. Equivalent to
+    # baking `kc.sh build --db=postgres` into a derived image.
+    # NOTE: "$$@" (doubled $) is the docker-compose escape for a literal "$@";
+    # at runtime /bin/sh receives "$@" and expands it to the `command` args.
+    entrypoint: ["/bin/sh", "-c", "/opt/keycloak/bin/kc.sh build --db=postgres && exec /opt/keycloak/bin/kc.sh \"$$@\"", "--"]
+    ports:
+      # host:container -> 8081 on the host (openHAB owns 8080), 8080 in-container.
+      - "8081:8080"
+    volumes:
+      # Realm import directory. --import-realm reads everything here on startup.
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

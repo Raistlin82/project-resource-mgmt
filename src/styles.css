@@ -1,8 +1,891 @@
 @import url('https://fonts.googleapis.com/icon?family=Material+Icons');
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-sans: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Schibsted Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+:root {
+  --cc-bg: #f5f6f8;
+  --cc-surface: #ffffff;
+  --cc-panel: #ffffff;
+  --cc-panel-muted: #f8fafc;
+  --cc-ink: #0f1222;
+  --cc-muted: #6b7280;
+  --cc-line: #e6e8ee;
+  --cc-line-strong: #d6d9e2;
+  --cc-sidebar: #ffffff;
+  --cc-sidebar-2: #f8fafc;
+  --cc-primary: #2563eb;
+  --cc-primary-strong: #1d4ed8;
+  /* Accent TEXT token — blue-700 (~5.9:1 on white) for accent text on light surfaces.
+     Use this, NOT --cc-primary (#2563eb, ~4.0:1, fails AA for normal text), wherever an
+     accent color renders as readable TEXT on a light/white background. Keep --cc-primary
+     for solid button/bar BACKGROUNDS only. */
+  --cc-primary-text: #1d4ed8;
+  --cc-primary-tint: #eff6ff;
+  --cc-blue: #2563eb;
+  --cc-amber: #d97706;
+  --cc-red: #dc2626;
+  --cc-green: #059669;
+  /* Green/amber TEXT tokens — emerald-700 (#047857, ~5.5:1 on white) and amber-700
+     (#b45309, ~5.0:1 on white) for financial figures rendered as readable TEXT on light
+     surfaces. Use these, NOT --cc-green (#059669, ~3.8:1) / --cc-amber (#d97706, ~3.2:1)
+     which fail AA for normal text. Keep --cc-green/--cc-amber for borders/backgrounds only.
+     Mirrors the chips (.command-status.green/.amber) which already use these -700 shades. */
+  --cc-green-text: #047857;
+  --cc-amber-text: #b45309;
+  --cc-violet: #7c3aed;
+  --cc-shadow: 0 1px 2px rgb(16 18 34 / 4%), 0 12px 32px -14px rgb(16 18 34 / 16%);
+  --cc-shadow-sm: 0 1px 2px rgb(16 18 34 / 4%), 0 8px 24px -12px rgb(16 18 34 / 10%);
+  --cc-glow: 0 0 0 1px rgb(37 99 235 / 12%), 0 6px 18px -8px rgb(37 99 235 / 35%);
+
+  /* Spacing rhythm — consistent vertical/horizontal scale */
+  --space-3xs: 0.25rem;
+  --space-2xs: 0.5rem;
+  --space-xs: 0.75rem;
+  --space-sm: 1rem;
+  --space-md: 1.5rem;
+  --space-lg: 2rem;
+  --space-xl: 3rem;
+  --space-2xl: 4rem;
+
+  /* Fluid type scale (1.20 minor-third-ish, clamped for fluidity) */
+  --text-2xs: clamp(0.625rem, 0.6rem + 0.1vw, 0.6875rem);
+  --text-xs: clamp(0.72rem, 0.7rem + 0.12vw, 0.78rem);
+  --text-sm: clamp(0.84rem, 0.82rem + 0.15vw, 0.92rem);
+  --text-base: clamp(0.94rem, 0.9rem + 0.2vw, 1.02rem);
+  --text-lg: clamp(1.05rem, 1rem + 0.3vw, 1.2rem);
+  --text-xl: clamp(1.25rem, 1.15rem + 0.5vw, 1.55rem);
+
+  /* Line heights */
+  --leading-tight: 1.14;
+  --leading-snug: 1.35;
+  --leading-normal: 1.5;
+
+  /* Motion */
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --reveal-distance: 12px;
+}
+
+html {
+  color-scheme: light;
+  background: var(--cc-bg);
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background: var(--cc-bg);
+  color: #3d4252;
+  font-family: var(--font-sans);
+  font-size: 15.5px;
+  font-feature-settings: "tnum";
+  line-height: var(--leading-normal);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Refined light atmosphere: barely-there cool dot texture + soft cool gradient, very low opacity */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(60rem 60rem at 92% -12%, rgb(37 99 235 / 4%), transparent 62%),
+    radial-gradient(52rem 52rem at -8% 110%, rgb(37 99 235 / 3%), transparent 60%),
+    radial-gradient(rgb(15 18 34 / 3%) 1px, transparent 1px);
+  background-size: auto, auto, 26px 26px;
+}
+
+/* Ensure app content sits above the atmosphere layer */
+app-root {
+  position: relative;
+  z-index: 10;
+  display: block;
+}
+
+button,
+select,
+input,
+textarea {
+  font: inherit;
+}
+
+/* Smooth, consistent feedback on interactive elements */
+button,
+select,
+input,
+textarea,
+a {
+  transition:
+    color 150ms ease,
+    background-color 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms var(--ease-out-quint);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display);
+  color: var(--cc-ink);
+  letter-spacing: -0.018em;
+  line-height: var(--leading-tight);
+  text-wrap: balance;
+}
+
+.font-mono,
+code,
+kbd {
+  font-family: var(--font-mono);
+}
+
+/* Numeric data reads as tabular monospace wherever these utility hooks are used */
+.tabular-nums,
+.command-kpi-value,
+.command-data-table td.num,
+.command-data-table th.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+::selection {
+  background: rgb(37 99 235 / 18%);
+  color: var(--cc-ink);
+}
+
+/* Confident blue a11y focus ring on every interactive surface */
+:focus-visible {
+  outline: 2px solid rgb(37 99 235 / 65%);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+a:focus-visible,
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible,
+.command-button:focus-visible,
+.command-nav-link:focus-visible {
+  outline: 2px solid rgb(37 99 235 / 70%);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgb(37 99 235 / 18%);
+}
+
+/* Thin custom light scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(148 163 184 / 55%) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgb(203 213 225 / 90%);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgb(148 163 184 / 90%);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.rounded-3xl {
+  border-radius: 8px !important;
+}
+
+.rounded-2xl {
+  border-radius: 8px !important;
+}
+
+.rounded-xl {
+  border-radius: 6px !important;
+}
+
+.command-shell {
+  background: transparent;
+  color: var(--cc-ink);
+}
+
+.command-sidebar {
+  /* Executive Workstation light theme — white surface, slate hairline */
+  background: #ffffff;
+  color: #475569;
+  border-right: 1px solid #e6e8ee;
+}
+
+.command-brand {
+  font-family: var(--font-display);
+  color: var(--cc-ink);
+  font-weight: 700;
+  text-transform: uppercase;
+  line-height: 0.95;
+  letter-spacing: 0.04em;
+}
+
+.command-section-label {
+  color: #64748b;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+}
+
+.command-nav-link {
+  position: relative;
+  display: flex;
+  min-height: 2.5rem;
+  align-items: center;
+  gap: 0.6rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+  /* slate-600 text on light surface */
+  color: #475569;
+  font-size: 0.875rem;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.command-nav-link:hover {
+  /* slate-50 hover wash, slate-900 ink */
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+.command-nav-link.active,
+.command-nav-link[aria-current="page"] {
+  /* blue-50 fill, blue-700 ink, 2px cobalt left accent bar */
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 #2563eb;
+}
+
+.command-nav-badge {
+  margin-left: auto;
+  min-width: 1.5rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  /* neutral light pill with blue-700 text */
+  background: #eff6ff;
+  padding: 0.05rem 0.45rem;
+  color: #1d4ed8;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 600;
+  line-height: 1.1rem;
+  text-align: center;
+}
+
+.command-nav-badge.danger {
+  /* red-50 fill, red-700 text (~5.9:1 on #fef2f2 — passes AA; red-600 was 4.41:1) */
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+/* ============================================================
+   SIDEBAR NAV — accordion groups, chevron, live filter (light)
+   ============================================================ */
+.command-nav-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin: 0 0.25rem 0.75rem;
+}
+
+.command-nav-search .mat-icon {
+  position: absolute;
+  left: 0.6rem;
+  font-size: 18px;
+  width: 18px;
+  height: 18px;
+  color: #94a3b8;
+  pointer-events: none;
+}
+
+.command-nav-search input {
+  width: 100%;
+  border: 1px solid #e6e8ee;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 0.45rem 2.6rem 0.45rem 2rem;
+  color: #0f172a;
+  font-size: 0.82rem;
+}
+
+.command-nav-search input::placeholder {
+  color: #64748b;
+}
+
+.command-nav-search input:focus {
+  border-color: #2563eb;
+  outline: none;
+  box-shadow: 0 0 0 3px rgb(37 99 235 / 12%);
+}
+
+.command-nav-search kbd {
+  position: absolute;
+  right: 0.5rem;
+  border: 1px solid #e6e8ee;
+  border-radius: 4px;
+  background: #f8fafc;
+  padding: 0.05rem 0.35rem;
+  color: #64748b;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  line-height: 1.1;
+  pointer-events: none;
+}
+
+.command-nav-search .command-nav-clear {
+  position: absolute;
+  right: 0.4rem;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+}
+
+.command-nav-search .command-nav-clear:hover {
+  color: #475569;
+  background: #f1f5f9;
+}
+
+.command-nav-group-header {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.5rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 0.4rem 0.5rem;
+  color: #64748b;
+  cursor: pointer;
+  text-align: left;
+}
+
+.command-nav-group-header:hover {
+  background: #f8fafc;
+  color: #475569;
+}
+
+.command-nav-group-header .command-section-label {
+  flex: 1;
+}
+
+.command-nav-chevron {
+  font-size: 18px;
+  width: 18px;
+  height: 18px;
+  color: #94a3b8;
+  transition: transform 200ms var(--ease-out-quint);
+}
+
+.command-nav-group-header[aria-expanded="true"] .command-nav-chevron {
+  transform: rotate(90deg);
+}
+
+/* Smooth expand/collapse via grid-template-rows trick */
+.command-nav-group-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 220ms var(--ease-out-quint);
+}
+
+.command-nav-group-body.open {
+  grid-template-rows: 1fr;
+}
+
+.command-nav-group-body > div {
+  overflow: hidden;
+}
+
+.command-nav-empty {
+  padding: 1.25rem 0.75rem;
+  color: #64748b;
+  font-size: 0.82rem;
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .command-nav-group-body,
+  .command-nav-chevron {
+    transition: none;
+  }
+}
+
+.command-page {
+  width: min(100%, 1560px);
+  margin-inline: auto;
+}
+
+.command-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  border-bottom: 1px solid var(--cc-line);
+  padding-bottom: var(--space-md);
+}
+
+.command-eyebrow {
+  color: var(--cc-primary-text);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+}
+
+.command-title {
+  margin-top: var(--space-3xs);
+  color: var(--cc-ink);
+  font-family: var(--font-display);
+  font-size: clamp(2rem, 4vw, 3.4rem);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.022em;
+  text-wrap: balance;
+}
+
+.command-subtitle {
+  margin-top: 0.62rem;
+  max-width: 48rem;
+  color: var(--cc-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  text-wrap: pretty;
+}
+
+.command-card {
+  border: 1px solid var(--cc-line);
+  border-radius: 8px;
+  background: var(--cc-surface);
+  box-shadow: var(--cc-shadow-sm);
+  position: relative;
+  transition:
+    transform 220ms var(--ease-out-quint),
+    box-shadow 220ms var(--ease-out-quint),
+    border-color 220ms ease;
+}
+
+.command-card-muted {
+  border: 1px solid var(--cc-line);
+  border-radius: 8px;
+  background: var(--cc-panel-muted);
+}
+
+.command-card-header {
+  display: flex;
+  min-height: 4rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  border-bottom: 1px solid var(--cc-line);
+  padding: var(--space-sm) var(--space-md);
+  background: linear-gradient(90deg, #f8fafc, transparent);
+}
+
+.command-kpi {
+  position: relative;
+  min-width: 0;
+  border: 1px solid var(--cc-line);
+  border-top: 3px solid var(--cc-primary);
+  border-radius: 8px;
+  background: var(--cc-surface);
+  box-shadow: var(--cc-shadow-sm);
+  padding: var(--space-sm);
+  transition:
+    transform 220ms var(--ease-out-quint),
+    box-shadow 220ms var(--ease-out-quint),
+    border-color 220ms ease;
+}
+
+.command-kpi.warning {
+  border-top-color: var(--cc-amber);
+}
+
+.command-kpi.warning .command-kpi-value {
+  color: var(--cc-amber-text);
+}
+
+.command-kpi.danger {
+  border-top-color: var(--cc-red);
+}
+
+.command-kpi.danger .command-kpi-value {
+  color: var(--cc-red);
+}
+
+.command-kpi.info {
+  border-top-color: var(--cc-blue);
+}
+
+.command-kpi.info .command-kpi-value {
+  color: var(--cc-primary-text);
+}
+
+.command-kpi.green {
+  border-top-color: var(--cc-green);
+}
+
+.command-kpi.green .command-kpi-value {
+  color: var(--cc-green-text);
+}
+
+.command-kpi-label {
+  color: var(--cc-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.command-kpi-value {
+  margin-top: var(--space-3xs);
+  color: var(--cc-ink);
+  font-family: var(--font-mono);
+  /* Smaller, fluid size so long currency amounts (e.g. €310,400) fit inside
+     narrow KPI cards without overflowing. Pairs with min-width:0 on the card. */
+  font-size: clamp(1.2rem, 0.95rem + 1vw, 1.85rem);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  min-width: 0;
+}
+
+.command-kpi-note {
+  margin-top: 0.55rem;
+  color: var(--cc-muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-snug);
+}
+
+.command-button {
+  display: inline-flex;
+  min-height: 2.5rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: var(--cc-primary);
+  padding: 0.58rem 0.92rem;
+  color: #ffffff;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  box-shadow: var(--cc-shadow-sm);
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms var(--ease-out-quint);
+}
+
+.command-button:hover {
+  background: var(--cc-primary-strong);
+  box-shadow: var(--cc-glow);
+}
+
+.command-button:active {
+  transform: translateY(1px);
+}
+
+.command-button.secondary {
+  border-color: var(--cc-line-strong);
+  background: var(--cc-surface);
+  color: var(--cc-ink);
+  box-shadow: none;
+}
+
+.command-button.secondary:hover {
+  border-color: rgb(37 99 235 / 45%);
+  background: var(--cc-primary-tint);
+  box-shadow: none;
+}
+
+.command-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 999px;
+  border: 1px solid rgb(37 99 235 / 20%);
+  background: var(--cc-primary-tint);
+  padding: 0.18rem 0.52rem;
+  color: var(--cc-primary-strong);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.command-status.green {
+  border-color: rgb(5 150 105 / 25%);
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.command-status.amber {
+  border-color: rgb(217 119 6 / 28%);
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.command-status.red {
+  border-color: rgb(220 38 38 / 25%);
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+/* Muted slate chip for not-yet-active workflow states (Draft, Open, ...) so
+   they stay visually distinct from the primary-blue default. */
+.command-status.neutral {
+  border-color: rgb(100 116 139 / 25%);
+  background: #f1f5f9;
+  color: #334155;
+}
+
+/* ============================================================
+   DATA TABLE — compact density, sticky head, zebra, numeric alignment
+   ============================================================ */
+.command-data-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--text-sm);
+}
+
+.command-data-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border-bottom: 1px solid var(--cc-line);
+  background: #f8fafc;
+  color: #64748b;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  font-weight: 500;
+  padding: 0.6rem 0.9rem;
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+}
+
+.command-data-table td {
+  border-bottom: 1px solid #f1f5f9;
+  color: var(--cc-ink);
+  padding: 0.62rem 0.9rem;
+  vertical-align: middle;
+  line-height: var(--leading-snug);
+}
+
+/* Subtle zebra striping */
+.command-data-table tbody tr:nth-child(even) td {
+  background: rgb(248 250 252 / 60%);
+}
+
+/* Hover row highlight (wins over zebra) */
+.command-data-table tbody tr:hover td {
+  background: #f1f5f9;
+}
+
+/* Right-aligned numeric cells, monospace tabular */
+.command-data-table th.num,
+.command-data-table td.num,
+.command-data-table th.text-right,
+.command-data-table td.text-right {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+.command-data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.command-meter {
+  height: 0.48rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #f1f5f9;
+}
+
+.command-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--cc-primary), var(--cc-primary-strong));
+}
+
+/* ============================================================
+   SHARED STATES — empty state + skeleton loader
+   ============================================================ */
+.command-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2xs);
+  padding: var(--space-xl) var(--space-md);
+  text-align: center;
+  color: var(--cc-muted);
+}
+
+.command-empty .material-icons,
+.command-empty [class*="icon"] {
+  font-size: 2.5rem;
+  color: rgb(148 163 184 / 70%);
+}
+
+.command-empty-title {
+  color: var(--cc-ink);
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.command-empty-note {
+  max-width: 32rem;
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+}
+
+.command-skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: 6px;
+  background: #eef1f5;
+  min-height: 1rem;
+}
+
+.command-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(255 255 255 / 70%) 50%,
+    transparent
+  );
+}
+
+/* ============================================================
+   MOTION — page-load reveal, card hover lift, shimmer.
+   All wrapped so it only runs when motion is welcome.
+   ============================================================ */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes cc-reveal {
+    from {
+      opacity: 0;
+      transform: translateY(var(--reveal-distance));
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes cc-shimmer {
+    to {
+      transform: translateX(100%);
+    }
+  }
+
+  /* Staggered reveal for top-level page children + card/section blocks */
+  .command-page > *,
+  .command-page .command-card,
+  .command-page section {
+    animation: cc-reveal 520ms var(--ease-out-quint) both;
+  }
+
+  .command-page > *:nth-child(1) { animation-delay: 40ms; }
+  .command-page > *:nth-child(2) { animation-delay: 90ms; }
+  .command-page > *:nth-child(3) { animation-delay: 140ms; }
+  .command-page > *:nth-child(4) { animation-delay: 190ms; }
+  .command-page > *:nth-child(5) { animation-delay: 240ms; }
+  .command-page > *:nth-child(6) { animation-delay: 290ms; }
+  .command-page > *:nth-child(7) { animation-delay: 340ms; }
+  .command-page > *:nth-child(8) { animation-delay: 390ms; }
+
+  /* Card / KPI hover lift — soft elevation, no glow */
+  .command-card:hover {
+    transform: translateY(-2px);
+    border-color: var(--cc-line-strong);
+    box-shadow: var(--cc-shadow);
+  }
+
+  .command-kpi:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--cc-shadow);
+  }
+
+  .command-button:hover {
+    transform: translateY(-1px);
+  }
+
+  .command-skeleton::after {
+    animation: cc-shimmer 1.4s ease-in-out infinite;
+  }
+}
+
+/* Hard-disable all motion under reduced-motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (max-width: 768px) {
+  .command-header {
+    display: block;
+  }
+
+  .command-title {
+    font-size: 2rem;
+  }
 }

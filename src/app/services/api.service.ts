@@ -1,7 +1,7 @@
-import { Injectable, inject, PLATFORM_ID } from '@angular/core';
+import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
-import { isPlatformServer } from '@angular/common';
+import { API_BASE_URL } from './api-config';
 
 export interface Resource {
   id: string;
@@ -17,6 +17,8 @@ export interface Resource {
   managerId?: string;
   organization?: string;
   location?: string;
+  costRate?: number;
+  billRate?: number;
 }
 
 export interface ResourceRequest {
@@ -31,6 +33,7 @@ export interface ResourceRequest {
   startDate?: string;
   endDate?: string;
   requesterId?: string;
+  projectId?: string;
 }
 
 export interface Assignment {
@@ -39,6 +42,15 @@ export interface Assignment {
   resourceId: string;
   assignedHours: number;
   status: string;
+}
+
+export type UserRole = 'employee' | 'pm' | 'resource-manager' | 'delivery-executive' | 'finance' | 'sales' | 'admin';
+
+export interface User {
+  id: string;
+  resourceId: string;
+  name: string;
+  role: UserRole;
 }
 
 export interface Language {
@@ -110,16 +122,354 @@ export interface Project {
   status: string;
   description?: string;
   ownerId?: string;
+  contractId?: string;
+}
+
+// --- Project sub-resources (shared types; import these, do not redefine locally) ---
+
+export interface Partner {
+  id: string;
+  projectId: string;
+  company: string;
+  role: string;
+  contact: string;
+  status: string;
+}
+
+export interface ProjectDocument {
+  id: string;
+  projectId: string;
+  name: string;
+  type: string;
+  size: string;
+  uploadedAt: string;
+  author: string;
+  authorInitials: string;
+}
+
+export interface WorkPackage {
+  id: string;
+  projectId: string;
+  name: string;
+  startDate: string;
+  endDate: string;
+  status: 'Planned' | 'In Progress' | 'Completed';
+  progress: number;
+  assignee: string;
+}
+
+export interface Milestone {
+  id: string;
+  projectId: string;
+  name: string;
+  date: string;
+  status: 'Pending' | 'Achieved';
+  approvedBy?: string;
+  approvedAt?: string;
+}
+
+export interface FinancialItem {
+  id: string;
+  projectId: string;
+  category: string;
+  budget: number;
+  actual: number;
+}
+
+export interface ProjectCostCenter {
+  id: string;
+  projectId: string;
+  name: string;
+  manager: string;
+  allocated: number;
+  actual: number;
+}
+
+export interface Task {
+  id: string;
+  projectId: string;
+  name: string;
+  assignee: string;
+  assigneeType?: 'Internal' | 'Subcontractor';
+  partnerId?: string;
+  dueDate: string;
+  status: string;
+  priority: string;
+}
+
+export interface Issue {
+  id: string;
+  projectId: string;
+  title: string;
+  type: string;
+  severity: string;
+  status: string;
+  reportedBy: string;
+  owner?: string;
+  dueDate?: string;
+  impact?: string;
+  actionPlan?: string;
+  escalated?: boolean;
+}
+
+export interface CostCenter {
+  id: string;
+  name: string;
+  manager: string;
+  allocated: number;
+  actual: number;
+}
+
+// --- Commercial domain (ADR-0001) ---
+
+export interface Customer {
+  id: string;
+  name: string;
+  industry?: string;
+  country?: string;
+}
+
+export interface Contract {
+  id: string;
+  customerId: string;
+  name: string;
+  type: 'T&M' | 'Fixed Price' | 'Framework';
+  totalValue: number;
+  currency: string;
+  status: 'Draft' | 'Active' | 'Closed';
+  startDate: string;
+  endDate: string;
+}
+
+export interface Order {
+  id: string;
+  contractId: string;
+  type: 'Customer' | 'Purchase';
+  partnerId?: string;
+  amount: number;
+  currency: string;
+  status: 'Open' | 'Confirmed' | 'Invoiced' | 'Paid';
+  orderDate: string;
+  // SERVER-SET (never accepted from client): a sequential, compliant invoice
+  // number (e.g. 'INV-2026-0001') and its date, assigned when an order first
+  // transitions to status 'Invoiced'.
+  invoiceNumber?: string;
+  invoiceDate?: string;
+}
+
+export interface OrderLine {
+  id: string;
+  orderId: string;
+  projectId: string;
+  description: string;
+  amount: number;
+}
+
+export type BillingType =
+  | 'Milestone'          // SAL — fixed-price, triggered by a project Milestone
+  | 'Recurring'          // retainer billed on a fixed cadence
+  | 'TimeAndMaterials'   // as-incurred: approved hours x billRate
+  | 'Capped'             // T&M not-to-exceed (cap)
+  | 'Advance'            // down payment taken up front
+  | 'Progress'           // percentage of completion (POC)
+  | 'Expense'            // pass-through / re-invoiced expenses
+  | 'CreditNote';        // nota di credito (negative)
+
+export interface BillingPlanItem {
+  id: string;
+  contractId: string;
+  projectId?: string;
+  type: BillingType;
+  label: string;
+  milestoneId?: string;                                  // Milestone
+  recurrence?: 'Monthly' | 'Quarterly' | 'Annual';       // Recurring
+  expectedDate?: string;
+  amount: number;                                        // base; negative ONLY for CreditNote
+  capAmount?: number;                                    // Capped
+  progressPct?: number;                                  // Progress (0-100)
+  markupPct?: number;                                    // Expense markup
+  retentionPct?: number;                                 // ritenuta a garanzia
+  taxRatePct?: number;                                   // IVA
+  paymentTermsDays?: number;                             // net terms
+  currency: string;
+  status: 'Planned' | 'Ready' | 'Invoiced' | 'Paid' | 'Blocked';
+  issuedDate?: string;
+  dueDate?: string;
+  paidDate?: string;
+  orderId?: string;                                      // generated invoice/order
+  notes?: string;
+}
+
+export interface TimeEntry {
+  id: string;
+  assignmentId: string;
+  requestId: string;
+  resourceId: string;
+  projectId: string;
+  date: string;
+  hours: number;
+  status: 'Draft' | 'Submitted' | 'Approved' | 'Rejected';
+  notes?: string;
+  approvedBy?: string;
+  approvedAt?: string;
+}
+
+export interface ChangeRequest {
+  id: string;
+  projectId: string;
+  title: string;
+  description: string;
+  requestedBy: string;
+  owner: string;
+  status: 'Draft' | 'Submitted' | 'Approved' | 'Rejected' | 'Implemented';
+  impactScope: string;
+  impactBudget: number;
+  impactScheduleDays: number;
+  priority: 'Low' | 'Medium' | 'High' | 'Critical';
+  createdAt: string;
+  decidedBy?: string;
+  decidedAt?: string;
+}
+
+// --- Approval workflow engine ---
+
+export type ApprovalKind = 'TimeEntry' | 'Expense' | 'Milestone' | 'ChangeRequest' | 'Invoice';
+export type ApprovalStatus = 'Pending' | 'Approved' | 'Rejected';
+
+export interface ApprovalStep {
+  role: string;
+  status: ApprovalStatus;
+  decidedBy?: string;
+  decidedAt?: string;
+}
+
+export interface ApprovalRequest {
+  id: string;
+  kind: ApprovalKind;
+  refId: string;
+  projectId?: string;
+  amount?: number;
+  requestedBy: string;
+  status: ApprovalStatus;
+  steps: ApprovalStep[];
+  currentStep: number;
+  createdAt: string;
+  slaDueAt?: string;
+  note?: string;
+}
+
+export interface AuditLog {
+  id: string;
+  at: string;
+  actorId: string;
+  actorRole: UserRole | 'unknown';
+  method: string;
+  path: string;
+  statusCode: number;
+  // AUDIT INTEGRITY: append-only entries capture which keys changed on a
+  // PUT/DELETE mutation, with before/after snapshots of just those keys.
+  changedKeys?: string[];
+  before?: Record<string, unknown>;
+  after?: Record<string, unknown>;
+}
+
+// --- Multi-currency foundation ---
+
+/** The reporting/base currency all monetary rollups normalise to. */
+export const BASE_CURRENCY = 'EUR';
+
+/**
+ * Exchange rate for a single currency, expressed as the base-currency value of
+ * 1 unit of `currency`. The base currency (EUR) therefore has rateToBase = 1.
+ * To convert an amount into the base currency: amount * rateToBase.
+ */
+export interface FxRate {
+  currency: string;
+  rateToBase: number;
+}
+
+// --- Integrations (local-artifact adapters: implemented, NOT connected) ---
+
+/** The four supported integration kinds. */
+export type IntegrationKind = 'erp' | 'einvoice' | 'crm' | 'bi';
+
+/** Server-side adapter self-description (mirror of the server contract). */
+export interface IntegrationDescriptor {
+  kind: IntegrationKind;
+  key: string;
+  name: string;
+  description: string;
+  /** Always false today: local-artifact adapters never contact external systems. */
+  connected: boolean;
+  mode: 'local-artifact';
+}
+
+/** GET /integrations response: active descriptors + per-kind active key. */
+export interface IntegrationsInfo {
+  adapters: IntegrationDescriptor[];
+  active: Record<IntegrationKind, string>;
+}
+
+/** CRM account record inside a prepared sync payload. */
+export interface CrmOutboxAccount {
+  externalId: string;
+  name: string;
+  industry?: string;
+  country?: string;
+}
+
+/** Condensed order nested under a CRM deal. */
+export interface CrmOutboxOrder {
+  id: string;
+  type: string;
+  amount: number;
+  status: string;
+}
+
+/** CRM deal record inside a prepared sync payload. */
+export interface CrmOutboxDeal {
+  externalId: string;
+  accountExternalId: string;
+  name: string;
+  value: number;
+  currency: string;
+  stage: string;
+  orders: CrmOutboxOrder[];
+}
+
+/**
+ * One prepared (never sent) CRM sync payload. The server keeps these in an
+ * intentionally ephemeral in-memory outbox (demo state, cleared on restart).
+ */
+export interface CrmOutboxEntry {
+  id?: string;
+  preparedAt: string;
+  status: string;
+  target: string;
+  payload: { accounts: CrmOutboxAccount[]; deals: CrmOutboxDeal[] };
+}
+
+/** A single cell of the BI feed (primitives only). */
+export type BiFeedCell = string | number | boolean | null;
+
+/** GET /integrations/bi/feed response: flat per-project financial rows. */
+export interface BiFeedPreview {
+  generatedAt: string;
+  rowCount: number;
+  rows: Record<string, BiFeedCell>[];
 }
 
 @Injectable({ providedIn: 'root' })
 export class ApiService {
   private http = inject(HttpClient);
-  private platformId = inject(PLATFORM_ID);
-  private baseUrl = isPlatformServer(this.platformId) ? 'http://localhost:3000/api' : '/api';
+  private baseUrl = inject(API_BASE_URL);
 
   getResources(): Observable<Resource[]> {
     return this.http.get<Resource[]>(`${this.baseUrl}/resources`);
+  }
+
+  getUsers(): Observable<User[]> {
+    return this.http.get<User[]>(`${this.baseUrl}/users`);
   }
 
   getResource(id: string): Observable<Resource> {
@@ -262,5 +612,118 @@ export class ApiService {
 
   deleteProject(id: string): Observable<void> {
     return this.http.delete<void>(`${this.baseUrl}/projects/${id}`);
+  }
+
+  // --- Project sub-resources (B1: real persistence) ---
+
+  getProjectPartners(): Observable<Partner[]> { return this.http.get<Partner[]>(`${this.baseUrl}/project-partners`); }
+  createProjectPartner(p: Partial<Partner>): Observable<Partner> { return this.http.post<Partner>(`${this.baseUrl}/project-partners`, p); }
+  updateProjectPartner(id: string, p: Partial<Partner>): Observable<Partner> { return this.http.put<Partner>(`${this.baseUrl}/project-partners/${id}`, p); }
+  deleteProjectPartner(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/project-partners/${id}`); }
+
+  getProjectDocuments(): Observable<ProjectDocument[]> { return this.http.get<ProjectDocument[]>(`${this.baseUrl}/project-documents`); }
+  createProjectDocument(d: Partial<ProjectDocument>): Observable<ProjectDocument> { return this.http.post<ProjectDocument>(`${this.baseUrl}/project-documents`, d); }
+  deleteProjectDocument(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/project-documents/${id}`); }
+
+  getWorkPackages(): Observable<WorkPackage[]> { return this.http.get<WorkPackage[]>(`${this.baseUrl}/work-packages`); }
+  createWorkPackage(w: Partial<WorkPackage>): Observable<WorkPackage> { return this.http.post<WorkPackage>(`${this.baseUrl}/work-packages`, w); }
+  updateWorkPackage(id: string, w: Partial<WorkPackage>): Observable<WorkPackage> { return this.http.put<WorkPackage>(`${this.baseUrl}/work-packages/${id}`, w); }
+
+  getMilestones(): Observable<Milestone[]> { return this.http.get<Milestone[]>(`${this.baseUrl}/milestones`); }
+  createMilestone(m: Partial<Milestone>): Observable<Milestone> { return this.http.post<Milestone>(`${this.baseUrl}/milestones`, m); }
+  updateMilestone(id: string, m: Partial<Milestone>): Observable<Milestone> { return this.http.put<Milestone>(`${this.baseUrl}/milestones/${id}`, m); }
+
+  getProjectFinancials(): Observable<FinancialItem[]> { return this.http.get<FinancialItem[]>(`${this.baseUrl}/project-financials`); }
+  createProjectFinancial(f: Partial<FinancialItem>): Observable<FinancialItem> { return this.http.post<FinancialItem>(`${this.baseUrl}/project-financials`, f); }
+  updateProjectFinancial(id: string, f: Partial<FinancialItem>): Observable<FinancialItem> { return this.http.put<FinancialItem>(`${this.baseUrl}/project-financials/${id}`, f); }
+  deleteProjectFinancial(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/project-financials/${id}`); }
+
+  getProjectCostCenters(): Observable<ProjectCostCenter[]> { return this.http.get<ProjectCostCenter[]>(`${this.baseUrl}/project-cost-centers`); }
+  createProjectCostCenter(c: Partial<ProjectCostCenter>): Observable<ProjectCostCenter> { return this.http.post<ProjectCostCenter>(`${this.baseUrl}/project-cost-centers`, c); }
+  updateProjectCostCenter(id: string, c: Partial<ProjectCostCenter>): Observable<ProjectCostCenter> { return this.http.put<ProjectCostCenter>(`${this.baseUrl}/project-cost-centers/${id}`, c); }
+  deleteProjectCostCenter(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/project-cost-centers/${id}`); }
+
+  getProjectTasks(): Observable<Task[]> { return this.http.get<Task[]>(`${this.baseUrl}/project-tasks`); }
+  createProjectTask(t: Partial<Task>): Observable<Task> { return this.http.post<Task>(`${this.baseUrl}/project-tasks`, t); }
+  updateProjectTask(id: string, t: Partial<Task>): Observable<Task> { return this.http.put<Task>(`${this.baseUrl}/project-tasks/${id}`, t); }
+
+  getProjectIssues(): Observable<Issue[]> { return this.http.get<Issue[]>(`${this.baseUrl}/project-issues`); }
+  createProjectIssue(i: Partial<Issue>): Observable<Issue> { return this.http.post<Issue>(`${this.baseUrl}/project-issues`, i); }
+  updateProjectIssue(id: string, i: Partial<Issue>): Observable<Issue> { return this.http.put<Issue>(`${this.baseUrl}/project-issues/${id}`, i); }
+
+  getChangeRequests(): Observable<ChangeRequest[]> { return this.http.get<ChangeRequest[]>(`${this.baseUrl}/change-requests`); }
+  createChangeRequest(c: Partial<ChangeRequest>): Observable<ChangeRequest> { return this.http.post<ChangeRequest>(`${this.baseUrl}/change-requests`, c); }
+  updateChangeRequest(id: string, c: Partial<ChangeRequest>): Observable<ChangeRequest> { return this.http.put<ChangeRequest>(`${this.baseUrl}/change-requests/${id}`, c); }
+  deleteChangeRequest(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/change-requests/${id}`); }
+
+  getCostCenters(): Observable<CostCenter[]> { return this.http.get<CostCenter[]>(`${this.baseUrl}/cost-centers`); }
+  createCostCenter(c: Partial<CostCenter>): Observable<CostCenter> { return this.http.post<CostCenter>(`${this.baseUrl}/cost-centers`, c); }
+  updateCostCenter(id: string, c: Partial<CostCenter>): Observable<CostCenter> { return this.http.put<CostCenter>(`${this.baseUrl}/cost-centers/${id}`, c); }
+  deleteCostCenter(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/cost-centers/${id}`); }
+
+  // --- Commercial domain (ADR-0001) ---
+
+  getCustomers(): Observable<Customer[]> { return this.http.get<Customer[]>(`${this.baseUrl}/customers`); }
+  createCustomer(c: Partial<Customer>): Observable<Customer> { return this.http.post<Customer>(`${this.baseUrl}/customers`, c); }
+  updateCustomer(id: string, c: Partial<Customer>): Observable<Customer> { return this.http.put<Customer>(`${this.baseUrl}/customers/${id}`, c); }
+  deleteCustomer(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/customers/${id}`); }
+
+  getContracts(): Observable<Contract[]> { return this.http.get<Contract[]>(`${this.baseUrl}/contracts`); }
+  createContract(c: Partial<Contract>): Observable<Contract> { return this.http.post<Contract>(`${this.baseUrl}/contracts`, c); }
+  updateContract(id: string, c: Partial<Contract>): Observable<Contract> { return this.http.put<Contract>(`${this.baseUrl}/contracts/${id}`, c); }
+  deleteContract(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/contracts/${id}`); }
+
+  getOrders(): Observable<Order[]> { return this.http.get<Order[]>(`${this.baseUrl}/orders`); }
+  createOrder(o: Partial<Order>): Observable<Order> { return this.http.post<Order>(`${this.baseUrl}/orders`, o); }
+  updateOrder(id: string, o: Partial<Order>): Observable<Order> { return this.http.put<Order>(`${this.baseUrl}/orders/${id}`, o); }
+  deleteOrder(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/orders/${id}`); }
+
+  getOrderLines(): Observable<OrderLine[]> { return this.http.get<OrderLine[]>(`${this.baseUrl}/order-lines`); }
+  createOrderLine(l: Partial<OrderLine>): Observable<OrderLine> { return this.http.post<OrderLine>(`${this.baseUrl}/order-lines`, l); }
+  updateOrderLine(id: string, l: Partial<OrderLine>): Observable<OrderLine> { return this.http.put<OrderLine>(`${this.baseUrl}/order-lines/${id}`, l); }
+  deleteOrderLine(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/order-lines/${id}`); }
+
+  getBillingPlanItems(): Observable<BillingPlanItem[]> { return this.http.get<BillingPlanItem[]>(`${this.baseUrl}/billing-plan-items`); }
+  createBillingPlanItem(i: Partial<BillingPlanItem>): Observable<BillingPlanItem> { return this.http.post<BillingPlanItem>(`${this.baseUrl}/billing-plan-items`, i); }
+  updateBillingPlanItem(id: string, i: Partial<BillingPlanItem>): Observable<BillingPlanItem> { return this.http.put<BillingPlanItem>(`${this.baseUrl}/billing-plan-items/${id}`, i); }
+  deleteBillingPlanItem(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/billing-plan-items/${id}`); }
+
+  getTimeEntries(): Observable<TimeEntry[]> { return this.http.get<TimeEntry[]>(`${this.baseUrl}/time-entries`); }
+  createTimeEntry(t: Partial<TimeEntry>): Observable<TimeEntry> { return this.http.post<TimeEntry>(`${this.baseUrl}/time-entries`, t); }
+  updateTimeEntry(id: string, t: Partial<TimeEntry>): Observable<TimeEntry> { return this.http.put<TimeEntry>(`${this.baseUrl}/time-entries/${id}`, t); }
+  deleteTimeEntry(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/time-entries/${id}`); }
+
+  // --- Approval workflow engine ---
+
+  getApprovalRequests(): Observable<ApprovalRequest[]> { return this.http.get<ApprovalRequest[]>(`${this.baseUrl}/approval-requests`); }
+  createApprovalRequest(a: Partial<ApprovalRequest>): Observable<ApprovalRequest> { return this.http.post<ApprovalRequest>(`${this.baseUrl}/approval-requests`, a); }
+  decideApprovalRequest(id: string, decision: 'Approved' | 'Rejected', by: string): Observable<ApprovalRequest> {
+    return this.http.put<ApprovalRequest>(`${this.baseUrl}/approval-requests/${id}/decision`, { decision, by });
+  }
+
+  getAuditLogs(): Observable<AuditLog[]> { return this.http.get<AuditLog[]>(`${this.baseUrl}/audit-logs`); }
+
+  // --- Multi-currency foundation ---
+
+  getFxRates(): Observable<FxRate[]> { return this.http.get<FxRate[]>(`${this.baseUrl}/fx-rates`); }
+
+  // --- Integrations (local-artifact adapters: implemented, NOT connected) ---
+
+  getIntegrations(): Observable<IntegrationsInfo> { return this.http.get<IntegrationsInfo>(`${this.baseUrl}/integrations`); }
+
+  getCrmOutbox(): Observable<CrmOutboxEntry[]> { return this.http.get<CrmOutboxEntry[]>(`${this.baseUrl}/integrations/crm/outbox`); }
+
+  prepareCrmSync(): Observable<CrmOutboxEntry> { return this.http.post<CrmOutboxEntry>(`${this.baseUrl}/integrations/crm/outbox`, {}); }
+
+  getBiFeedPreview(): Observable<BiFeedPreview> { return this.http.get<BiFeedPreview>(`${this.baseUrl}/integrations/bi/feed`); }
+
+  /** URL of the ERP GL-journal export download (the page fetch-blobs it). */
+  erpJournalExportUrl(format: 'csv' | 'json'): string {
+    return `${this.baseUrl}/integrations/erp/journal-export?format=${format}`;
+  }
+
+  /** URL of the FatturaPA XML download for an invoiced order (fetch-blob). */
+  einvoiceXmlUrl(orderId: string): string {
+    return `${this.baseUrl}/integrations/einvoice/orders/${encodeURIComponent(orderId)}`;
   }
 }
