@@ -672,6 +672,14 @@ textarea:focus-visible,
   color: #b91c1c;
 }
 
+/* Muted slate chip for not-yet-active workflow states (Draft, Open, ...) so
+   they stay visually distinct from the primary-blue default. */
+.command-status.neutral {
+  border-color: rgb(100 116 139 / 25%);
+  background: #f1f5f9;
+  color: #334155;
+}
+
 /* ============================================================
    DATA TABLE — compact density, sticky head, zebra, numeric alignment
    ============================================================ */

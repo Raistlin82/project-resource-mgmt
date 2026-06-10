@@ -1,6 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, PLATFORM_ID, signal } from '@angular/core';
 import { DatePipe, DecimalPipe, isPlatformBrowser } from '@angular/common';
-import { HttpClient, HttpResponse } from '@angular/common/http';
+import { HttpClient, HttpErrorResponse, HttpResponse } from '@angular/common/http';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { forkJoin, of } from 'rxjs';
@@ -371,8 +371,16 @@ export class IntegrationsComponent {
           this.busy.set(null);
           this.saveBlob(response, fallbackName);
         },
-        // The global error interceptor already surfaces failures as toasts.
-        error: () => this.busy.set(null),
+        // The global error interceptor surfaces most failures as toasts, but it
+        // deliberately SUPPRESSES 401s on /api (transient auth-state noise).
+        // For an explicit user action like a download that would mean silent
+        // failure — no file, no message — so surface the expired-session case here.
+        error: (err: unknown) => {
+          this.busy.set(null);
+          if (err instanceof HttpErrorResponse && err.status === 401) {
+            this.notifications.error('Download failed: your session has expired. Sign in again and retry.');
+          }
+        },
       });
   }
 

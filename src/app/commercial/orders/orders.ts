@@ -66,6 +66,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                   <td class="num font-semibold">{{ order.amount | currency:order.currency }}</td>
                   <td>
                     <span class="command-status"
+                          [class.neutral]="order.status === 'Open'"
                           [class.amber]="order.status === 'Invoiced'"
                           [class.green]="order.status === 'Paid'">
                       {{ order.status }}

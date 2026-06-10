@@ -52,7 +52,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                   <td class="num font-semibold">{{ c.totalValue | currency:c.currency }}</td>
                   <td>
                     <span class="command-status"
-                          [class.green]="c.status === 'Active'">
+                          [class.green]="c.status === 'Active'"
+                          [class.neutral]="c.status === 'Draft'">
                       {{ c.status }}
                     </span>
                   </td>

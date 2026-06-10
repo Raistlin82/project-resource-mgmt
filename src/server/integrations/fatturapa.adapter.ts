@@ -105,11 +105,15 @@ interface NormalizedLine {
  * `order.amount`.
  */
 function normalizeLines(order: Order, contract: Contract | undefined, lines: readonly OrderLine[]): NormalizedLine[] {
+  // Amounts are rounded to cents HERE so every per-line PrezzoTotale and the
+  // ImponibileImporto (sum of these amounts) agree by construction — otherwise
+  // >2-decimal inputs make the document violate its own Σ-lines invariant
+  // (SDI check 00422).
   if (lines.length > 0) {
-    return lines.map((l) => ({ description: l.description, amount: l.amount }));
+    return lines.map((l) => ({ description: l.description, amount: round2(l.amount) }));
   }
   const description = contract !== undefined ? `${contract.name} - order ${order.id}` : `Order ${order.id}`;
-  return [{ description, amount: order.amount }];
+  return [{ description, amount: round2(order.amount) }];
 }
 
 /** Deterministic 5-char ProgressivoInvio derived from the invoice number digits. */
@@ -165,7 +169,10 @@ export class FatturaPaAdapter implements EInvoiceAdapter {
     }
 
     const invoiceNumber = order.invoiceNumber.trim();
-    const invoiceDate = order.invoiceDate ?? order.orderDate;
+    // FatturaPA <Data> must be an xs:date (YYYY-MM-DD). invoiceDate is
+    // server-set in that shape, but the orderDate fallback is client-supplied:
+    // normalise defensively so a full ISO timestamp can never leak into the XML.
+    const invoiceDate = (order.invoiceDate ?? order.orderDate).slice(0, 10);
     const supplierCountry = countryCode(supplier.country, 'IT');
     const customerCountry = countryCode(customer.country, 'IT');
     const codiceDestinatario = supplier.codiceDestinatario ?? DEFAULT_CODICE_DESTINATARIO;
@@ -176,12 +183,18 @@ export class FatturaPaAdapter implements EInvoiceAdapter {
     const importoTotale = round2(imponibile + imposta);
     const aliquota = FATTURAPA_VAT_RATE_PCT.toFixed(2);
 
+    // PrezzoUnitario is MANDATORY in the FPR12 XSD (its absence fails schema
+    // validation, SDI error 00200). Each normalized line is billed as a single
+    // unit, so Quantita is 1.00 and PrezzoUnitario === PrezzoTotale, which also
+    // satisfies SDI check 00423 (PrezzoTotale = PrezzoUnitario × Quantita).
     const dettaglioLinee = normalized
       .map((line, i) =>
         [
           '      <DettaglioLinee>',
           `        <NumeroLinea>${i + 1}</NumeroLinea>`,
           `        <Descrizione>${escapeXml(line.description)}</Descrizione>`,
+          '        <Quantita>1.00</Quantita>',
+          `        <PrezzoUnitario>${money(line.amount)}</PrezzoUnitario>`,
           `        <PrezzoTotale>${money(line.amount)}</PrezzoTotale>`,
           `        <AliquotaIVA>${aliquota}</AliquotaIVA>`,
           '      </DettaglioLinee>',

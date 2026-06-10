@@ -1702,16 +1702,47 @@ async function loadFinanceData(): Promise<FinanceData> {
 
 /** Send a locally-built ExportArtifact as a file-download response. */
 function sendArtifact(res: Response, artifact: ExportArtifact): void {
+  // DEFENSE-IN-DEPTH (header injection): adapter filenames are interpolated
+  // into a response header. Today every adapter builds its filename from
+  // server-generated values, but never trust that at the seam — strip anything
+  // outside a conservative filesystem-safe set so CR/LF/quotes can never reach
+  // Content-Disposition.
+  const safeFilename = artifact.filename.replace(/[^A-Za-z0-9._-]/g, '_');
   res.setHeader('Content-Type', artifact.mimeType);
-  res.setHeader('Content-Disposition', `attachment; filename="${artifact.filename}"`);
+  res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
   res.send(artifact.content);
 }
 
 /**
- * Default rev-rec window for the GL journal export: full-year 2026, monthly.
- * Covers the seed data (all demo billing/time activity is dated in 2026).
+ * Fallback rev-rec window for the GL journal export when the data set carries
+ * no dated activity at all: full-year 2026, monthly (covers the seed data).
  */
-const ERP_JOURNAL_WINDOW: { from: string; to: string } = { from: '2026-01', to: '2026-12' };
+const ERP_JOURNAL_WINDOW_FALLBACK: { from: string; to: string } = { from: '2026-01', to: '2026-12' };
+
+/** Months accepted on the journal-export from/to query params. */
+const JOURNAL_MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+/**
+ * COMPLETENESS: a GL export must cover ALL dated activity, not a hardcoded
+ * year — otherwise entries silently vanish from an accounting artifact. Derive
+ * the window from the data's own min/max months (time entries + billing item
+ * dates), falling back to the seed-era default only when nothing is dated.
+ */
+function deriveJournalWindow(data: Awaited<ReturnType<typeof loadFinanceData>>): { from: string; to: string } {
+  const months: string[] = [];
+  const push = (value: string | undefined): void => {
+    if (typeof value === 'string' && /^\d{4}-\d{2}/.test(value)) months.push(value.slice(0, 7));
+  };
+  for (const t of data.timeEntries ?? []) push(t.date);
+  for (const b of data.billingItems ?? []) {
+    push(b.expectedDate);
+    push(b.issuedDate);
+    push(b.paidDate);
+  }
+  if (months.length === 0) return ERP_JOURNAL_WINDOW_FALLBACK;
+  months.sort();
+  return { from: months[0], to: months[months.length - 1] };
+}
 
 /** Supplier (CedentePrestatore) master data from env, with sane demo defaults. */
 function supplierFromEnv(): SupplierInfo {
@@ -1741,10 +1772,21 @@ apiRouter.get('/integrations', async (_req, res) => {
 });
 
 // ERP: balanced double-entry GL journal of the rev-rec schedule (CSV or JSON).
+// Window: derived from the data's dated activity; overridable with validated
+// from/to query params (YYYY-MM).
 apiRouter.get('/integrations/erp/journal-export', async (req, res) => {
   const format = req.query['format'] === 'json' ? 'json' : 'csv';
   const data = await loadFinanceData();
-  const journal = recognitionJournal(data, ERP_JOURNAL_WINDOW);
+  const derived = deriveJournalWindow(data);
+  const fromQ = req.query['from'];
+  const toQ = req.query['to'];
+  const from = typeof fromQ === 'string' && JOURNAL_MONTH_RE.test(fromQ) ? fromQ : derived.from;
+  const to = typeof toQ === 'string' && JOURNAL_MONTH_RE.test(toQ) ? toQ : derived.to;
+  if (from > to) {
+    res.status(400).json({ error: 'from must be <= to (YYYY-MM)' });
+    return;
+  }
+  const journal = recognitionJournal(data, { from, to });
   try {
     const artifact = getIntegrations().erp.buildJournalExport(journal, { format });
     sendArtifact(res, artifact);

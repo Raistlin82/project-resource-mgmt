@@ -351,3 +351,35 @@ describe('FatturaPaAdapter.buildInvoiceXml() — currency and dates', () => {
     expect(build({ order: { invoiceNumber: 'NO-DIGITS-X' } })).toContain('<ProgressivoInvio>00001</ProgressivoInvio>');
   });
 });
+
+describe('FatturaPaAdapter.buildInvoiceXml() — FPR12 schema-validity regressions', () => {
+  it('emits Quantita and a PrezzoUnitario equal to PrezzoTotale on every line (PrezzoUnitario is mandatory in the FPR12 XSD)', () => {
+    const xml = build({ lines: [makeLine('l1', 'Analysis', 600), makeLine('l2', 'Build', 400)] });
+    expect(countOpen(xml, 'PrezzoUnitario')).toBe(2);
+    expect(countOpen(xml, 'Quantita')).toBe(2);
+    expect(xml).toContain('<Quantita>1.00</Quantita>');
+    expect(xml).toContain('<PrezzoUnitario>600.00</PrezzoUnitario>');
+    expect(xml).toContain('<PrezzoTotale>600.00</PrezzoTotale>');
+    // XSD element order inside DettaglioLinee: Descrizione, Quantita, PrezzoUnitario, PrezzoTotale, AliquotaIVA.
+    const first = (tag: string) => xml.indexOf(`<${tag}>`);
+    expect(first('Descrizione')).toBeLessThan(first('Quantita'));
+    expect(first('Quantita')).toBeLessThan(first('PrezzoUnitario'));
+    expect(first('PrezzoUnitario')).toBeLessThan(first('PrezzoTotale'));
+    expect(first('PrezzoTotale')).toBeLessThan(first('AliquotaIVA'));
+  });
+
+  it('keeps ImponibileImporto identical to the sum of the rendered PrezzoTotale values (no per-line rounding drift, SDI 00422)', () => {
+    const lines = [1, 2, 3, 4, 5].map(n => makeLine(`l${n}`, `Item ${n}`, 10.125));
+    const xml = build({ lines });
+    // Each 10.125 line renders as 10.13; the riepilogo must sum the ROUNDED amounts.
+    expect((xml.match(/<PrezzoTotale>10\.13<\/PrezzoTotale>/g) ?? []).length).toBe(5);
+    expect(xml).toContain('<ImponibileImporto>50.65</ImponibileImporto>');
+    expect(xml).toContain('<Imposta>11.14</Imposta>');
+    expect(xml).toContain('<ImportoTotaleDocumento>61.79</ImportoTotaleDocumento>');
+  });
+
+  it('normalises a full ISO timestamp invoiceDate to an xs:date for <Data>', () => {
+    const xml = build({ order: { invoiceDate: '2026-06-01T10:30:00.000Z' } });
+    expect(xml).toContain('<Data>2026-06-01</Data>');
+  });
+});

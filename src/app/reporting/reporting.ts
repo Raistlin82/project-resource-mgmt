@@ -67,6 +67,13 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
         </div>
       </div>
 
+      @if (accessNotice(); as notice) {
+        <div class="command-card-muted p-4 flex items-start gap-3" role="alert">
+          <mat-icon class="text-[20px] w-[20px] h-[20px] text-[var(--cc-amber-text)] shrink-0">lock</mat-icon>
+          <p class="text-sm font-medium text-[var(--cc-ink)]">{{ notice }}</p>
+        </div>
+      }
+
       <!-- KPI Cards -->
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
         @for (kpi of kpis(); track kpi.label) {
@@ -691,6 +698,21 @@ export class Reporting {
 
   /** Reporting/base currency label for converted portfolio/AR/margin totals. */
   protected readonly baseCurrency = BASE_CURRENCY;
+
+  /**
+   * ACCESS FEEDBACK: this report reads role-gated collections in a fail-fast
+   * forkJoin, and 401s are deliberately NOT toasted by the error interceptor.
+   * Without this notice, an anonymous or under-privileged user would see a page
+   * of silent zeros with misleading "no data yet" empty states. When the load
+   * errors, say WHY (sign in vs insufficient role) instead of pretending the
+   * portfolio is empty.
+   */
+  protected accessNotice = computed<string | null>(() => {
+    if (this.dataRes.status() !== 'error') return null;
+    return this.auth.isAuthenticated()
+      ? 'Your role does not have access to the financial reporting data. The figures below are incomplete.'
+      : 'Sign in to view portfolio analytics — financial data requires an authenticated role.';
+  });
 
   private financeData = computed<FinanceData>(() => {
     const d = this.dataRes.value();

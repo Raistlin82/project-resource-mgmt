@@ -22,7 +22,16 @@ const serverPort = process.env['PORT'] || '3000';
 // (`process.env['HOST'] || 'localhost'`). Defaulting to 127.0.0.1 instead would
 // break the no-HOST case: Express binds the socket to the `localhost` resolution
 // specifically, so a 127.0.0.1 SSR fetch can be refused even though both are loopback.
-const serverHost = (process.env['HOST'] || 'localhost').trim();
+//
+// Wildcard binds are NOT usable as fetch targets: `0.0.0.0` only works
+// incidentally on Linux/macOS (and fails on Windows), and a bare IPv6 host
+// (`::`, `::1`) produces a malformed URL unless bracketed. A wildcard bind
+// always serves loopback, so map those to a host SSR can actually fetch.
+function fetchableHost(bindHost: string): string {
+  if (bindHost === '0.0.0.0' || bindHost === '::' || bindHost === '') return 'localhost';
+  return bindHost.includes(':') ? `[${bindHost}]` : bindHost; // bracket IPv6 literals
+}
+const serverHost = fetchableHost((process.env['HOST'] || 'localhost').trim());
 const serverApiBaseUrl = process.env['API_BASE_URL'] ?? `http://${serverHost}:${serverPort}/api`;
 
 const serverConfig: ApplicationConfig = {
