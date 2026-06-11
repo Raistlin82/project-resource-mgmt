@@ -1,0 +1,77 @@
+# App-service OVERLAY for the full-stack Docker deploy.
+#
+# Compose this on TOP of docker-compose.yml (which provides postgres + keycloak):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.app.yml up -d --build
+#
+# That brings up Postgres 17, Keycloak 26 (prod mode, realm 'psa'), AND the
+# Delivery Control app — all three in containers on the same compose network.
+#
+# Browser-vs-SSR issuer caveat (READ THIS):
+#   * The BROWSER talks to Keycloak at http://localhost:8081/realms/psa (host
+#     port 8081; host 8080 is owned by openHAB). Tokens it obtains carry
+#     iss=http://localhost:8081/realms/psa.
+#   * The SSR server (this 'app' container) ALSO verifies those tokens, fetching
+#     the realm JWKS from OIDC_ISSUER. The issuer string MUST byte-match the
+#     token's `iss`, so OIDC_ISSUER stays http://localhost:8081/realms/psa.
+#   * Inside a container, "localhost" is the container itself, so we add
+#     extra_hosts host.docker.internal -> host-gateway and rely on the host's
+#     published 8081 to reach Keycloak. On Docker Desktop (macOS/Windows)
+#     "localhost" from a container already routes to the host gateway for
+#     published ports; the extra_hosts entry makes the same reachability
+#     explicit and portable to Linux engines.
+#   * For a SINGLE-HOST local deploy this works because the tokens are
+#     browser-obtained and the issuer stays localhost:8081 for both sides. A real
+#     MULTI-HOST production deploy needs a STABLE EXTERNAL issuer URL (a DNS name
+#     + TLS) configured identically in Keycloak (KC_HOSTNAME), the SPA
+#     (AuthService ISSUER), and OIDC_ISSUER here — never a per-container
+#     "localhost".
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: delivery-control-app:latest
+    container_name: prm-app
+    restart: unless-stopped
+    environment:
+      # --- Persistence (Postgres service on the compose network) -------------
+      # Reaches the 'postgres' service by name; the APP database is
+      # project_resource_mgmt (Keycloak uses its own 'keycloak' db).
+      DATABASE_URL: "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-project_resource_mgmt}"
+      # Local docker Postgres has no TLS; never set PGSSL=true here.
+      PGSSL: "false"
+
+      # --- Identity (Keycloak / OIDC) ----------------------------------------
+      # MUST byte-match the `iss` on browser-obtained tokens (localhost:8081).
+      # See the issuer caveat above for why this stays localhost, not the
+      # 'keycloak' service name.
+      OIDC_ISSUER: "${OIDC_ISSUER:-http://localhost:8081/realms/psa}"
+      # Optional: pin the expected audience. The SPA client is 'psa-web'; set this
+      # only once tokens carry a matching `aud` (else leave empty to skip the
+      # audience check — issuer + signature are still verified).
+      OIDC_AUDIENCE: "${OIDC_AUDIENCE:-}"
+      # PRODUCTION SAFETY: never trust the spoofable X-User-* demo headers in a
+      # containerized deploy. Identity comes from verified JWTs only.
+      AUTH_TRUST_HEADERS: "false"
+
+      # --- HTTP bind ---------------------------------------------------------
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      # Hostnames Angular SSR host-validation accepts (server.ts NG_ALLOWED_HOSTS).
+      NG_ALLOWED_HOSTS: "${NG_ALLOWED_HOSTS:-localhost,127.0.0.1}"
+      # API_BASE_URL is intentionally UNSET: the SSR server derives its own /api
+      # base from PORT/HOST (see app.config.server.ts), which is correct here.
+    ports:
+      - "3000:3000"
+    extra_hosts:
+      # Lets the SSR server resolve the host gateway, so the issuer's
+      # localhost:8081 (published Keycloak port) is reachable from inside the
+      # container on Linux engines too. See the issuer caveat above.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
