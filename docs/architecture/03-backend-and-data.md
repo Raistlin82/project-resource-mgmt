@@ -1,0 +1,516 @@
+# Backend & Data Model
+
+> **Diátaxis mode: Explanation + Reference.** The first half explains the shape
+> of the backend and the Repository pattern that gives Delivery Control a single
+> dev-vs-prod parity guarantee. The second half is reference material: the
+> domain ER diagrams and a 31-entity catalogue. For the layer overview start at
+> [`01-overview.md`](./01-overview.md); for who may call what, see
+> [`04-security-identity.md`](./04-security-identity.md) and
+> [`../roles-and-permissions.md`](../roles-and-permissions.md).
+
+## The backend shape
+
+There is **one** Express application (`src/server.ts`). It is simultaneously the
+**SSR handler** (it renders the Angular app via `AngularNodeAppEngine` and serves
+the browser bundle) and the host of the **`/api` router**. The wiring at the
+bottom of the file is deliberately ordered:
+
+1. `app.use('/api', apiRouter)` — the API surface.
+2. `express.static(browserDistFolder, …)` — the built browser assets.
+3. A catch-all that hands the request to `angularApp.handle(req)` for SSR, or
+   falls through to `next()` when Angular declines it.
+
+So `/api/*` is matched first and never reaches the SSR engine, while every other
+path is server-rendered. The exported `reqHandler` (`createNodeRequestHandler(app)`)
+is what the production `serve:ssr` entry invokes; when run as the main module the
+app also `listen`s on `PORT` (default 3000) bound to `HOST`.
+
+### Async handlers everywhere
+
+Every route handler is `async` and `await`s the repository. This is required
+because the persistence boundary is asynchronous (see below), and it is what
+makes the Express 5 behaviour of forwarding a rejected handler promise to the
+error middleware useful — see [error mapping](#postgres-fk-integrity--409).
+
+### The generic `crud()` helper
+
+Most collections are plain keyed resources, so a single generic helper mounts
+their four endpoints against any `Repository<T>`:
+
+```
+crud(router, path, repo, allowed, numericFields?)
+  GET    /${path}      -> repo.list()
+  POST   /${path}      -> validate numerics, pick allow-list, id = newId(), repo.create()
+  PUT    /${path}/:id  -> 404 if missing, validate, repo.update()
+  DELETE /${path}/:id  -> repo.remove(); 404 when id was absent, else 204
+```
+
+`crud()` is used for the simple collections (`project-partners`,
+`project-documents`, `work-packages`, `project-financials`,
+`project-cost-centers`, `project-tasks`, `project-issues`, `cost-centers`,
+`customers`). Collections that carry **referential-integrity rules or domain
+automations** — `contracts`, `orders`, `order-lines`, `billing-plan-items`,
+`requests`, `assignments`, `time-entries`, `milestones`, `change-requests`,
+`approval-requests` — are written as bespoke handlers because `crud()` cannot
+express their FK checks and side effects.
+
+Two security primitives shared by both styles:
+
+- **`pick()` allow-list (mass-assignment guard).** Every write copies *only*
+  named fields from the untrusted body. A field not in the allow-list (e.g. a
+  client-supplied `status` on a new time entry, or an `invoiceNumber` on an
+  order) is silently dropped, so server-pinned fields can never be forged.
+- **Numeric validation.** `findInvalidNumericField()` rejects any present,
+  allow-listed numeric field that is not a finite, non-negative number, returning
+  `400`. Billing items use a stricter variant
+  (`findInvalidBillingNumericField`) that allows a **negative `amount` only for a
+  `CreditNote`**.
+
+### Cross-cutting middleware
+
+The `apiRouter` stacks three concerns before any handler runs:
+
+1. **Rate limiting (two tiers).** A per-client limiter (`300 req/min`, keyed on
+   `req.ip`) plus a global limiter (`3000 req/min`) so one client cannot exhaust
+   the whole budget. `req.ip` is only trustworthy once `TRUST_PROXY` is set to the
+   real proxy-hop count; the default is `0` (off), the safe no-proxy default.
+2. **`roleGate` (auth + RBAC).** Verifies any `Authorization: Bearer` token
+   against Keycloak's JWKS, then applies per-collection read/write RBAC. Detailed
+   in [`04-security-identity.md`](./04-security-identity.md).
+3. **Append-only audit middleware.** See next.
+
+### Append-only audit middleware with before/after diffs
+
+The audit middleware snapshots the targeted entity **before** a `PUT`/`DELETE`
+runs (via `findAuditEntity()`, which resolves a `/collection/:id` path to its
+read repository through `auditRepoBySegment`), then on the response `finish`
+event — for a successful `POST`/`PUT`/`DELETE` only — re-reads the **after**
+state for a `PUT`, diffs the changed keys (`diffChangedKeys`), and appends an
+`AuditEntry` via `repos.auditLogs.create(...)`.
+
+Key properties:
+
+- **Append-only.** Entries are created in insertion order and never edited or
+  deleted. The read endpoint (`GET /audit-logs`) returns a **bounded,
+  newest-first page** (`limit`/`offset`, clamped to a max of 1000). On Postgres
+  the ordering + paging are pushed into SQL (`ORDER BY at DESC LIMIT OFFSET`,
+  backed by `audit_logs_at_idx`); in memory the list is sorted newest-first and
+  sliced.
+- **Trusted attribution.** The recorded `actorId`/`actorRole` come from the same
+  trust gate as authorization (a verified JWT, or a trusted demo header) — never
+  from raw spoofable `X-User-*` headers. An unauthenticated caller cannot forge
+  the recorded actor.
+- **Best-effort.** Audit persistence happens after the response is sent and its
+  failures never affect the already-sent response.
+
+## The Repository pattern
+
+All persistence goes through one small, fully-typed boundary
+(`src/db/repository.ts`):
+
+```ts
+interface Repository<T extends Entity> {
+  list(): Promise<T[]>;
+  get(id: string): Promise<T | undefined>;
+  create(entity: T): Promise<T>;
+  update(id: string, patch: Partial<T>): Promise<T | undefined>;
+  remove(id: string): Promise<boolean>;
+}
+```
+
+`Entity` is simply `{ id: string }`. Handlers depend only on this interface, so
+swapping the backing store is a one-line change at the composition root.
+
+### Two interchangeable adapters
+
+- **`InMemoryRepository<T>`** — array-backed, **defensively cloned** on every read
+  and write (`structuredClone`, JSON fallback) so the store can never share
+  references with callers. Synchronous logic wrapped in `Promise.resolve` to
+  satisfy the async contract. This is the **dev / mock** adapter; no database
+  needed.
+- **`PgRepository<T>`** — PostgreSQL via **Drizzle ORM** over a node-postgres pool
+  (`db` from `src/db/client.ts`). `list()` adds `.orderBy(id)` for a deterministic
+  order that matches the in-memory adapter's insertion order. The handful of
+  unavoidable Drizzle-generic casts are localized to single `.values()` / `.set()`
+  arguments and bridged through `unknown` — the public boundary never leaks `any`.
+
+### The composition root and the env-switch
+
+`getRepositories()` (`src/db/repositories.ts`) builds the process-wide
+`Repositories` object once and memoizes it. Selection mirrors `src/db/client.ts`:
+
+```
+DATABASE_URL set    -> buildPgRepositories(db)         (Drizzle adapters)
+DATABASE_URL unset  -> buildInMemoryRepositories()     (seeded mock adapters)
+```
+
+`db` (and the connection `pool`) in `client.ts` are themselves `null` when
+`DATABASE_URL` is unset, so the same env variable drives both modules. TLS is
+hardened in `client.ts`: when `PGSSL=true` the server certificate is **always**
+verified (`rejectUnauthorized: true`), optionally pinning a CA bundle from
+`PG_CA_CERT`; verification is never disabled.
+
+### Natural-key adapters
+
+Two entities have **no `id`** in their source interfaces: `Language` (keyed by
+`code`) and `FxRate` (keyed by `currency`). To flow them through
+`Repository<T extends Entity>` without changing their persisted shape, each is
+wrapped in a small natural-key adapter (`NaturalKeyInMemoryRepository` /
+`NaturalKeyPgRepository`) that:
+
+- carries a **synthetic `id` that always mirrors the natural key** (`id === code`
+  / `id === currency`), added on every return path and stripped before any write
+  (the Postgres tables have no `id` column);
+- moves identity correctly when the natural key itself changes (in memory this is
+  a remove + create so the `id === key` invariant holds).
+
+This is why the route handlers can address an FX rate by currency
+(`PUT /fx-rates/:currency` does an upsert keyed on `currency`) and a language by
+its code while still seeing one uniform `Repository<T>` per entity. The list
+handlers project these rows back to the exact legacy client shape (dropping the
+synthetic `id`).
+
+### Two parity shims you must know about
+
+The InMemory and Pg adapters must behave **identically** so dev and prod never
+diverge in observable ways. Two shims enforce that:
+
+- **`nullsToUndefined()`** — Drizzle returns nullable columns as explicit `null`,
+  but the `api.service` interfaces (and the in-memory adapter) model those fields
+  as *optional* (`prop?: V`, i.e. absent). Without normalization the prod JSON
+  would carry `key: null` where dev omits the key. `nullsToUndefined` runs on
+  every **return** path only — never on the values handed to `.set()`, where
+  `undefined` is intentionally omitted (no clobber) and an explicit `null` still
+  sets the column NULL.
+- **Empty-patch update parity** — Drizzle's `.set()` throws `"No values to set"`
+  when a patch is effectively empty (a 500 in prod), whereas the in-memory adapter
+  returns the unchanged entity (200). The Pg adapters short-circuit an
+  all-`undefined` patch to a plain `get(id)` so both adapters return the same 200.
+
+## What the parity guarantee buys, and its gotchas
+
+Because the same handlers run over either adapter, a developer can clone, install,
+`npx ng serve`, and exercise the whole product on seeded in-memory data — then
+the *same build* is promoted to a persistent Postgres deployment by setting
+`DATABASE_URL`. Two real differences between the adapters are deliberately
+reconciled at the seam:
+
+### Postgres FK integrity → 409
+
+The Postgres adapter enforces foreign keys (the InMemory adapter would silently
+**orphan** a referenced row). Deleting an FK-referenced row therefore raises a
+`pg` error with SQLSTATE `23503` (`foreign_key_violation`). The API error
+middleware (`isFkViolation` → `apiRouter.use((err, …) => …)`) maps that to a clean
+**`409 Conflict`** (`"the record is still referenced by other records"`) instead
+of leaking an opaque 500. All other errors fall through to the default handler.
+
+### Restart-safe id sequences
+
+Ids are server-assigned from an in-memory counter (`newId()` → `idSeq`; some
+collections wrap the suffix in a prefix, e.g. `TE…`, `AL…`, `AR…`, `OB…`).
+Invoice numbers come from a separate `invoiceSeq` (`INV-<year>-NNNN`). After a
+restart these counters would reset to their defaults and **re-issue ids that are
+already persisted**, colliding on the prefixed primary keys. `seedSequences()`
+(run after `initPersistence()`) prevents that by scanning every repository:
+
+- `idSeq` is advanced past the **largest numeric suffix** seen across all rows —
+  both purely-numeric ids and prefixed ones (the suffix is `newId()`'s output, via
+  the pure `maxIdSeq` scanner).
+- `invoiceSeq` is advanced past the largest `INV-<INVOICE_YEAR>-NNNN` across
+  orders, so no invoice number is ever reused. (The seed already holds
+  `INV-2026-0001` on order `O1`, so the next issued invoice is `0002`.)
+
+## Persistence lifecycle
+
+`initPersistence()` (`src/db/bootstrap.ts`) is called once at boot, before
+`seedSequences()`:
+
+- **`DATABASE_URL` unset** → **no-op.** The in-memory repositories are already
+  constructed from the same `src/db/seed.ts` arrays, so there is nothing to
+  migrate or seed.
+- **`DATABASE_URL` set** →
+  1. **Migrate.** Run all pending Drizzle migrations from `./drizzle`
+     (`drizzle-orm/node-postgres` migrator). `migrate()` is idempotent —
+     already-applied migrations are skipped.
+  2. **Seed when empty.** Each core table is seeded from `seed.ts` only when its
+     own `count(*) === 0` check passes, so repeat boots never duplicate rows.
+     Inserts run **parent-before-child** so foreign keys are satisfied (roots like
+     `customers`/`resources`/`languages`/`fxRates` first, then `contracts`/`users`,
+     then `projects`, then project sub-resources, then the commercial chain and
+     `approvalRequests`). `auditLogs` is intentionally seeded empty.
+
+`seed.ts` is the single source of truth for the initial data — the in-memory
+adapter and the Postgres seeder consume the *same* arrays, so the two can never
+drift apart. (Note: `getRepositories()`/`client.ts` use the in-memory adapter
+purely on `DATABASE_URL` presence; the in-memory store is seeded by construction
+regardless of `initPersistence`.)
+
+## A request, end to end
+
+**Read** (`GET /api/orders`):
+
+```
+client → rate limiters → roleGate (READ_RULES: commercial reads are gated to
+  sales/finance/delivery-executive/admin) → audit middleware (no before-snapshot
+  for GET) → handler: res.json(await repos.orders.list())
+```
+
+**Write** (`PUT /api/orders/:id`, transition to `Invoiced`):
+
+```
+client → rate limiters → roleGate (WRITE rule: sales/finance/delivery-executive/
+  admin) → audit middleware snapshots the order BEFORE the handler
+  → handler: get() 404-guard → pick(ORDER_FIELDS) → numeric + FK validation
+    (validateOrder: contract exists; Purchase vs Customer partner rules)
+  → withLock('invoice-seq'): re-read, applyInvoiceNumbering (assign the next
+    INV-<year>-NNNN + date when first Invoiced), repos.orders.update()
+  → res.json(updated)
+  → on 'finish' (status < 400): re-read AFTER state, diff changed keys, append an
+    audit entry attributed to the trusted actor
+```
+
+Read-modify-write sequences over a shared aggregate (a request's
+`staffedEffort`, a resource's `utilization`, the invoice sequence, an approval
+step) are serialized through a per-key async mutex (`withLock`) because Express
+handlers run concurrently and there is no atomic-increment primitive on the
+`Repository<T>` boundary.
+
+## Domain ER diagrams (reference)
+
+The 31 tables (`src/db/schema.ts`) are split into four domain groups below.
+Crow's-foot relationships show the **declared** foreign keys; soft links
+(`requesterId`, `ownerId`, `refId`) carry the column without a hard FK and are
+called out in the catalogue. Money/FX columns use `doublePrecision`; date-like
+values are `text` (ISO strings); nested arrays/objects are `jsonb`.
+
+### Resourcing
+
+```mermaid
+erDiagram
+    resources ||--o{ users : "identifies"
+    resources ||--o{ assignments : "staffed on"
+    requests  ||--o{ assignments : "fulfilled by"
+    resources ||--o{ resources : "manages (managerId, soft)"
+
+    resources {
+        text id PK
+        text name
+        double costRate
+        double billRate
+        double capacity
+        double utilization
+        text managerId "soft self-ref"
+    }
+    users {
+        text id PK
+        text resourceId FK
+        text role
+    }
+    requests {
+        text id PK
+        double requiredEffort
+        double staffedEffort
+        text status
+        text projectId FK
+        text requesterId "soft"
+    }
+    assignments {
+        text id PK
+        text requestId FK
+        text resourceId FK
+        double assignedHours
+    }
+```
+
+### Projects & sub-resources
+
+```mermaid
+erDiagram
+    contracts ||--o{ projects          : "governs"
+    projects  ||--o{ projectPartners   : "has"
+    projects  ||--o{ projectDocuments  : "has"
+    projects  ||--o{ workPackages      : "has"
+    projects  ||--o{ milestones        : "has"
+    projects  ||--o{ projectFinancials : "has"
+    projects  ||--o{ projectCostCenters: "has"
+    projects  ||--o{ projectTasks      : "has"
+    projects  ||--o{ projectIssues     : "has"
+    projects  ||--o{ changeRequests    : "has"
+    projectPartners ||--o{ projectTasks: "subcontracts (partnerId)"
+
+    projects {
+        text id PK
+        text contractId FK
+        text ownerId "soft"
+        text status
+    }
+    projectPartners { text id PK
+        text projectId FK }
+    workPackages    { text id PK
+        text projectId FK
+        double progress }
+    milestones      { text id PK
+        text projectId FK
+        text status }
+    changeRequests  { text id PK
+        text projectId FK
+        text createdBy "server-pinned" }
+```
+
+### Commercial, billing & FX
+
+```mermaid
+erDiagram
+    customers ||--o{ contracts        : "signs"
+    contracts ||--o{ orders           : "issues"
+    contracts ||--o{ billingPlanItems : "plans"
+    orders    ||--o{ orderLines       : "itemizes"
+    orders    ||--o{ billingPlanItems : "invoiced via (orderId)"
+    projects  ||--o{ orderLines       : "charged to"
+    projects  ||--o{ billingPlanItems : "charged to"
+    milestones ||--o{ billingPlanItems: "triggers (milestoneId)"
+    projectPartners ||--o{ orders     : "supplies (Purchase, partnerId)"
+
+    customers { text id PK }
+    contracts {
+        text id PK
+        text customerId FK
+        text type
+        double totalValue
+        text currency
+    }
+    orders {
+        text id PK
+        text contractId FK
+        text partnerId FK
+        text status
+        text invoiceNumber "server-set"
+    }
+    orderLines {
+        text id PK
+        text orderId FK
+        text projectId FK
+        double amount
+    }
+    billingPlanItems {
+        text id PK
+        text contractId FK
+        text projectId FK
+        text milestoneId FK
+        text orderId FK
+        text type
+        double amount
+        double capAmount
+        text currency
+        text status
+    }
+    fxRates { text currency PK
+        double rateToBase }
+```
+
+### Governance, config & audit
+
+```mermaid
+erDiagram
+    projects ||--o{ approvalRequests : "subject of"
+    serviceOrganizations ||--o{ resourceOrganizations : "parents"
+    proficiencySets ||--o{ skills : "leveled by"
+    assignments ||--o{ timeEntries : "logged against"
+    requests    ||--o{ timeEntries : "logged against"
+    resources   ||--o{ timeEntries : "logged by"
+    projects    ||--o{ timeEntries : "charged to"
+
+    approvalRequests {
+        text id PK
+        text kind
+        text refId "polymorphic, soft"
+        text projectId FK
+        double amount
+        text requestedBy "server-pinned"
+        jsonb steps
+        int currentStep
+    }
+    timeEntries {
+        text id PK
+        text assignmentId FK
+        text requestId FK
+        text resourceId FK
+        text projectId FK
+        text status
+    }
+    auditLogs {
+        text id PK
+        text at "indexed DESC"
+        text actorId
+        text method
+        text path
+        jsonb before
+        jsonb after
+    }
+    languages { text code PK
+        bool isDefault }
+```
+
+## Entity catalogue (reference)
+
+All 31 tables in `src/db/schema.ts`. **Key FKs** lists declared `references()`
+foreign keys; *(soft)* marks columns that carry a reference without a hard FK.
+
+| Entity (table) | Purpose | Key fields & FKs | Domain |
+| --- | --- | --- | --- |
+| `resources` | People with skills, capacity, rates | `id`, `capacity`, `utilization`, `costRate`, `billRate`; `managerId` *(soft self-ref)* | Resourcing |
+| `users` | Identity → resource + RBAC role mapping | `id`, `role`; **FK** `resourceId→resources` | Resourcing |
+| `requests` | Demand (resource requests) | `id`, `requiredEffort`, `staffedEffort`, `status`; **FK** `projectId→projects`; `requesterId` *(soft)* | Resourcing |
+| `assignments` | Staffing of a resource onto a request | `id`, `assignedHours`; **FK** `requestId→requests`, `resourceId→resources` | Resourcing |
+| `timeEntries` | Logged hours with approval lifecycle | `id`, `hours`, `status`, `approvedBy/At`; **FK** `assignmentId→assignments`, `requestId→requests`, `resourceId→resources`, `projectId→projects` | Resourcing / Governance |
+| `languages` | UI languages (natural key `code`) | `code` PK, `isDefault` | Config |
+| `skillCatalogs` | Named collections of skills | `id`, `skills` (jsonb id array) | Config |
+| `proficiencySets` | Ordered proficiency rungs | `id`, `levels` (jsonb) | Config |
+| `skills` | Skill master data | `id`, `conceptUri`, `restricted`; **FK** `proficiencySetId→proficiencySets` | Config |
+| `projectRoles` | Project role master data | `id`, `code`, `restricted` | Config |
+| `serviceOrganizations` | Delivery org units | `id`, `code`, `costCenters` (jsonb) | Config |
+| `resourceOrganizations` | Resource org units | `id`, `costCenters` (jsonb); **FK** `serviceOrganizationId→serviceOrganizations` | Config |
+| `projects` | Delivery projects | `id`, `status`; **FK** `contractId→contracts`; `ownerId` *(soft)* | Projects |
+| `projectPartners` | Partner companies on a project | `id`, `company`, `status`; **FK** `projectId→projects` | Projects |
+| `projectDocuments` | Project document metadata | `id`, `name`, `type`; **FK** `projectId→projects` | Projects |
+| `workPackages` | Work breakdown items | `id`, `progress`, `status`; **FK** `projectId→projects` | Projects |
+| `milestones` | Project milestones (SAL trigger) | `id`, `status`, `approvedBy/At`; **FK** `projectId→projects` | Projects |
+| `projectFinancials` | Budget vs actual by category | `id`, `budget`, `actual`; **FK** `projectId→projects` | Projects / Finance |
+| `projectCostCenters` | Per-project cost centers | `id`, `allocated`, `actual`; **FK** `projectId→projects` | Projects / Finance |
+| `projectTasks` | Project tasks | `id`, `status`, `priority`; **FK** `projectId→projects`, `partnerId→projectPartners` | Projects |
+| `projectIssues` | Project issues / risks | `id`, `severity`, `status`, `escalated`; **FK** `projectId→projects` | Projects |
+| `changeRequests` | Scope/budget change requests | `id`, `impactBudget`, `status`, `createdBy` *(server-pinned SoD)*; **FK** `projectId→projects` | Projects / Governance |
+| `costCenters` | Top-level (non-project) cost centers | `id`, `allocated`, `actual` | Config / Finance |
+| `customers` | Customer accounts | `id`, `industry`, `country` | Commercial |
+| `contracts` | Customer contracts (T&M / Fixed / Framework) | `id`, `type`, `totalValue`, `currency`, `status`; **FK** `customerId→customers` | Commercial |
+| `orders` | Customer / purchase orders | `id`, `type`, `status`, `invoiceNumber/Date` *(server-set)*; **FK** `contractId→contracts`, `partnerId→projectPartners` | Commercial / Billing |
+| `orderLines` | Order line items charged to a project | `id`, `amount`; **FK** `orderId→orders`, `projectId→projects` | Commercial / Billing |
+| `billingPlanItems` | Per-`BillingType` billing plan | `id`, `type`, `amount`, `capAmount`, `currency`, `status`; **FK** `contractId→contracts`, `projectId→projects`, `milestoneId→milestones`, `orderId→orders` | Billing |
+| `fxRates` | FX rate to base (natural key `currency`) | `currency` PK, `rateToBase` | Billing / Finance |
+| `approvalRequests` | Multi-step approval chains | `id`, `kind`, `amount`, `steps`, `currentStep`, `requestedBy` *(server-pinned SoD)*; **FK** `projectId→projects`; `refId` *(soft, polymorphic)* | Governance |
+| `auditLogs` | Append-only mutation trail | `id`, `at` *(indexed DESC)*, `actorId`, `method`, `path`, `before`, `after` | Governance |
+
+## The `doublePrecision` money trade-off
+
+Every monetary amount (contract `totalValue`, order/line/billing `amount`,
+`costRate`/`billRate`, FX `rateToBase`, project budgets) is stored as
+**`doublePrecision`** — IEEE-754 floating point. This matches the JS `number`
+runtime the in-memory mock uses, so dev and prod agree exactly, and it is fine
+for the demo's previews, rollups, and exports.
+
+It is **not** appropriate for real money once invoices are actually issued and
+posted: binary floating point cannot represent decimal cents exactly, so sums and
+VAT computations can drift by sub-cent amounts that violate reconciliation
+invariants. **Recommendation: migrate the monetary columns to
+`numeric(14,2)`** (a fixed-precision decimal) before Delivery Control issues real
+invoices or posts real ledger entries. The integration adapters already round to
+2 decimals at the seam (the FatturaPA builder, the GL export), but the
+**stored** representation should be exact first.
+
+## Where to go next
+
+- The layered overview → [`01-overview.md`](./01-overview.md)
+- Auth, RBAC, and SoD details → [`04-security-identity.md`](./04-security-identity.md)
+- The export adapters built on this data → [`05-integrations.md`](./05-integrations.md)
+- What each role may do → [`../roles-and-permissions.md`](../roles-and-permissions.md)
+- Functional overview → [`../functional/00-overview.md`](../functional/00-overview.md)

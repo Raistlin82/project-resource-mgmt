@@ -1,0 +1,35 @@
+# Keep the build context small and reproducible. node_modules and build outputs
+# are regenerated inside the image (npm ci + npx ng build); local caches, VCS
+# metadata, and tooling artifacts never belong in the image.
+
+# Dependencies — reinstalled by `npm ci` in the build stage.
+node_modules
+
+# Build outputs — produced by `npx ng build` in the build stage.
+dist
+.angular
+
+# Local env / secrets — never bake credentials into the image. The app reads
+# configuration from environment variables at runtime (see docker-compose.app.yml).
+.env
+.env.*
+!.env.example
+
+# VCS and editor metadata.
+.git
+.gitignore
+.vscode
+.idea
+
+# Test / tooling artifacts.
+.playwright-mcp
+coverage
+*.log
+npm-debug.log*
+
+# Docs and Docker scaffolding are not needed inside the image.
+docs
+*.md
+Dockerfile
+.dockerignore
+docker-compose*.yml
