@@ -343,6 +343,27 @@ export const vendors = pgTable('vendors', {
   country: text('country'),
 });
 
+// RATE CARDS (Phase E) — role-based DEFAULT cost/bill rates (customizing). A
+// resource's EFFECTIVE rate = its per-resource override (the resources.cost_rate
+// / bill_rate columns, nullable) ?? the matching card here, resolved on read.
+// Keyed by role NAME (the value stored on resources.role) + an OPTIONAL
+// organization NAME (null = applies to all orgs; an org-specific card wins over
+// the generic one) + currency (base currency, EUR — the rate denomination).
+export const rateCards = pgTable(
+  'rate_cards',
+  {
+    id: text('id').primaryKey(),
+    role: text('role').notNull(),
+    organization: text('organization'),
+    currency: text('currency').notNull(),
+    costRate: doublePrecision('cost_rate').notNull(),
+    billRate: doublePrecision('bill_rate').notNull(),
+  },
+  (t) => [
+    index('rate_cards_role_idx').on(t.role),
+  ],
+);
+
 // ---------------------------------------------------------------------------
 // Projects & project sub-resources
 // ---------------------------------------------------------------------------

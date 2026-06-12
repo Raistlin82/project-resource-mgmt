@@ -12,7 +12,7 @@ import type { Entity, Repository } from './db/repository';
 import type { AuditLog, Resource, ResourceRequest, Assignment, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition } from './app/services/staffing.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
-import type { FxRate } from './app/services/api.service';
+import type { FxRate, RateCard } from './app/services/api.service';
 import { maxIdSeq } from './server/id-seq.util';
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
@@ -452,6 +452,9 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
     { test: p => ['/project-financials', '/project-cost-centers', '/cost-centers'].some(prefix => p.startsWith(prefix)), roles: ['finance', 'delivery-executive', 'admin'] },
     // Sensitive financial rates (costRate/billRate) live on resources; restrict who may rewrite them.
     { test: p => p.startsWith('/resources'), roles: ['resource-manager', 'delivery-executive', 'admin'] },
+    // Rate cards (Phase E) define the DEFAULT cost/bill rates — sensitive financial
+    // config. Mutations restricted to the finance-grade roles that own rates.
+    { test: p => p.startsWith('/rate-cards'), roles: ['admin', 'delivery-executive', 'finance'] },
     // Time entries incl. approval. Self-approval is additionally blocked in the PUT handler (SoD).
     { test: p => p.startsWith('/time-entries'), roles: ['employee', 'pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
     { test: p => ['/assignments', '/requests'].some(prefix => p.startsWith(prefix)), roles: ['pm', 'resource-manager', 'delivery-executive', 'admin'] },
@@ -492,6 +495,9 @@ const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   // mappings — both need-to-know. Mirror the resource WRITE sensitivity, plus pm
   // and finance who legitimately read staffing/margin.
   { test: p => p === '/resources' || p.startsWith('/resources/') || p.startsWith('/users'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
+  // Rate cards expose cost rates (margin data): gate reads like /resources so the
+  // resource form's "inherited default" placeholder can load for the staffing roles.
+  { test: p => p === '/rate-cards' || p.startsWith('/rate-cards/'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
   // Resource Schedule: staffing demand + bookings feed the read-only timeline and
   // its date-level conflict detection. Restrict reads to the resourcing roles that
   // own staffing (mirrors the /assignments + /requests WRITE gate), never served
@@ -632,7 +638,11 @@ apiRouter.use((req, res, next) => {
 
 // --- Core resources (custom logic, hardened) --------------------------------
 
-const RESOURCE_FIELDS = ['name', 'role', 'skills', 'projectRoles', 'externalExperience', 'profilePicture', 'resume', 'capacity', 'managerId', 'organization', 'location', 'costRate', 'billRate', 'hireDate', 'terminationDate'] as const;
+// NOTE (Phase E): costRate/billRate are NOT picked from the body — on read they
+// are the RESOLVED effective rate (override ?? rate card). The per-resource
+// OVERRIDE is written via costRateOverride/billRateOverride, which the handlers
+// map onto the cost_rate/bill_rate columns (see applyRateOverrides).
+const RESOURCE_FIELDS = ['name', 'role', 'skills', 'projectRoles', 'externalExperience', 'profilePicture', 'resume', 'capacity', 'managerId', 'organization', 'location', 'hireDate', 'terminationDate'] as const;
 
 /**
  * Repository-backed equivalent of the array `exists()` helper: a value is a
@@ -956,11 +966,68 @@ async function recomputeResourceUtilization(resourceId: string): Promise<void> {
   await repos.resources.update(resourceId, { utilization: clampUtil(utilizationContribution(totalHours, resource.capacity)) });
 }
 
-apiRouter.get('/resources', async (_req, res) => { res.json(await repos.resources.list()); });
+// ---------------------------------------------------------------------------
+// RATE CARDS (Phase E) — effective-rate resolution.
+//
+// A resource's stored cost_rate/bill_rate column is the OPTIONAL per-resource
+// OVERRIDE. The EFFECTIVE rate that margin math consumes (finance.util, billing,
+// match, the GL/e-invoice accrual) = override ?? the matching rate card. We
+// resolve on READ so there is no snapshot to drift: editing a card updates every
+// resource that hasn't overridden. Lookup: same role + base currency (EUR),
+// preferring an org-specific card over the generic (no-org) one.
+// ---------------------------------------------------------------------------
+const RATE_BASE_CURRENCY = 'EUR';
+function pickRateCard(cards: RateCard[], role: string | undefined, organization: string | undefined): RateCard | undefined {
+  if (!role) return undefined;
+  const forRole = cards.filter(c => c.role === role && (c.currency ?? RATE_BASE_CURRENCY) === RATE_BASE_CURRENCY);
+  return forRole.find(c => c.organization && c.organization === organization)
+      ?? forRole.find(c => !c.organization);
+}
+/** Return a resource with EFFECTIVE costRate/billRate plus the raw override fields. */
+function withEffectiveRates(r: Resource, cards: RateCard[]): Resource {
+  const card = pickRateCard(cards, r.role, r.organization);
+  const costOverride = r.costRate ?? null;
+  const billOverride = r.billRate ?? null;
+  return {
+    ...r,
+    costRateOverride: costOverride,
+    billRateOverride: billOverride,
+    costRate: costOverride ?? card?.costRate,
+    billRate: billOverride ?? card?.billRate,
+  };
+}
+/** Resolve effective rates over a resource list (one shared rate-card fetch). */
+async function resolveResourceRates(rows: Resource[]): Promise<Resource[]> {
+  const cards = (await repos.rateCards.list()) as unknown as RateCard[];
+  return rows.map(r => withEffectiveRates(r, cards));
+}
+/**
+ * Map the form's costRateOverride/billRateOverride onto the persisted cost_rate/
+ * bill_rate columns. '' / null / undefined = clear the override (inherit the
+ * card). Returns a 400-suitable error string for a non-numeric/negative override,
+ * else null. Only fields PRESENT in the request body are touched, so partial PUTs
+ * (e.g. a terminationDate-only edit) never disturb the stored rate.
+ */
+function applyRateOverrides(body: Partial<Resource>, reqBody: unknown): string | null {
+  const src = (reqBody ?? {}) as Record<string, unknown>;
+  for (const [field, col] of [['costRateOverride', 'costRate'], ['billRateOverride', 'billRate']] as const) {
+    if (!(field in src)) continue;
+    const v = src[field];
+    if (v === null || v === undefined || v === '') { (body as Record<string, unknown>)[col] = null; continue; }
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) return `${field} must be a non-negative number, or empty to inherit the role's rate card`;
+    (body as Record<string, unknown>)[col] = n;
+  }
+  return null;
+}
+
+apiRouter.get('/resources', async (_req, res) => { res.json(await resolveResourceRates(await repos.resources.list())); });
 apiRouter.get('/users', async (_req, res) => { res.json(await repos.users.list()); });
 apiRouter.get('/resources/:id', async (req, res) => {
   const resource = await repos.resources.get(req.params.id);
-  return resource ? res.json(resource) : res.status(404).json({ error: 'Not found' });
+  if (!resource) { res.status(404).json({ error: 'Not found' }); return; }
+  const [resolved] = await resolveResourceRates([resource]);
+  res.json(resolved);
 });
 // RESOURCE LIFECYCLE (creazione): onboard a new employee. RBAC is already gated to
 // resource-manager/delivery-executive/admin by the existing /resources mutation
@@ -969,6 +1036,10 @@ apiRouter.get('/resources/:id', async (req, res) => {
 // utilization starts at 0 (derived server-side from assignments), id is server-set.
 apiRouter.post('/resources', async (req, res) => {
   const body = pick<Resource>(req.body, RESOURCE_FIELDS);
+  // Phase E: map costRateOverride/billRateOverride onto the cost_rate/bill_rate
+  // columns ('' / absent = inherit the role's rate card on read).
+  const rateErr = applyRateOverrides(body, req.body);
+  if (rateErr) { res.status(400).json({ error: rateErr }); return; }
   if (!(isNonNegNumber(body.capacity) && body.capacity > 0)) {
     res.status(400).json({ error: 'capacity must be a positive number' });
     return;
@@ -1005,12 +1076,18 @@ apiRouter.post('/resources', async (req, res) => {
     utilization: 0,
   } as Resource;
   const created = await repos.resources.create(item);
-  res.status(201).json(created);
+  // Resolve effective rates so the create response matches the GET shape (Phase E).
+  const [resolved] = await resolveResourceRates([created]);
+  res.status(201).json(resolved);
 });
 apiRouter.put('/resources/:id', async (req, res) => {
   const existing = await repos.resources.get(req.params.id);
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   const body = pick<Resource>(req.body, RESOURCE_FIELDS);
+  // Phase E: map any supplied costRateOverride/billRateOverride onto the columns
+  // ('' clears the override → inherit; absent leaves the stored rate untouched).
+  const rateErr = applyRateOverrides(body, req.body);
+  if (rateErr) { res.status(400).json({ error: rateErr }); return; }
   // B-DATA: capacity is a divisor in utilization math; never allow 0/negative/NaN.
   if (body.capacity !== undefined && !(isNonNegNumber(body.capacity) && body.capacity > 0)) {
     res.status(400).json({ error: 'capacity must be a positive number' });
@@ -1044,7 +1121,8 @@ apiRouter.put('/resources/:id', async (req, res) => {
   const catalogErr = await validateResourceCatalogRefs(body);
   if (catalogErr) { res.status(400).json({ error: catalogErr }); return; }
   const updated = await repos.resources.update(req.params.id, body);
-  res.json(updated);
+  const [resolved] = await resolveResourceRates([updated as Resource]);
+  res.json(resolved);
 });
 
 const REQUEST_FIELDS = ['name', 'requiredRole', 'requiredEffort', 'skills', 'description', 'startDate', 'endDate', 'status', 'requesterId', 'projectId'] as const;
@@ -1431,6 +1509,29 @@ crud(apiRouter, 'partner-roles', repos.partnerRoles, ['name']);
 // catalog (the natural key). Optional; an omitted/empty country passes.
 crud(apiRouter, 'vendors', repos.vendors, ['name', 'vatId', 'country'], [], data =>
   validateCatalogValue(data['country'], 'country', countryCodes, 'country (ISO-2 code)'));
+
+// RATE CARDS (Phase E) — role-based default cost/bill rates customizing.
+// REFERENCE-DATA INTEGRITY: `role` -> project-roles (name, required), optional
+// `organization` -> resource-organizations (name), `currency` -> fx-rates
+// (required), `costRate`/`billRate` required non-negative numbers. Reads + writes
+// are sensitive (expose rates) and RBAC-gated like /resources (roleGate + READ_RULES).
+crud(apiRouter, 'rate-cards', repos.rateCards, ['role', 'organization', 'currency', 'costRate', 'billRate'], ['costRate', 'billRate'],
+  async data => {
+    if (!data['role']) return 'role is required (project-role catalog name)';
+    const roleErr = await validateCatalogValue(data['role'], 'role', projectRoleNames, 'project role (catalog name)');
+    if (roleErr) return roleErr;
+    if (data['organization'] !== undefined && data['organization'] !== null && data['organization'] !== '') {
+      const orgErr = await validateCatalogValue(data['organization'], 'organization', resourceOrganizationNames, 'resource organization (catalog name)');
+      if (orgErr) return orgErr;
+    }
+    if (!data['currency']) return 'currency is required';
+    const curErr = await validateCurrency({ currency: data['currency'] });
+    if (curErr) return curErr;
+    if (!Number.isFinite(Number(data['costRate'])) || !Number.isFinite(Number(data['billRate']))) {
+      return 'costRate and billRate are required numbers';
+    }
+    return null;
+  });
 
 const PROJECT_FIELDS = ['name', 'location', 'startDate', 'endDate', 'status', 'description', 'ownerId', 'contractId'] as const;
 apiRouter.get('/projects', async (_req, res) => { res.json(await repos.projects.list()); });
@@ -1914,7 +2015,9 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
  */
 async function accruedTAndM(item: Pick<BillingPlanEntry, 'projectId'>): Promise<number | undefined> {
   if (!item.projectId) return undefined;
-  const [entries, resources] = await Promise.all([repos.timeEntries.list(), repos.resources.list()]);
+  const [entries, rawResources] = await Promise.all([repos.timeEntries.list(), repos.resources.list()]);
+  // Phase E: use EFFECTIVE bill rates (override ?? rate card), not the raw column.
+  const resources = await resolveResourceRates(rawResources);
   const billRateById = new Map(resources.map(r => [r.id, r.billRate ?? 0]));
   let accrued = 0;
   for (const t of entries) {

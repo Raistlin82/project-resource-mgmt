@@ -423,6 +423,7 @@ export class App {
         { label: 'Cost Categories', icon: 'sell', route: '/config/cost-categories', compact: true },
         { label: 'Partner Roles', icon: 'diversity_3', route: '/config/partner-roles', compact: true },
         { label: 'Vendors', icon: 'storefront', route: '/config/vendors', compact: true },
+        { label: 'Rate Cards', icon: 'request_quote', route: '/config/rate-cards', compact: true },
         { label: 'Availability Data', icon: 'event_available', route: '/config/availability', compact: true },
         { label: 'Integrations', icon: 'cable', route: '/config/integrations', compact: true },
       ],
@@ -466,12 +467,15 @@ export class App {
           // The Phase F1 customizing catalogs mirror their route guards
           // (admin/delivery-executive); Integrations mirrors financeGuard.
           const canManageCatalogs = this.auth.hasAnyRole(['admin', 'delivery-executive']);
+          // Rate Cards (Phase E) expose rates — finance-grade roles only.
+          const canManageRateCards = this.auth.hasAnyRole(['admin', 'delivery-executive', 'finance']);
           const catalogRoutes = new Set([
             '/config/locations', '/config/industries', '/config/cost-categories',
             '/config/partner-roles', '/config/vendors',
           ]);
           const items = group.items.filter(item => {
             if (item.route === '/config/integrations') return canFinance;
+            if (item.route === '/config/rate-cards') return canManageRateCards;
             if (catalogRoutes.has(item.route)) return canManageCatalogs;
             return true;
           });
