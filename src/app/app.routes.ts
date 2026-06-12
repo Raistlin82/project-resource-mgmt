@@ -7,6 +7,7 @@ export const routes: Routes = [
   { path: 'profile', title: 'My Profile', loadComponent: () => import('./my-profile/my-profile.component').then(m => m.MyProfileComponent) },
   { path: 'assignments', title: 'My Assignments', loadComponent: () => import('./my-assignments/my-assignments.component').then(m => m.MyAssignmentsComponent) },
   { path: 'requests', title: 'Resource Requests', loadComponent: () => import('./resource-requests/resource-requests.component').then(m => m.ResourceRequestsComponent) },
+  { path: 'resources', title: 'Resources', canMatch: [roleGuard(a => a.hasAnyRole(['resource-manager', 'delivery-executive', 'admin']))], loadComponent: () => import('./resources/resources.component').then(m => m.ResourcesComponent) },
   { path: 'staffing', title: 'Staffing', loadComponent: () => import('./staffing/staffing.component').then(m => m.StaffingComponent) },
   { path: 'schedule', title: 'Schedule', canMatch: [roleGuard(a => a.hasAnyRole(['pm', 'resource-manager', 'delivery-executive', 'admin']))], loadComponent: () => import('./schedule/schedule.component').then(m => m.ScheduleComponent) },
   { path: 'utilization', title: 'Utilization', loadComponent: () => import('./utilization/utilization.component').then(m => m.UtilizationComponent) },

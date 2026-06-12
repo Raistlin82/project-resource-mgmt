@@ -43,6 +43,110 @@ flowchart TD
 
 ## SOPs
 
+### Manage resources / onboard & terminate employees
+
+**Purpose.** Run the full resource (employee) lifecycle from one People screen:
+view the pool, onboard a new employee (assunzione), edit master data, and
+logically terminate a contract (cessazione) — never a hard delete. Active vs
+Terminated is derived from `terminationDate`; a terminated resource can be
+reactivated.
+
+**Scope.**
+- *In:* listing resources with an Active/Terminated badge and an "Active only"
+  filter; creating a resource via `POST /resources` (with required `hireDate`);
+  editing `name`, `role`, `organization`, `location`, `capacity`, `costRate`,
+  `billRate`, `hireDate` via `PUT /resources/:id`; terminating
+  (`PUT /resources/:id` with `terminationDate`) and reactivating
+  (`terminationDate: null`).
+- *Out:* `utilization` (derived server-side from assignments — never sent from
+  this screen), skills/project-roles/experience (the My Profile SOP), a hard
+  `DELETE` (does not exist — termination is logical only), staffing/assignments
+  (separate SOPs).
+
+**RACI.**
+
+| Step | Responsible | Accountable | Consulted | Informed |
+|------|-------------|-------------|-----------|----------|
+| Open Resources screen | resource-manager | resource-manager | — | — |
+| Onboard a new employee | resource-manager | resource-manager | delivery-executive | finance |
+| Edit resource master data | resource-manager | resource-manager | — | — |
+| Terminate a contract | resource-manager | delivery-executive | — | finance |
+| Reactivate a resource | resource-manager | delivery-executive | — | — |
+
+**Process flow.**
+
+```mermaid
+flowchart TD
+  A[Open /resources on authReady] --> B[getResources]
+  B --> C{Action?}
+  C -->|New employee| D[Form incl. hireDate*] --> E[POST /resources<br/>201 created]
+  C -->|Edit| F[Form prefilled] --> G[PUT /resources/:id]
+  C -->|Terminate| H[Confirm + termination date] --> I[PUT /resources/:id<br/>terminationDate set]
+  C -->|Reactivate| J[PUT /resources/:id<br/>terminationDate null]
+  E & G & I & J --> K[Reload list]
+```
+
+**Detailed steps.**
+
+1. **Open the Resources screen.**
+   - **Who:** `resource-manager` / `delivery-executive` / `admin`. **When:**
+     managing the people pool.
+   - **How:** navigate to `/resources` (`ResourcesComponent`). On `authReady` the
+     page loads `getResources()`. The "Active only" toggle (on by default) hides
+     terminated rows; the search box filters by name/role/organization/location.
+   - **Output:** the resource table with an Active / Terminated status badge.
+2. **Onboard a new employee (creazione).**
+   - **Who:** `resource-manager`. **When:** a new hire joins.
+   - **How:** "New employee" → fill name\*, role\*, organization, location,
+     capacity\* (h/wk, positive), costRate, billRate, **hireDate\*** (data di
+     assunzione, required) → `createResource()` → `POST /resources`. The server
+     defaults `utilization: 0`, assigns the `id`, and returns `201` + the record.
+   - **Output:** the new resource appears in the list (Active).
+3. **Edit resource master data (modifica).**
+   - **Who:** `resource-manager`. **How:** the row "Edit" action opens the same
+     form prefilled → `updateResource(id, {...})` → `PUT /resources/:id`.
+     `utilization` is not editable here (derived server-side).
+   - **Output:** persisted changes; the list reloads.
+4. **Terminate a contract (cessazione logica).**
+   - **Who:** `resource-manager` (accountable: `delivery-executive`). **When:** an
+     employee leaves.
+   - **How:** the row "Terminate" action opens a confirm dialog with a date input
+     defaulting to today → `updateResource(id, { terminationDate })`
+     → `PUT /resources/:id`. The row flips to **Terminated** once the date is on
+     or before today. No data is deleted.
+   - **Output:** the resource is logically terminated and hidden under
+     "Active only".
+5. **Reactivate a resource.**
+   - **Who:** `resource-manager`. **How:** on a terminated row, the "Reactivate"
+     action clears the marker → `updateResource(id, { terminationDate: null })`.
+   - **Output:** the resource is Active again.
+
+**Exceptions & edge cases.**
+
+| Situation | System response |
+|-----------|-----------------|
+| `hireDate` missing or not ISO-parseable on create | `400` — `hireDate is required and must be an ISO date string`. |
+| `capacity` 0 / negative / NaN on create or edit | `400` — `capacity must be a positive number` (it is a divisor in utilization math). |
+| `terminationDate` earlier than `hireDate` | `400` — `terminationDate must be on or after hireDate`. |
+| Reactivate (`terminationDate: null` / empty) | Allowed — clears the marker; the resource becomes Active. |
+| Caller lacks the capability | `403` — `/resources` mutations require `resource-manager` / `delivery-executive` / `admin`. |
+| Hard delete of a resource | Not supported — there is no `DELETE /resources/:id`; termination is logical only. |
+| Non-allow-listed field sent in body | Silently dropped — only `RESOURCE_FIELDS` are picked; `utilization` is never client-set on this path. |
+
+**Metrics.**
+
+| Metric | Definition |
+|--------|------------|
+| Active headcount | Count of resources with no `terminationDate` ≤ today. |
+| Attrition | Resources terminated in a period ÷ average headcount. |
+| Onboarding lead time | Days between `hireDate` and first assignment. |
+
+**Related.** [View / maintain My Profile](#view--maintain-my-profile),
+[Match & rank candidates](#match--rank-candidates--assign-a-resource),
+[Monitor Utilization & rebalance](#monitor-utilization--rebalance).
+
+---
+
 ### View / maintain My Profile
 
 **Purpose.** Let an employee keep their own skill inventory, project-role

@@ -369,6 +369,7 @@ export class App {
         { label: 'My Profile', icon: 'person', route: '/profile' },
         { label: 'My Assignments', icon: 'event_note', route: '/assignments' },
         { label: 'Resource Requests', icon: 'assignment', route: '/requests', badge: 'requests' },
+        { label: 'Resources', icon: 'badge', route: '/resources' },
         { label: 'Staffing', icon: 'group_add', route: '/staffing' },
         { label: 'Schedule', icon: 'calendar_view_week', route: '/schedule' },
         { label: 'Approvals', icon: 'fact_check', route: '/approvals' },
@@ -436,10 +437,17 @@ export class App {
     const canCommercial = this.auth.canManageCommercial();
     const canFinance = this.auth.canApproveFinancials();
     const canSchedule = this.auth.hasAnyRole(['pm', 'resource-manager', 'delivery-executive', 'admin']);
+    // Resources (people lifecycle) mirrors its roleGuard — visible only to the
+    // roles that own resource master data (resource-manager/delivery-executive/admin).
+    const canManageResources = this.auth.hasAnyRole(['resource-manager', 'delivery-executive', 'admin']);
     return this.allNavGroups
       .map(group => {
         if (group.label === 'Resource Control') {
-          const items = group.items.filter(item => item.route !== '/schedule' || canSchedule);
+          const items = group.items.filter(item => {
+            if (item.route === '/schedule') return canSchedule;
+            if (item.route === '/resources') return canManageResources;
+            return true;
+          });
           return { label: group.label, items };
         }
         if (group.label === 'Commercial') {

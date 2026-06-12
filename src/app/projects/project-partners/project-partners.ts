@@ -62,8 +62,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                     </span>
                   </td>
                   <td class="px-6 py-4 text-right">
-                    <button type="button" (click)="removePartner(partner)" [attr.aria-label]="'Remove ' + partner.company" [attr.title]="'Remove ' + partner.company" class="text-ink-muted hover:text-accent-text transition-colors">
-                      <mat-icon class="text-sm">more_vert</mat-icon>
+                    <button type="button" (click)="askRemove(partner)" [attr.aria-label]="'Remove ' + partner.company" [attr.title]="'Remove ' + partner.company" class="text-ink-muted hover:text-critical-text transition-colors p-1">
+                      <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                     </button>
                   </td>
                 </tr>
@@ -115,6 +115,26 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               <button type="button" (click)="savePartner()" [disabled]="!partnerForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
                 Invite Partner
               </button>
+            </div>
+          </div>
+        </div>
+      }
+
+      <!-- Remove Partner Confirmation Modal -->
+      @if (removing(); as partner) {
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+             appModal ariaLabelledby="partnerRemoveTitle" (dismiss)="cancelRemove()">
+          <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col">
+            <div class="p-6 text-center">
+              <div class="w-16 h-16 bg-critical-tint ring-1 ring-critical rounded-full flex items-center justify-center mx-auto mb-4">
+                <mat-icon class="text-critical-text text-3xl">warning</mat-icon>
+              </div>
+              <h3 id="partnerRemoveTitle" class="font-display text-lg font-bold text-[var(--cc-ink)] mb-2">Remove Partner</h3>
+              <p class="text-[var(--cc-muted)] text-sm">Are you sure you want to remove <strong class="text-ink">{{ partner.company }}</strong> from this project? This action cannot be undone.</p>
+            </div>
+            <div class="p-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
+              <button type="button" (click)="cancelRemove()" class="command-button secondary">Cancel</button>
+              <button type="button" (click)="confirmRemove()" class="px-4 py-2 bg-critical text-white rounded-lg text-sm font-medium hover:bg-critical-strong transition-colors shadow-sm">Remove</button>
             </div>
           </div>
         </div>
@@ -179,7 +199,23 @@ export class ProjectPartners {
     this.closeForm();
   }
 
-  removePartner(partner: Partner) {
-    this.api.deleteProjectPartner(partner.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.partnersRes.reload());
+  // Remove a partner behind a confirm step (parity with the other delete flows).
+  removing = signal<Partner | null>(null);
+
+  askRemove(partner: Partner) {
+    this.removing.set(partner);
+  }
+
+  cancelRemove() {
+    this.removing.set(null);
+  }
+
+  confirmRemove() {
+    const partner = this.removing();
+    if (!partner) return;
+    this.api.deleteProjectPartner(partner.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => {
+      this.partnersRes.reload();
+      this.removing.set(null);
+    });
   }
 }

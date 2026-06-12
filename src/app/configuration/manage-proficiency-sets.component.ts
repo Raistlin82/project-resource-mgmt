@@ -54,7 +54,7 @@ import { NotificationService } from '../services/notification.service';
                       <label [for]="'levelDesc' + i" class="block text-[10px] font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-1.5">Description</label>
                       <input [id]="'levelDesc' + i" type="text" formControlName="description" class="command-input">
                     </div>
-                    <button type="button" (click)="removeLevel(i)" class="mt-0 sm:mt-6 w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm self-end sm:self-auto">
+                    <button type="button" (click)="removeLevel(i)" [attr.aria-label]="'Remove level ' + (i + 1)" [attr.title]="'Remove level ' + (i + 1)" class="mt-0 sm:mt-6 w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm self-end sm:self-auto">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">remove_circle</mat-icon>
                     </button>
                   </div>

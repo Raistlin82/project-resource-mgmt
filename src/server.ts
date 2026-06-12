@@ -613,7 +613,7 @@ apiRouter.use((req, res, next) => {
 
 // --- Core resources (custom logic, hardened) --------------------------------
 
-const RESOURCE_FIELDS = ['name', 'role', 'skills', 'projectRoles', 'externalExperience', 'profilePicture', 'resume', 'capacity', 'managerId', 'organization', 'location', 'costRate', 'billRate'] as const;
+const RESOURCE_FIELDS = ['name', 'role', 'skills', 'projectRoles', 'externalExperience', 'profilePicture', 'resume', 'capacity', 'managerId', 'organization', 'location', 'costRate', 'billRate', 'hireDate', 'terminationDate'] as const;
 
 /**
  * Repository-backed equivalent of the array `exists()` helper: a value is a
@@ -654,6 +654,40 @@ apiRouter.get('/resources/:id', async (req, res) => {
   const resource = await repos.resources.get(req.params.id);
   return resource ? res.json(resource) : res.status(404).json({ error: 'Not found' });
 });
+// RESOURCE LIFECYCLE (creazione): onboard a new employee. RBAC is already gated to
+// resource-manager/delivery-executive/admin by the existing /resources mutation
+// rule in roleGate. capacity must be a positive number (it is the divisor in the
+// utilization math) and hireDate (data di assunzione) is REQUIRED + ISO-parseable.
+// utilization starts at 0 (derived server-side from assignments), id is server-set.
+apiRouter.post('/resources', async (req, res) => {
+  const body = pick<Resource>(req.body, RESOURCE_FIELDS);
+  if (!(isNonNegNumber(body.capacity) && body.capacity > 0)) {
+    res.status(400).json({ error: 'capacity must be a positive number' });
+    return;
+  }
+  if (!isIsoDateString(body.hireDate)) {
+    res.status(400).json({ error: 'hireDate is required and must be an ISO date string' });
+    return;
+  }
+  if (body.terminationDate !== undefined && body.terminationDate !== null && body.terminationDate !== '') {
+    if (!isIsoDateString(body.terminationDate)) {
+      res.status(400).json({ error: 'terminationDate must be an ISO date string' });
+      return;
+    }
+    if (Date.parse(body.terminationDate) < Date.parse(body.hireDate)) {
+      res.status(400).json({ error: 'terminationDate must be on or after hireDate' });
+      return;
+    }
+  }
+  const item = {
+    skills: [], projectRoles: [], externalExperience: [],
+    ...body,
+    id: newId(),
+    utilization: 0,
+  } as Resource;
+  const created = await repos.resources.create(item);
+  res.status(201).json(created);
+});
 apiRouter.put('/resources/:id', async (req, res) => {
   const existing = await repos.resources.get(req.params.id);
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
@@ -662,6 +696,21 @@ apiRouter.put('/resources/:id', async (req, res) => {
   if (body.capacity !== undefined && !(isNonNegNumber(body.capacity) && body.capacity > 0)) {
     res.status(400).json({ error: 'capacity must be a positive number' });
     return;
+  }
+  // RESOURCE LIFECYCLE (cessazione/modifica): terminationDate is the logical-
+  // deletion marker. Clearing it (null/'') reactivates and is always allowed.
+  // When set, it must be ISO-parseable and on or after the effective hireDate
+  // (the incoming one if hireDate is also being changed, else the stored one).
+  if (body.terminationDate !== undefined && body.terminationDate !== null && body.terminationDate !== '') {
+    if (!isIsoDateString(body.terminationDate)) {
+      res.status(400).json({ error: 'terminationDate must be an ISO date string' });
+      return;
+    }
+    const effectiveHire = body.hireDate ?? existing.hireDate;
+    if (isIsoDateString(effectiveHire) && Date.parse(body.terminationDate) < Date.parse(effectiveHire)) {
+      res.status(400).json({ error: 'terminationDate must be on or after hireDate' });
+      return;
+    }
   }
   const updated = await repos.resources.update(req.params.id, body);
   res.json(updated);
@@ -2066,6 +2115,20 @@ function isFkViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'code' in err
     && (err as { code?: unknown }).code === '23503';
 }
+
+/**
+ * HARDENING: clean JSON 404 for any unmatched /api/* request.
+ *
+ * Registered LAST on the apiRouter (after every real route), so it only fires
+ * when nothing else matched. Without it, an unknown verb/path under /api (e.g.
+ * `POST /api/nonexistent`) fell through this router to the Angular SSR catch-all
+ * below, which crashed rendering with a 500 ("Response body ... locked"). This
+ * keeps the response scoped to /api — real SSR page routes (which never reach
+ * this router) are untouched — and returns a predictable, parseable error shape.
+ */
+apiRouter.use((req, res) => {
+  res.status(404).json({ error: `No API route for ${req.method} ${req.originalUrl}` });
+});
 
 /**
  * API error mapper (Express 5 forwards rejected async-handler promises here).

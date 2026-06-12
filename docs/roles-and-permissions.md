@@ -81,15 +81,25 @@ server, re-evaluate in the browser after `authReady`).
 | `billing` | `commercialGuard` **and** `financeGuard` | intersection → `finance`, `delivery-executive`, `admin` |
 | `config/integrations` | `financeGuard` → `canApproveFinancials()` | `finance`, `delivery-executive`, `admin` |
 | `schedule` | `roleGuard(a => a.hasAnyRole(['pm','resource-manager','delivery-executive','admin']))` | `pm`, `resource-manager`, `delivery-executive`, `admin` |
+| `resources` | `roleGuard(a => a.hasAnyRole(['resource-manager','delivery-executive','admin']))` | `resource-manager`, `delivery-executive`, `admin` |
 | Everything else (dashboard, profile, assignments, requests, staffing, utilization, forecast, what-if, approvals, all `projects/*`, `reporting`, all other `config/*`) | _none_ | open to any signed-in user (UX layer; API still enforces RBAC) |
 
-> The **`schedule`** route (the read-only Resource Schedule timeline) is the only
-> resourcing route with a client guard. It is gated to the staffing roles
-> (`pm`, `resource-manager`, `delivery-executive`, `admin`) — and its nav item
-> appears in the **Resource Control** group only for those roles. No new endpoint
-> backs it: it reads the already-gated `/assignments` plus `/requests` and
-> `/resources` (see [Server endpoint RBAC](#server-endpoint-rbac)), and writes go
-> through the existing `/assignments` mutation rule.
+> The **`schedule`** route (the read-only Resource Schedule timeline) is gated to
+> the staffing roles (`pm`, `resource-manager`, `delivery-executive`, `admin`) —
+> and its nav item appears in the **Resource Control** group only for those roles.
+> No new endpoint backs it: it reads the already-gated `/assignments` plus
+> `/requests` and `/resources` (see [Server endpoint RBAC](#server-endpoint-rbac)),
+> and writes go through the existing `/assignments` mutation rule.
+
+> The **`resources`** route (People management: the resource/employee lifecycle —
+> view, create, edit, and logical termination/reactivation) is gated to the roles
+> that own resource master data (`resource-manager`, `delivery-executive`,
+> `admin`) — matching the existing `/resources` mutation rule — and its nav item
+> appears in the **Resource Control** group only for those roles. It reads the
+> already-gated `/resources` collection and writes through `POST /resources`
+> (create) and `PUT /resources/:id` (edit + terminate via `terminationDate`); both
+> are covered by the existing `/resources` mutation rule. There is no hard
+> `DELETE` for resources — termination is logical only.
 
 > The `billing` route stacks `commercialGuard` **and** `financeGuard`, so a user
 > must satisfy *both* — effectively the `canApproveFinancials` set, since it is a
