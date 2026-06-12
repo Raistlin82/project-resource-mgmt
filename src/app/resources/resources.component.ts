@@ -243,20 +243,20 @@ const REMOTE_LOCATION = 'Remote';
                    Leaving an input empty INHERITS the card; a typed value OVERRIDES it. -->
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label for="res-cost" class="block text-sm font-medium text-ink-secondary mb-1">Cost rate</label>
+                  <label for="res-cost" class="block text-sm font-medium text-ink-secondary mb-1">Cost rate (€/gg)</label>
                   <input id="res-cost" type="number" min="0" step="1" formControlName="costRateOverride" class="command-input"
-                         [placeholder]="inheritedRate() ? ('Inherited: ' + inheritedRate()!.costRate) : 'e.g. 75'">
+                         [placeholder]="inheritedRate() ? ('Inherited: ' + inheritedRate()!.costRate) : 'e.g. 600'">
                 </div>
                 <div>
-                  <label for="res-bill" class="block text-sm font-medium text-ink-secondary mb-1">Bill rate</label>
+                  <label for="res-bill" class="block text-sm font-medium text-ink-secondary mb-1">Bill rate (€/gg)</label>
                   <input id="res-bill" type="number" min="0" step="1" formControlName="billRateOverride" class="command-input"
-                         [placeholder]="inheritedRate() ? ('Inherited: ' + inheritedRate()!.billRate) : 'e.g. 140'">
+                         [placeholder]="inheritedRate() ? ('Inherited: ' + inheritedRate()!.billRate) : 'e.g. 1120'">
                 </div>
               </div>
               @if (inheritedRate(); as ir) {
                 <p class="-mt-2 text-xs text-[var(--cc-muted)]">
                   Leave empty to inherit the <strong class="text-ink-secondary">{{ form.controls.role.value }}</strong>
-                  rate card (cost {{ ir.costRate }} · bill {{ ir.billRate }} {{ ir.currency }}). Enter a value to override.
+                  rate card (cost {{ ir.costRate }} · bill {{ ir.billRate }} {{ ir.currency }}/giorno). Enter a value to override.
                 </p>
               } @else if (form.controls.role.value) {
                 <p class="-mt-2 text-xs text-[var(--cc-muted)]">No rate card for this role — enter cost/bill rates manually, or define one under Configuration → Rate Cards.</p>

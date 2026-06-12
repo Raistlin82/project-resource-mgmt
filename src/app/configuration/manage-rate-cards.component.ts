@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, computed, effect, inject, signal } from '@angular/core';
 import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
@@ -19,11 +19,22 @@ const BASE_CURRENCY = 'EUR';
         <div>
           <div class="command-section-label">Configuration</div>
           <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Rate Cards</h1>
-          <p class="mt-1 text-sm text-[var(--cc-muted)]">Default cost &amp; bill rates per role. A resource inherits the matching card unless it sets a per-resource override; an organization-specific card overrides the generic one.</p>
+          <p class="mt-1 text-sm text-[var(--cc-muted)]">Default cost &amp; bill rates per role, in <strong>€ / giorno</strong>. A resource inherits the matching card unless it sets a per-resource override; an organization-specific card overrides the generic one.</p>
         </div>
         <button (click)="openForm()" class="command-button">
           <mat-icon class="text-sm">add</mat-icon> Add Rate Card
         </button>
+      </div>
+
+      <!-- HYBRID DAY MODEL: rates are per day; this factor converts them to the
+           hourly rate used for margins (timesheets/assignments stay in hours). -->
+      <div class="command-card p-4 flex flex-wrap items-center gap-3">
+        <mat-icon class="text-accent-text">schedule</mat-icon>
+        <span class="text-sm text-ink-secondary">Le tariffe sono <strong>giornaliere</strong>. 1 giornata lavorativa =</span>
+        <input type="number" min="1" max="24" step="0.5" [ngModel]="hoursPerDay()" (ngModelChange)="hoursPerDay.set($event)"
+               class="command-input text-center" style="width:5rem" aria-label="Working hours per day">
+        <span class="text-sm text-ink-secondary">ore (usate per convertire €/giorno → €/ora nei calcoli di margine).</span>
+        <button type="button" (click)="saveHoursPerDay()" [disabled]="!validHoursPerDay()" class="command-button secondary text-sm disabled:opacity-50 disabled:cursor-not-allowed">Salva</button>
       </div>
 
       <div class="command-card overflow-hidden">
@@ -42,8 +53,8 @@ const BASE_CURRENCY = 'EUR';
               <th>Role</th>
               <th>Organization</th>
               <th>Currency</th>
-              <th class="text-right">Cost rate</th>
-              <th class="text-right">Bill rate</th>
+              <th class="text-right">Cost rate (€/gg)</th>
+              <th class="text-right">Bill rate (€/gg)</th>
               <th class="text-right">Actions</th>
             </tr>
           </thead>
@@ -121,12 +132,12 @@ const BASE_CURRENCY = 'EUR';
               </div>
               <div class="grid grid-cols-2 gap-4">
                 <div>
-                  <label for="rc-cost" class="block text-sm font-medium text-ink-secondary mb-1">Cost rate *</label>
-                  <input id="rc-cost" type="number" min="0" step="1" formControlName="costRate" class="command-input" placeholder="e.g. 75">
+                  <label for="rc-cost" class="block text-sm font-medium text-ink-secondary mb-1">Cost rate (€/gg) *</label>
+                  <input id="rc-cost" type="number" min="0" step="1" formControlName="costRate" class="command-input" placeholder="e.g. 600">
                 </div>
                 <div>
-                  <label for="rc-bill" class="block text-sm font-medium text-ink-secondary mb-1">Bill rate *</label>
-                  <input id="rc-bill" type="number" min="0" step="1" formControlName="billRate" class="command-input" placeholder="e.g. 140">
+                  <label for="rc-bill" class="block text-sm font-medium text-ink-secondary mb-1">Bill rate (€/gg) *</label>
+                  <input id="rc-bill" type="number" min="0" step="1" formControlName="billRate" class="command-input" placeholder="e.g. 1120">
                 </div>
               </div>
               @if (duplicateExists()) {
@@ -181,6 +192,23 @@ export class ManageRateCardsComponent {
     const set = new Set<string>([BASE_CURRENCY, ...this.fxRes.value().map(f => f.currency)]);
     return [...set];
   });
+
+  // Hybrid day model: working hours per day (converts €/day → €/hour for margins).
+  hoursPerDay = signal<number | null>(null);
+  validHoursPerDay = computed(() => { const v = this.hoursPerDay(); return v != null && v > 0 && v <= 24; });
+  private hpdRes = rxResource({ stream: () => this.api.getHoursPerDay(), defaultValue: { value: 8 } });
+  constructor() {
+    // Seed the editable field from the persisted setting once it loads.
+    effect(() => { const v = this.hpdRes.value()?.value; if (v != null && this.hoursPerDay() == null) this.hoursPerDay.set(v); });
+  }
+  saveHoursPerDay() {
+    const v = this.hoursPerDay();
+    if (v == null || !this.validHoursPerDay()) return;
+    this.api.setHoursPerDay(v).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => { this.itemsRes.reload(); this.notifications.show('Ore/giorno aggiornate. Le tariffe orarie effettive sono ricalcolate.', 'success'); },
+      error: (e) => this.notifications.show((e as { error?: { error?: string } })?.error?.error || 'Impossibile salvare le ore/giorno.', 'error'),
+    });
+  }
 
   search = signal('');
   filtered = computed(() => {
