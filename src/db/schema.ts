@@ -93,6 +93,12 @@ export const resources = pgTable(
     location: text('location'),
     costRate: doublePrecision('cost_rate'),
     billRate: doublePrecision('bill_rate'),
+    // Resource lifecycle: hireDate (data di assunzione) is required at create
+    // time but the COLUMN is nullable for migration safety (pre-existing rows
+    // predate it). terminationDate (data di cessazione) is the logical-deletion
+    // marker — a resource is Terminated when set to a date <= today, else Active.
+    hireDate: text('hire_date'),
+    terminationDate: text('termination_date'),
   },
   (t) => [
     index('resources_manager_id_idx').on(t.managerId),

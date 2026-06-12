@@ -47,7 +47,7 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
                     <div class="flex-1">
                       <input type="text" [formControlName]="i" placeholder="Cost Center ID" class="command-input font-mono">
                     </div>
-                    <button type="button" (click)="removeCostCenter(i)" class="w-10 h-10 rounded-full bg-surface-muted border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm">
+                    <button type="button" (click)="removeCostCenter(i)" [attr.aria-label]="'Remove cost center ' + (i + 1)" [attr.title]="'Remove cost center ' + (i + 1)" class="w-10 h-10 rounded-full bg-surface-muted border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">remove_circle</mat-icon>
                     </button>
                   </div>

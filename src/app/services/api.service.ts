@@ -19,6 +19,20 @@ export interface Resource {
   location?: string;
   costRate?: number;
   billRate?: number;
+  /**
+   * Date the resource was hired (data di assunzione), ISO 'YYYY-MM-DD'.
+   * REQUIRED at create time (the server rejects a missing/invalid value), but
+   * declared optional here for back-compat with pre-existing seeds/rows that
+   * predate the field.
+   */
+  hireDate?: string;
+  /**
+   * Date the resource's contract was terminated (data di cessazione), ISO
+   * 'YYYY-MM-DD'. Optional. A resource is considered TERMINATED when this is set
+   * to a date on or before today, and ACTIVE otherwise. Logical deletion only —
+   * resources are never hard-deleted; clearing this (null/empty) reactivates.
+   */
+  terminationDate?: string;
 }
 
 export interface ResourceRequest {
@@ -482,6 +496,15 @@ export class ApiService {
     return this.http.get<Resource>(`${this.baseUrl}/resources/${id}`);
   }
 
+  /** Onboard a new employee (creazione). `hireDate` is required server-side. */
+  createResource(data: Partial<Resource>): Observable<Resource> {
+    return this.http.post<Resource>(`${this.baseUrl}/resources`, data);
+  }
+
+  /**
+   * Edit (modifica) or terminate/reactivate (cessazione logica) a resource.
+   * Terminate = set `terminationDate`; reactivate = send `terminationDate: null`.
+   */
   updateResource(id: string, data: Partial<Resource>): Observable<Resource> {
     return this.http.put<Resource>(`${this.baseUrl}/resources/${id}`, data);
   }

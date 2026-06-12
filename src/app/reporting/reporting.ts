@@ -63,7 +63,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
             <option value="quarter">This Quarter</option>
             <option value="year">This Year</option>
           </select>
-          <button (click)="exportReport()" class="command-button w-full sm:w-auto">
+          <button type="button" (click)="exportReport()" class="command-button w-full sm:w-auto">
             <mat-icon class="text-[20px] w-[20px] h-[20px]">download</mat-icon> Export Report
           </button>
         </div>
@@ -310,7 +310,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
                   </td>
                   <td class="px-6 sm:px-8 py-5 text-ink-secondary font-medium">{{ report.lastGenerated }}</td>
                   <td class="px-6 sm:px-8 py-5 text-right">
-                    <button (click)="exportReport()" class="text-accent-text hover:text-accent-strong hover:underline font-semibold text-sm transition-colors opacity-0 group-hover:opacity-100 focus-within:opacity-100 flex items-center justify-end gap-1 ml-auto">
+                    <button type="button" (click)="exportReport()" class="text-accent-text hover:text-accent-strong hover:underline font-semibold text-sm transition-colors opacity-0 group-hover:opacity-100 focus-within:opacity-100 flex items-center justify-end gap-1 ml-auto">
                       Export <mat-icon class="text-[16px] w-[16px] h-[16px]">download</mat-icon>
                     </button>
                   </td>

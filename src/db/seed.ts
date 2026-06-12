@@ -68,13 +68,13 @@ export const resources: Resource[] = [
     skills: [{ name: 'Java', level: 3 }, { name: 'Spring', level: 2 }],
     projectRoles: ['Senior Developer', 'Backend Engineer'],
     externalExperience: [{ projectName: 'E-commerce Migration', company: 'TechCorp', role: 'Java Developer', startDate: '2020-01-01', endDate: '2022-12-31', comment: 'Migrated legacy system to Spring Boot.' }],
-    profilePicture: '', resume: '', utilization: 95, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York, NY', costRate: 75, billRate: 140 },
+    profilePicture: '', resume: '', utilization: 95, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York, NY', costRate: 75, billRate: 140, hireDate: '2019-03-04' },
   { id: '2', name: 'John Miller', role: 'Consultant',
     skills: [{ name: 'Project Management', level: 2 }], projectRoles: ['Business Consultant'],
-    externalExperience: [], profilePicture: '', resume: '', utilization: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London, UK', costRate: 90, billRate: 180 },
+    externalExperience: [], profilePicture: '', resume: '', utilization: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London, UK', costRate: 90, billRate: 180, hireDate: '2021-09-13' },
   { id: '3', name: 'Alice Smith', role: 'Designer',
     skills: [{ name: 'Figma', level: 3 }], projectRoles: ['UX Designer'],
-    externalExperience: [], profilePicture: '', resume: '', utilization: 55, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', costRate: 65, billRate: 120 },
+    externalExperience: [], profilePicture: '', resume: '', utilization: 55, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', costRate: 65, billRate: 120, hireDate: '2023-01-16' },
 ];
 
 export const users: User[] = [
