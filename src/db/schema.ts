@@ -152,6 +152,13 @@ export const assignments = pgTable(
       .references(() => resources.id),
     assignedHours: doublePrecision('assigned_hours').notNull(),
     status: text('status').notNull(),
+    // Resource Schedule (Approach B): explicit booking window + allocation.
+    // All three are NULLABLE and backward-compatible — the schedule util falls
+    // back to the linked request's dates when an assignment carries none of its
+    // own, and allocation defaults to 100% when unset.
+    startDate: text('start_date'),
+    endDate: text('end_date'),
+    allocationPct: doublePrecision('allocation_pct'),
   },
   (t) => [
     index('assignments_request_id_idx').on(t.requestId),

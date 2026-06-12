@@ -148,10 +148,29 @@ interface DimensionMeter {
                     </div>
                     <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0 w-full sm:w-auto">
                       @if (assigningResourceId() === cand.resourceId) {
-                        <div class="flex items-center gap-2 w-full sm:w-auto">
-                          <input type="number" [ngModel]="assignHours()" (ngModelChange)="assignHours.set($event)" class="w-20 px-3 py-2 border border-[var(--cc-line)] rounded-md text-sm font-bold font-mono tabular-nums text-[var(--cc-ink)] placeholder:text-ink-muted bg-surface focus:ring-2 focus:ring-accent/25 focus:border-[var(--cc-primary)] focus:outline-none" min="1" [max]="selectedRequest()?.requiredEffort || 1">
-                          <button (click)="confirmAssign(cand.resourceId)" [disabled]="assigning()" class="command-button flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">Confirm</button>
-                          <button type="button" (click)="cancelAssign()" aria-label="Cancel assignment" title="Cancel assignment" class="command-button secondary"><mat-icon class="text-[20px] w-[20px] h-[20px]">close</mat-icon></button>
+                        <div class="flex flex-col gap-3 w-full sm:w-auto">
+                          <div class="grid grid-cols-2 gap-3">
+                            <label class="command-field">
+                              <span class="command-field-label">Hours</span>
+                              <input type="number" [ngModel]="assignHours()" (ngModelChange)="assignHours.set($event)" class="command-input font-mono tabular-nums" min="1" [max]="selectedRequest()?.requiredEffort || 1">
+                            </label>
+                            <label class="command-field">
+                              <span class="command-field-label">Allocation %</span>
+                              <input type="number" [ngModel]="assignAllocationPct()" (ngModelChange)="assignAllocationPct.set($event)" class="command-input font-mono tabular-nums" min="0" max="100" step="5">
+                            </label>
+                            <label class="command-field">
+                              <span class="command-field-label">Start date</span>
+                              <input type="date" [ngModel]="assignStartDate()" (ngModelChange)="assignStartDate.set($event)" class="command-input font-mono tabular-nums">
+                            </label>
+                            <label class="command-field">
+                              <span class="command-field-label">End date</span>
+                              <input type="date" [ngModel]="assignEndDate()" (ngModelChange)="assignEndDate.set($event)" [min]="assignStartDate() || null" class="command-input font-mono tabular-nums">
+                            </label>
+                          </div>
+                          <div class="flex items-center gap-2">
+                            <button (click)="confirmAssign(cand.resourceId)" [disabled]="assigning()" class="command-button flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">Confirm</button>
+                            <button type="button" (click)="cancelAssign()" aria-label="Cancel assignment" title="Cancel assignment" class="command-button secondary"><mat-icon class="text-[20px] w-[20px] h-[20px]">close</mat-icon></button>
+                          </div>
                         </div>
                       } @else {
                         <button (click)="startAssign(cand.resourceId)" class="command-button secondary w-full sm:w-auto">
@@ -259,6 +278,11 @@ export class StaffingComponent {
   assigningResourceId = signal<string | null>(null);
   assignHours = signal<number>(0);
 
+  /** Booking window + allocation for the new assignment. Default to the selected request's dates / 100% allocation. */
+  assignStartDate = signal<string>('');
+  assignEndDate = signal<string>('');
+  assignAllocationPct = signal<number>(100);
+
   /** True while a createAssignment request is in flight, to block duplicate submits (double-staffing). */
   assigning = signal(false);
 
@@ -359,12 +383,19 @@ export class StaffingComponent {
       this.assigningResourceId.set(resourceId);
       const remaining = req.requiredEffort - (req.staffedEffort || 0);
       this.assignHours.set(remaining > 0 ? remaining : req.requiredEffort);
+      // Seed the booking window from the request; allocation defaults to a full 100%.
+      this.assignStartDate.set(req.startDate ?? '');
+      this.assignEndDate.set(req.endDate ?? '');
+      this.assignAllocationPct.set(100);
     }
   }
 
   cancelAssign() {
     this.assigningResourceId.set(null);
     this.assignHours.set(0);
+    this.assignStartDate.set('');
+    this.assignEndDate.set('');
+    this.assignAllocationPct.set(100);
   }
 
   confirmAssign(resourceId: string) {
@@ -373,11 +404,19 @@ export class StaffingComponent {
     const hours = this.assignHours();
     if (req && hours > 0) {
       this.assigning.set(true);
+      const startDate = this.assignStartDate().trim();
+      const endDate = this.assignEndDate().trim();
+      const allocationPct = this.assignAllocationPct();
       this.api.createAssignment({
         requestId: req.id,
         resourceId: resourceId,
         assignedHours: hours,
-        status: 'hard-booked'
+        status: 'hard-booked',
+        // Carry the booking window + allocation; omit empty dates so the schedule
+        // util falls back to the linked request's dates.
+        ...(startDate ? { startDate } : {}),
+        ...(endDate ? { endDate } : {}),
+        ...(Number.isFinite(allocationPct) ? { allocationPct } : {})
       }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
         next: () => {
           this.assigning.set(false);

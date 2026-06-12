@@ -42,6 +42,12 @@ export interface Assignment {
   resourceId: string;
   assignedHours: number;
   status: string;
+  /** ISO booking start (YYYY-MM-DD). Falls back to the linked request's startDate when absent. */
+  startDate?: string;
+  /** ISO booking end (YYYY-MM-DD). Falls back to the linked request's endDate when absent. */
+  endDate?: string;
+  /** Percentage of the resource's weekly capacity this booking consumes. Defaults to 100. */
+  allocationPct?: number;
 }
 
 export type UserRole = 'employee' | 'pm' | 'resource-manager' | 'delivery-executive' | 'finance' | 'sales' | 'admin';
