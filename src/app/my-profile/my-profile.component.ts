@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, inject, signal, computed } from '@angular/core';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
-import { ApiService, Resource, Assignment, ResourceRequest } from '../services/api.service';
+import { ApiService, Resource, Assignment, ResourceRequest, ProjectRole } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { DecimalPipe } from '@angular/common';
@@ -155,7 +155,15 @@ import { forkJoin, of } from 'rxjs';
           <div class="p-6">
             @if (showAddRole()) {
               <div class="command-card-muted flex gap-4 mb-6 p-4">
-                <input [formControl]="roleInput" placeholder="Role name (e.g. Scrum Master)" class="command-input flex-1">
+                <!-- Project roles are catalog values: choose-then-add from /project-roles
+                     (stored value = role name). Roles already on the profile are filtered
+                     out so they can't be added twice. -->
+                <select [formControl]="roleInput" class="command-select flex-1">
+                  <option value="" disabled>Select a role...</option>
+                  @for (role of addableRoleOptions(); track role.id) {
+                    <option [value]="role.name">{{ role.name }}</option>
+                  }
+                </select>
                 <button (click)="addRole()" [disabled]="!roleInput.value" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save</button>
               </div>
             }
@@ -333,7 +341,25 @@ export class MyProfileComponent {
     defaultValue: { profile: null, assignments: [], requests: [] },
   });
 
+  // Project-role option source: the canonical /project-roles catalog. projectRoles[]
+  // entries are catalog NAMES (Phase A). Open read, but keyed on authReady to mirror
+  // the principal-gated profile read above.
+  private rolesRes = rxResource<ProjectRole[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getProjectRoles() : of<ProjectRole[]>([])),
+    defaultValue: [] as ProjectRole[],
+  });
+  roleOptions = this.rolesRes.value;
+
   profile = computed(() => this.dataRes.value().profile);
+
+  // Roles still available to add: every catalog role not already on the profile.
+  // (Existing projectRoles outside the catalog stay visible as chips and are simply
+  // not re-offered here; this is the choose-then-add list, not an edit-in-place.)
+  addableRoleOptions = computed<ProjectRole[]>(() => {
+    const have = new Set(this.profile()?.projectRoles ?? []);
+    return this.roleOptions().filter(r => !have.has(r.name));
+  });
   myAssignments = computed(() => {
     const id = this.dataRes.value().profile?.id;
     return this.dataRes.value().assignments.filter(a => a.resourceId === id);

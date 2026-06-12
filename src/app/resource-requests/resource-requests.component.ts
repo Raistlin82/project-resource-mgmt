@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, inject, signal, computed } from '@angular/core';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
-import { ApiService, ResourceRequest, Assignment, Resource } from '../services/api.service';
+import { ApiService, ResourceRequest, Assignment, Resource, ProjectRole } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { DecimalPipe } from '@angular/common';
@@ -65,7 +65,18 @@ interface RequestsData {
                 </div>
                 <div class="space-y-1.5">
                   <label for="requiredRole" class="block text-sm font-semibold text-ink-secondary">Required Role <span class="text-critical">*</span></label>
-                  <input id="requiredRole" formControlName="requiredRole" class="command-input">
+                  <select id="requiredRole" formControlName="requiredRole" class="command-select">
+                    <option value="" disabled>Select a role...</option>
+                    @for (role of roleOptions(); track role.id) {
+                      <option [value]="role.name">{{ role.name }}</option>
+                    }
+                    <!-- ORPHAN VALUE: a stored requiredRole not in the catalog (e.g. legacy free
+                         text) stays selectable as a disabled option so editing never wipes it.
+                         requiredRole feeds match-scoring, so preserving the exact value matters. -->
+                    @if (orphanRole(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
                 </div>
                 <div class="space-y-1.5">
                   <label for="requiredEffort" class="block text-sm font-semibold text-ink-secondary">Required Effort (Hours) <span class="text-critical">*</span></label>
@@ -397,6 +408,26 @@ export class ResourceRequestsComponent {
   assignments = computed(() => this.res.value().assignments);
   resources = computed(() => this.res.value().resources);
 
+  // Required-role option source: the canonical /project-roles catalog. Stored value
+  // = name (Phase A), which is what match-scoring compares against. Keyed on
+  // authReady to mirror the principal-gated config reads elsewhere.
+  private rolesRes = rxResource<ProjectRole[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getProjectRoles() : of<ProjectRole[]>([])),
+    defaultValue: [] as ProjectRole[],
+  });
+  roleOptions = this.rolesRes.value;
+
+  // ORPHAN VALUE: when editing a request whose stored requiredRole isn't in the
+  // catalog, expose it so the select still shows it and saving doesn't wipe it.
+  orphanRole = computed<string | null>(() => {
+    const current = this.editingRole();
+    if (!current) return null;
+    return this.roleOptions().some(r => r.name === current) ? null : current;
+  });
+  /** The requiredRole value currently loaded into the form (drives orphan detection). */
+  private editingRole = signal<string>('');
+
   showForm = signal(false);
   editingId = signal<string | null>(null);
   trackingRequestId = signal<string | null>(null);
@@ -472,12 +503,14 @@ export class ResourceRequestsComponent {
 
   openCreateForm() {
     this.editingId.set(null);
+    this.editingRole.set('');
     this.requestForm.reset({ requiredEffort: 0 });
     this.showForm.set(true);
   }
 
   openEditForm(req: ResourceRequest) {
     this.editingId.set(req.id);
+    this.editingRole.set(req.requiredRole ?? '');
     this.requestForm.patchValue({
       name: req.name,
       requiredRole: req.requiredRole,

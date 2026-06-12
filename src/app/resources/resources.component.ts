@@ -10,7 +10,7 @@ import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { of } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Resource } from '../services/api.service';
+import { ApiService, Resource, ProjectRole } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
@@ -155,8 +155,18 @@ function todayIso(): string {
 
               <div>
                 <label for="res-role" class="block text-sm font-medium text-ink-secondary mb-1">Role *</label>
-                <input id="res-role" type="text" formControlName="role" class="command-input" placeholder="e.g. Developer"
-                       [attr.aria-invalid]="invalid('role')">
+                <select id="res-role" formControlName="role" class="command-select"
+                        [attr.aria-invalid]="invalid('role')">
+                  <option value="" disabled>Select a role...</option>
+                  @for (role of roleOptions(); track role.id) {
+                    <option [value]="role.name">{{ role.name }}</option>
+                  }
+                  <!-- ORPHAN VALUE: a stored role not in the catalog stays selectable as a
+                       disabled "(not in catalog)" option so editing never silently wipes it. -->
+                  @if (orphanRole(); as orphan) {
+                    <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                  }
+                </select>
                 @if (invalid('role')) {
                   <p role="alert" class="mt-1 text-xs text-critical-text">Role is required.</p>
                 }
@@ -256,6 +266,27 @@ export class ResourcesComponent {
   });
   resources = this.resourcesRes.value;
 
+  // Role option source: the canonical /project-roles catalog. Stored value = name
+  // (see reference-data-integrity plan, Phase A). Open read but keyed on authReady
+  // to mirror the other gated config reads on this screen.
+  protected readonly rolesRes = rxResource<ProjectRole[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getProjectRoles() : of<ProjectRole[]>([])),
+    defaultValue: [] as ProjectRole[],
+  });
+  roleOptions = this.rolesRes.value;
+
+  // ORPHAN VALUE: when editing a resource whose stored role isn't in the catalog
+  // (e.g. legacy free-text data), expose it so the select can still show it and a
+  // save doesn't silently discard it. null when the current value is a catalog name.
+  orphanRole = computed<string | null>(() => {
+    const current = this.editingRole();
+    if (!current) return null;
+    return this.roleOptions().some(r => r.name === current) ? null : current;
+  });
+  /** The role value currently loaded into the form (drives orphan detection). */
+  private editingRole = signal<string>('');
+
   search = signal('');
   /** "Active only" filter toggle — true by default (terminated rows hidden). */
   activeOnly = signal(true);
@@ -303,6 +334,7 @@ export class ResourcesComponent {
   openForm(r?: Resource) {
     if (r) {
       this.editingId.set(r.id);
+      this.editingRole.set(r.role ?? '');
       this.form.reset({
         name: r.name,
         role: r.role,
@@ -315,6 +347,7 @@ export class ResourcesComponent {
       });
     } else {
       this.editingId.set(null);
+      this.editingRole.set('');
       this.form.reset({ name: '', role: '', organization: '', location: '', capacity: 40, costRate: null, billRate: null, hireDate: '' });
     }
     this.showForm.set(true);

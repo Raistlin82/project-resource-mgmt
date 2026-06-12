@@ -626,6 +626,49 @@ const existsRepo = async <T extends Entity>(repo: Repository<T>, id: unknown): P
   typeof id === 'string' && id.length > 0 && (await repo.get(id)) !== undefined;
 
 /**
+ * REFERENCE-DATA INTEGRITY (Phase A): role fields are FKs to the /project-roles
+ * config catalog by NAME (the stored value; backward-compatible with match-scoring
+ * which compares role strings). Loads the current set of catalog role names.
+ */
+async function projectRoleNames(): Promise<Set<string>> {
+  const roles = await repos.projectRoles.list();
+  return new Set(roles.map(r => r.name));
+}
+
+/**
+ * Validate the role references on a resource/request body against the project-roles
+ * catalog (by name). Returns a 400-suitable error message, or null when valid.
+ *   - `role` / `requiredRole`: when present (non-empty), must be a catalog name.
+ *   - `projectRoles[]`: every entry must be a catalog name.
+ * Omitted/undefined fields pass (so optional fields don't break create/edit), but a
+ * supplied empty `projectRoles: []` is fine (no entries to check). Case-sensitive
+ * match to the stored names, matching the in-app SELECT options.
+ */
+async function validateRoleRefs(
+  body: { role?: unknown; requiredRole?: unknown; projectRoles?: unknown },
+): Promise<string | null> {
+  const names = await projectRoleNames();
+  const roleVal = body.role ?? body.requiredRole;
+  const roleField = body.role !== undefined ? 'role' : 'requiredRole';
+  if (roleVal !== undefined && roleVal !== null && roleVal !== '') {
+    if (typeof roleVal !== 'string' || !names.has(roleVal)) {
+      return `${roleField} must reference an existing project role (catalog name)`;
+    }
+  }
+  if (body.projectRoles !== undefined) {
+    if (!Array.isArray(body.projectRoles)) {
+      return 'projectRoles must be an array of project role names';
+    }
+    for (const pr of body.projectRoles) {
+      if (typeof pr !== 'string' || !names.has(pr)) {
+        return `projectRoles entry "${String(pr)}" must reference an existing project role (catalog name)`;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * B-UTILIZATION: recompute a resource's utilization FROM THE SOURCE OF TRUTH
  * (the sum of its assigned hours across all assignments) rather than mutating a
  * stored counter by deltas. Incremental ±contribution with a per-step
@@ -679,6 +722,9 @@ apiRouter.post('/resources', async (req, res) => {
       return;
     }
   }
+  // REFERENCE-DATA INTEGRITY: role / projectRoles[] must reference the catalog.
+  const roleErr = await validateRoleRefs(body);
+  if (roleErr) { res.status(400).json({ error: roleErr }); return; }
   const item = {
     skills: [], projectRoles: [], externalExperience: [],
     ...body,
@@ -712,6 +758,11 @@ apiRouter.put('/resources/:id', async (req, res) => {
       return;
     }
   }
+  // REFERENCE-DATA INTEGRITY: validate any supplied role / projectRoles[] against
+  // the catalog. Omitted fields pass, so partial edits (e.g. a terminationDate-only
+  // PUT) are never blocked.
+  const roleErr = await validateRoleRefs(body);
+  if (roleErr) { res.status(400).json({ error: roleErr }); return; }
   const updated = await repos.resources.update(req.params.id, body);
   res.json(updated);
 });
@@ -730,6 +781,10 @@ apiRouter.post('/requests', async (req, res) => {
     res.status(400).json({ error: 'requiredEffort must be a positive number' });
     return;
   }
+  // REFERENCE-DATA INTEGRITY: requiredRole must reference the project-roles catalog
+  // by name (the value match-scoring compares against).
+  const roleErr = await validateRoleRefs(body);
+  if (roleErr) { res.status(400).json({ error: roleErr }); return; }
   const newReq = { id: newId(), staffedEffort: 0, ...body, status: 'Not Published' } as ResourceRequest;
   const created = await repos.requests.create(newReq);
   res.json(created);
@@ -749,6 +804,9 @@ apiRouter.put('/requests/:id', async (req, res) => {
     res.status(400).json({ error: `status must be one of: ${CLIENT_REQUEST_STATUSES.join(', ')}` });
     return;
   }
+  // REFERENCE-DATA INTEGRITY: validate any supplied requiredRole against the catalog.
+  const roleErr = await validateRoleRefs(body);
+  if (roleErr) { res.status(400).json({ error: roleErr }); return; }
   const updated = await repos.requests.update(req.params.id, body);
   res.json(updated);
 });
