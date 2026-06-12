@@ -2,16 +2,18 @@ import { ChangeDetectionStrategy, Component, computed, inject, input, signal } f
 import { CurrencyPipe, DatePipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { RouterLink } from '@angular/router';
-import { rxResource } from '@angular/core/rxjs-interop';
+import { rxResource, toSignal } from '@angular/core/rxjs-interop';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { of } from 'rxjs';
 import {
   ApiService,
   Assignment,
+  BASE_CURRENCY,
   BillingPlanItem,
   Contract,
   Customer,
   FinancialItem,
+  FxRate,
   Milestone,
   Order,
   OrderLine,
@@ -607,10 +609,9 @@ interface BillingControlRow {
                     <div>
                       <label for="billingRecurrence" class="block text-sm font-semibold text-ink-secondary mb-1.5">Recurrence *</label>
                       <select id="billingRecurrence" formControlName="recurrence" class="command-select">
-                        <option value="One-off">One-off</option>
-                        <option value="Monthly">Monthly</option>
-                        <option value="Quarterly">Quarterly</option>
-                        <option value="Milestone">Milestone</option>
+                        @for (recurrence of recurrences; track recurrence) {
+                          <option [value]="recurrence">{{ recurrence }}</option>
+                        }
                       </select>
                     </div>
 
@@ -626,7 +627,11 @@ interface BillingControlRow {
 
                     <div>
                       <label for="billingCurrency" class="block text-sm font-semibold text-ink-secondary mb-1.5">Currency *</label>
-                      <input id="billingCurrency" type="text" formControlName="currency" class="command-input">
+                      <select id="billingCurrency" formControlName="currency" class="command-select">
+                        @for (option of currencyOptions(); track option.code) {
+                          <option [value]="option.code" [disabled]="option.orphan">{{ option.label }}</option>
+                        }
+                      </select>
                     </div>
 
                     <div>
@@ -717,6 +722,14 @@ export class ContractDetails {
     defaultValue: [] as BillingPlanItem[],
   });
   private milestonesRes = rxResource({ stream: () => this.api.getMilestones(), defaultValue: [] as Milestone[] });
+  // REFERENCE-DATA INTEGRITY (Phase B): `currency` is a config-value FK to the
+  // configured currency set (fx-rates). Gated on authReady() with the other
+  // principal-gated reads.
+  private fxRatesRes = rxResource<FxRate[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getFxRates() : of<FxRate[]>([])),
+    defaultValue: [] as FxRate[],
+  });
 
   contracts = this.contractsRes.value;
   customers = this.customersRes.value;
@@ -730,6 +743,10 @@ export class ContractDetails {
   timeEntries = this.timeEntriesRes.value;
   billingPlanItems = this.billingPlanRes.value;
   milestones = this.milestonesRes.value;
+  fxRates = this.fxRatesRes.value;
+
+  /** Canonical recurrence enum (matches BillingPlanItem['recurrence'] and billing's RECURRENCES). */
+  readonly recurrences: readonly NonNullable<BillingPlanItem['recurrence']>[] = ['Monthly', 'Quarterly', 'Annual'];
 
   showBillingPlanForm = signal(false);
 
@@ -738,9 +755,31 @@ export class ContractDetails {
     label: new FormControl('', { nonNullable: true, validators: Validators.required }),
     expectedDate: new FormControl('', { nonNullable: true, validators: Validators.required }),
     amount: new FormControl<number | null>(null, { validators: Validators.required }),
-    currency: new FormControl('EUR', { nonNullable: true, validators: Validators.required }),
+    currency: new FormControl(BASE_CURRENCY, { nonNullable: true, validators: Validators.required }),
     recurrence: new FormControl<BillingPlanItem['recurrence']>('Monthly', { nonNullable: true, validators: Validators.required }),
     status: new FormControl<BillingPlanItem['status']>('Planned', { nonNullable: true, validators: Validators.required }),
+  });
+
+  // --- currency options (Phase B) ---
+  private currencyValue = toSignal(this.billingPlanForm.controls.currency.valueChanges, {
+    initialValue: this.billingPlanForm.controls.currency.value,
+  });
+
+  /**
+   * Currency options for the SELECT: configured currency codes from fx-rates
+   * (label = value = code). When creating an expected-billing item the currency
+   * defaults to the parent contract's currency (set in openBillingPlanForm). An
+   * orphan value (not in the configured set) is injected as a disabled
+   * "<code> (not configured)" option so it is never silently dropped.
+   */
+  currencyOptions = computed(() => {
+    const codes = this.fxRates().map(r => r.currency);
+    const options = codes.map(code => ({ code, label: code, orphan: false }));
+    const current = this.currencyValue();
+    if (current && !codes.includes(current)) {
+      options.push({ code: current, label: `${current} (not configured)`, orphan: true });
+    }
+    return options;
   });
 
   contract = computed<Contract | undefined>(() => this.contracts().find(c => c.id === this.id()));

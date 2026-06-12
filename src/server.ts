@@ -636,6 +636,39 @@ async function projectRoleNames(): Promise<Set<string>> {
 }
 
 /**
+ * REFERENCE-DATA INTEGRITY (Phase B): `currency` is a config-value FK to the
+ * /fx-rates catalog (the configured currency set, e.g. EUR/USD/GBP) by code.
+ * Loads the current set of configured currency codes (uppercased to match the
+ * stored rows). The base currency (EUR) is always a member.
+ */
+async function knownCurrencies(): Promise<Set<string>> {
+  const rows = await repos.fxRates.list();
+  return new Set(rows.map(r => String(r.currency).toUpperCase()));
+}
+
+/** True iff `code` is a configured currency (membership in the fx-rates set). */
+async function isKnownCurrency(code: unknown): Promise<boolean> {
+  if (typeof code !== 'string' || code.length === 0) return false;
+  return (await knownCurrencies()).has(code.toUpperCase());
+}
+
+/**
+ * Validate the `currency` field on a contract/order/billing body against the
+ * fx-rates configured currency set. Returns a 400-suitable error message, or
+ * null when valid. An omitted/undefined/empty currency passes (optional paths
+ * — e.g. a PUT that doesn't touch currency — are not blocked); only a SUPPLIED
+ * value is checked, and must be a configured code.
+ */
+async function validateCurrency(body: { currency?: unknown }): Promise<string | null> {
+  const { currency } = body;
+  if (currency === undefined || currency === null || currency === '') return null;
+  if (!(await isKnownCurrency(currency))) {
+    return `currency must be a configured currency (one of ${[...(await knownCurrencies())].sort().join(', ')})`;
+  }
+  return null;
+}
+
+/**
  * Validate the role references on a resource/request body against the project-roles
  * catalog (by name). Returns a 400-suitable error message, or null when valid.
  *   - `role` / `requiredRole`: when present (non-empty), must be a catalog name.
@@ -1274,6 +1307,8 @@ apiRouter.post('/contracts', async (req, res) => {
   if (!(await existsRepo(repos.customers, body.customerId))) { res.status(400).json({ error: 'customerId must reference an existing customer' }); return; }
   const bad = findInvalidNumericField(body, ['totalValue']);
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
+  const curErr = await validateCurrency(body);
+  if (curErr) { res.status(400).json({ error: curErr }); return; }
   const item = { id: newId(), ...body } as ContractEntry;
   const created = await repos.contracts.create(item as unknown as Contract);
   res.json(created);
@@ -1285,6 +1320,8 @@ apiRouter.put('/contracts/:id', async (req, res) => {
   if (body.customerId !== undefined && !(await existsRepo(repos.customers, body.customerId))) { res.status(400).json({ error: 'customerId must reference an existing customer' }); return; }
   const bad = findInvalidNumericField(body, ['totalValue']);
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
+  const curErr = await validateCurrency(body);
+  if (curErr) { res.status(400).json({ error: curErr }); return; }
   const updated = await repos.contracts.update(req.params.id, body as Partial<Contract>);
   res.json(updated);
 });
@@ -1302,6 +1339,8 @@ async function validateOrder(body: Partial<OrderEntry>, current?: OrderEntry): P
   if (body.contractId !== undefined || !current) {
     if (!(await existsRepo(repos.contracts, body.contractId ?? current?.contractId))) return 'contractId must reference an existing contract';
   }
+  const curErr = await validateCurrency(body);
+  if (curErr) return curErr;
   if (type === 'Purchase') {
     if (!(await existsRepo(repos.projectPartners, partnerId))) return 'Purchase orders require an existing partnerId';
   } else if (type === 'Customer') {
@@ -1579,6 +1618,8 @@ apiRouter.post('/billing-plan-items', async (req, res) => {
     res.status(400).json({ error: rule });
     return;
   }
+  const curErr = await validateCurrency(body);
+  if (curErr) { res.status(400).json({ error: curErr }); return; }
   const item = { id: newId(), ...body } as BillingPlanEntry;
   // #14 CAPPED not-to-exceed: reject an overcap amount on create; otherwise apply
   // any cap-breach flag the accrued-T&M check produced before persisting.
@@ -1603,6 +1644,8 @@ apiRouter.put('/billing-plan-items/:id', async (req, res) => {
     res.status(400).json({ error: rule });
     return;
   }
+  const curErr = await validateCurrency(body);
+  if (curErr) { res.status(400).json({ error: curErr }); return; }
 
   // B-CONCURRENCY: serialize the read-merge-write per billing item against the
   // milestone→'Ready' trigger (which also writes this item) AND other concurrent

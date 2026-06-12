@@ -494,7 +494,11 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
               <!-- Currency -->
               <div>
                 <label for="bCurrency" class="block text-sm font-semibold text-ink-secondary mb-1.5">Currency *</label>
-                <input id="bCurrency" type="text" formControlName="currency" class="command-input" placeholder="EUR">
+                <select id="bCurrency" formControlName="currency" class="command-select">
+                  @for (option of currencyOptions(); track option.code) {
+                    <option [value]="option.code" [disabled]="option.orphan">{{ option.label }}</option>
+                  }
+                </select>
               </div>
 
               <!-- Tax -->
@@ -849,7 +853,7 @@ export class Billing {
     progressPct: new FormControl<number | null>(null),
     markupPct: new FormControl<number | null>(null),
     amount: new FormControl<number | null>(null, { validators: [Validators.required, Validators.min(0)] }),
-    currency: new FormControl('EUR', { nonNullable: true, validators: Validators.required }),
+    currency: new FormControl(BASE_CURRENCY, { nonNullable: true, validators: Validators.required }),
     taxRatePct: new FormControl<number>(22, { nonNullable: true }),
     retentionPct: new FormControl<number>(0, { nonNullable: true }),
     paymentTermsDays: new FormControl<number>(30, { nonNullable: true }),
@@ -865,6 +869,27 @@ export class Billing {
     const projectId = this.formProjectId();
     const all = this.milestones();
     return projectId ? all.filter(m => m.projectId === projectId) : all;
+  });
+
+  // --- currency (Phase B): `currency` is a config-value FK to the fx-rates set ---
+  private readonly currencyValue = toSignal(this.form.controls.currency.valueChanges, {
+    initialValue: this.form.controls.currency.value,
+  });
+
+  /**
+   * Currency options: configured currency codes from fx-rates (label = value =
+   * code). An orphan value (the edited item's currency isn't configured) is
+   * injected as a disabled "<code> (not configured)" option so editing never
+   * silently wipes a real value.
+   */
+  readonly currencyOptions = computed(() => {
+    const codes = this.fxRates().map(r => r.currency);
+    const options = codes.map(code => ({ code, label: code, orphan: false }));
+    const current = this.currencyValue();
+    if (current && !codes.includes(current)) {
+      options.push({ code: current, label: `${current} (not configured)`, orphan: true });
+    }
+    return options;
   });
 
   // --- derived rows (master table) ---
@@ -1028,7 +1053,7 @@ export class Billing {
       progressPct: null,
       markupPct: null,
       amount: null,
-      currency: 'EUR',
+      currency: BASE_CURRENCY,
       taxRatePct: 22,
       retentionPct: 0,
       paymentTermsDays: 30,

@@ -24,5 +24,16 @@ Extend the generic `crud()` helper with an optional `fks: {field, repo|domain, r
 - **E — Rate Cards (new config)**: rate-cards entity + table + seed + CRUD + `config/rate-cards` screen + nav (admin/finance/delivery-executive); wire resource effective rates (derive from card by role+org+currency, override allowed) through finance.util; resource form shows derived vs override.
 - **F — New catalogs + remaining binds**: Locations, Cost Categories, Partner Roles, Vendors (entities + screens + nav, gated) and bind `Resource.location`→locations, `financial-plans.category`→cost-categories, `project-partners.role`→partner-roles, `project-partners.company`→vendors, `project-cost-centers.id`→cost-centers, `resource-organizations.costCenters[]`→cost-centers, add the missing `serviceOrganizationId` select, `Resource.organization`→resource-organizations; server-validate all.
 
+## Final field decisions (2026-06-12, user-confirmed)
+- **Industries**: new customizing catalog, pre-seeded with the standard industry list → `Customer.industry`.
+- **Locations = Country + City**: new `countries` catalog + new `cities` catalog (city belongs to a country), cities pre-seeded with the principal Italian cities/comuni and extendable in customizing. `Resource.location` & `Project.location` → City (with its Country); `Customer.country` → Country. (Full ISTAT comuni list can be imported later; seed a representative set now.)
+- **skills[].level**: bound to the proficiency-set levels (not a free number).
+- **ProjectPartner.contact**: stays FREE (external person name, not an internal FK).
+- **Dates**: every date input across the app uses a native calendar date-picker (`<input type="date">`); convert any free-text date field. (Phase G — cross-cutting sweep.)
+- New catalogs total: rate-cards, industries, countries, cities, cost-categories, partner-roles, vendors.
+
+## Phase G — Date pickers
+Sweep all create/edit forms; ensure every date field is an `<input type="date">` (calendar popup), never free text. Validate ISO + sensible ranges server-side where missing.
+
 ## Out of scope / later
 Migrating role storage from name→code (coordinated migration); locations/vendors as full master records (start as simple {id,name} catalogs).
