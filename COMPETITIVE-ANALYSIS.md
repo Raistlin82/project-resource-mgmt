@@ -14,7 +14,7 @@ What is now genuinely operational:
 
 - **Real persistence.** A dual-adapter Repository pattern (`src/db/`) selects Postgres + Drizzle when `DATABASE_URL` is set (31 typed `pgTable`s, FK constraints, indexes, forward migrations, idempotent parent-before-child seeding) and falls back to in-memory otherwise. `GET /storage-status` reports which is live. Dev still defaults to in-memory; Postgres is opt-in.
 - **Real authentication & server-side authorization.** Keycloak OIDC (Authorization Code + PKCE) on the client; the server cryptographically verifies every bearer token against the IdP's JWKS via `jose` (`src/server.ts`). A `roleGate` middleware enforces a server-trusted role (JWT realm role wins; spoofable headers honored only in opt-in dev mode) on both reads and writes. Segregation of Duties (no self-approval) is enforced in three flows on server-pinned principals. An append-only audit trail records actor/role/method/path + before/after deltas.
-- **Forward-looking resourcing.** A tested capacity-forecasting engine (`forecast.util.ts`) produces rolling 8/12-week supply-vs-demand, bench and over-allocation lists, and per-skill gap analysis, surfaced in `forecast.ts`. A fully working **what-if scenario sandbox** (`what-if.ts`) overlays win-deal / hire / slip-project levers and shows side-by-side deltas. A deterministic **resource-match scorer** (`match.util.ts`, weighted 0-100 across skill/proficiency/role/availability/margin) is wired into Staffing.
+- **Forward-looking resourcing.** A tested capacity-forecasting engine (`forecast.util.ts`) produces rolling 8/12-week supply-vs-demand, bench and over-allocation lists, and per-skill gap analysis, surfaced in `forecast.ts`. A fully working **what-if scenario sandbox** (`what-if.ts`) overlays win-deal / hire / slip-project levers and shows side-by-side deltas. A deterministic **resource-match scorer** (`match.util.ts`, weighted 0-100 across skill/proficiency/role/availability/margin) is wired into Staffing. A **date-level resource Schedule** (`/schedule`, `schedule.util.ts`) renders per-resource booking bars on a week timeline with **date-level over-allocation conflict detection** (sweep-line, >100%) and **interactive drag-drop** reschedule / resize / reassign — optimistic, persisted via `PUT /assignments/:id`.
 - **Actioned finance.** `finance.util.ts` (1,600+ lines, unit-tested) delivers dated ASC-606-style **revenue-recognition schedules** (POC / straight-line / as-incurred / deferred-advance) with a **balanced double-entry journal preview**, **AR aging + DSO** (buckets, per-customer, amount-weighted), **customer profitability + concentration (real HHI)**, **margin drill-down + variance alerts**, and **realization / revenue-per-FTE**. All cross-currency rollups normalize to a base currency via a real FX rate table.
 - **Real billing.** Server-side **sequential invoice numbering** under a lock, **batch invoice generation**, a printable invoice artifact, **capped not-to-exceed enforcement** (hard reject + accrual flag), tax/retention modifiers, and a **FatturaPA e-invoice XML** builder.
 - **Approval workflow engine.** Multi-step, amount-threshold (>50k → delivery-executive → finance) sequential routing with per-step role enforcement, SLA stamping, and race-safe locked decisions.
@@ -25,9 +25,8 @@ What is now genuinely operational:
 
 1. **The integration seam produces artifacts, not connections.** GL posting, e-invoice transmission (SDI/PEPPOL), and CRM sync all stop at a downloadable/parked file — no network, credentials, acknowledgement, or reverse-sync. There is **no inbound CRM deal → project** handoff.
 2. **No payments or collections.** Mark-paid is a status flip; there is no payment gateway, partial payments/cash application, dunning, or bank reconciliation.
-3. **No true scheduling Gantt.** Forecasting and conflict detection are aggregate (util > 110%), not per-resource date-level booking bars with drag-and-drop and overlap detection — `Assignment` has no start/end dates.
-4. **No performance-obligation / SSP model.** Recognition is per-billing-line heuristic, the journal is a preview (no posted ledger, no period close), and FX is current-rate-only (no dated rates).
-5. **Greenfield areas remain:** AI/ML matching & anomaly detection, mobile/offline, client/partner portals, SCIM/HRIS sync, multi-entity (legal entity) consolidation, an ad-hoc BI/report builder, GDPR/data-privacy tooling, and equipment/asset tracking.
+3. **No performance-obligation / SSP model.** Recognition is per-billing-line heuristic, the journal is a preview (no posted ledger, no period close), and FX is current-rate-only (no dated rates).
+4. **Greenfield areas remain:** AI/ML matching & anomaly detection, mobile/offline, client/partner portals, SCIM/HRIS sync, multi-entity (legal entity) consolidation, an ad-hoc BI/report builder, GDPR/data-privacy tooling, and equipment/asset tracking.
 
 **Bottom line:** we have crossed the threshold from "tracks what happened" to "tells you what to do" on an enterprise-grade auth + persistence + governance spine. The remaining frontier is **the outside world** — live external integrations, payments, AI, mobile, and portals — plus accounting depth (posted ledgers, performance obligations, dated FX).
 
@@ -58,6 +57,7 @@ The prior §4 roadmap (P0/P1/P2) is largely complete. Status verified in code.
 | BI/data export (CSV/Excel + JSON) | P2 | **Partial** | Hardened `toCsv`/`escapeCsv` wired across reports; JSON export implemented but **not wired** into any UI. |
 | Multi-currency foundation | P2 | **Done (current-rate)** | `fx_rates` table + admin CRUD; `convertToBase` pervasive. No dated/historical rates, no FX gain/loss. |
 | GL/ERP, CRM, e-invoice, BI **adapter seam** (new) | — | **Done (artifacts)** | 4 spec-tested adapters in `src/server/integrations/`, registry, all `connected:false`. |
+| Date-level resource **Schedule + Gantt + drag-drop** (new) | — | **Done** | `/schedule` per-resource timeline (`schedule.component.ts`) + `schedule.util.ts` sweep-line conflict detection + `Assignment` start/end/allocation; drag/resize/reassign + keyboard, optimistic, persisted via `PUT /assignments/:id`. |
 
 ---
 
@@ -67,7 +67,7 @@ Legend — **TS** = Table-stakes. **Have**: yes / partial / no. Updated to verif
 
 | Capability | Market leaders | TS | Have | Note (current state + residual gap) |
 |---|---|:--:|:--:|---|
-| Resource Scheduling & Optimization | Planview, Workday (constraint solvers, AI matching); Wrike | Yes | partial | Deterministic match scorer + forecasting now exist; **no constraint-based auto-assignment or multi-request optimizer**. |
+| Resource Scheduling & Optimization | Planview, Workday (constraint solvers, AI matching); Wrike | Yes | **partial** | Date-level Schedule timeline (booking bars, drag-drop move/resize/reassign, date-level conflict detection) + deterministic match scorer + forecasting. Gap: **no constraint-based auto-assignment or multi-request optimizer**. |
 | Demand Planning & Capacity Forecasting | Kantata, Workday, Forecast, Runn, Smartsheet | Yes | **partial** | Real rolling 8/12-wk supply-vs-demand engine + bench/over-alloc/skill-gap (`forecast.util.ts`). Gap: per-resource **heatmap/calendars**, PTO/ramp, weighted pipeline, longer horizons. |
 | Skills Marketplace & Gig Integration | Kantata (Upwork/Toptal), Workday ML | No | partial | Profiles + skills + proficiency + governed catalog; no marketplace or ML matching. |
 | Revenue Recognition (ASC 606 / IFRS 15) | Certinia, SAP, Oracle, Workday, NetSuite | Yes | **partial** | Dated `recognitionSchedule` (POC/straight-line/as-incurred/deferred) + balanced journal preview. Gap: **no five-step / performance-obligation / SSP allocation**, preview-only (no posted ledger/period close), currency-naive schedule. |
@@ -84,7 +84,7 @@ Legend — **TS** = Table-stakes. **Have**: yes / partial / no. Updated to verif
 | AI & Automation | Predictive matching, risk/cost prediction, anomaly detection, OCR | No | **no** | Match scoring is deterministic (static weights), not ML. No anomaly detection, no learning loop. |
 | Mobile & Offline | iOS/Android, offline sync, push, receipt capture | Yes | **no** | Responsive Tailwind only. SSR with no service worker/PWA/offline. |
 | Enterprise Governance & Compliance | RBAC + hierarchy, residency, 2FA, encryption, ISO 27001 | Yes | **partial** | Real OIDC + server RBAC + SoD + append-only audit + rate limiting + prod auth guard. Gap: **no admin config layer** (hard-coded rules/thresholds), no policy engine, no residency/retention, no e-sign/attestation. |
-| Visual Capacity Planning (Gantt/Timeline) | Float, Runn, Forecast, Resource Guru (drag-drop, conflict detection) | Yes | **partial** | Timeline as charts + colored gap bands + aggregate over-alloc. Gap: **no per-resource swimlanes/booking bars, no drag-drop, no date-level conflict detection** (Assignment has no dates). |
+| Visual Capacity Planning (Gantt/Timeline) | Float, Runn, Forecast, Resource Guru (drag-drop, conflict detection) | Yes | **yes** | `/schedule`: per-resource swimlanes with booking bars sized by window, **drag-drop** move/resize/reassign (+ keyboard), **date-level over-allocation conflict detection** (>100%, peak% badge). Gap: sub-weekly granularity, capacity calendars (PTO/holidays), auto-leveling. |
 | Skills-Based Matching & Gap ID | Kantata, Dayshape, Mosaic (ontology, best-fit, gap analysis) | No | **yes** | Request-level missing-skills + portfolio-level `skillGap` (tested), surfaced in Staffing + Forecast. Gap: no taxonomy/synonym/adjacency credit, gap ignores min-proficiency. |
 | AI-Powered Scheduling | Dayshape (constraint-solving ML), Forecast | No | **no** | Manual + deterministic scoring only. No constraint solver / ML. |
 | Project Portfolio Management | Wrike, Smartsheet, Mosaic, Runn (scoring, conflict, scenarios) | No/Yes | partial | Portfolio analytics + what-if scenarios + alerts. Gap: strategic scoring, cross-project conflict resolution, persisted scenarios. |
@@ -132,18 +132,19 @@ Ordered by enterprise-deal impact. Each is verified as genuinely missing or part
 1. **Live external integrations (vs local artifacts).** GL posting, e-invoice transmission (SDI/PEPPOL), and CRM sync all stop at a file/parked payload (`connected:false`). No network, credentials, chart-of-accounts mapping, acknowledgement/idempotency, retry queue, or reverse-sync. **No inbound CRM deal → auto-provision Contract+Project+billing plan.** _The single biggest commercial gap._
 2. **Payments, cash application & collections/dunning.** Mark-paid is a status flip. No payment gateway, partial payments, remittance/cash matching, dunning levels/reminders/escalation, or bank feed/reconciliation. AR analytics feed no collections action.
 3. **Performance obligations + posted ledger + period close.** No PObj/SSP/allocation model; recognition is per-line heuristic and the journal is preview-only (no posted GL, no period lock, no reversal/catch-up). Recognition schedule is currency-naive.
-4. **True resource-scheduling Gantt + date-level conflict detection.** `Assignment` has no start/end dates, so no per-resource booking bars, drag-and-drop, or overlapping-booking detection — only aggregate util>110% flags.
-5. **AI/ML matching & anomaly detection.** Scoring is static-weight deterministic; alerts are threshold-based. No learning loop, predictive risk/cost, optimal multi-request allocation, or statistical anomaly detection.
-6. **Mobile & offline.** No PWA/service worker/native app/offline time-expense capture. Responsive CSS only.
-7. **Client / partner portals.** Entirely internal; no external/guest auth scope or scoped self-service.
-8. **SCIM 2.0 / HRIS sync.** No provisioning endpoint or connector to populate the people roster, rates, org, capacity.
-9. **Multi-entity (legal entity) consolidation.** Multi-currency exists, but no company/legal-entity model, intercompany, per-entity ledgers, or entity-scoped numbering. FX has no dated rates or gain/loss.
-10. **Ad-hoc BI / report & dashboard builder + custom KPIs.** Dashboards are fixed; no drag-drop builder, saved views, scheduled distribution, JSON/BI feed (JSON export exists but is unwired), or user-defined metrics.
-11. **Active approval governance.** Engine lacks SLA escalation/reminders, delegation/out-of-office, parallel/quorum approval, configurable per-kind/per-project thresholds, and an admin workflow designer.
-12. **GDPR / data privacy.** Zero implementation; append-only audit retains PII indefinitely with no purge path.
-13. **Tamper-evident audit.** Append-only by convention only — no hash-chain/WORM/signing; best-effort writes; coverage limited to `/api` mutations <400 (no auth events).
-14. **Accounting depth tail.** No discount modifiers, multi-jurisdiction tax engine, overhead/G&A burden allocation, EVM (SPI/CPI/burndown), recurring proration/true-up, dated rate cards, or document management (real file upload/versioning).
-15. **Equipment / asset tracking.** Absent (may be intentional for a people-centric PSA).
+4. **AI/ML matching & anomaly detection.** Scoring is static-weight deterministic; alerts are threshold-based. No learning loop, predictive risk/cost, optimal multi-request allocation, or statistical anomaly detection.
+5. **Mobile & offline.** No PWA/service worker/native app/offline time-expense capture. Responsive CSS only.
+6. **Client / partner portals.** Entirely internal; no external/guest auth scope or scoped self-service.
+7. **SCIM 2.0 / HRIS sync.** No provisioning endpoint or connector to populate the people roster, rates, org, capacity.
+8. **Multi-entity (legal entity) consolidation.** Multi-currency exists, but no company/legal-entity model, intercompany, per-entity ledgers, or entity-scoped numbering. FX has no dated rates or gain/loss.
+9. **Ad-hoc BI / report & dashboard builder + custom KPIs.** Dashboards are fixed; no drag-drop builder, saved views, scheduled distribution, JSON/BI feed (JSON export exists but is unwired), or user-defined metrics.
+10. **Active approval governance.** Engine lacks SLA escalation/reminders, delegation/out-of-office, parallel/quorum approval, configurable per-kind/per-project thresholds, and an admin workflow designer.
+11. **GDPR / data privacy.** Zero implementation; append-only audit retains PII indefinitely with no purge path.
+12. **Tamper-evident audit.** Append-only by convention only — no hash-chain/WORM/signing; best-effort writes; coverage limited to `/api` mutations <400 (no auth events).
+13. **Accounting depth tail.** No discount modifiers, multi-jurisdiction tax engine, overhead/G&A burden allocation, EVM (SPI/CPI/burndown), recurring proration/true-up, dated rate cards, or document management (real file upload/versioning).
+14. **Equipment / asset tracking.** Absent (may be intentional for a people-centric PSA).
+
+> **Closed 2026-06-12:** _Date-level resource-scheduling Gantt + conflict detection_ (was the #4 gap) — shipped as the `/schedule` timeline with drag-drop and >100% overlap detection.
 
 ---
 
@@ -151,25 +152,26 @@ Ordered by enterprise-deal impact. Each is verified as genuinely missing or part
 
 Most P0/P1 from the prior plan is done. The new frontier is **the outside world plus accounting depth**.
 
+> ✅ **Done 2026-06-12** — _Date-level scheduling_ (was NOW #4): `/schedule` per-resource Gantt with booking bars, drag-drop move/resize/reassign, and date-level overlap-conflict detection. The scheduling frontier is now at market parity (sans AI/constraint optimization).
+
 ### NOW — connect to reality & take money
 1. **Live GL/ERP posting** behind the existing adapter seam: real connector (REST/OData), chart-of-accounts + dimension mapping, posting acknowledgement + idempotency keys, posted-ledger persistence with period close. _Consumes the journal export we already emit._
 2. **Payments + cash application**: payment gateway, partial payments, remittance matching, mark-paid → cash receipt; then **dunning/collections workflow** on the AR aging we already compute.
 3. **Inbound CRM deal → project handoff**: Closed-Won → auto-provision Contract + Project + billing plan; field mapping; persisted (non-ephemeral) outbox with delivery/retry. _Makes forecasting pipeline real._
-4. **Date-level scheduling**: add start/end to `Assignment`, build a per-resource timeline/Gantt with booking bars + overlap-conflict detection (the core leaders sell).
 
 ### NEXT — accounting depth & governance polish
-5. **Performance-obligation model + SSP allocation + posted journals + period close** (true ASC 606 step 2-4); CR approval triggers revenue/recognition catch-up.
-6. **E-invoice transmission**: SDI/PEC for FatturaPA, digital signature, plus UBL/PEPPOL BIS; credit-memo (TD04) flow.
-7. **Dated multi-currency** (transaction/period-end rates, FX gain/loss) + **legal-entity model** for multi-entity consolidation.
-8. **Active approval governance**: SLA escalation/reminders, delegation, parallel/quorum, configurable thresholds, designer UI; admin-configurable RBAC/SoD matrix.
-9. **Tamper-evident audit** (hash-chain/WORM, guaranteed writes, auth-event coverage) + GDPR tooling (DSAR/erasure/retention) — paired since erasure complicates append-only audit.
+4. **Performance-obligation model + SSP allocation + posted journals + period close** (true ASC 606 step 2-4); CR approval triggers revenue/recognition catch-up.
+5. **E-invoice transmission**: SDI/PEC for FatturaPA, digital signature, plus UBL/PEPPOL BIS; credit-memo (TD04) flow.
+6. **Dated multi-currency** (transaction/period-end rates, FX gain/loss) + **legal-entity model** for multi-entity consolidation.
+7. **Active approval governance**: SLA escalation/reminders, delegation, parallel/quorum, configurable thresholds, designer UI; admin-configurable RBAC/SoD matrix.
+8. **Tamper-evident audit** (hash-chain/WORM, guaranteed writes, auth-event coverage) + GDPR tooling (DSAR/erasure/retention) — paired since erasure complicates append-only audit.
 
 ### LATER — breadth, intelligence & reach
-10. **AI/ML**: predictive match learning loop, anomaly/early-warning detection, probability-weighted pipeline.
-11. **Mobile/offline PWA** (offline time/expense + sync queue) — gates field-services segment.
-12. **Client/partner portals** (scoped self-service, white-label, external auth scope).
-13. **SCIM 2.0 / HRIS sync**; **ad-hoc BI/report builder + custom KPIs + scheduled distribution + JSON/BI feed**; per-resource realization & rate-card library.
-14. **Accounting tail**: discount modifiers, multi-jurisdiction tax engine, overhead/burden allocation, EVM (SPI/CPI/burndown), recurring proration/true-up, document management.
+9. **AI/ML**: predictive match learning loop, anomaly/early-warning detection, probability-weighted pipeline; **constraint-based auto-scheduling** (the remaining scheduling frontier).
+10. **Mobile/offline PWA** (offline time/expense + sync queue) — gates field-services segment.
+11. **Client/partner portals** (scoped self-service, white-label, external auth scope).
+12. **SCIM 2.0 / HRIS sync**; **ad-hoc BI/report builder + custom KPIs + scheduled distribution + JSON/BI feed**; per-resource realization & rate-card library.
+13. **Accounting tail**: discount modifiers, multi-jurisdiction tax engine, overhead/burden allocation, EVM (SPI/CPI/burndown), recurring proration/true-up, document management.
 
 ### Guiding principle (revised)
 The "pure derivation over data we hold" era is **largely banked** — forecasting, AR aging, match scoring, rev-rec schedules, margin drill-down, what-if, approvals, and real auth/persistence all shipped. The remaining value is **structural and outward-facing**: live connectors, money movement, and accounting-grade ledgers. Sequence the external-integration long poles deliberately, because each (ERP posting, payments, e-invoice transmission, CRM ingestion) carries credentials, compliance, and reverse-sync complexity that the local-artifact seam deliberately deferred. This path moves us from "system of decision" to **"system of execution"** — acting in the customer's real financial and operational systems.
