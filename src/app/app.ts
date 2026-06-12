@@ -10,10 +10,10 @@ import {
   viewChild,
 } from '@angular/core';
 import { NavigationEnd, Router, RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
-import { MatIconModule } from '@angular/material/icon';
+import { MatIconModule, MatIconRegistry } from '@angular/material/icon';
 import { rxResource, toSignal } from '@angular/core/rxjs-interop';
 import { forkJoin, of } from 'rxjs';
-import { filter, map } from 'rxjs/operators';
+import { catchError, filter, map } from 'rxjs/operators';
 import {
   ApiService,
   ChangeRequest,
@@ -103,7 +103,7 @@ interface NavState {
                 Delivery Control
                 <span class="inline-block size-1.5 rounded-full bg-accent"></span>
               </div>
-              <div class="mt-1 text-xs text-ink-muted">PMO cockpit · Keycloak-ready RBAC</div>
+              <div class="mt-1 text-xs text-ink-muted">Professional Services Automation</div>
             </div>
           </div>
           <div class="mt-4 grid grid-cols-4 gap-2 text-center">
@@ -298,6 +298,12 @@ export class App {
   readonly isDark = computed(() => this.theme.theme() === 'dark');
 
   constructor() {
+    // Ensure EVERY <mat-icon> uses the Material Icons ligature font. Without a
+    // registered default font set, some mat-icon instances render the ligature
+    // source text (e.g. "insights"/"add") instead of the glyph. SSR-safe (no DOM).
+    const iconRegistry = inject(MatIconRegistry);
+    iconRegistry.setDefaultFontSetClass('material-icons', 'mat-ligature-font');
+
     // Browser-only (afterNextRender never runs on the server) global ⌘K / Ctrl+K
     // shortcut that focuses the nav search input, making the kbd hint honest.
     afterNextRender(() => {
@@ -313,6 +319,14 @@ export class App {
       };
       document.addEventListener('keydown', handler);
       this.destroyRef.onDestroy(() => document.removeEventListener('keydown', handler));
+
+      // On every navigation, reset the content pane to the top so each screen
+      // opens at its start (the content scrolls inside <main>, not the window,
+      // so router scroll-restoration wouldn't reach it).
+      const navSub = this.router.events
+        .pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd))
+        .subscribe(() => document.getElementById('main-content')?.scrollTo({ top: 0, left: 0 }));
+      this.destroyRef.onDestroy(() => navSub.unsubscribe());
     });
   }
 
@@ -429,7 +443,13 @@ export class App {
             issues: this.api.getProjectIssues(),
             changes: this.api.getChangeRequests(),
             resources: this.api.getResources(),
-          })
+          }).pipe(
+            // Resilience: a failure of the badge-data endpoints (e.g. a transient
+            // 401/403 or outage) must NOT throw out of the resource value — that
+            // would break change detection for the whole shell and freeze the nav.
+            // Degrade gracefully to empty badges; the navigation stays fully usable.
+            catchError(() => of<NavState>({ requests: [], issues: [], changes: [], resources: [] })),
+          )
         : of<NavState>({ requests: [], issues: [], changes: [], resources: [] }),
     defaultValue: { requests: [], issues: [], changes: [], resources: [] },
   });

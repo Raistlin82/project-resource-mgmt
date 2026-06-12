@@ -1730,6 +1730,11 @@ apiRouter.get('/audit-logs', async (req, res) => {
 apiRouter.get('/storage-status', (_req, res) => res.json({
   provider: process.env['DATABASE_URL'] ? 'postgresql' : 'memory',
   persistent: Boolean(process.env['DATABASE_URL']),
+  // Header-trust is on ONLY in local/dev. When true, the SPA may bootstrap a demo
+  // admin identity (without a running Keycloak) so the in-memory app is fully
+  // usable for testing. In production this is false → the SPA stays anonymous and
+  // the server still ignores any client-set role header.
+  demoMode: trustHeaders,
 }));
 
 // --- Integrations (local-artifact adapters: implemented, NOT connected) ------

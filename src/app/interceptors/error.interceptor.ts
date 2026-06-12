@@ -28,9 +28,10 @@ export const errorInterceptor: HttpInterceptorFn = (req, next) => {
 
   const ownApiRequest = isOwnApiRequest(req.url);
 
+  const auth = ownApiRequest ? inject(AuthService) : null;
+
   let outgoing = req;
-  if (ownApiRequest) {
-    const auth = inject(AuthService);
+  if (ownApiRequest && auth) {
     outgoing = req.clone({
       setHeaders: {
         'X-User-Id': auth.userId(),
@@ -41,9 +42,19 @@ export const errorInterceptor: HttpInterceptorFn = (req, next) => {
 
   return next(outgoing).pipe(
     catchError((error: HttpErrorResponse) => {
-      // Swallow the toast for transient auth-state transitions: a 401 on our own
-      // /api requests. Still rethrow so callers/resources can react.
-      if (ownApiRequest && error.status === 401) {
+      // Cross-origin connection failure (status 0) — e.g. the Keycloak OIDC
+      // discovery/token endpoints when the identity provider is unreachable. Not
+      // user-actionable (the app falls back to its demo/anonymous state), so it
+      // must not raise a raw "...: 0 undefined" error toast.
+      if (!ownApiRequest && error.status === 0) {
+        return throwError(() => error);
+      }
+      // Auth-state transitions on our own /api are expected and self-healing: a
+      // 401 (OIDC bootstrap / anonymous), or a 403 while NOT authenticated (an
+      // anonymous user hitting a role-gated read). rxResources fall back to empty
+      // defaults — don't toast. A 403 for an AUTHENTICATED user is a genuine
+      // "not allowed" and is still toasted below.
+      if (ownApiRequest && (error.status === 401 || (error.status === 403 && !auth?.isAuthenticated()))) {
         return throwError(() => error);
       }
 
