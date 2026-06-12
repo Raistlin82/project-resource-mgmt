@@ -307,19 +307,22 @@ export class Orders {
     return options;
   });
 
-  /**
-   * Default an order's currency to its parent contract's currency when a contract
-   * is selected (an order is a child of a contract), falling back to the base
-   * currency. Only steers the default while the form is untouched by the user, so
-   * a manual currency choice is never overwritten.
-   */
-  private readonly contractCurrencyDefault = effect(() => {
-    const contractId = this.selectedContractId();
-    const ctrl = this.orderForm.controls.currency;
-    if (ctrl.dirty) return;
-    const next = (contractId && this.contractCurrencyById().get(contractId)) || BASE_CURRENCY;
-    if (ctrl.value !== next) ctrl.setValue(next);
-  });
+  constructor() {
+    /**
+     * Default an order's currency to its parent contract's currency when a contract
+     * is selected (an order is a child of a contract), falling back to the base
+     * currency. Only steers the default while the form is untouched by the user, so
+     * a manual currency choice is never overwritten. Registered as a bare effect()
+     * (run for its side-effect) rather than an unused private field.
+     */
+    effect(() => {
+      const contractId = this.selectedContractId();
+      const ctrl = this.orderForm.controls.currency;
+      if (ctrl.dirty) return;
+      const next = (contractId && this.contractCurrencyById().get(contractId)) || BASE_CURRENCY;
+      if (ctrl.value !== next) ctrl.setValue(next);
+    });
+  }
 
   contractName(id: string): string {
     return this.contractsById().get(id) ?? id;

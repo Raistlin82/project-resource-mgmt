@@ -702,6 +702,82 @@ async function validateRoleRefs(
 }
 
 /**
+ * REFERENCE-DATA INTEGRITY (Phase C): skill references are FKs to the /skills
+ * catalog by NAME (the stored value on requests and resources). Loads the current
+ * set of catalog skill names. Mirrors `projectRoleNames`.
+ */
+async function skillNames(): Promise<Set<string>> {
+  const skills = await repos.skills.list();
+  return new Set(skills.map(s => s.name));
+}
+
+/**
+ * REFERENCE-DATA INTEGRITY (Phase C): a skill LEVEL is a config-value FK to the
+ * proficiency-set levels (the configured proficiency scale), keyed by the level
+ * NUMBER. Loads the set of valid level numbers across all proficiency sets so a
+ * level coming from any configured set is accepted. Empty when no set defines
+ * levels (in which case level validation is skipped to avoid blocking).
+ */
+async function proficiencyLevelNumbers(): Promise<Set<number>> {
+  const sets = await repos.proficiencySets.list();
+  const levels = new Set<number>();
+  for (const set of sets) {
+    for (const lvl of set.levels ?? []) {
+      if (typeof lvl.level === 'number' && Number.isFinite(lvl.level)) levels.add(lvl.level);
+    }
+  }
+  return levels;
+}
+
+/**
+ * Validate the `skills` field on a resource/request body against the /skills
+ * catalog (by name) and, for resources, the proficiency-set levels (by number).
+ * Returns a 400-suitable error message naming the offending value, or null when
+ * valid. Two shapes are accepted because the two entities store skills differently:
+ *   - REQUEST  `skills: string[]`                  -> every entry must be a catalog name.
+ *   - RESOURCE `skills: {name, level}[]`           -> every name must be a catalog
+ *     name AND every level must be a configured proficiency level number.
+ * Omitted/undefined `skills` passes (so partial edits never break), and an empty
+ * array is fine (no entries to check). Case-sensitive match to the stored names,
+ * matching the in-app SELECT options. Level checking is skipped when no proficiency
+ * set defines any levels.
+ */
+async function validateSkillRefs(
+  body: { skills?: unknown },
+  shape: 'names' | 'objects',
+): Promise<string | null> {
+  if (body.skills === undefined) return null;
+  if (!Array.isArray(body.skills)) {
+    return 'skills must be an array';
+  }
+  const names = await skillNames();
+  if (shape === 'names') {
+    for (const s of body.skills) {
+      if (typeof s !== 'string' || !names.has(s)) {
+        return `skills entry "${String(s)}" must reference an existing skill (catalog name)`;
+      }
+    }
+    return null;
+  }
+  // shape === 'objects' (resource skills): {name, level}
+  const levels = await proficiencyLevelNumbers();
+  for (const s of body.skills) {
+    if (!s || typeof s !== 'object') {
+      return 'each skill must be an object with a name and level';
+    }
+    const { name, level } = s as { name?: unknown; level?: unknown };
+    if (typeof name !== 'string' || !names.has(name)) {
+      return `skill "${String(name)}" must reference an existing skill (catalog name)`;
+    }
+    // Only enforce level membership when the proficiency scale defines levels.
+    if (levels.size > 0 && !(typeof level === 'number' && levels.has(level))) {
+      return `skill "${name}" level ${String(level)} must be a valid proficiency level (one of ${[...levels].sort((a, b) => a - b).join(', ')})`;
+    }
+  }
+  return null;
+}
+
+/**
  * B-UTILIZATION: recompute a resource's utilization FROM THE SOURCE OF TRUTH
  * (the sum of its assigned hours across all assignments) rather than mutating a
  * stored counter by deltas. Incremental ±contribution with a per-step
@@ -758,6 +834,10 @@ apiRouter.post('/resources', async (req, res) => {
   // REFERENCE-DATA INTEGRITY: role / projectRoles[] must reference the catalog.
   const roleErr = await validateRoleRefs(body);
   if (roleErr) { res.status(400).json({ error: roleErr }); return; }
+  // REFERENCE-DATA INTEGRITY (Phase C): skills[].name must be a catalog skill and
+  // skills[].level must be a configured proficiency level.
+  const skillErr = await validateSkillRefs(body, 'objects');
+  if (skillErr) { res.status(400).json({ error: skillErr }); return; }
   const item = {
     skills: [], projectRoles: [], externalExperience: [],
     ...body,
@@ -796,6 +876,10 @@ apiRouter.put('/resources/:id', async (req, res) => {
   // PUT) are never blocked.
   const roleErr = await validateRoleRefs(body);
   if (roleErr) { res.status(400).json({ error: roleErr }); return; }
+  // REFERENCE-DATA INTEGRITY (Phase C): validate any supplied skills[] against the
+  // catalog (name) + proficiency-set levels (level). Omitted passes.
+  const skillErr = await validateSkillRefs(body, 'objects');
+  if (skillErr) { res.status(400).json({ error: skillErr }); return; }
   const updated = await repos.resources.update(req.params.id, body);
   res.json(updated);
 });
@@ -818,6 +902,9 @@ apiRouter.post('/requests', async (req, res) => {
   // by name (the value match-scoring compares against).
   const roleErr = await validateRoleRefs(body);
   if (roleErr) { res.status(400).json({ error: roleErr }); return; }
+  // REFERENCE-DATA INTEGRITY (Phase C): every skills[] entry must be a catalog skill name.
+  const skillErr = await validateSkillRefs(body, 'names');
+  if (skillErr) { res.status(400).json({ error: skillErr }); return; }
   const newReq = { id: newId(), staffedEffort: 0, ...body, status: 'Not Published' } as ResourceRequest;
   const created = await repos.requests.create(newReq);
   res.json(created);
@@ -840,6 +927,9 @@ apiRouter.put('/requests/:id', async (req, res) => {
   // REFERENCE-DATA INTEGRITY: validate any supplied requiredRole against the catalog.
   const roleErr = await validateRoleRefs(body);
   if (roleErr) { res.status(400).json({ error: roleErr }); return; }
+  // REFERENCE-DATA INTEGRITY (Phase C): validate any supplied skills[] against the catalog.
+  const skillErr = await validateSkillRefs(body, 'names');
+  if (skillErr) { res.status(400).json({ error: skillErr }); return; }
   const updated = await repos.requests.update(req.params.id, body);
   res.json(updated);
 });

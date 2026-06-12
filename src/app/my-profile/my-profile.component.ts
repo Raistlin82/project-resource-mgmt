@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, inject, signal, computed } from '@angular/core';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
-import { ApiService, Resource, Assignment, ResourceRequest, ProjectRole } from '../services/api.service';
+import { ApiService, Resource, Assignment, ResourceRequest, ProjectRole, Skill, ProficiencySet } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { DecimalPipe } from '@angular/common';
@@ -109,11 +109,23 @@ import { forkJoin, of } from 'rxjs';
           <div class="p-6 sm:p-8">
             @if (showAddSkill()) {
               <form [formGroup]="skillForm" (ngSubmit)="addSkill()" class="command-card-muted flex flex-col sm:flex-row gap-4 mb-8 p-5">
-                <input formControlName="name" placeholder="Skill name (e.g. Angular)" class="command-input flex-1">
+                <!-- Skill NAME is a catalog value, never free text: select from /skills
+                     (stored value = skill name). Skills already on the profile are filtered
+                     out so they can't be added twice. -->
+                <select formControlName="name" class="command-select flex-1">
+                  <option value="" disabled>Select a skill...</option>
+                  @for (skill of addableSkillOptions(); track skill.id) {
+                    <option [value]="skill.name">{{ skill.name }}</option>
+                  }
+                </select>
+                <!-- Skill LEVEL is bound to the proficiency-set levels (label = level name
+                     e.g. Beginner/Intermediate/Advanced/Expert, value = level number), not a
+                     hardcoded 1/2/3 list. -->
                 <select formControlName="level" class="command-select w-auto">
-                  <option [value]="1">Beginner (1)</option>
-                  <option [value]="2">Intermediate (2)</option>
-                  <option [value]="3">Expert (3)</option>
+                  <option [ngValue]="null" disabled>Select a level...</option>
+                  @for (lvl of levelOptions(); track lvl.level) {
+                    <option [ngValue]="lvl.level">{{ lvl.name }} ({{ lvl.level }})</option>
+                  }
                 </select>
                 <button type="submit" [disabled]="!skillForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
                   Save
@@ -351,6 +363,31 @@ export class MyProfileComponent {
   });
   roleOptions = this.rolesRes.value;
 
+  // Skill option source (Phase C): the canonical /skills catalog. A profile skill's
+  // `name` is a catalog NAME; the add-skill picker offers these names. Keyed on
+  // authReady to mirror the principal-gated reads above.
+  private skillsRes = rxResource<Skill[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getSkills() : of<Skill[]>([])),
+    defaultValue: [] as Skill[],
+  });
+  skillOptions = this.skillsRes.value;
+
+  // Proficiency-set source (Phase C): a skill LEVEL is bound to the proficiency-set
+  // levels (label = level name, value = level number) instead of a hardcoded 1/2/3.
+  private proficiencyRes = rxResource<ProficiencySet[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getProficiencySets() : of<ProficiencySet[]>([])),
+    defaultValue: [] as ProficiencySet[],
+  });
+  // Level options come from the default (first) proficiency set's levels, sorted by
+  // ascending level number. Empty until the set loads.
+  levelOptions = computed(() => {
+    const sets = this.proficiencyRes.value();
+    const levels = sets[0]?.levels ?? [];
+    return [...levels].sort((a, b) => a.level - b.level);
+  });
+
   profile = computed(() => this.dataRes.value().profile);
 
   // Roles still available to add: every catalog role not already on the profile.
@@ -359,6 +396,14 @@ export class MyProfileComponent {
   addableRoleOptions = computed<ProjectRole[]>(() => {
     const have = new Set(this.profile()?.projectRoles ?? []);
     return this.roleOptions().filter(r => !have.has(r.name));
+  });
+
+  // Skills still available to add: every catalog skill not already on the profile.
+  // (Existing skills outside the catalog stay visible as chips and are simply not
+  // re-offered here; this is the choose-then-add list, not an edit-in-place.)
+  addableSkillOptions = computed<Skill[]>(() => {
+    const have = new Set((this.profile()?.skills ?? []).map(s => s.name));
+    return this.skillOptions().filter(s => !have.has(s.name));
   });
   myAssignments = computed(() => {
     const id = this.dataRes.value().profile?.id;
@@ -372,7 +417,7 @@ export class MyProfileComponent {
 
   skillForm = new FormGroup({
     name: new FormControl('', Validators.required),
-    level: new FormControl(1, Validators.required)
+    level: new FormControl<number | null>(null, Validators.required)
   });
 
   roleInput = new FormControl('', Validators.required);
@@ -435,7 +480,7 @@ export class MyProfileComponent {
       const updatedSkills = [...currentProfile.skills, newSkill];
       this.api.updateResource(currentProfile.id, { skills: updatedSkills }).subscribe(() => {
         this.dataRes.reload();
-        this.skillForm.reset({ level: 1 });
+        this.skillForm.reset({ name: '', level: null });
         this.showAddSkill.set(false);
       });
     }
