@@ -154,9 +154,24 @@ export const skills: Skill[] = [
   { id: '2', conceptUri: 'sap-rm://skill/2', name: 'JavaScript', description: 'JS programming', catalogs: ['1'], proficiencySetId: '1', restricted: false },
 ];
 
+// CANONICAL ROLE CATALOG (reference-data integrity, Phase A). The stored value
+// on resources/requests is the role NAME (backward-compatible with match-scoring
+// which compares role strings), so this catalog MUST cover every role value used
+// by the seeded resources (`role` + `projectRoles[]`) and requests (`requiredRole`):
+//   - resources.role:         Developer, Consultant, Designer
+//   - resources.projectRoles: Senior Developer, Backend Engineer, Business Consultant, UX Designer
+//   - requests.requiredRole:  Developer, Designer, Consultant
+// The original DEV/PM rows are kept; the rest are added so existing data stay
+// valid SELECT options and never get silently discarded on edit.
 export const projectRoles: ProjectRole[] = [
   { id: '1', code: 'DEV', name: 'Developer', description: 'Software Developer', restricted: false },
   { id: '2', code: 'PM', name: 'Project Manager', description: 'Project Manager', restricted: false },
+  { id: '3', code: 'SR_DEV', name: 'Senior Developer', description: 'Senior Software Developer', restricted: false },
+  { id: '4', code: 'BE_ENG', name: 'Backend Engineer', description: 'Backend Engineer', restricted: false },
+  { id: '5', code: 'CONS', name: 'Consultant', description: 'Consultant', restricted: false },
+  { id: '6', code: 'BIZ_CONS', name: 'Business Consultant', description: 'Business Consultant', restricted: false },
+  { id: '7', code: 'DESIGN', name: 'Designer', description: 'Designer', restricted: false },
+  { id: '8', code: 'UX_DESIGN', name: 'UX Designer', description: 'UX Designer', restricted: false },
 ];
 
 export const serviceOrganizations: ServiceOrganization[] = [
