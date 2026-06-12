@@ -2,8 +2,9 @@ import { ChangeDetectionStrategy, Component, input, signal, computed, inject, De
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { CurrencyPipe } from '@angular/common';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Project, FinancialItem } from '../../services/api.service';
+import { ApiService, Project, FinancialItem, CostCategory } from '../../services/api.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
@@ -114,7 +115,16 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               <form [formGroup]="finForm" (ngSubmit)="savePlan()" class="space-y-6">
                 <div>
                   <label for="finCategory" class="block text-sm font-semibold text-ink-secondary mb-1.5">Category *</label>
-                  <input id="finCategory" type="text" formControlName="category" class="command-input" placeholder="e.g. Software Licenses">
+                  <!-- Category is a config FK to the cost-categories catalog (store = name). -->
+                  <select id="finCategory" formControlName="category" class="command-select">
+                    <option value="" disabled>Select a category...</option>
+                    @for (cat of categoryOptions(); track cat.id) {
+                      <option [value]="cat.name">{{ cat.name }}</option>
+                    }
+                    @if (orphanCategory(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
                 </div>
 
                 <div class="grid grid-cols-2 gap-4">
@@ -162,6 +172,18 @@ export class FinancialPlans {
     category: new FormControl('', Validators.required),
     budget: new FormControl<number | null>(null, [Validators.required, Validators.min(0)]),
     actual: new FormControl<number | null>(null, [Validators.required, Validators.min(0)])
+  });
+
+  // Category is a config FK to the cost-categories catalog (Phase F2). Open read.
+  private categoriesRes = rxResource({ stream: () => this.api.getCostCategories(), defaultValue: [] as CostCategory[] });
+  categoryOptions = this.categoriesRes.value;
+
+  // ORPHAN VALUE: a stored category not in the catalog stays selectable as a disabled option.
+  private categoryValue = toSignal(this.finForm.controls.category.valueChanges, { initialValue: this.finForm.controls.category.value });
+  orphanCategory = computed<string | null>(() => {
+    const current = this.categoryValue();
+    if (!current) return null;
+    return this.categoryOptions().some(c => c.name === current) ? null : current;
   });
 
   private financialsRes = rxResource({

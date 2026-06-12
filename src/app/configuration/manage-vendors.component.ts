@@ -1,8 +1,8 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
-import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { rxResource, toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Vendor } from '../services/api.service';
+import { ApiService, Vendor, Country } from '../services/api.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 
@@ -88,7 +88,16 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
               </div>
               <div>
                 <label for="country" class="block text-sm font-medium text-ink-secondary mb-1">Country</label>
-                <input id="country" type="text" formControlName="country" class="command-input" placeholder="e.g. IT">
+                <!-- Country is a config FK to the countries catalog (store = ISO-2 code). -->
+                <select id="country" formControlName="country" class="command-select">
+                  <option value="">— None —</option>
+                  @for (c of countryOptions(); track c.code) {
+                    <option [value]="c.code">{{ c.name }} ({{ c.code }})</option>
+                  }
+                  @if (orphanCountry(); as orphan) {
+                    <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                  }
+                </select>
               </div>
               <div class="pt-4 flex justify-end gap-3">
                 <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
@@ -146,6 +155,18 @@ export class ManageVendorsComponent {
     name: new FormControl('', Validators.required),
     vatId: new FormControl(''),
     country: new FormControl(''),
+  });
+
+  // PHASE F2 — `country` is a config FK to the countries catalog (store = ISO-2 code).
+  private countriesRes = rxResource({ stream: () => this.api.getCountries(), defaultValue: [] as Country[] });
+  countryOptions = this.countriesRes.value;
+
+  // ORPHAN VALUE: a stored country code not in the catalog stays selectable as a disabled option.
+  private countryValue = toSignal(this.form.controls.country.valueChanges, { initialValue: this.form.controls.country.value });
+  orphanCountry = computed<string | null>(() => {
+    const current = this.countryValue();
+    if (!current) return null;
+    return this.countryOptions().some(c => c.code === current) ? null : current;
   });
 
   openForm(it?: Vendor) {

@@ -4,7 +4,7 @@ import { of } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
 import { CurrencyPipe, DecimalPipe } from '@angular/common';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Project, ProjectCostCenter, Resource } from '../../services/api.service';
+import { ApiService, Project, ProjectCostCenter, Resource, CostCenter } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
@@ -113,13 +113,25 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <div class="p-6 sm:p-8 overflow-y-auto flex-1">
               <form [formGroup]="ccForm" (ngSubmit)="saveCostCenter()" class="space-y-6">
                 <div>
-                  <label for="ccId" class="block text-sm font-semibold text-ink-secondary mb-1.5">Cost Center ID *</label>
-                  <input id="ccId" type="text" formControlName="id" class="command-input" placeholder="e.g. CC-1234">
+                  <label for="ccId" class="block text-sm font-semibold text-ink-secondary mb-1.5">Cost Center *</label>
+                  @if (editingId()) {
+                    <!-- The id is the immutable key on edit; show it read-only. -->
+                    <input id="ccId" type="text" class="command-input font-mono" [value]="ccForm.controls.id.value" disabled>
+                  } @else {
+                    <!-- Select a configuration cost center: fills+locks the id and derives the name. -->
+                    <select id="ccId" formControlName="id" class="command-select" (change)="onCostCenterPicked()">
+                      <option value="" disabled>Select a cost center...</option>
+                      @for (cc of availableCostCenters(); track cc.id) {
+                        <option [value]="cc.id">{{ cc.id }} — {{ cc.name }}</option>
+                      }
+                    </select>
+                  }
                 </div>
 
                 <div>
-                  <label for="ccName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Name *</label>
-                  <input id="ccName" type="text" formControlName="name" class="command-input" placeholder="e.g. Engineering">
+                  <label for="ccName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Name</label>
+                  <!-- DERIVED from the chosen cost center; not hand-typed. -->
+                  <input id="ccName" type="text" formControlName="name" class="command-input" readonly>
                 </div>
 
                 <div class="grid grid-cols-2 gap-4">
@@ -186,6 +198,24 @@ export class ProjectCostCenters {
     allocatedBudget: new FormControl(0, [Validators.required, Validators.min(0)]),
     manager: new FormControl('')
   });
+
+  // PHASE F2 — the project cost-center `id` is chosen from the configuration
+  // cost-centers catalog (selecting one fills+locks the id and derives the name).
+  private catalogRes = rxResource({ stream: () => this.api.getCostCenters(), defaultValue: [] as CostCenter[] });
+  catalogCostCenters = this.catalogRes.value;
+
+  /** Catalog cost centers not already added to the current project (avoid dup ids). */
+  availableCostCenters = computed<CostCenter[]>(() => {
+    const used = new Set(this.filteredCostCenters().map(cc => cc.id));
+    return this.catalogCostCenters().filter(cc => !used.has(cc.id));
+  });
+
+  /** A cost center was picked: derive + lock the name from the catalog entry. */
+  onCostCenterPicked() {
+    const id = this.ccForm.controls.id.value ?? '';
+    const cc = this.catalogCostCenters().find(c => c.id === id);
+    this.ccForm.controls.name.setValue(cc ? cc.name : '');
+  }
 
   // ORPHAN VALUE: a stored manager that isn't a current resource name is surfaced as a
   // disabled option so editing never silently discards a real value.

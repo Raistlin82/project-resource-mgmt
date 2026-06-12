@@ -1,9 +1,9 @@
 import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, signal } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { rxResource, toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { of } from 'rxjs';
-import { ApiService, Customer, Contract } from '../../services/api.service';
+import { ApiService, Customer, Contract, Country, Industry } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
@@ -96,11 +96,29 @@ import { ListStateComponent } from '../../shared/list-state.component';
                 </div>
                 <div>
                   <label for="customerIndustry" class="block text-sm font-semibold text-ink-secondary mb-1.5">Industry</label>
-                  <input id="customerIndustry" type="text" formControlName="industry" class="command-input" placeholder="e.g. Manufacturing">
+                  <!-- Industry is a config FK to the industries catalog (store = name). -->
+                  <select id="customerIndustry" formControlName="industry" class="command-select">
+                    <option value="">— None —</option>
+                    @for (ind of industryOptions(); track ind.id) {
+                      <option [value]="ind.name">{{ ind.name }}</option>
+                    }
+                    @if (orphanIndustry(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
                 </div>
                 <div>
                   <label for="customerCountry" class="block text-sm font-semibold text-ink-secondary mb-1.5">Country</label>
-                  <input id="customerCountry" type="text" formControlName="country" class="command-input" placeholder="e.g. United States">
+                  <!-- Country is a config FK to the countries catalog (store = country NAME). -->
+                  <select id="customerCountry" formControlName="country" class="command-select">
+                    <option value="">— None —</option>
+                    @for (c of countryOptions(); track c.code) {
+                      <option [value]="c.name">{{ c.name }}</option>
+                    }
+                    @if (orphanCountry(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
                 </div>
               </div>
             </form>
@@ -142,6 +160,20 @@ export class Customers {
   customers = this.customersRes.value;
   contracts = this.contractsRes.value;
 
+  // Industry + Country are config FKs (Phase F2). Open reads, gated on authReady.
+  private industriesRes = rxResource<Industry[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getIndustries() : of<Industry[]>([])),
+    defaultValue: [] as Industry[],
+  });
+  private countriesRes = rxResource<Country[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getCountries() : of<Country[]>([])),
+    defaultValue: [] as Country[],
+  });
+  industryOptions = this.industriesRes.value;
+  countryOptions = this.countriesRes.value;
+
   contractCounts = computed(() => {
     const counts: Record<string, number> = {};
     for (const contract of this.contracts()) {
@@ -156,6 +188,21 @@ export class Customers {
     name: new FormControl('', { nonNullable: true, validators: Validators.required }),
     industry: new FormControl('', { nonNullable: true }),
     country: new FormControl('', { nonNullable: true })
+  });
+
+  // ORPHAN VALUE: a stored industry/country not in the catalog stays selectable as a
+  // disabled option so editing never silently discards a real value.
+  private industryValue = toSignal(this.customerForm.controls.industry.valueChanges, { initialValue: this.customerForm.controls.industry.value });
+  private countryValue = toSignal(this.customerForm.controls.country.valueChanges, { initialValue: this.customerForm.controls.country.value });
+  orphanIndustry = computed<string | null>(() => {
+    const current = this.industryValue();
+    if (!current) return null;
+    return this.industryOptions().some(i => i.name === current) ? null : current;
+  });
+  orphanCountry = computed<string | null>(() => {
+    const current = this.countryValue();
+    if (!current) return null;
+    return this.countryOptions().some(c => c.name === current) ? null : current;
   });
 
   openForm(): void {

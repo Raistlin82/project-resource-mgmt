@@ -9,7 +9,7 @@ import { db } from './db/client';
 import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
-import type { AuditLog, Resource, ResourceRequest, Assignment, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project } from './app/services/api.service';
+import type { AuditLog, Resource, ResourceRequest, Assignment, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition } from './app/services/staffing.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate } from './app/services/api.service';
@@ -841,6 +841,98 @@ async function validatePersonRefs(
   return null;
 }
 
+// --- REFERENCE-DATA INTEGRITY (Phase F2): customizing-catalog FK validators -----
+// Each consumer field below is a config-value FK to one of the F1 catalogs, stored
+// by NAME (cities/industries/cost-categories/partner-roles/vendors/resource-orgs) or
+// by CODE (countries). Every validator only checks a SUPPLIED non-empty value, so an
+// omitted/empty field (optional path / partial edit) is never blocked; a supplied
+// value must be a current catalog member. A small extra constant 'allow' set lets the
+// caller permit sentinels (e.g. the 'Remote' location) without seeding a catalog row.
+
+/** Load the set of catalog values produced by `select` from the repository rows. */
+async function catalogValues<T extends Entity>(repo: Repository<T>, select: (row: T) => string): Promise<Set<string>> {
+  const rows = await repo.list();
+  return new Set(rows.map(select));
+}
+
+/** City names (the stored value on location fields). */
+async function cityNames(): Promise<Set<string>> { return catalogValues(repos.cities, c => c.name); }
+/** Country NAMES (the stored value on customer.country). */
+async function countryNames(): Promise<Set<string>> { return catalogValues(repos.countries, c => c.name); }
+/** Country CODES (the stored value on vendor.country — the natural key). */
+async function countryCodes(): Promise<Set<string>> { return catalogValues(repos.countries, c => String((c as { code?: string }).code ?? c.id)); }
+/** Industry names. */
+async function industryNames(): Promise<Set<string>> { return catalogValues(repos.industries, i => i.name); }
+/** Cost-category names. */
+async function costCategoryNames(): Promise<Set<string>> { return catalogValues(repos.costCategories, c => c.name); }
+/** Partner-role names. */
+async function partnerRoleNames(): Promise<Set<string>> { return catalogValues(repos.partnerRoles, r => r.name); }
+/** Vendor company names. */
+async function vendorNames(): Promise<Set<string>> { return catalogValues(repos.vendors, v => v.name); }
+/** Resource-organization names (the stored value on resource.organization). */
+async function resourceOrganizationNames(): Promise<Set<string>> { return catalogValues(repos.resourceOrganizations, o => o.name); }
+/** Cost-center ids (the configuration cost-centers catalog). */
+async function costCenterIds(): Promise<Set<string>> { return catalogValues(repos.costCenters, c => c.id); }
+
+/**
+ * Validate a single supplied catalog-value FK field. Returns a 400-suitable error
+ * message, or null when valid (or when the value is omitted/empty, or is in `allow`).
+ */
+async function validateCatalogValue(
+  value: unknown,
+  field: string,
+  loadValues: () => Promise<Set<string>>,
+  label: string,
+  allow: readonly string[] = [],
+): Promise<string | null> {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value === 'string' && allow.includes(value)) return null;
+  const values = await loadValues();
+  if (typeof value !== 'string' || !values.has(value)) {
+    return `${field} must reference an existing ${label}`;
+  }
+  return null;
+}
+
+/** Allowed location sentinel (matches seed.REMOTE_LOCATION). */
+const REMOTE_LOCATION = 'Remote';
+
+/**
+ * Validate a resource body's F2 catalog references: `location` -> cities (name) or
+ * the 'Remote' sentinel, and `organization` -> resource-organizations (name). Both
+ * are optional; only supplied non-empty values are checked.
+ */
+async function validateResourceCatalogRefs(body: { location?: unknown; organization?: unknown }): Promise<string | null> {
+  const locErr = await validateCatalogValue(body.location, 'location', cityNames, 'city (location catalog name) or "Remote"', [REMOTE_LOCATION]);
+  if (locErr) return locErr;
+  return validateCatalogValue(body.organization, 'organization', resourceOrganizationNames, 'resource organization (catalog name)');
+}
+
+/**
+ * Validate a resource-organization body's F2 references: `costCenters[]` -> the
+ * configuration cost-centers catalog (by id), and `serviceOrganizationId` -> the
+ * service-organizations catalog (by id). Both optional; only supplied values checked.
+ */
+async function validateResourceOrgRefs(body: { costCenters?: unknown; serviceOrganizationId?: unknown }): Promise<string | null> {
+  if (body.costCenters !== undefined && body.costCenters !== null) {
+    if (!Array.isArray(body.costCenters)) return 'costCenters must be an array of cost-center ids';
+    if (body.costCenters.length > 0) {
+      const ids = await costCenterIds();
+      for (const cc of body.costCenters) {
+        if (typeof cc !== 'string' || !ids.has(cc)) {
+          return `costCenters entry "${String(cc)}" must reference an existing cost center (catalog id)`;
+        }
+      }
+    }
+  }
+  if (body.serviceOrganizationId !== undefined && body.serviceOrganizationId !== null && body.serviceOrganizationId !== '') {
+    if (!(await existsRepo(repos.serviceOrganizations, body.serviceOrganizationId))) {
+      return 'serviceOrganizationId must reference an existing service organization';
+    }
+  }
+  return null;
+}
+
 /**
  * B-UTILIZATION: recompute a resource's utilization FROM THE SOURCE OF TRUTH
  * (the sum of its assigned hours across all assignments) rather than mutating a
@@ -902,6 +994,10 @@ apiRouter.post('/resources', async (req, res) => {
   // skills[].level must be a configured proficiency level.
   const skillErr = await validateSkillRefs(body, 'objects');
   if (skillErr) { res.status(400).json({ error: skillErr }); return; }
+  // REFERENCE-DATA INTEGRITY (Phase F2): location -> cities/Remote, organization ->
+  // resource-organizations. Optional; only supplied values are checked.
+  const catalogErr = await validateResourceCatalogRefs(body);
+  if (catalogErr) { res.status(400).json({ error: catalogErr }); return; }
   const item = {
     skills: [], projectRoles: [], externalExperience: [],
     ...body,
@@ -944,6 +1040,9 @@ apiRouter.put('/resources/:id', async (req, res) => {
   // catalog (name) + proficiency-set levels (level). Omitted passes.
   const skillErr = await validateSkillRefs(body, 'objects');
   if (skillErr) { res.status(400).json({ error: skillErr }); return; }
+  // REFERENCE-DATA INTEGRITY (Phase F2): validate any supplied location/organization.
+  const catalogErr = await validateResourceCatalogRefs(body);
+  if (catalogErr) { res.status(400).json({ error: catalogErr }); return; }
   const updated = await repos.resources.update(req.params.id, body);
   res.json(updated);
 });
@@ -1261,13 +1360,21 @@ apiRouter.get('/service-organizations', async (_req, res) => { res.json(await re
 
 apiRouter.get('/resource-organizations', async (_req, res) => { res.json(await repos.resourceOrganizations.list()); });
 apiRouter.post('/resource-organizations', async (req, res) => {
-  const item = { id: newId(), costCenters: [], ...pick(req.body, ['name', 'description', 'costCenters', 'serviceOrganizationId']) } as ResourceOrganization;
+  const body = pick<ResourceOrganization>(req.body, ['name', 'description', 'costCenters', 'serviceOrganizationId']);
+  // REFERENCE-DATA INTEGRITY (Phase F2): costCenters[] -> cost-centers catalog (id),
+  // serviceOrganizationId -> service-organizations (id). Optional; supplied values checked.
+  const refErr = await validateResourceOrgRefs(body as Record<string, unknown>);
+  if (refErr) { res.status(400).json({ error: refErr }); return; }
+  const item = { id: newId(), costCenters: [], ...body } as ResourceOrganization;
   res.json(await repos.resourceOrganizations.create(item));
 });
 apiRouter.put('/resource-organizations/:id', async (req, res) => {
   const existing = await repos.resourceOrganizations.get(req.params.id);
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
-  const updated = await repos.resourceOrganizations.update(req.params.id, pick(req.body, ['name', 'description', 'costCenters', 'serviceOrganizationId']));
+  const body = pick<ResourceOrganization>(req.body, ['name', 'description', 'costCenters', 'serviceOrganizationId']);
+  const refErr = await validateResourceOrgRefs(body as Record<string, unknown>);
+  if (refErr) { res.status(400).json({ error: refErr }); return; }
+  const updated = await repos.resourceOrganizations.update(req.params.id, body);
   res.json(updated);
 });
 apiRouter.delete('/resource-organizations/:id', async (req, res) => { await repos.resourceOrganizations.remove(req.params.id); res.status(204).send(); });
@@ -1319,8 +1426,11 @@ crud(apiRouter, 'industries', repos.industries, ['name']);
 crud(apiRouter, 'cost-categories', repos.costCategories, ['name']);
 crud(apiRouter, 'partner-roles', repos.partnerRoles, ['name']);
 
-// VENDORS — partner/supplier companies.
-crud(apiRouter, 'vendors', repos.vendors, ['name', 'vatId', 'country']);
+// VENDORS — partner/supplier companies. REFERENCE-DATA INTEGRITY (Phase F2):
+// `country` (when supplied) must be a valid ISO-2 country code from the countries
+// catalog (the natural key). Optional; an omitted/empty country passes.
+crud(apiRouter, 'vendors', repos.vendors, ['name', 'vatId', 'country'], [], data =>
+  validateCatalogValue(data['country'], 'country', countryCodes, 'country (ISO-2 code)'));
 
 const PROJECT_FIELDS = ['name', 'location', 'startDate', 'endDate', 'status', 'description', 'ownerId', 'contractId'] as const;
 apiRouter.get('/projects', async (_req, res) => { res.json(await repos.projects.list()); });
@@ -1333,6 +1443,10 @@ apiRouter.post('/projects', async (req, res) => {
     res.status(400).json({ error: 'ownerId must reference an existing resource' });
     return;
   }
+  // REFERENCE-DATA INTEGRITY (Phase F2): `location` -> cities catalog (name) or the
+  // 'Remote' sentinel. Optional; only a supplied non-empty value is checked.
+  const locErr = await validateCatalogValue(body.location, 'location', cityNames, 'city (location catalog name) or "Remote"', [REMOTE_LOCATION]);
+  if (locErr) { res.status(400).json({ error: locErr }); return; }
   const item = { id: newId(), ...body } as Project;
   res.json(await repos.projects.create(item));
 });
@@ -1346,6 +1460,9 @@ apiRouter.put('/projects/:id', async (req, res) => {
     res.status(400).json({ error: 'ownerId must reference an existing resource' });
     return;
   }
+  // REFERENCE-DATA INTEGRITY (Phase F2): validate any supplied `location`.
+  const locErr = await validateCatalogValue(body.location, 'location', cityNames, 'city (location catalog name) or "Remote"', [REMOTE_LOCATION]);
+  if (locErr) { res.status(400).json({ error: locErr }); return; }
   const updated = await repos.projects.update(req.params.id, body);
   res.json(updated);
 });
@@ -1353,7 +1470,14 @@ apiRouter.delete('/projects/:id', async (req, res) => { await repos.projects.rem
 
 // --- B1: project sub-resources (real endpoints, seeded on REAL ids 1/2) -----
 
-crud(apiRouter, 'project-partners', repos.projectPartners, ['projectId', 'company', 'role', 'contact', 'status']);
+// REFERENCE-DATA INTEGRITY (Phase F2): `company` -> vendors catalog (name), `role`
+// -> partner-roles catalog (name). `contact` stays FREE (external person). Both FKs
+// optional at the validator level; the UI enforces required.
+crud(apiRouter, 'project-partners', repos.projectPartners, ['projectId', 'company', 'role', 'contact', 'status'], [], async data => {
+  const companyErr = await validateCatalogValue(data['company'], 'company', vendorNames, 'vendor (company catalog name)');
+  if (companyErr) return companyErr;
+  return validateCatalogValue(data['role'], 'role', partnerRoleNames, 'partner role (catalog name)');
+});
 
 crud(apiRouter, 'project-documents', repos.projectDocuments, ['projectId', 'name', 'type', 'size', 'uploadedAt', 'author', 'authorInitials']);
 
@@ -1397,11 +1521,48 @@ apiRouter.delete('/milestones/:id', async (req, res) => {
   res.status(204).send();
 });
 
-crud(apiRouter, 'project-financials', repos.projectFinancials, ['projectId', 'category', 'budget', 'actual'], ['budget', 'actual']);
+// REFERENCE-DATA INTEGRITY (Phase F2): `category` -> cost-categories catalog (name).
+crud(apiRouter, 'project-financials', repos.projectFinancials, ['projectId', 'category', 'budget', 'actual'], ['budget', 'actual'], data =>
+  validateCatalogValue(data['category'], 'category', costCategoryNames, 'cost category (catalog name)'));
 
-// PHASE D — `manager` is a person reference (optional).
-crud(apiRouter, 'project-cost-centers', repos.projectCostCenters, ['projectId', 'name', 'manager', 'allocated', 'actual'], ['allocated', 'actual'],
-  data => validatePersonRefs(data, ['manager']));
+// PROJECT COST CENTERS — bespoke handlers (the generic crud server-assigns the id;
+// here the project cost-center IS one of the configuration cost-centers, so the id is
+// CLIENT-SUPPLIED on create and must reference the cost-centers catalog). The `name`
+// is DERIVED from the chosen catalog cost center (no longer hand-typed). `manager`
+// stays a person reference (Phase D, optional). PUT cannot change the id (immutable key).
+const PROJECT_COST_CENTER_FIELDS = ['projectId', 'name', 'manager', 'allocated', 'actual'] as const;
+apiRouter.get('/project-cost-centers', async (_req, res) => { res.json(await repos.projectCostCenters.list()); });
+apiRouter.post('/project-cost-centers', async (req, res) => {
+  const id = req.body?.id;
+  if (typeof id !== 'string' || id.length === 0) { res.status(400).json({ error: 'id is required and must reference a cost center (catalog id)' }); return; }
+  const catalogCc = await repos.costCenters.get(id);
+  if (!catalogCc) { res.status(400).json({ error: 'id must reference an existing cost center (catalog id)' }); return; }
+  if (await repos.projectCostCenters.get(id)) { res.status(400).json({ error: `project cost center ${id} already exists` }); return; }
+  const body = pick<ProjectCostCenter>(req.body, PROJECT_COST_CENTER_FIELDS);
+  const bad = findInvalidNumericField(body, ['allocated', 'actual']);
+  if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
+  const personErr = await validatePersonRefs(body as Record<string, unknown>, ['manager']);
+  if (personErr) { res.status(400).json({ error: personErr }); return; }
+  // DERIVE the name from the chosen catalog cost center (never trust a hand-typed one).
+  const item = { actual: 0, ...body, id, name: catalogCc.name } as ProjectCostCenter;
+  res.json(await repos.projectCostCenters.create(item));
+});
+apiRouter.put('/project-cost-centers/:id', async (req, res) => {
+  const existing = await repos.projectCostCenters.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const body = pick<ProjectCostCenter>(req.body, PROJECT_COST_CENTER_FIELDS);
+  const bad = findInvalidNumericField(body, ['allocated', 'actual']);
+  if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
+  const personErr = await validatePersonRefs(body as Record<string, unknown>, ['manager']);
+  if (personErr) { res.status(400).json({ error: personErr }); return; }
+  const updated = await repos.projectCostCenters.update(req.params.id, body as Partial<ProjectCostCenter>);
+  res.json(updated);
+});
+apiRouter.delete('/project-cost-centers/:id', async (req, res) => {
+  const removed = await repos.projectCostCenters.remove(req.params.id);
+  if (!removed) { res.status(404).json({ error: 'Not found' }); return; }
+  res.status(204).send();
+});
 
 // PHASE D — task `assignee` is a person reference ('Unassigned' allowed).
 crud(apiRouter, 'project-tasks', repos.projectTasks, ['projectId', 'name', 'assignee', 'assigneeType', 'partnerId', 'dueDate', 'status', 'priority'], [],
@@ -1510,7 +1671,14 @@ crud(apiRouter, 'cost-centers', repos.costCenters, ['name', 'manager', 'allocate
 
 // --- Commercial domain (ADR-0001): Customers, Contracts, Orders, OrderLines ---
 
-crud(apiRouter, 'customers', repos.customers, ['name', 'industry', 'country']);
+// REFERENCE-DATA INTEGRITY (Phase F2): `industry` -> industries catalog (name),
+// `country` -> countries catalog (country NAME, matching the seeded display). Both
+// optional; only supplied non-empty values are checked.
+crud(apiRouter, 'customers', repos.customers, ['name', 'industry', 'country'], [], async data => {
+  const indErr = await validateCatalogValue(data['industry'], 'industry', industryNames, 'industry (catalog name)');
+  if (indErr) return indErr;
+  return validateCatalogValue(data['country'], 'country', countryNames, 'country (catalog name)');
+});
 
 interface ContractEntry { id: string; customerId: string; name: string; type: string; totalValue: number; currency: string; status: string; startDate: string; endDate: string }
 

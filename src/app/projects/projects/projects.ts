@@ -1,18 +1,21 @@
 import { ChangeDetectionStrategy, Component, inject, signal, computed, DestroyRef } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { DatePipe } from '@angular/common';
-import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
+import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { toSignal, rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { of } from 'rxjs';
 import { RouterLink } from '@angular/router';
-import { ApiService, Project, Contract, Resource } from '../../services/api.service';
+import { ApiService, Project, Contract, Resource, Country, City } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+
+/** Allowed location sentinel for fully-remote projects (mirrors the server + seed). */
+const REMOTE_LOCATION = 'Remote';
 
 @Component({
   selector: 'app-projects',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DatePipe, ReactiveFormsModule, RouterLink, ModalDialogDirective],
+  imports: [MatIconModule, DatePipe, ReactiveFormsModule, FormsModule, RouterLink, ModalDialogDirective],
   template: `
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -132,11 +135,36 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                   }
                 </div>
 
-                <div class="sm:col-span-2">
-                  <label for="projectLocation" class="block text-sm font-semibold text-ink-secondary mb-1.5">Location *</label>
-                  <input id="projectLocation" type="text" formControlName="location" class="command-input" placeholder="e.g. New York, NY"
-                         [attr.aria-invalid]="projectForm.controls.location.invalid && (projectForm.controls.location.touched || projectForm.controls.location.dirty)"
-                         [attr.aria-describedby]="projectForm.controls.location.invalid && (projectForm.controls.location.touched || projectForm.controls.location.dirty) ? 'projectLocationError' : null">
+                <div>
+                  <label for="projectCountry" class="block text-sm font-semibold text-ink-secondary mb-1.5">Country *</label>
+                  <!-- Location = Country + City. Country filters the City list; the stored
+                       value is the City NAME ('location'). 'Remote' is a sentinel location. -->
+                  <select id="projectCountry" [ngModel]="locationCountry()" (ngModelChange)="onCountryChange($event)" [ngModelOptions]="{ standalone: true }" class="command-select">
+                    <option value="" disabled>Select a country...</option>
+                    <option value="__REMOTE__">Remote</option>
+                    @for (c of countryOptions(); track c.code) {
+                      <option [value]="c.code">{{ c.name }}</option>
+                    }
+                  </select>
+                </div>
+
+                <div>
+                  <label for="projectLocation" class="block text-sm font-semibold text-ink-secondary mb-1.5">City *</label>
+                  @if (locationCountry() === '__REMOTE__') {
+                    <input id="projectLocation" type="text" class="command-input" value="Remote (no city)" disabled>
+                  } @else {
+                    <select id="projectLocation" formControlName="location" class="command-select"
+                            [attr.aria-invalid]="projectForm.controls.location.invalid && (projectForm.controls.location.touched || projectForm.controls.location.dirty)"
+                            [attr.aria-describedby]="projectForm.controls.location.invalid && (projectForm.controls.location.touched || projectForm.controls.location.dirty) ? 'projectLocationError' : null">
+                      <option value="" disabled>{{ locationCountry() ? 'Select a city...' : 'Select a country first' }}</option>
+                      @for (city of citiesForCountry(); track city.id) {
+                        <option [value]="city.name">{{ city.name }}</option>
+                      }
+                      @if (orphanCity(); as orphan) {
+                        <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                      }
+                    </select>
+                  }
                   @if (projectForm.controls.location.invalid && (projectForm.controls.location.touched || projectForm.controls.location.dirty)) {
                     <p id="projectLocationError" class="command-field-error" role="alert">Location is required.</p>
                   }
@@ -271,6 +299,12 @@ export class ProjectsComponent {
   });
   resourceOptions = this.resourcesRes.value;
 
+  // Location = Country + City (Phase F2). Both catalogs are open reads.
+  private countriesRes = rxResource({ stream: () => this.api.getCountries(), defaultValue: [] as Country[] });
+  private citiesRes = rxResource({ stream: () => this.api.getCities(), defaultValue: [] as City[] });
+  countryOptions = this.countriesRes.value;
+  cityOptions = this.citiesRes.value;
+
   searchControl = new FormControl('');
   searchValue = toSignal(this.searchControl.valueChanges, { initialValue: '' });
 
@@ -294,6 +328,39 @@ export class ProjectsComponent {
     return this.resourceOptions().some(r => r.id === current) ? null : { id: current, label: current };
   });
 
+  // Location picker state (Phase F2). The form's `location` holds the city NAME (or
+  // 'Remote'). The country selection drives the city list; a manual override lets the
+  // user change country interactively without losing the initial derive (cities load
+  // async after the form opens).
+  private locationValue = toSignal(this.projectForm.controls.location.valueChanges, { initialValue: this.projectForm.controls.location.value });
+  private countryOverride = signal<string | null>(null);
+  locationCountry = computed<string>(() => {
+    const override = this.countryOverride();
+    if (override !== null) return override;
+    const loc = this.locationValue() ?? '';
+    if (!loc) return '';
+    if (loc === REMOTE_LOCATION) return '__REMOTE__';
+    const city = this.cityOptions().find(c => c.name === loc);
+    return city ? city.countryCode : '';
+  });
+  citiesForCountry = computed<City[]>(() => {
+    const code = this.locationCountry();
+    if (!code || code === '__REMOTE__') return [];
+    return this.cityOptions().filter(c => c.countryCode === code);
+  });
+  orphanCity = computed<string | null>(() => {
+    const current = this.locationValue() ?? '';
+    if (!current || current === REMOTE_LOCATION) return null;
+    return this.cityOptions().some(c => c.name === current) ? null : current;
+  });
+
+  /** Country select change: 'Remote' stores the sentinel; otherwise clear the city. */
+  onCountryChange(code: string) {
+    this.countryOverride.set(code);
+    this.projectForm.controls.location.setValue(code === '__REMOTE__' ? REMOTE_LOCATION : '');
+    this.projectForm.controls.location.markAsDirty();
+  }
+
   filteredProjects = computed(() => {
     const search = (this.searchValue() ?? '').toLowerCase();
     return this.projects().filter(p => {
@@ -312,6 +379,7 @@ export class ProjectsComponent {
 
   editProject(project: Project) {
     this.editingId.set(project.id);
+    this.countryOverride.set(null); // derive the country from the stored location
     this.projectForm.patchValue({
       name: project.name,
       location: project.location,
@@ -372,13 +440,15 @@ export class ProjectsComponent {
   /** Open the create form, defaulting the owner to the signed-in user's resource id. */
   openCreateForm() {
     this.editingId.set(null);
-    this.projectForm.reset({ status: 'In Planning', ownerId: this.auth.userId(), contractId: '' });
+    this.countryOverride.set('');
+    this.projectForm.reset({ status: 'In Planning', ownerId: this.auth.userId(), contractId: '', location: '' });
     this.showForm.set(true);
   }
 
   closeForm() {
     this.showForm.set(false);
     this.editingId.set(null);
-    this.projectForm.reset({ status: 'In Planning', ownerId: '', contractId: '' });
+    this.countryOverride.set('');
+    this.projectForm.reset({ status: 'In Planning', ownerId: '', contractId: '', location: '' });
   }
 }

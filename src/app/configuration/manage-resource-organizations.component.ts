@@ -1,13 +1,14 @@
-import { Component, inject, signal, computed } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, signal, computed } from '@angular/core';
 import { rxResource } from '@angular/core/rxjs-interop';
-import { ReactiveFormsModule, FormBuilder, FormGroup, Validators, FormArray } from '@angular/forms';
+import { ReactiveFormsModule, FormBuilder, FormGroup, Validators } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
-import { ApiService, ResourceOrganization } from '../services/api.service';
+import { ApiService, ResourceOrganization, CostCenter, ServiceOrganization } from '../services/api.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 
 @Component({
   selector: 'app-manage-resource-organizations',
+  changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [ReactiveFormsModule, MatIconModule, ModalDialogDirective],
   template: `
     <div class="command-page space-y-6">
@@ -33,25 +34,32 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
               </div>
             </div>
 
-            <div formArrayName="costCenters" class="space-y-4 mt-8">
-              <div class="flex justify-between items-center pb-2 border-b border-[var(--cc-line)]">
-                <h3 class="command-section-label">Cost Centers</h3>
-                <button type="button" (click)="addCostCenter()" class="command-button secondary">
-                  <mat-icon class="text-[18px] w-[18px] h-[18px]">add_circle</mat-icon> Add Cost Center
-                </button>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label for="orgServiceOrg" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Service Organization</label>
+                <!-- serviceOrganizationId is an FK to the service-organizations catalog (by id). -->
+                <select id="orgServiceOrg" formControlName="serviceOrganizationId" class="command-select">
+                  <option value="">— None —</option>
+                  @for (so of serviceOrgOptions(); track so.id) {
+                    <option [value]="so.id">{{ so.code }} — {{ so.description }}</option>
+                  }
+                  @if (orphanServiceOrg(); as orphan) {
+                    <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                  }
+                </select>
               </div>
-
-              <div class="space-y-3">
-                @for (cc of costCenters.controls; track i; let i = $index) {
-                  <div class="command-card flex gap-4 items-center p-4 group">
-                    <div class="flex-1">
-                      <input type="text" [formControlName]="i" placeholder="Cost Center ID" class="command-input font-mono">
-                    </div>
-                    <button type="button" (click)="removeCostCenter(i)" [attr.aria-label]="'Remove cost center ' + (i + 1)" [attr.title]="'Remove cost center ' + (i + 1)" class="w-10 h-10 rounded-full bg-surface-muted border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm">
-                      <mat-icon class="text-[20px] w-[20px] h-[20px]">remove_circle</mat-icon>
-                    </button>
-                  </div>
-                }
+              <div>
+                <label for="orgCostCenters" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Cost Centers</label>
+                <!-- costCenters[] is an FK MULTI-select to the cost-centers catalog (by id). -->
+                <select id="orgCostCenters" formControlName="costCenters" multiple class="command-select min-h-[120px]">
+                  @for (cc of costCenterOptions(); track cc.id) {
+                    <option [value]="cc.id">{{ cc.id }} — {{ cc.name }}</option>
+                  }
+                  @for (orphan of orphanCostCenters(); track orphan) {
+                    <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                  }
+                </select>
+                <p class="text-xs font-medium text-[var(--cc-muted)] mt-2">Hold Ctrl/Cmd to select multiple cost centers.</p>
               </div>
             </div>
 
@@ -69,7 +77,8 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
             <thead>
               <tr>
                 <th class="w-1/4">Name</th>
-                <th class="w-1/3">Description</th>
+                <th>Description</th>
+                <th>Service Org</th>
                 <th>Cost Centers</th>
                 <th class="text-right">Actions</th>
               </tr>
@@ -79,6 +88,7 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
                 <tr>
                   <td class="font-bold text-base">{{ org.name }}</td>
                   <td class="font-medium"><span class="text-[var(--cc-muted)]">{{ org.description }}</span></td>
+                  <td><span class="text-[var(--cc-muted)]">{{ serviceOrgLabel(org.serviceOrganizationId) }}</span></td>
                   <td>
                     <div class="flex flex-wrap gap-2">
                       @for (cc of org.costCenters; track cc) {
@@ -132,20 +142,35 @@ export class ManageResourceOrganizationsComponent {
   showForm = signal(false);
   deletingId = signal<string | null>(null);
 
+  // PHASE F2 — costCenters[] -> cost-centers catalog (multi, by id), serviceOrganizationId
+  // -> service-organizations (by id). Both open reads.
+  private costCentersRes = rxResource({ stream: () => this.api.getCostCenters(), defaultValue: [] as CostCenter[] });
+  private serviceOrgsRes = rxResource({ stream: () => this.api.getServiceOrganizations(), defaultValue: [] as ServiceOrganization[] });
+  costCenterOptions = this.costCentersRes.value;
+  serviceOrgOptions = this.serviceOrgsRes.value;
+
   orgForm: FormGroup = this.fb.group({
     name: ['', Validators.required],
     description: [''],
-    costCenters: this.fb.array([])
+    costCenters: [[] as string[]],
+    serviceOrganizationId: ['']
   });
 
-  get costCenters() {
-    return this.orgForm.get('costCenters') as FormArray;
-  }
+  // ORPHAN VALUES: stored ids no longer in the catalog stay selectable as disabled
+  // options so an edit never silently discards them.
+  orphanCostCenters = computed<string[]>(() => {
+    const selected: string[] = this.orgForm.controls['costCenters'].value ?? [];
+    const known = new Set(this.costCenterOptions().map(cc => cc.id));
+    return selected.filter(id => !known.has(id));
+  });
+  orphanServiceOrg = computed<string | null>(() => {
+    const current: string = this.orgForm.controls['serviceOrganizationId'].value ?? '';
+    if (!current) return null;
+    return this.serviceOrgOptions().some(so => so.id === current) ? null : current;
+  });
 
   openCreateForm() {
-    this.orgForm.reset();
-    this.costCenters.clear();
-    this.addCostCenter();
+    this.orgForm.reset({ name: '', description: '', costCenters: [], serviceOrganizationId: '' });
     this.showForm.set(true);
   }
 
@@ -153,22 +178,27 @@ export class ManageResourceOrganizationsComponent {
     this.showForm.set(false);
   }
 
-  addCostCenter() {
-    this.costCenters.push(this.fb.control('', Validators.required));
-  }
-
-  removeCostCenter(index: number) {
-    this.costCenters.removeAt(index);
-  }
-
   onSubmit() {
     if (this.orgForm.valid) {
-      this.api.createResourceOrganization(this.orgForm.value).subscribe(() => {
+      const raw = this.orgForm.getRawValue();
+      const payload: Partial<ResourceOrganization> = {
+        name: raw.name,
+        description: raw.description ?? '',
+        costCenters: raw.costCenters ?? [],
+        serviceOrganizationId: raw.serviceOrganizationId || undefined,
+      };
+      this.api.createResourceOrganization(payload).subscribe(() => {
         this.orgsRes.reload();
         this.closeForm();
         this.notifications.show('Resource organization created.', 'success');
       });
     }
+  }
+
+  /** Display label for a service-org id (code), falling back to the raw id / em-dash. */
+  serviceOrgLabel(id: string | undefined): string {
+    if (!id) return '—';
+    return this.serviceOrgOptions().find(so => so.id === id)?.code ?? id;
   }
 
   deleteOrg(id: string) {

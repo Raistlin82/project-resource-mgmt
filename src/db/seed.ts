@@ -70,14 +70,18 @@ export const resources: Resource[] = [
   // It is kept plausible against each resource's booking load below: Julie is the
   // over-allocated developer (two overlapping Alpha bookings), John is fully
   // committed on the Beta migration, Alice carries two partial Beta bookings.
+  // PHASE F2 — REFERENCE-DATA INTEGRITY: `location` is bound to the cities catalog
+  // (store = city name; 'New York'/'London' are seeded cities, 'Remote' is the
+  // seeded sentinel city). `organization` is bound to the resource-organizations
+  // catalog (store = org name); the names below are seeded resource-org rows.
   { id: '1', name: 'Julie Armstrong', role: 'Developer',
     skills: [{ name: 'Java', level: 3 }, { name: 'Spring', level: 2 }],
     projectRoles: ['Senior Developer', 'Backend Engineer'],
     externalExperience: [{ projectName: 'E-commerce Migration', company: 'TechCorp', role: 'Java Developer', startDate: '2020-01-01', endDate: '2022-12-31', comment: 'Migrated legacy system to Spring Boot.' }],
-    profilePicture: '', resume: '', utilization: 95, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York, NY', costRate: 75, billRate: 140, hireDate: '2019-03-04' },
+    profilePicture: '', resume: '', utilization: 95, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York', costRate: 75, billRate: 140, hireDate: '2019-03-04' },
   { id: '2', name: 'John Miller', role: 'Consultant',
     skills: [{ name: 'Project Management', level: 2 }], projectRoles: ['Business Consultant'],
-    externalExperience: [], profilePicture: '', resume: '', utilization: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London, UK', costRate: 90, billRate: 180, hireDate: '2021-09-13' },
+    externalExperience: [], profilePicture: '', resume: '', utilization: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London', costRate: 90, billRate: 180, hireDate: '2021-09-13' },
   { id: '3', name: 'Alice Smith', role: 'Designer',
     skills: [{ name: 'Figma', level: 3 }], projectRoles: ['UX Designer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 55, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', costRate: 65, billRate: 120, hireDate: '2023-01-16' },
@@ -184,8 +188,15 @@ export const serviceOrganizations: ServiceOrganization[] = [
   { id: '1', code: 'SO_DE', description: 'Service Org Germany', costCenters: ['CC_DE_1', 'CC_DE_2'] },
 ];
 
+// PHASE F2 — `Resource.organization` is bound to this catalog by NAME. The seeded
+// resources carry organization 'Engineering'/'Consulting'/'Design', so add a row per
+// name (alongside the original Germany org) to keep existing data a valid SELECT
+// option. costCenters reference the configuration cost-centers catalog (CC-9001/9002).
 export const resourceOrganizations: ResourceOrganization[] = [
   { id: '1', name: 'Res Org Germany', description: 'Resource Org for Germany', costCenters: ['CC_DE_1', 'CC_DE_2'], serviceOrganizationId: '1' },
+  { id: '2', name: 'Engineering', description: 'Engineering organization', costCenters: ['CC-9001'], serviceOrganizationId: '1' },
+  { id: '3', name: 'Consulting', description: 'Consulting organization', costCenters: ['CC-9002'], serviceOrganizationId: '1' },
+  { id: '4', name: 'Design', description: 'Design organization', costCenters: [], serviceOrganizationId: '1' },
 ];
 
 // --- Customizing catalogs (Phase F1 — additive reference data) --------------
@@ -232,6 +243,12 @@ export const cities: City[] = [
   { id: 'CITY_LONDON', name: 'London', countryCode: 'GB' },
   { id: 'CITY_NEW_YORK', name: 'New York', countryCode: 'US' },
 ];
+
+// PHASE F2 — 'Remote' is an allowed location sentinel (not a physical city). It is
+// stored on `Resource.location` for fully-remote staff. Bindings surface it as a
+// dedicated "Remote" option (outside the Country>City filter) and the server treats
+// it as a valid location value.
+export const REMOTE_LOCATION = 'Remote';
 
 // Standard industry list (covers existing customer industries Manufacturing,
 // Finance -> Financial Services).
@@ -287,16 +304,22 @@ export const vendors: Vendor[] = [
   { id: 'V5', name: 'Albion Cloud Services Ltd', vatId: 'GB-ALBI-0005', country: 'GB' },
 ];
 
+// PHASE F2 — `location` is bound to the cities catalog (store = city name).
+// 'Berlin'/'Munich' are seeded cities (countryCode 'DE').
 export const projects: Project[] = [
-  { id: '1', name: 'Project Alpha', location: 'Berlin, Germany', startDate: '2026-04-01', endDate: '2026-12-31', status: 'In Planning', description: 'A major software development project.', ownerId: '1', contractId: 'CT1' },
-  { id: '2', name: 'Project Beta', location: 'Munich, Germany', startDate: '2026-05-01', endDate: '2027-05-01', status: 'In Execution', description: 'Infrastructure upgrade project.', ownerId: '1', contractId: 'CT2' },
+  { id: '1', name: 'Project Alpha', location: 'Berlin', startDate: '2026-04-01', endDate: '2026-12-31', status: 'In Planning', description: 'A major software development project.', ownerId: '1', contractId: 'CT1' },
+  { id: '2', name: 'Project Beta', location: 'Munich', startDate: '2026-05-01', endDate: '2027-05-01', status: 'In Execution', description: 'Infrastructure upgrade project.', ownerId: '1', contractId: 'CT2' },
 ];
 
 // --- Project sub-resources (seeded on REAL ids 1/2) -------------------------
 
+// PHASE F2 — `company` is bound to the vendors catalog (store = company name) and
+// `role` to the partner-roles catalog (store = role name). 'TechCorp Inc.' /
+// 'DesignStudio LLC' are seeded vendors; 'Development Partner' / 'Technology Partner'
+// are seeded partner-roles ('UI/UX Design' reconciled to 'Technology Partner').
 export const projectPartners: Partner[] = [
   { id: 'PT1', projectId: '1', company: 'TechCorp Inc.', role: 'Development Partner', contact: 'Jane Doe', status: 'Active' },
-  { id: 'PT2', projectId: '2', company: 'DesignStudio LLC', role: 'UI/UX Design', contact: 'John Smith', status: 'Invited' },
+  { id: 'PT2', projectId: '2', company: 'DesignStudio LLC', role: 'Technology Partner', contact: 'John Smith', status: 'Invited' },
 ];
 
 export const projectDocuments: ProjectDocument[] = [
@@ -318,9 +341,12 @@ export const milestones: Milestone[] = [
   { id: 'M3', projectId: '2', name: 'Architecture Approved', date: '2026-05-20', status: 'Pending' },
 ];
 
+// PHASE F2 — `category` is bound to the cost-categories catalog (store = name).
+// 'Software & Licenses' / 'Subcontracting' / 'Hardware' are seeded categories
+// ('Software Licenses' -> 'Software & Licenses', 'Consulting Services' -> 'Subcontracting').
 export const projectFinancials: FinancialItem[] = [
-  { id: 'F1', projectId: '1', category: 'Software Licenses', budget: 20000, actual: 18500 },
-  { id: 'F2', projectId: '1', category: 'Consulting Services', budget: 50000, actual: 25000 },
+  { id: 'F1', projectId: '1', category: 'Software & Licenses', budget: 20000, actual: 18500 },
+  { id: 'F2', projectId: '1', category: 'Subcontracting', budget: 50000, actual: 25000 },
   { id: 'F3', projectId: '2', category: 'Hardware', budget: 10000, actual: 11200 },
 ];
 
@@ -358,18 +384,30 @@ export const changeRequests: ChangeRequest[] = [
 ];
 
 // Configuration-level cost centers (B16)
+// PHASE F2 — this catalog is the source for the project-cost-center `id` SELECT
+// (selecting a cost center fills+locks the id and derives the name) and the
+// resource-organizations `costCenters[]` multi-select. The CC-1001/1002/1003 rows
+// are added so the seeded project cost centers (which reference those ids) resolve
+// to a real catalog cost center and stay valid SELECT options.
 export const costCenters: CostCenter[] = [
   // PHASE D — manager is a PERSON reference to the resources catalog; reconcile the
   // orphan names ('Dana White'/'Erik Stone') to existing resources.
   { id: 'CC-9001', name: 'Corporate IT', manager: 'Alice Smith', allocated: 200000, actual: 150000 },
   { id: 'CC-9002', name: 'Shared Services', manager: 'John Miller', allocated: 80000, actual: 64000 },
+  { id: 'CC-1001', name: 'Engineering & Dev', manager: 'Alice Smith', allocated: 150000, actual: 125000 },
+  { id: 'CC-1002', name: 'Design & UX', manager: 'John Miller', allocated: 50000, actual: 48000 },
+  { id: 'CC-1003', name: 'Quality Assurance', manager: 'Julie Armstrong', allocated: 40000, actual: 42000 },
 ];
 
 // --- Commercial domain (ADR-0001): Customers, Contracts, Orders, OrderLines ---
 
+// PHASE F2 — `industry` is bound to the industries catalog (store = name) and
+// `country` to the countries catalog (store = country NAME, matching the seeded
+// display). 'Manufacturing' / 'Financial Services' are seeded industries ('Finance'
+// -> 'Financial Services'); 'Germany' / 'United Kingdom' are seeded country names.
 export const customers: Customer[] = [
   { id: 'C1', name: 'Globex Corp', industry: 'Manufacturing', country: 'Germany' },
-  { id: 'C2', name: 'Initech', industry: 'Finance', country: 'United Kingdom' },
+  { id: 'C2', name: 'Initech', industry: 'Financial Services', country: 'United Kingdom' },
 ];
 
 export const contracts: Contract[] = [

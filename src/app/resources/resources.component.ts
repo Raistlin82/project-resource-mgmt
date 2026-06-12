@@ -10,7 +10,7 @@ import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { of } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Resource, ProjectRole } from '../services/api.service';
+import { ApiService, Resource, ProjectRole, Country, City, ResourceOrganization } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
@@ -20,6 +20,9 @@ import { ListStateComponent } from '../shared/list-state.component';
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
+
+/** Allowed location sentinel for fully-remote staff (mirrors the server + seed). */
+const REMOTE_LOCATION = 'Remote';
 
 /**
  * People management screen — the full RESOURCE (employee) lifecycle:
@@ -175,13 +178,47 @@ function todayIso(): string {
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label for="res-org" class="block text-sm font-medium text-ink-secondary mb-1">Organization</label>
-                  <input id="res-org" type="text" formControlName="organization" class="command-input" placeholder="e.g. Engineering">
+                  <!-- Resource organization is a config FK, bound to the resource-organizations
+                       catalog by NAME (the stored value). Optional. -->
+                  <select id="res-org" formControlName="organization" class="command-select">
+                    <option value="">Unassigned</option>
+                    @for (org of orgOptions(); track org.id) {
+                      <option [value]="org.name">{{ org.name }}</option>
+                    }
+                    @if (orphanOrg(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
                 </div>
                 <div>
-                  <label for="res-loc" class="block text-sm font-medium text-ink-secondary mb-1">Location</label>
-                  <input id="res-loc" type="text" formControlName="location" class="command-input" placeholder="e.g. Milan, IT">
+                  <label for="res-country" class="block text-sm font-medium text-ink-secondary mb-1">Country</label>
+                  <!-- Location = Country + City. Country filters the City list; the stored
+                       value is the City NAME (the 'location' field). 'Remote' is a sentinel
+                       location (no country/city). Optional. -->
+                  <select id="res-country" [ngModel]="locationCountry()" (ngModelChange)="onCountryChange($event)" [ngModelOptions]="{ standalone: true }" class="command-select">
+                    <option value="">— No country —</option>
+                    <option value="__REMOTE__">Remote</option>
+                    @for (c of countryOptions(); track c.code) {
+                      <option [value]="c.code">{{ c.name }}</option>
+                    }
+                  </select>
                 </div>
               </div>
+
+              @if (locationCountry() && locationCountry() !== '__REMOTE__') {
+                <div>
+                  <label for="res-loc" class="block text-sm font-medium text-ink-secondary mb-1">City</label>
+                  <select id="res-loc" formControlName="location" class="command-select">
+                    <option value="">Select a city...</option>
+                    @for (city of citiesForCountry(); track city.id) {
+                      <option [value]="city.name">{{ city.name }}</option>
+                    }
+                    @if (orphanCity(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
+                </div>
+              }
 
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
@@ -287,6 +324,82 @@ export class ResourcesComponent {
   /** The role value currently loaded into the form (drives orphan detection). */
   private editingRole = signal<string>('');
 
+  // Location = Country + City and Organization are config FKs (Phase F2). All three
+  // option sources are open reads but keyed on authReady to mirror the gated reads.
+  protected readonly countriesRes = rxResource<Country[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getCountries() : of<Country[]>([])),
+    defaultValue: [] as Country[],
+  });
+  countryOptions = this.countriesRes.value;
+  protected readonly citiesRes = rxResource<City[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getCities() : of<City[]>([])),
+    defaultValue: [] as City[],
+  });
+  cityOptions = this.citiesRes.value;
+  protected readonly orgsRes = rxResource<ResourceOrganization[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResourceOrganizations() : of<ResourceOrganization[]>([])),
+    defaultValue: [] as ResourceOrganization[],
+  });
+  orgOptions = this.orgsRes.value;
+
+  // The selected country in the location picker. '' = none, '__REMOTE__' = the Remote
+  // sentinel (stored location 'Remote'); else an ISO-2 country code filtering the city
+  // list. A manual override (null = "derive from the stored location") lets the user
+  // change the country interactively while editing without losing the initial derive,
+  // which matters because the cities list loads async after openForm() runs.
+  private countryOverride = signal<string | null>(null);
+  locationCountry = computed<string>(() => {
+    const override = this.countryOverride();
+    if (override !== null) return override;
+    return this.countryForLocation(this.editingLocation());
+  });
+  /** Cities belonging to the selected country (the City select option list). */
+  citiesForCountry = computed<City[]>(() => {
+    const code = this.locationCountry();
+    if (!code || code === '__REMOTE__') return [];
+    return this.cityOptions().filter(c => c.countryCode === code);
+  });
+
+  // ORPHAN VALUE: a stored location/city not in the catalog stays selectable as a
+  // disabled "(not in catalog)" option (drives off the form's location value).
+  private editingLocation = signal<string>('');
+  orphanCity = computed<string | null>(() => {
+    const current = this.editingLocation();
+    if (!current || current === REMOTE_LOCATION) return null;
+    return this.cityOptions().some(c => c.name === current) ? null : current;
+  });
+
+  // ORPHAN VALUE: a stored organization name not in the catalog stays selectable.
+  private editingOrg = signal<string>('');
+  orphanOrg = computed<string | null>(() => {
+    const current = this.editingOrg();
+    if (!current) return null;
+    return this.orgOptions().some(o => o.name === current) ? null : current;
+  });
+
+  /** Derive the country/Remote selection from a stored city/sentinel location value. */
+  private countryForLocation(location: string): string {
+    if (!location) return '';
+    if (location === REMOTE_LOCATION) return '__REMOTE__';
+    const city = this.cityOptions().find(c => c.name === location);
+    return city ? city.countryCode : '';
+  }
+
+  /** Country select change: 'Remote' stores the sentinel; otherwise clear the city. */
+  onCountryChange(code: string) {
+    this.countryOverride.set(code);
+    if (code === '__REMOTE__') {
+      this.form.controls.location.setValue(REMOTE_LOCATION);
+    } else {
+      // Switching/clearing the country invalidates any previously chosen city.
+      this.form.controls.location.setValue('');
+    }
+    this.editingLocation.set(this.form.controls.location.value ?? '');
+  }
+
   search = signal('');
   /** "Active only" filter toggle — true by default (terminated rows hidden). */
   activeOnly = signal(true);
@@ -335,6 +448,9 @@ export class ResourcesComponent {
     if (r) {
       this.editingId.set(r.id);
       this.editingRole.set(r.role ?? '');
+      this.editingLocation.set(r.location ?? '');
+      this.editingOrg.set(r.organization ?? '');
+      this.countryOverride.set(null); // derive country from the stored location
       this.form.reset({
         name: r.name,
         role: r.role,
@@ -348,6 +464,9 @@ export class ResourcesComponent {
     } else {
       this.editingId.set(null);
       this.editingRole.set('');
+      this.editingLocation.set('');
+      this.editingOrg.set('');
+      this.countryOverride.set('');
       this.form.reset({ name: '', role: '', organization: '', location: '', capacity: 40, costRate: null, billRate: null, hireDate: '' });
     }
     this.showForm.set(true);
