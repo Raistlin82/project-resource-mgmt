@@ -100,6 +100,33 @@ function validateAssignmentSchedule(body: Partial<Assignment>): string | null {
   return null;
 }
 
+/**
+ * Phase G — server-side date backstop. Each named field, WHEN PRESENT (non-empty),
+ * must be an ISO-parseable date string; optional/omitted/'' fields pass unchanged.
+ * `order` enforces `to >= from` when BOTH are present. The native <input type="date">
+ * already emits ISO 'YYYY-MM-DD', so valid UI submissions are unaffected — this
+ * rejects only malformed dates from direct API / integration callers.
+ */
+function validateDateFields(
+  body: Record<string, unknown>,
+  fields: readonly string[],
+  order?: { from: string; to: string },
+): string | null {
+  for (const f of fields) {
+    const v = body[f];
+    if (v === undefined || v === null || v === '') continue;
+    if (!isIsoDateString(v)) return `${f} must be an ISO date string (YYYY-MM-DD)`;
+  }
+  if (order) {
+    const a = body[order.from];
+    const b = body[order.to];
+    if (a && b && isIsoDateString(a) && isIsoDateString(b) && Date.parse(b as string) < Date.parse(a as string)) {
+      return `${order.to} must be on or after ${order.from}`;
+    }
+  }
+  return null;
+}
+
 /** B10: keep utilization within [0, 100] and avoid float drift. */
 function clampUtil(v: number): number {
   return Math.round(Math.max(0, Math.min(100, v)));
@@ -1148,6 +1175,9 @@ apiRouter.post('/requests', async (req, res) => {
   // REFERENCE-DATA INTEGRITY (Phase C): every skills[] entry must be a catalog skill name.
   const skillErr = await validateSkillRefs(body, 'names');
   if (skillErr) { res.status(400).json({ error: skillErr }); return; }
+  // Phase G: startDate/endDate must be ISO (they feed schedule conflict detection).
+  const dateErr = validateDateFields(body as Record<string, unknown>, ['startDate', 'endDate'], { from: 'startDate', to: 'endDate' });
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
   const newReq = { id: newId(), staffedEffort: 0, ...body, status: 'Not Published' } as ResourceRequest;
   const created = await repos.requests.create(newReq);
   res.json(created);
@@ -1173,6 +1203,9 @@ apiRouter.put('/requests/:id', async (req, res) => {
   // REFERENCE-DATA INTEGRITY (Phase C): validate any supplied skills[] against the catalog.
   const skillErr = await validateSkillRefs(body, 'names');
   if (skillErr) { res.status(400).json({ error: skillErr }); return; }
+  // Phase G: validate any supplied start/end date (ISO + end >= start).
+  const dateErr = validateDateFields(body as Record<string, unknown>, ['startDate', 'endDate'], { from: 'startDate', to: 'endDate' });
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
   const updated = await repos.requests.update(req.params.id, body);
   res.json(updated);
 });
@@ -1563,6 +1596,9 @@ apiRouter.post('/projects', async (req, res) => {
   // 'Remote' sentinel. Optional; only a supplied non-empty value is checked.
   const locErr = await validateCatalogValue(body.location, 'location', cityNames, 'city (location catalog name) or "Remote"', [REMOTE_LOCATION]);
   if (locErr) { res.status(400).json({ error: locErr }); return; }
+  // Phase G: startDate/endDate must be ISO (end >= start) — they drive timelines.
+  const dateErr = validateDateFields(body as Record<string, unknown>, ['startDate', 'endDate'], { from: 'startDate', to: 'endDate' });
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
   const item = { id: newId(), ...body } as Project;
   res.json(await repos.projects.create(item));
 });
@@ -1579,6 +1615,9 @@ apiRouter.put('/projects/:id', async (req, res) => {
   // REFERENCE-DATA INTEGRITY (Phase F2): validate any supplied `location`.
   const locErr = await validateCatalogValue(body.location, 'location', cityNames, 'city (location catalog name) or "Remote"', [REMOTE_LOCATION]);
   if (locErr) { res.status(400).json({ error: locErr }); return; }
+  // Phase G: validate any supplied start/end date (ISO + end >= start).
+  const dateErr = validateDateFields(body as Record<string, unknown>, ['startDate', 'endDate'], { from: 'startDate', to: 'endDate' });
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
   const updated = await repos.projects.update(req.params.id, body);
   res.json(updated);
 });
@@ -1598,14 +1637,20 @@ crud(apiRouter, 'project-partners', repos.projectPartners, ['projectId', 'compan
 crud(apiRouter, 'project-documents', repos.projectDocuments, ['projectId', 'name', 'type', 'size', 'uploadedAt', 'author', 'authorInitials']);
 
 // PHASE D — work-package `assignee` is a person reference ('Unassigned' allowed).
+// Phase G — start/end must be ISO (end >= start) when supplied.
 crud(apiRouter, 'work-packages', repos.workPackages, ['projectId', 'name', 'startDate', 'endDate', 'status', 'progress', 'assignee'], [],
-  data => validatePersonRefs(data, ['assignee'], ['assignee']));
+  async data => validateDateFields(data, ['startDate', 'endDate'], { from: 'startDate', to: 'endDate' })
+    ?? await validatePersonRefs(data, ['assignee'], ['assignee']));
 
 interface MilestoneEntry { id: string; projectId: string; name: string; date: string; status: 'Pending' | 'Achieved'; approvedBy?: string; approvedAt?: string }
 const MILESTONE_FIELDS = ['projectId', 'name', 'date', 'status', 'approvedBy', 'approvedAt'] as const;
 apiRouter.get('/milestones', async (_req, res) => { res.json(await repos.milestones.list()); });
 apiRouter.post('/milestones', async (req, res) => {
-  const item = { id: newId(), ...pick<MilestoneEntry>(req.body, MILESTONE_FIELDS) } as MilestoneEntry;
+  const body = pick<MilestoneEntry>(req.body, MILESTONE_FIELDS);
+  // Phase G: the milestone `date` must be ISO when supplied.
+  const dateErr = validateDateFields(body as Record<string, unknown>, ['date']);
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
+  const item = { id: newId(), ...body } as MilestoneEntry;
   res.json(await repos.milestones.create(item));
 });
 apiRouter.put('/milestones/:id', async (req, res) => {
@@ -1613,6 +1658,9 @@ apiRouter.put('/milestones/:id', async (req, res) => {
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   const previousStatus = existing.status;
   const body = pick<MilestoneEntry>(req.body, MILESTONE_FIELDS);
+  // Phase G: validate the milestone `date` when supplied (ISO).
+  const dateErr = validateDateFields(body as Record<string, unknown>, ['date']);
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
   const updated = await repos.milestones.update(req.params.id, body) as MilestoneEntry;
   // MILESTONE TRIGGER (SAL): when a milestone first transitions to 'Achieved',
   // make its fixed-price billing item billable by flipping every linked
@@ -1681,12 +1729,14 @@ apiRouter.delete('/project-cost-centers/:id', async (req, res) => {
 });
 
 // PHASE D — task `assignee` is a person reference ('Unassigned' allowed).
+// Phase G — `dueDate` must be ISO when supplied.
 crud(apiRouter, 'project-tasks', repos.projectTasks, ['projectId', 'name', 'assignee', 'assigneeType', 'partnerId', 'dueDate', 'status', 'priority'], [],
-  data => validatePersonRefs(data, ['assignee'], ['assignee']));
+  async data => validateDateFields(data, ['dueDate']) ?? await validatePersonRefs(data, ['assignee'], ['assignee']));
 
 // PHASE D — issue `reportedBy` and `owner` are person references (optional).
+// Phase G — `dueDate` must be ISO when supplied.
 crud(apiRouter, 'project-issues', repos.projectIssues, ['projectId', 'title', 'type', 'severity', 'status', 'reportedBy', 'owner', 'dueDate', 'impact', 'actionPlan', 'escalated'], [],
-  data => validatePersonRefs(data, ['reportedBy', 'owner']));
+  async data => validateDateFields(data, ['dueDate']) ?? await validatePersonRefs(data, ['reportedBy', 'owner']));
 
 interface ChangeRequestEntry {
   id: string;
@@ -1831,6 +1881,9 @@ apiRouter.post('/contracts', async (req, res) => {
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
   const curErr = await validateCurrency(body);
   if (curErr) { res.status(400).json({ error: curErr }); return; }
+  // Phase G: startDate/endDate must be ISO (end >= start) when supplied.
+  const dateErr = validateDateFields(body as Record<string, unknown>, ['startDate', 'endDate'], { from: 'startDate', to: 'endDate' });
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
   const item = { id: newId(), ...body } as ContractEntry;
   const created = await repos.contracts.create(item as unknown as Contract);
   res.json(created);
@@ -1844,6 +1897,9 @@ apiRouter.put('/contracts/:id', async (req, res) => {
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
   const curErr = await validateCurrency(body);
   if (curErr) { res.status(400).json({ error: curErr }); return; }
+  // Phase G: validate any supplied start/end date (ISO + end >= start).
+  const dateErr = validateDateFields(body as Record<string, unknown>, ['startDate', 'endDate'], { from: 'startDate', to: 'endDate' });
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
   const updated = await repos.contracts.update(req.params.id, body as Partial<Contract>);
   res.json(updated);
 });
@@ -1878,6 +1934,9 @@ apiRouter.post('/orders', async (req, res) => {
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
   const fkError = await validateOrder(body);
   if (fkError) { res.status(400).json({ error: fkError }); return; }
+  // Phase G: orderDate must be ISO when supplied.
+  const dateErr = validateDateFields(body as Record<string, unknown>, ['orderDate']);
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
   const item = { id: newId(), partnerId: '', ...body } as OrderEntry;
   // INVOICE NUMBERING: an order created directly as 'Invoiced' gets a number now.
   // Serialize on the shared invoice-sequence so the ++invoiceSeq increment is
@@ -1896,6 +1955,9 @@ apiRouter.put('/orders/:id', async (req, res) => {
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
   const fkError = await validateOrder(body, existing as unknown as OrderEntry);
   if (fkError) { res.status(400).json({ error: fkError }); return; }
+  // Phase G: orderDate must be ISO when supplied.
+  const dateErr = validateDateFields(body as Record<string, unknown>, ['orderDate']);
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
   // INVOICE NUMBERING: assign a sequential number/date on transition to
   // 'Invoiced'. invoiceNumber/invoiceDate are not in ORDER_FIELDS, so the
   // client can never set them; they are strictly server-assigned.
@@ -2144,6 +2206,9 @@ apiRouter.post('/billing-plan-items', async (req, res) => {
   }
   const curErr = await validateCurrency(body);
   if (curErr) { res.status(400).json({ error: curErr }); return; }
+  // Phase G: every billing date (expected/issued/due/paid) must be ISO when supplied.
+  const dateErr = validateDateFields(body as Record<string, unknown>, ['expectedDate', 'issuedDate', 'dueDate', 'paidDate']);
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
   const item = { id: newId(), ...body } as BillingPlanEntry;
   // #14 CAPPED not-to-exceed: reject an overcap amount on create; otherwise apply
   // any cap-breach flag the accrued-T&M check produced before persisting.
@@ -2170,6 +2235,9 @@ apiRouter.put('/billing-plan-items/:id', async (req, res) => {
   }
   const curErr = await validateCurrency(body);
   if (curErr) { res.status(400).json({ error: curErr }); return; }
+  // Phase G: validate any supplied billing date (expected/issued/due/paid) as ISO.
+  const dateErr = validateDateFields(body as Record<string, unknown>, ['expectedDate', 'issuedDate', 'dueDate', 'paidDate']);
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
 
   // B-CONCURRENCY: serialize the read-merge-write per billing item against the
   // milestone→'Ready' trigger (which also writes this item) AND other concurrent
