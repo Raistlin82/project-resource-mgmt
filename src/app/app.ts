@@ -320,12 +320,16 @@ export class App {
       document.addEventListener('keydown', handler);
       this.destroyRef.onDestroy(() => document.removeEventListener('keydown', handler));
 
-      // On every navigation, reset the content pane to the top so each screen
-      // opens at its start (the content scrolls inside <main>, not the window,
-      // so router scroll-restoration wouldn't reach it).
+      // On every navigation, reset scroll to the top so each screen opens at its
+      // start. The content pane <main> is the scroll container on desktop
+      // (lg:h-screen + overflow-y-auto); on smaller viewports the window/document
+      // scrolls instead. Reset BOTH so it works at every breakpoint.
       const navSub = this.router.events
         .pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd))
-        .subscribe(() => document.getElementById('main-content')?.scrollTo({ top: 0, left: 0 }));
+        .subscribe(() => {
+          document.getElementById('main-content')?.scrollTo({ top: 0, left: 0 });
+          window.scrollTo({ top: 0, left: 0 });
+        });
       this.destroyRef.onDestroy(() => navSub.unsubscribe());
     });
   }
