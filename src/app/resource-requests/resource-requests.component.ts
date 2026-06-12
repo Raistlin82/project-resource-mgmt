@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, inject, signal, computed } from '@angular/core';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
-import { ApiService, ResourceRequest, Assignment, Resource, ProjectRole } from '../services/api.service';
+import { ApiService, ResourceRequest, Assignment, Resource, ProjectRole, Skill } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { DecimalPipe } from '@angular/common';
@@ -83,8 +83,21 @@ interface RequestsData {
                   <input id="requiredEffort" type="number" formControlName="requiredEffort" class="command-input">
                 </div>
                 <div class="space-y-1.5">
-                  <label for="skills" class="block text-sm font-semibold text-ink-secondary">Required Skill</label>
-                  <input id="skills" formControlName="skills" placeholder="e.g. Java, Angular, React" class="command-input">
+                  <label for="skills" class="block text-sm font-semibold text-ink-secondary">Required Skills</label>
+                  <!-- Skills are catalog values, never free text: a multi-select bound to
+                       the /skills catalog (stored value = skill NAME, the value match-scoring
+                       compares against). Hold Ctrl/Cmd to pick several. -->
+                  <select id="skills" formControlName="skills" multiple class="command-select min-h-[120px]">
+                    @for (skill of skillOptions(); track skill.id) {
+                      <option [value]="skill.name">{{ skill.name }}</option>
+                    }
+                    <!-- ORPHAN VALUE: any stored skill name not in the catalog (legacy free
+                         text) stays selectable as a disabled option so editing never drops it. -->
+                    @for (orphan of orphanSkills(); track orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
+                  <p class="text-xs font-medium text-[var(--cc-muted)] mt-2">Hold Ctrl/Cmd to select multiple skills.</p>
                 </div>
                 <div class="space-y-1.5">
                   <label for="startDate" class="block text-sm font-semibold text-ink-secondary">Start Date</label>
@@ -428,6 +441,25 @@ export class ResourceRequestsComponent {
   /** The requiredRole value currently loaded into the form (drives orphan detection). */
   private editingRole = signal<string>('');
 
+  // Required-skills option source: the canonical /skills catalog. Stored value =
+  // skill name, which is what match-scoring compares against. Keyed on authReady
+  // to mirror the principal-gated reads above.
+  private skillsRes = rxResource<Skill[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getSkills() : of<Skill[]>([])),
+    defaultValue: [] as Skill[],
+  });
+  skillOptions = this.skillsRes.value;
+
+  // ORPHAN VALUES: any skill on the edited request whose name isn't in the catalog
+  // (legacy free text) is surfaced as a disabled option so editing never drops it.
+  orphanSkills = computed<string[]>(() => {
+    const names = new Set(this.skillOptions().map(s => s.name));
+    return this.editingSkills().filter(s => !names.has(s));
+  });
+  /** The skill names currently loaded into the form (drives orphan detection). */
+  private editingSkills = signal<string[]>([]);
+
   showForm = signal(false);
   editingId = signal<string | null>(null);
   trackingRequestId = signal<string | null>(null);
@@ -487,7 +519,7 @@ export class ResourceRequestsComponent {
     name: new FormControl('', Validators.required),
     requiredRole: new FormControl('', Validators.required),
     requiredEffort: new FormControl(0, [Validators.required, Validators.min(1)]),
-    skills: new FormControl(''),
+    skills: new FormControl<string[]>([], { nonNullable: true }),
     description: new FormControl(''),
     startDate: new FormControl(''),
     endDate: new FormControl('')
@@ -504,18 +536,20 @@ export class ResourceRequestsComponent {
   openCreateForm() {
     this.editingId.set(null);
     this.editingRole.set('');
-    this.requestForm.reset({ requiredEffort: 0 });
+    this.editingSkills.set([]);
+    this.requestForm.reset({ requiredEffort: 0, skills: [] });
     this.showForm.set(true);
   }
 
   openEditForm(req: ResourceRequest) {
     this.editingId.set(req.id);
     this.editingRole.set(req.requiredRole ?? '');
+    this.editingSkills.set([...(req.skills ?? [])]);
     this.requestForm.patchValue({
       name: req.name,
       requiredRole: req.requiredRole,
       requiredEffort: req.requiredEffort,
-      skills: req.skills.join(', '),
+      skills: [...(req.skills ?? [])],
       description: req.description || '',
       startDate: req.startDate || '',
       endDate: req.endDate || ''
@@ -536,7 +570,9 @@ export class ResourceRequestsComponent {
         name: val.name || '',
         requiredRole: val.requiredRole || '',
         requiredEffort: val.requiredEffort || 0,
-        skills: val.skills ? val.skills.split(',').map(s => s.trim()).filter(s => s) : [],
+        // Multi-select already yields the selected skill NAMES; preserve any orphan
+        // values the user kept (disabled options aren't auto-removed on save).
+        skills: val.skills ?? [],
         description: val.description || '',
         startDate: val.startDate || '',
         endDate: val.endDate || '',
