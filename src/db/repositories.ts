@@ -58,6 +58,12 @@ import type {
   ProjectRole,
   ServiceOrganization,
   ResourceOrganization,
+  Country,
+  City,
+  Industry,
+  CostCategory,
+  PartnerRole,
+  Vendor,
   Project,
   Partner,
   ProjectDocument,
@@ -95,6 +101,8 @@ import type {
 export type LanguageRow = Language & Entity;
 /** `FxRate` exposed with an `id` mirroring `currency` (id === currency). */
 export type FxRateRow = FxRate & Entity;
+/** `Country` exposed with an `id` mirroring `code` (id === code). */
+export type CountryRow = Country & Entity;
 
 /**
  * Natural-key DEV adapter.
@@ -305,6 +313,12 @@ export interface Repositories {
   projectRoles: Repository<ProjectRole>;
   serviceOrganizations: Repository<ServiceOrganization>;
   resourceOrganizations: Repository<ResourceOrganization>;
+  countries: Repository<CountryRow>;
+  cities: Repository<City>;
+  industries: Repository<Industry>;
+  costCategories: Repository<CostCategory>;
+  partnerRoles: Repository<PartnerRole>;
+  vendors: Repository<Vendor>;
   projects: Repository<Project>;
   projectPartners: Repository<Partner>;
   projectDocuments: Repository<ProjectDocument>;
@@ -366,6 +380,16 @@ function buildPgRepositories(database: DrizzleDb): Repositories {
     resourceOrganizations: pg<ResourceOrganization>(
       schema.resourceOrganizations,
     ),
+    countries: new NaturalKeyPgRepository<CountryRow, 'code'>(
+      database,
+      schema.countries,
+      'code',
+    ),
+    cities: pg<City>(schema.cities),
+    industries: pg<Industry>(schema.industries),
+    costCategories: pg<CostCategory>(schema.costCategories),
+    partnerRoles: pg<PartnerRole>(schema.partnerRoles),
+    vendors: pg<Vendor>(schema.vendors),
     projects: pg<Project>(schema.projects),
     projectPartners: pg<Partner>(schema.projectPartners),
     projectDocuments: pg<ProjectDocument>(schema.projectDocuments),
@@ -419,6 +443,15 @@ function buildInMemoryRepositories(): Repositories {
     resourceOrganizations: mem<ResourceOrganization>(
       seed.resourceOrganizations,
     ),
+    countries: new NaturalKeyInMemoryRepository<CountryRow, Country>(
+      seed.countries,
+      'code',
+    ),
+    cities: mem<City>(seed.cities),
+    industries: mem<Industry>(seed.industries),
+    costCategories: mem<CostCategory>(seed.costCategories),
+    partnerRoles: mem<PartnerRole>(seed.partnerRoles),
+    vendors: mem<Vendor>(seed.vendors),
     projects: mem<Project>(seed.projects),
     projectPartners: mem<Partner>(seed.projectPartners),
     projectDocuments: mem<ProjectDocument>(seed.projectDocuments),

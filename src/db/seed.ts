@@ -36,6 +36,12 @@ import type {
   ProjectRole,
   ServiceOrganization,
   ResourceOrganization,
+  Country,
+  City,
+  Industry,
+  CostCategory,
+  PartnerRole,
+  Vendor,
   Project,
   Partner,
   ProjectDocument,
@@ -180,6 +186,105 @@ export const serviceOrganizations: ServiceOrganization[] = [
 
 export const resourceOrganizations: ResourceOrganization[] = [
   { id: '1', name: 'Res Org Germany', description: 'Resource Org for Germany', costCenters: ['CC_DE_1', 'CC_DE_2'], serviceOrganizationId: '1' },
+];
+
+// --- Customizing catalogs (Phase F1 — additive reference data) --------------
+
+// Countries keyed by ISO 3166-1 alpha-2 code. Covers the countries present in
+// the existing resource/project/customer location data (US New York, GB London,
+// DE Berlin/Munich) plus the principal extras (IT/FR/ES) so F2 can reconcile.
+export const countries: Country[] = [
+  { code: 'IT', name: 'Italy' },
+  { code: 'DE', name: 'Germany' },
+  { code: 'GB', name: 'United Kingdom' },
+  { code: 'US', name: 'United States' },
+  { code: 'FR', name: 'France' },
+  { code: 'ES', name: 'Spain' },
+];
+
+// Principal Italian cities/comuni (~20) plus the cities present in existing data
+// (Berlin/Munich DE, London GB, New York US) so F2 can reconcile project/resource
+// locations. Extendable in customizing.
+export const cities: City[] = [
+  { id: 'CITY_ROMA', name: 'Roma', countryCode: 'IT' },
+  { id: 'CITY_MILANO', name: 'Milano', countryCode: 'IT' },
+  { id: 'CITY_NAPOLI', name: 'Napoli', countryCode: 'IT' },
+  { id: 'CITY_TORINO', name: 'Torino', countryCode: 'IT' },
+  { id: 'CITY_PALERMO', name: 'Palermo', countryCode: 'IT' },
+  { id: 'CITY_GENOVA', name: 'Genova', countryCode: 'IT' },
+  { id: 'CITY_BOLOGNA', name: 'Bologna', countryCode: 'IT' },
+  { id: 'CITY_FIRENZE', name: 'Firenze', countryCode: 'IT' },
+  { id: 'CITY_BARI', name: 'Bari', countryCode: 'IT' },
+  { id: 'CITY_CATANIA', name: 'Catania', countryCode: 'IT' },
+  { id: 'CITY_VENEZIA', name: 'Venezia', countryCode: 'IT' },
+  { id: 'CITY_VERONA', name: 'Verona', countryCode: 'IT' },
+  { id: 'CITY_PADOVA', name: 'Padova', countryCode: 'IT' },
+  { id: 'CITY_TRIESTE', name: 'Trieste', countryCode: 'IT' },
+  { id: 'CITY_BRESCIA', name: 'Brescia', countryCode: 'IT' },
+  { id: 'CITY_PARMA', name: 'Parma', countryCode: 'IT' },
+  { id: 'CITY_MODENA', name: 'Modena', countryCode: 'IT' },
+  { id: 'CITY_PERUGIA', name: 'Perugia', countryCode: 'IT' },
+  { id: 'CITY_CAGLIARI', name: 'Cagliari', countryCode: 'IT' },
+  { id: 'CITY_REGGIO_CALABRIA', name: 'Reggio Calabria', countryCode: 'IT' },
+  // Cities present in existing project/resource data (for F2 reconciliation).
+  { id: 'CITY_BERLIN', name: 'Berlin', countryCode: 'DE' },
+  { id: 'CITY_MUNICH', name: 'Munich', countryCode: 'DE' },
+  { id: 'CITY_LONDON', name: 'London', countryCode: 'GB' },
+  { id: 'CITY_NEW_YORK', name: 'New York', countryCode: 'US' },
+];
+
+// Standard industry list (covers existing customer industries Manufacturing,
+// Finance -> Financial Services).
+export const industries: Industry[] = [
+  { id: 'IND_TECH', name: 'Technology' },
+  { id: 'IND_FINSERV', name: 'Financial Services' },
+  { id: 'IND_MANUF', name: 'Manufacturing' },
+  { id: 'IND_HEALTH', name: 'Healthcare' },
+  { id: 'IND_RETAIL', name: 'Retail' },
+  { id: 'IND_ENERGY', name: 'Energy & Utilities' },
+  { id: 'IND_TELCO', name: 'Telecommunications' },
+  { id: 'IND_PUBLIC', name: 'Public Sector' },
+  { id: 'IND_PROFSVC', name: 'Professional Services' },
+  { id: 'IND_MEDIA', name: 'Media & Entertainment' },
+  { id: 'IND_TRANSPORT', name: 'Transportation & Logistics' },
+  { id: 'IND_EDU', name: 'Education' },
+  { id: 'IND_REALESTATE', name: 'Real Estate' },
+  { id: 'IND_PHARMA', name: 'Pharmaceuticals' },
+];
+
+// Cost categories (covers existing financial-plan categories: Software Licenses
+// -> Software & Licenses, Consulting Services -> Subcontracting, Hardware).
+export const costCategories: CostCategory[] = [
+  { id: 'CCAT_LABOR', name: 'Labor' },
+  { id: 'CCAT_TRAVEL', name: 'Travel & Expenses' },
+  { id: 'CCAT_SOFTWARE', name: 'Software & Licenses' },
+  { id: 'CCAT_HARDWARE', name: 'Hardware' },
+  { id: 'CCAT_SUBCONTRACT', name: 'Subcontracting' },
+  { id: 'CCAT_TRAINING', name: 'Training' },
+  { id: 'CCAT_FACILITIES', name: 'Facilities' },
+  { id: 'CCAT_MARKETING', name: 'Marketing' },
+  { id: 'CCAT_OTHER', name: 'Other' },
+];
+
+// Partner relationship roles (covers existing project-partner role values:
+// 'Development Partner', and 'UI/UX Design' which maps to a Technology Partner).
+export const partnerRoles: PartnerRole[] = [
+  { id: 'PROLE_DEV', name: 'Development Partner' },
+  { id: 'PROLE_SUBCONTRACT', name: 'Subcontractor' },
+  { id: 'PROLE_RESELLER', name: 'Reseller' },
+  { id: 'PROLE_TECH', name: 'Technology Partner' },
+  { id: 'PROLE_STAFFING', name: 'Staffing Agency' },
+  { id: 'PROLE_CONSULTING', name: 'Consulting Partner' },
+];
+
+// Vendor catalog: partner/supplier companies. Seeded from existing project-partner
+// companies (TechCorp Inc., DesignStudio LLC) plus a few plausible others.
+export const vendors: Vendor[] = [
+  { id: 'V1', name: 'TechCorp Inc.', vatId: 'US-TECH-0001', country: 'US' },
+  { id: 'V2', name: 'DesignStudio LLC', vatId: 'US-DSGN-0002', country: 'US' },
+  { id: 'V3', name: 'Nordwind Software GmbH', vatId: 'DE-NORD-0003', country: 'DE' },
+  { id: 'V4', name: 'Mediolanum Consulting S.r.l.', vatId: 'IT-MEDI-0004', country: 'IT' },
+  { id: 'V5', name: 'Albion Cloud Services Ltd', vatId: 'GB-ALBI-0005', country: 'GB' },
 ];
 
 export const projects: Project[] = [

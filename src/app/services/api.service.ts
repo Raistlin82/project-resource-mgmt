@@ -133,6 +133,53 @@ export interface ResourceOrganization {
   serviceOrganizationId?: string;
 }
 
+// --- Customizing catalogs (Phase F1 — additive reference data) ---
+// These are simple keyed catalogs that F2 will bind consumer fields to (Resource
+// location/organization, Customer industry/country, financial-plan category,
+// project-partner role/company). Added here additively; no existing consumer is
+// rewired yet.
+
+/** A country, keyed by its ISO 3166-1 alpha-2 code (the id IS the code). */
+export interface Country {
+  /** ISO-2 code (e.g. 'IT'); doubles as the primary key. */
+  code: string;
+  name: string;
+}
+
+/** A city/comune belonging to a {@link Country} (FK by country code). */
+export interface City {
+  id: string;
+  name: string;
+  /** FK -> Country.code. */
+  countryCode: string;
+}
+
+/** A customer industry sector (e.g. 'Technology'). */
+export interface Industry {
+  id: string;
+  name: string;
+}
+
+/** A financial-plan cost category (e.g. 'Labor', 'Travel & Expenses'). */
+export interface CostCategory {
+  id: string;
+  name: string;
+}
+
+/** A project-partner relationship role (e.g. 'Subcontractor', 'Reseller'). */
+export interface PartnerRole {
+  id: string;
+  name: string;
+}
+
+/** A partner/supplier company in the vendor catalog. */
+export interface Vendor {
+  id: string;
+  name: string;
+  vatId?: string;
+  country?: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -626,6 +673,38 @@ export class ApiService {
   deleteResourceOrganization(id: string): Observable<void> {
     return this.http.delete<void>(`${this.baseUrl}/resource-organizations/${id}`);
   }
+
+  // --- Customizing catalogs (Phase F1 — additive reference data) ---
+
+  getCountries(): Observable<Country[]> { return this.http.get<Country[]>(`${this.baseUrl}/countries`); }
+  createCountry(c: Partial<Country>): Observable<Country> { return this.http.post<Country>(`${this.baseUrl}/countries`, c); }
+  updateCountry(code: string, c: Partial<Country>): Observable<Country> { return this.http.put<Country>(`${this.baseUrl}/countries/${code}`, c); }
+  deleteCountry(code: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/countries/${code}`); }
+
+  getCities(): Observable<City[]> { return this.http.get<City[]>(`${this.baseUrl}/cities`); }
+  createCity(c: Partial<City>): Observable<City> { return this.http.post<City>(`${this.baseUrl}/cities`, c); }
+  updateCity(id: string, c: Partial<City>): Observable<City> { return this.http.put<City>(`${this.baseUrl}/cities/${id}`, c); }
+  deleteCity(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/cities/${id}`); }
+
+  getIndustries(): Observable<Industry[]> { return this.http.get<Industry[]>(`${this.baseUrl}/industries`); }
+  createIndustry(i: Partial<Industry>): Observable<Industry> { return this.http.post<Industry>(`${this.baseUrl}/industries`, i); }
+  updateIndustry(id: string, i: Partial<Industry>): Observable<Industry> { return this.http.put<Industry>(`${this.baseUrl}/industries/${id}`, i); }
+  deleteIndustry(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/industries/${id}`); }
+
+  getCostCategories(): Observable<CostCategory[]> { return this.http.get<CostCategory[]>(`${this.baseUrl}/cost-categories`); }
+  createCostCategory(c: Partial<CostCategory>): Observable<CostCategory> { return this.http.post<CostCategory>(`${this.baseUrl}/cost-categories`, c); }
+  updateCostCategory(id: string, c: Partial<CostCategory>): Observable<CostCategory> { return this.http.put<CostCategory>(`${this.baseUrl}/cost-categories/${id}`, c); }
+  deleteCostCategory(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/cost-categories/${id}`); }
+
+  getPartnerRoles(): Observable<PartnerRole[]> { return this.http.get<PartnerRole[]>(`${this.baseUrl}/partner-roles`); }
+  createPartnerRole(r: Partial<PartnerRole>): Observable<PartnerRole> { return this.http.post<PartnerRole>(`${this.baseUrl}/partner-roles`, r); }
+  updatePartnerRole(id: string, r: Partial<PartnerRole>): Observable<PartnerRole> { return this.http.put<PartnerRole>(`${this.baseUrl}/partner-roles/${id}`, r); }
+  deletePartnerRole(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/partner-roles/${id}`); }
+
+  getVendors(): Observable<Vendor[]> { return this.http.get<Vendor[]>(`${this.baseUrl}/vendors`); }
+  createVendor(v: Partial<Vendor>): Observable<Vendor> { return this.http.post<Vendor>(`${this.baseUrl}/vendors`, v); }
+  updateVendor(id: string, v: Partial<Vendor>): Observable<Vendor> { return this.http.put<Vendor>(`${this.baseUrl}/vendors/${id}`, v); }
+  deleteVendor(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/vendors/${id}`); }
 
   getProjects(): Observable<Project[]> {
     return this.http.get<Project[]>(`${this.baseUrl}/projects`);
