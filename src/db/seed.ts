@@ -43,6 +43,7 @@ import type {
   PartnerRole,
   Vendor,
   RateCard,
+  Setting,
   Project,
   Partner,
   ProjectDocument,
@@ -79,10 +80,10 @@ export const resources: Resource[] = [
     skills: [{ name: 'Java', level: 3 }, { name: 'Spring', level: 2 }],
     projectRoles: ['Senior Developer', 'Backend Engineer'],
     externalExperience: [{ projectName: 'E-commerce Migration', company: 'TechCorp', role: 'Java Developer', startDate: '2020-01-01', endDate: '2022-12-31', comment: 'Migrated legacy system to Spring Boot.' }],
-    profilePicture: '', resume: '', utilization: 95, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York', costRate: 75, billRate: 140, hireDate: '2019-03-04' },
+    profilePicture: '', resume: '', utilization: 95, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York', costRate: 600, billRate: 1120, hireDate: '2019-03-04' },
   { id: '2', name: 'John Miller', role: 'Consultant',
     skills: [{ name: 'Project Management', level: 2 }], projectRoles: ['Business Consultant'],
-    externalExperience: [], profilePicture: '', resume: '', utilization: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London', costRate: 90, billRate: 180, hireDate: '2021-09-13' },
+    externalExperience: [], profilePicture: '', resume: '', utilization: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London', costRate: 720, billRate: 1440, hireDate: '2021-09-13' },
   { id: '3', name: 'Alice Smith', role: 'Designer',
     skills: [{ name: 'Figma', level: 3 }], projectRoles: ['UX Designer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 55, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', hireDate: '2023-01-16' },
@@ -310,17 +311,25 @@ export const vendors: Vendor[] = [
 // its role (and organization, if an org-specific card exists). Generic cards
 // (no organization) cover every org; 'RC_DEV_ENG' demonstrates an org-specific
 // override that beats the generic Developer card for the Engineering org.
+// Hybrid day-rate model: rates are €/DAY (the server converts to €/hour via the
+// hoursPerDay setting, default 8). These equal the prior hourly rates × 8, so the
+// effective hourly rate — and therefore every margin — is unchanged.
 export const rateCards: RateCard[] = [
-  { id: 'RC_DEV', role: 'Developer', currency: 'EUR', costRate: 75, billRate: 140 },
-  { id: 'RC_PM', role: 'Project Manager', currency: 'EUR', costRate: 95, billRate: 190 },
-  { id: 'RC_SR_DEV', role: 'Senior Developer', currency: 'EUR', costRate: 95, billRate: 175 },
-  { id: 'RC_BE_ENG', role: 'Backend Engineer', currency: 'EUR', costRate: 85, billRate: 160 },
-  { id: 'RC_CONS', role: 'Consultant', currency: 'EUR', costRate: 90, billRate: 180 },
-  { id: 'RC_BIZ_CONS', role: 'Business Consultant', currency: 'EUR', costRate: 110, billRate: 210 },
-  { id: 'RC_DESIGN', role: 'Designer', currency: 'EUR', costRate: 65, billRate: 120 },
-  { id: 'RC_UX_DESIGN', role: 'UX Designer', currency: 'EUR', costRate: 70, billRate: 130 },
+  { id: 'RC_DEV', role: 'Developer', currency: 'EUR', costRate: 600, billRate: 1120 },
+  { id: 'RC_PM', role: 'Project Manager', currency: 'EUR', costRate: 760, billRate: 1520 },
+  { id: 'RC_SR_DEV', role: 'Senior Developer', currency: 'EUR', costRate: 760, billRate: 1400 },
+  { id: 'RC_BE_ENG', role: 'Backend Engineer', currency: 'EUR', costRate: 680, billRate: 1280 },
+  { id: 'RC_CONS', role: 'Consultant', currency: 'EUR', costRate: 720, billRate: 1440 },
+  { id: 'RC_BIZ_CONS', role: 'Business Consultant', currency: 'EUR', costRate: 880, billRate: 1680 },
+  { id: 'RC_DESIGN', role: 'Designer', currency: 'EUR', costRate: 520, billRate: 960 },
+  { id: 'RC_UX_DESIGN', role: 'UX Designer', currency: 'EUR', costRate: 560, billRate: 1040 },
   // Org-specific override: Developers in the Engineering org bill higher.
-  { id: 'RC_DEV_ENG', role: 'Developer', organization: 'Engineering', currency: 'EUR', costRate: 80, billRate: 150 },
+  { id: 'RC_DEV_ENG', role: 'Developer', organization: 'Engineering', currency: 'EUR', costRate: 640, billRate: 1200 },
+];
+
+// Global settings. hoursPerDay converts the €/day rate cards into €/hour.
+export const settings: Setting[] = [
+  { id: 'hoursPerDay', value: '8' },
 ];
 
 // PHASE F2 — `location` is bound to the cities catalog (store = city name).

@@ -101,6 +101,7 @@ export async function initPersistence(): Promise<void> {
   await seedIfEmpty(database, schema.resources, seed.resources);
   await seedIfEmpty(database, schema.languages, seed.languages);
   await seedIfEmpty(database, schema.fxRates, seed.fxRates);
+  await seedIfEmpty(database, schema.settings, seed.settings); // global settings (hoursPerDay)
   await seedIfEmpty(database, schema.skillCatalogs, seed.skillCatalogs);
   await seedIfEmpty(database, schema.proficiencySets, seed.proficiencySets);
   await seedIfEmpty(database, schema.projectRoles, seed.projectRoles);

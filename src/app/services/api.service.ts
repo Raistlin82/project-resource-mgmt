@@ -18,21 +18,25 @@ export interface Resource {
   organization?: string;
   location?: string;
   /**
-   * EFFECTIVE cost rate (override ?? the role's rate-card default), resolved by
-   * the server on read. This is the value all margin math consumes; treat it as
-   * read-only — write `costRateOverride` instead. Phase E (Rate Cards).
+   * EFFECTIVE cost rate in **€/HOUR** (effective day rate ÷ hours-per-day),
+   * resolved by the server on read. This is the value all margin math consumes
+   * (cost = hours × costRate); treat it as read-only. Phase E + hybrid day model.
    */
   costRate?: number;
-  /** EFFECTIVE bill rate (override ?? rate-card default), resolved on read. */
+  /** EFFECTIVE bill rate in **€/HOUR** (effective day rate ÷ hours-per-day). */
   billRate?: number;
   /**
-   * Per-resource MANUAL OVERRIDE of the role's rate-card cost rate. `null`/
-   * `undefined` = inherit the card default. The form binds the Cost-rate input
-   * here; the server maps it onto the resources.cost_rate column. Phase E.
+   * Per-resource MANUAL OVERRIDE of the role's rate card, in **€/DAY**. `null`/
+   * `undefined` = inherit the card default. The form binds the Cost-rate (€/gg)
+   * input here; the server maps it onto the resources.cost_rate column. Phase E.
    */
   costRateOverride?: number | null;
-  /** Per-resource manual override of the role's rate-card bill rate (null = inherit). */
+  /** Per-resource manual override of the bill rate, in **€/DAY** (null = inherit). */
   billRateOverride?: number | null;
+  /** EFFECTIVE cost rate in **€/DAY** (override ?? card), resolved on read — for display/entry. */
+  costRateDay?: number;
+  /** EFFECTIVE bill rate in **€/DAY** (override ?? card), resolved on read. */
+  billRateDay?: number;
   /**
    * Date the resource was hired (data di assunzione), ISO 'YYYY-MM-DD'.
    * REQUIRED at create time (the server rejects a missing/invalid value), but
@@ -200,6 +204,8 @@ export interface Vendor {
  * rate — a resource's effective rate is its per-resource override (if any) else
  * the matching card here. Keyed by `role` (project-role NAME) + optional
  * `organization` (resource-org NAME; empty = all orgs) + `currency` (base/EUR).
+ * Rates are in **€/DAY** (hybrid model); the server converts to €/hour via the
+ * `hoursPerDay` setting before margin math.
  */
 export interface RateCard {
   id: string;
@@ -208,6 +214,12 @@ export interface RateCard {
   currency: string;
   costRate: number;
   billRate: number;
+}
+
+/** A global key-value setting (id IS the key, e.g. 'hoursPerDay'). */
+export interface Setting {
+  id: string;
+  value: string;
 }
 
 export interface Project {
@@ -742,6 +754,11 @@ export class ApiService {
   createRateCard(r: Partial<RateCard>): Observable<RateCard> { return this.http.post<RateCard>(`${this.baseUrl}/rate-cards`, r); }
   updateRateCard(id: string, r: Partial<RateCard>): Observable<RateCard> { return this.http.put<RateCard>(`${this.baseUrl}/rate-cards/${id}`, r); }
   deleteRateCard(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/rate-cards/${id}`); }
+
+  // Hybrid day-rate model: hours-per-day converts €/day rate cards into the €/hour
+  // the margin math consumes. Read open; write gated to finance-grade roles.
+  getHoursPerDay(): Observable<{ value: number }> { return this.http.get<{ value: number }>(`${this.baseUrl}/settings/hours-per-day`); }
+  setHoursPerDay(value: number): Observable<{ value: number }> { return this.http.put<{ value: number }>(`${this.baseUrl}/settings/hours-per-day`, { value }); }
 
   getProjects(): Observable<Project[]> {
     return this.http.get<Project[]>(`${this.baseUrl}/projects`);

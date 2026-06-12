@@ -482,6 +482,8 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
     // Rate cards (Phase E) define the DEFAULT cost/bill rates — sensitive financial
     // config. Mutations restricted to the finance-grade roles that own rates.
     { test: p => p.startsWith('/rate-cards'), roles: ['admin', 'delivery-executive', 'finance'] },
+    // Global settings (hours-per-day) rescale every effective rate — finance-grade only.
+    { test: p => p.startsWith('/settings'), roles: ['admin', 'delivery-executive', 'finance'] },
     // Time entries incl. approval. Self-approval is additionally blocked in the PUT handler (SoD).
     { test: p => p.startsWith('/time-entries'), roles: ['employee', 'pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
     { test: p => ['/assignments', '/requests'].some(prefix => p.startsWith(prefix)), roles: ['pm', 'resource-manager', 'delivery-executive', 'admin'] },
@@ -1006,29 +1008,48 @@ async function recomputeResourceUtilization(resourceId: string): Promise<void> {
 // preferring an org-specific card over the generic (no-org) one.
 // ---------------------------------------------------------------------------
 const RATE_BASE_CURRENCY = 'EUR';
+const DEFAULT_HOURS_PER_DAY = 8;
+/** The configured working hours/day (settings.hoursPerDay), default 8 if unset/invalid. */
+async function getHoursPerDay(): Promise<number> {
+  const row = await repos.settings.get('hoursPerDay');
+  const n = row ? Number((row as { value?: unknown }).value) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_HOURS_PER_DAY;
+}
 function pickRateCard(cards: RateCard[], role: string | undefined, organization: string | undefined): RateCard | undefined {
   if (!role) return undefined;
   const forRole = cards.filter(c => c.role === role && (c.currency ?? RATE_BASE_CURRENCY) === RATE_BASE_CURRENCY);
   return forRole.find(c => c.organization && c.organization === organization)
       ?? forRole.find(c => !c.organization);
 }
-/** Return a resource with EFFECTIVE costRate/billRate plus the raw override fields. */
-function withEffectiveRates(r: Resource, cards: RateCard[]): Resource {
+/**
+ * Resolve a resource's rates (hybrid day model). Rate cards + the per-resource
+ * override (the cost_rate/bill_rate columns) are in €/DAY. This exposes:
+ *   - costRateOverride/billRateOverride — the raw €/day override (for the form),
+ *   - costRateDay/billRateDay           — the effective €/day (override ?? card),
+ *   - costRate/billRate                 — the effective €/HOUR (= €/day ÷ hpd),
+ *     which all margin math (finance.util, billing, match, accrual) consumes.
+ */
+function withEffectiveRates(r: Resource, cards: RateCard[], hpd: number): Resource {
   const card = pickRateCard(cards, r.role, r.organization);
-  const costOverride = r.costRate ?? null;
-  const billOverride = r.billRate ?? null;
+  const costOverrideDay = r.costRate ?? null;
+  const billOverrideDay = r.billRate ?? null;
+  const costDay = costOverrideDay ?? card?.costRate;
+  const billDay = billOverrideDay ?? card?.billRate;
   return {
     ...r,
-    costRateOverride: costOverride,
-    billRateOverride: billOverride,
-    costRate: costOverride ?? card?.costRate,
-    billRate: billOverride ?? card?.billRate,
+    costRateOverride: costOverrideDay,
+    billRateOverride: billOverrideDay,
+    costRateDay: costDay,
+    billRateDay: billDay,
+    costRate: costDay != null ? costDay / hpd : undefined,
+    billRate: billDay != null ? billDay / hpd : undefined,
   };
 }
-/** Resolve effective rates over a resource list (one shared rate-card fetch). */
+/** Resolve effective rates over a resource list (one shared rate-card + hpd fetch). */
 async function resolveResourceRates(rows: Resource[]): Promise<Resource[]> {
   const cards = (await repos.rateCards.list()) as unknown as RateCard[];
-  return rows.map(r => withEffectiveRates(r, cards));
+  const hpd = await getHoursPerDay();
+  return rows.map(r => withEffectiveRates(r, cards, hpd));
 }
 /**
  * Map the form's costRateOverride/billRateOverride onto the persisted cost_rate/
@@ -1580,6 +1601,24 @@ crud(apiRouter, 'rate-cards', repos.rateCards, ['role', 'organization', 'currenc
     }
     return null;
   });
+
+// HYBRID DAY MODEL — working hours-per-day that converts the €/day rate cards into
+// the €/hour the margin math consumes. Read is open (the resolver + forms need it);
+// writes are gated to finance-grade roles (it rescales every effective rate).
+apiRouter.get('/settings/hours-per-day', async (_req, res) => {
+  res.json({ value: await getHoursPerDay() });
+});
+apiRouter.put('/settings/hours-per-day', async (req, res) => {
+  const n = Number((req.body ?? {}).value);
+  if (!Number.isFinite(n) || n <= 0 || n > 24) {
+    res.status(400).json({ error: 'value must be a number in (0, 24] — working hours per day' });
+    return;
+  }
+  const existing = await repos.settings.get('hoursPerDay');
+  if (existing) await repos.settings.update('hoursPerDay', { value: String(n) });
+  else await repos.settings.create({ id: 'hoursPerDay', value: String(n) });
+  res.json({ value: n });
+});
 
 const PROJECT_FIELDS = ['name', 'location', 'startDate', 'endDate', 'status', 'description', 'ownerId', 'contractId'] as const;
 apiRouter.get('/projects', async (_req, res) => { res.json(await repos.projects.list()); });

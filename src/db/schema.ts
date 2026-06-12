@@ -713,6 +713,15 @@ export const fxRates = pgTable('fx_rates', {
   rateToBase: doublePrecision('rate_to_base').notNull(),
 });
 
+// Global key-value settings. `id` IS the setting key (so it flows through the
+// standard id-bearing Repository<T> without a natural-key adapter). Currently
+// holds `hoursPerDay` — the org's working hours per day, used to convert the
+// day-based rate cards (€/giorno) into the hourly rates the margin math consumes.
+export const settings = pgTable('settings', {
+  id: text('id').primaryKey(),
+  value: text('value').notNull(),
+});
+
 // ---------------------------------------------------------------------------
 // Approval workflow engine
 // ---------------------------------------------------------------------------
