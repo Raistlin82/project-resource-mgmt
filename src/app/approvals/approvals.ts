@@ -66,19 +66,19 @@ interface ApprovalRow {
         </div>
         <div class="command-card-muted p-1 flex items-center self-start sm:self-auto">
           <button type="button" (click)="filter.set('mine')"
-                  [class.bg-white]="filter() === 'mine'"
+                  [class.bg-surface]="filter() === 'mine'"
                   [class.shadow-sm]="filter() === 'mine'"
-                  [class.text-slate-900]="filter() === 'mine'"
-                  [class.text-slate-500]="filter() !== 'mine'"
+                  [class.text-ink]="filter() === 'mine'"
+                  [class.text-ink-muted]="filter() !== 'mine'"
                   class="px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ease-out flex items-center gap-2">
             My inbox
             <span class="command-status">{{ mineCount() }}</span>
           </button>
           <button type="button" (click)="filter.set('all')"
-                  [class.bg-white]="filter() === 'all'"
+                  [class.bg-surface]="filter() === 'all'"
                   [class.shadow-sm]="filter() === 'all'"
-                  [class.text-slate-900]="filter() === 'all'"
-                  [class.text-slate-500]="filter() !== 'all'"
+                  [class.text-ink]="filter() === 'all'"
+                  [class.text-ink-muted]="filter() !== 'all'"
                   class="px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ease-out">
             All pending
           </button>
@@ -106,7 +106,7 @@ interface ApprovalRow {
               @for (row of rows(); track row.request.id) {
                 <tr class="transition-colors">
                   <td>
-                    <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold ring-1 bg-slate-50 text-slate-700 ring-slate-200">
+                    <span class="command-chip is-neutral">
                       <mat-icon class="text-[16px] w-[16px] h-[16px]">{{ kindIcon(row.kind) }}</mat-icon>
                       {{ row.kind }}
                     </span>
@@ -117,7 +117,7 @@ interface ApprovalRow {
                     @if (row.amount !== undefined) {
                       {{ row.amount | currency:'EUR':'symbol':'1.0-0' }}
                     } @else {
-                      <span class="text-slate-400">&mdash;</span>
+                      <span class="text-ink-muted">&mdash;</span>
                     }
                   </td>
                   <td><span class="text-[var(--cc-muted)]">{{ row.requestedByLabel }}</span></td>
@@ -138,7 +138,7 @@ interface ApprovalRow {
                         }
                       </div>
                     } @else {
-                      <span class="text-slate-400">&mdash;</span>
+                      <span class="text-ink-muted">&mdash;</span>
                     }
                   </td>
                   <td>
@@ -157,7 +157,7 @@ interface ApprovalRow {
                                 [disabled]="!row.canDecide || pendingId() === row.request.id"
                                 [title]="approveTitle(row)"
                                 [attr.aria-label]="approveTitle(row)"
-                                class="p-2 rounded-lg text-slate-400 enabled:hover:text-emerald-700 enabled:hover:bg-emerald-50 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+                                class="p-2 rounded-lg text-ink-muted enabled:hover:text-positive-text enabled:hover:bg-positive-tint transition-all disabled:opacity-40 disabled:cursor-not-allowed">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">check_circle</mat-icon>
                         </button>
                         <button type="button"
@@ -165,7 +165,7 @@ interface ApprovalRow {
                                 [disabled]="!row.canDecide || pendingId() === row.request.id"
                                 [title]="rejectTitle(row)"
                                 [attr.aria-label]="rejectTitle(row)"
-                                class="p-2 rounded-lg text-slate-400 enabled:hover:text-red-700 enabled:hover:bg-red-50 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+                                class="p-2 rounded-lg text-ink-muted enabled:hover:text-critical-text enabled:hover:bg-critical-tint transition-all disabled:opacity-40 disabled:cursor-not-allowed">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">cancel</mat-icon>
                         </button>
                       </div>
@@ -179,7 +179,7 @@ interface ApprovalRow {
                   <td colspan="9" class="text-center text-[var(--cc-muted)]">
                     <div class="flex flex-col items-center justify-center px-6 py-16">
                       <mat-icon class="text-4xl mb-3 opacity-50">inbox</mat-icon>
-                      <p class="font-medium text-slate-600">
+                      <p class="font-medium text-ink-secondary">
                         {{ filter() === 'mine' ? 'Your inbox is clear.' : 'No pending approvals.' }}
                       </p>
                       <p class="text-sm mt-1">

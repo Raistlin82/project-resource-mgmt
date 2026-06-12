@@ -50,7 +50,7 @@ import { ChangeRequests } from '../change-requests/change-requests';
                   <span class="command-status"
                         [class.amber]="p.status === 'In Planning'"
                         [class.green]="p.status === 'In Execution'"
-                        [class.text-slate-700]="p.status === 'Completed'">
+                        [class.text-ink-secondary]="p.status === 'Completed'">
                     {{ p.status }}
                   </span>
                   <span class="command-status"
@@ -99,9 +99,9 @@ import { ChangeRequests } from '../change-requests/change-requests';
                   class="px-4 py-4 text-sm font-semibold whitespace-nowrap border-b-2 transition-colors"
                   [class.project-tab-active]="activeTab() === tab.id"
                   [class.border-transparent]="activeTab() !== tab.id"
-                  [class.text-slate-500]="activeTab() !== tab.id"
-                  [class.hover:text-slate-700]="activeTab() !== tab.id"
-                  [class.hover:border-slate-300]="activeTab() !== tab.id">
+                  [class.text-ink-muted]="activeTab() !== tab.id"
+                  [class.hover:text-ink-secondary]="activeTab() !== tab.id"
+                  [class.hover:border-line-strong]="activeTab() !== tab.id">
             {{ tab.label }}
           </button>
         }
@@ -147,8 +147,8 @@ import { ChangeRequests } from '../change-requests/change-requests';
               </div>
               <div class="command-kpi" [class.danger]="f.margin < 0">
                 <p class="command-kpi-label">Margin</p>
-                <p class="command-kpi-value font-mono tabular-nums" [class.text-emerald-700]="f.margin >= 0" [class.text-red-700]="f.margin < 0">{{ f.margin | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="command-kpi-note font-semibold" [class.text-emerald-700]="f.margin >= 0" [class.text-red-700]="f.margin < 0">{{ f.marginPct | number:'1.0-1' }}% margin</p>
+                <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="f.margin >= 0" [class.text-critical-text]="f.margin < 0">{{ f.margin | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-note font-semibold" [class.text-positive-text]="f.margin >= 0" [class.text-critical-text]="f.margin < 0">{{ f.marginPct | number:'1.0-1' }}% margin</p>
               </div>
               <div class="command-kpi info">
                 <p class="command-kpi-label">Backlog</p>
@@ -162,9 +162,9 @@ import { ChangeRequests } from '../change-requests/change-requests';
               </div>
               <div class="command-kpi" [class.danger]="f.burnPct > 100">
                 <p class="command-kpi-label">Budget Burn</p>
-                <p class="command-kpi-value font-mono tabular-nums" [class.text-emerald-700]="f.burnPct <= 100" [class.text-red-700]="f.burnPct > 100">{{ f.burnPct | number:'1.0-0' }}%</p>
-                <div class="w-full bg-slate-100 rounded-full h-2 overflow-hidden mt-2">
-                  <div class="h-2 rounded-full" [class.bg-gradient-to-r]="f.burnPct <= 100" [class.from-blue-500]="f.burnPct <= 100" [class.to-blue-600]="f.burnPct <= 100" [class.bg-red-500]="f.burnPct > 100" [style.width.%]="f.burnPct < 100 ? f.burnPct : 100"></div>
+                <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="f.burnPct <= 100" [class.text-critical-text]="f.burnPct > 100">{{ f.burnPct | number:'1.0-0' }}%</p>
+                <div class="w-full bg-surface-muted rounded-full h-2 overflow-hidden mt-2">
+                  <div class="h-2 rounded-full" [class.bg-gradient-to-r]="f.burnPct <= 100" [class.from-accent]="f.burnPct <= 100" [class.to-accent]="f.burnPct <= 100" [class.bg-critical]="f.burnPct > 100" [style.width.%]="f.burnPct < 100 ? f.burnPct : 100"></div>
                 </div>
               </div>
               <div class="command-kpi info">
@@ -179,7 +179,7 @@ import { ChangeRequests } from '../change-requests/change-requests';
               </div>
               <div class="command-kpi" [class.danger]="f.varianceAtCompletion < 0">
                 <p class="command-kpi-label">VAC</p>
-                <p class="command-kpi-value font-mono tabular-nums" [class.text-emerald-700]="f.varianceAtCompletion >= 0" [class.text-red-700]="f.varianceAtCompletion < 0">{{ f.varianceAtCompletion | currency:'EUR':'symbol':'1.0-0' }}</p>
+                <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="f.varianceAtCompletion >= 0" [class.text-critical-text]="f.varianceAtCompletion < 0">{{ f.varianceAtCompletion | currency:'EUR':'symbol':'1.0-0' }}</p>
                 <p class="command-kpi-note">Budget minus EAC</p>
               </div>
             </div>
@@ -187,15 +187,15 @@ import { ChangeRequests } from '../change-requests/change-requests';
             <div class="command-card p-6 sm:p-8">
               <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] tracking-tight mb-6">Revenue breakdown</h3>
               @if (f.revenue > 0) {
-                <div class="flex h-9 w-full rounded-xl overflow-hidden text-xs font-bold ring-1 ring-slate-200">
-                  <div class="bg-amber-100 text-amber-700 flex items-center justify-center min-w-0" [style.width.%]="f.laborCost / f.revenue * 100">Labor</div>
-                  <div class="bg-orange-100 text-orange-700 flex items-center justify-center min-w-0" [style.width.%]="f.externalCost / f.revenue * 100">Ext</div>
-                  <div class="flex items-center justify-center min-w-0" [class.bg-emerald-100]="f.margin >= 0" [class.text-emerald-700]="f.margin >= 0" [class.bg-red-100]="f.margin < 0" [class.text-red-700]="f.margin < 0" [style.width.%]="f.marginPct > 0 ? f.marginPct : 0">Margin</div>
+                <div class="flex h-9 w-full rounded-xl overflow-hidden text-xs font-bold ring-1 ring-line">
+                  <div class="bg-caution-tint text-caution-text flex items-center justify-center min-w-0" [style.width.%]="f.laborCost / f.revenue * 100">Labor</div>
+                  <div class="bg-caution-tint text-caution-text flex items-center justify-center min-w-0" [style.width.%]="f.externalCost / f.revenue * 100">Ext</div>
+                  <div class="flex items-center justify-center min-w-0" [class.bg-positive-tint]="f.margin >= 0" [class.text-positive-text]="f.margin >= 0" [class.bg-critical-tint]="f.margin < 0" [class.text-critical-text]="f.margin < 0" [style.width.%]="f.marginPct > 0 ? f.marginPct : 0">Margin</div>
                 </div>
                 <div class="flex flex-wrap gap-4 mt-3 text-xs text-[var(--cc-muted)]">
-                  <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-amber-500"></span> Labor</span>
-                  <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-orange-500"></span> External</span>
-                  <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-emerald-500"></span> Margin</span>
+                  <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-caution"></span> Labor</span>
+                  <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-caution"></span> External</span>
+                  <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-positive"></span> Margin</span>
                 </div>
               } @else {
                 <p class="text-sm text-[var(--cc-muted)]">No customer revenue recorded for this project yet. Add a Customer order with a line imputed to this project (Commercial → Orders).</p>

@@ -2,9 +2,27 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Google AI Studio Angular App</title>
+    <title>Delivery Control</title>
     <base href="/" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Anti-FOUC: apply the stored theme synchronously, before first paint, so a
+         user who chose dark doesn't see a light flash on load. Runs in the browser
+         only (never during SSR); mirrors ThemeService's 'dc-theme' key. -->
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem('dc-theme') === 'dark') {
+            document.documentElement.dataset.theme = 'dark';
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <meta
+      name="description"
+      content="Delivery Control — Professional Services Automation: resourcing, delivery, commercial, billing & revenue."
+    />
+    <meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#15171f" media="(prefers-color-scheme: dark)" />
     <link rel="icon" type="image/x-icon" href="favicon.ico" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -12,6 +30,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&family=Hanken+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
     />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons" />
   </head>
   <body>
     <app-root></app-root>

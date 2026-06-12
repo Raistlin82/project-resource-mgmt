@@ -28,7 +28,7 @@ import { ApiService, Language } from '../services/api.service';
             <tbody>
               @for (lang of languages(); track lang.code) {
                 <tr>
-                  <td><span class="text-blue-700 font-mono font-bold tracking-wide">{{ lang.code }}</span></td>
+                  <td><span class="text-accent-text font-mono font-bold tracking-wide">{{ lang.code }}</span></td>
                   <td class="font-bold text-base">
                     {{ lang.name }}
                     @if (lang.isDefault) {

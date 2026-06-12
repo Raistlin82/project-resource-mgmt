@@ -28,18 +28,18 @@ interface RequestsData {
         <div class="flex flex-col sm:flex-row items-center gap-4">
           <div class="command-card-muted p-1 flex items-center">
             <button (click)="currentView.set('requests')"
-                    [class.bg-white]="currentView() === 'requests'"
+                    [class.bg-surface]="currentView() === 'requests'"
                     [class.shadow-sm]="currentView() === 'requests'"
-                    [class.text-slate-900]="currentView() === 'requests'"
-                    [class.text-slate-500]="currentView() !== 'requests'"
+                    [class.text-ink]="currentView() === 'requests'"
+                    [class.text-ink-muted]="currentView() !== 'requests'"
                     class="px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ease-out">
               Requests
             </button>
             <button (click)="currentView.set('availability')"
-                    [class.bg-white]="currentView() === 'availability'"
+                    [class.bg-surface]="currentView() === 'availability'"
                     [class.shadow-sm]="currentView() === 'availability'"
-                    [class.text-slate-900]="currentView() === 'availability'"
-                    [class.text-slate-500]="currentView() !== 'availability'"
+                    [class.text-ink]="currentView() === 'availability'"
+                    [class.text-ink-muted]="currentView() !== 'availability'"
                     class="px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ease-out">
               Resource Availability
             </button>
@@ -55,38 +55,38 @@ interface RequestsData {
       @if (currentView() === 'requests') {
         @if (showForm()) {
           <div class="command-card p-8 relative overflow-hidden">
-            <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-blue-600"></div>
+            <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-accent to-accent"></div>
             <h2 class="font-display text-2xl font-bold text-[var(--cc-ink)] mb-8">{{ editingId() ? 'Edit Request' : 'New Resource Request' }}</h2>
             <form [formGroup]="requestForm" (ngSubmit)="saveRequest()" class="space-y-6">
               <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div class="space-y-1.5">
-                  <label for="name" class="block text-sm font-semibold text-slate-700">Project Name <span class="text-red-500">*</span></label>
-                  <input id="name" formControlName="name" class="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white focus:bg-white text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none">
+                  <label for="name" class="block text-sm font-semibold text-ink-secondary">Project Name <span class="text-critical">*</span></label>
+                  <input id="name" formControlName="name" class="command-input">
                 </div>
                 <div class="space-y-1.5">
-                  <label for="requiredRole" class="block text-sm font-semibold text-slate-700">Required Role <span class="text-red-500">*</span></label>
-                  <input id="requiredRole" formControlName="requiredRole" class="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white focus:bg-white text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none">
+                  <label for="requiredRole" class="block text-sm font-semibold text-ink-secondary">Required Role <span class="text-critical">*</span></label>
+                  <input id="requiredRole" formControlName="requiredRole" class="command-input">
                 </div>
                 <div class="space-y-1.5">
-                  <label for="requiredEffort" class="block text-sm font-semibold text-slate-700">Required Effort (Hours) <span class="text-red-500">*</span></label>
-                  <input id="requiredEffort" type="number" formControlName="requiredEffort" class="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white focus:bg-white text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none">
+                  <label for="requiredEffort" class="block text-sm font-semibold text-ink-secondary">Required Effort (Hours) <span class="text-critical">*</span></label>
+                  <input id="requiredEffort" type="number" formControlName="requiredEffort" class="command-input">
                 </div>
                 <div class="space-y-1.5">
-                  <label for="skills" class="block text-sm font-semibold text-slate-700">Required Skill</label>
-                  <input id="skills" formControlName="skills" placeholder="e.g. Java, Angular, React" class="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white focus:bg-white text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none">
+                  <label for="skills" class="block text-sm font-semibold text-ink-secondary">Required Skill</label>
+                  <input id="skills" formControlName="skills" placeholder="e.g. Java, Angular, React" class="command-input">
                 </div>
                 <div class="space-y-1.5">
-                  <label for="startDate" class="block text-sm font-semibold text-slate-700">Start Date</label>
-                  <input id="startDate" type="date" formControlName="startDate" class="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white focus:bg-white placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none text-slate-900">
+                  <label for="startDate" class="block text-sm font-semibold text-ink-secondary">Start Date</label>
+                  <input id="startDate" type="date" formControlName="startDate" class="command-input">
                 </div>
                 <div class="space-y-1.5">
-                  <label for="endDate" class="block text-sm font-semibold text-slate-700">End Date</label>
-                  <input id="endDate" type="date" formControlName="endDate" class="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white focus:bg-white placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none text-slate-900">
+                  <label for="endDate" class="block text-sm font-semibold text-ink-secondary">End Date</label>
+                  <input id="endDate" type="date" formControlName="endDate" class="command-input">
                 </div>
               </div>
               <div class="space-y-1.5">
-                <label for="description" class="block text-sm font-semibold text-slate-700">Description</label>
-                <textarea id="description" formControlName="description" rows="4" placeholder="Provide details about the project and the role..." class="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white focus:bg-white text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none resize-y"></textarea>
+                <label for="description" class="block text-sm font-semibold text-ink-secondary">Description</label>
+                <textarea id="description" formControlName="description" rows="4" placeholder="Provide details about the project and the role..." class="command-textarea"></textarea>
               </div>
               <div class="flex justify-end gap-3 pt-6 border-t border-[var(--cc-line)]">
                 <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
@@ -112,75 +112,60 @@ interface RequestsData {
                 @for (req of myRequests(); track req.id) {
                   <tr class="transition-colors group">
                     <td>
-                      <div class="font-semibold text-[var(--cc-ink)] group-hover:text-blue-700 transition-colors">{{ req.name }}</div>
+                      <div class="font-semibold text-[var(--cc-ink)] group-hover:text-accent-text transition-colors">{{ req.name }}</div>
                       <div class="text-xs font-medium text-[var(--cc-muted)] mt-1 flex items-center gap-1"><mat-icon class="text-[14px] w-[14px] h-[14px]">event</mat-icon> {{ req.startDate || 'TBD' }} to {{ req.endDate || 'TBD' }}</div>
                       @if (req.description) {
                         <div class="text-xs text-[var(--cc-muted)] mt-1.5 truncate max-w-[200px]" [title]="req.description">{{ req.description }}</div>
                       }
                     </td>
                     <td>
-                      <div class="text-[var(--cc-ink)] font-semibold flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-slate-400">badge</mat-icon> {{ req.requiredRole }}</div>
-                      <div class="text-xs font-medium text-[var(--cc-muted)] mt-1 flex items-center gap-1"><mat-icon class="text-[14px] w-[14px] h-[14px] text-slate-400">psychology</mat-icon> {{ req.skills.join(', ') || 'No specific skills' }}</div>
+                      <div class="text-[var(--cc-ink)] font-semibold flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-ink-muted">badge</mat-icon> {{ req.requiredRole }}</div>
+                      <div class="text-xs font-medium text-[var(--cc-muted)] mt-1 flex items-center gap-1"><mat-icon class="text-[14px] w-[14px] h-[14px] text-ink-muted">psychology</mat-icon> {{ req.skills.join(', ') || 'No specific skills' }}</div>
                     </td>
                     <td>
                       <div class="flex flex-col gap-1.5">
                         <div class="flex items-center justify-between text-xs font-semibold">
                           <span class="text-[var(--cc-ink)] font-mono tabular-nums">{{ req.staffedEffort || 0 }} / {{ req.requiredEffort }}h</span>
                           <span class="font-mono tabular-nums"
-                                [class.text-emerald-700]="getStaffingPercentage(req) >= 100"
-                                [class.text-amber-700]="getStaffingPercentage(req) > 0 && getStaffingPercentage(req) < 100"
-                                [class.text-slate-500]="getStaffingPercentage(req) === 0">
+                                [class.text-positive-text]="getStaffingPercentage(req) >= 100"
+                                [class.text-caution-text]="getStaffingPercentage(req) > 0 && getStaffingPercentage(req) < 100"
+                                [class.text-ink-muted]="getStaffingPercentage(req) === 0">
                             {{ getStaffingPercentage(req) | number:'1.0-0' }}%
                           </span>
                         </div>
-                        <div class="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                        <div class="w-full bg-surface-muted rounded-full h-2 overflow-hidden">
                           <div class="h-2 rounded-full transition-all duration-1000 ease-out"
-                               [class.bg-emerald-500]="getStaffingPercentage(req) >= 100"
-                               [class.bg-amber-500]="getStaffingPercentage(req) > 0 && getStaffingPercentage(req) < 100"
-                               [class.bg-slate-300]="getStaffingPercentage(req) === 0"
+                               [class.bg-positive]="getStaffingPercentage(req) >= 100"
+                               [class.bg-caution]="getStaffingPercentage(req) > 0 && getStaffingPercentage(req) < 100"
+                               [class.bg-line-strong]="getStaffingPercentage(req) === 0"
                                [style.width.%]="getStaffingPercentage(req)"></div>
                         </div>
                       </div>
                     </td>
                     <td>
-                      <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold tracking-wide ring-1"
-                        [class.bg-emerald-50]="req.status === 'Published'"
-                        [class.text-emerald-700]="req.status === 'Published'"
-                        [class.ring-emerald-200]="req.status === 'Published'"
-                        [class.bg-slate-100]="req.status === 'Not Published'"
-                        [class.text-slate-700]="req.status === 'Not Published'"
-                        [class.ring-slate-200]="req.status === 'Not Published'"
-                        [class.bg-blue-50]="req.status === 'Open'"
-                        [class.text-blue-700]="req.status === 'Open'"
-                        [class.ring-blue-200]="req.status === 'Open'"
-                        [class.bg-emerald-50]="req.status === 'Fulfilled'"
-                        [class.text-emerald-700]="req.status === 'Fulfilled'"
-                        [class.ring-emerald-200]="req.status === 'Fulfilled'"
-                        [class.bg-amber-50]="req.status === 'Withdrawn'"
-                        [class.text-amber-700]="req.status === 'Withdrawn'"
-                        [class.ring-amber-200]="req.status === 'Withdrawn'">
+                      <span class="command-chip" [class]="statusChipTone(req.status)">
                         {{ req.status }}
                       </span>
                     </td>
                     <td class="text-right space-x-1">
                       @if (req.status !== 'Not Published' && req.status !== 'Withdrawn') {
-                        <button (click)="trackRequest(req)" class="p-2 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-all" title="Track Staffing">
+                        <button (click)="trackRequest(req)" class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-all" title="Track Staffing">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">analytics</mat-icon>
                         </button>
                       }
                       @if (req.status === 'Not Published' || req.status === 'Withdrawn') {
-                        <button (click)="openEditForm(req)" class="p-2 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-all" title="Edit">
+                        <button (click)="openEditForm(req)" class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-all" title="Edit">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                         </button>
-                        <button (click)="publishRequest(req)" class="p-2 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition-all" title="Publish">
+                        <button (click)="publishRequest(req)" class="p-2 text-ink-muted hover:text-positive-text hover:bg-positive-tint rounded-lg transition-all" title="Publish">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">publish</mat-icon>
                         </button>
-                        <button (click)="deleteRequest(req)" class="p-2 text-slate-400 hover:text-red-700 hover:bg-red-50 rounded-lg transition-all" title="Delete">
+                        <button (click)="deleteRequest(req)" class="p-2 text-ink-muted hover:text-critical-text hover:bg-critical-tint rounded-lg transition-all" title="Delete">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                         </button>
                       }
                       @if (req.status === 'Published' || req.status === 'Open' || req.status === 'Fulfilled') {
-                        <button (click)="withdrawRequest(req)" class="p-2 text-slate-400 hover:text-amber-700 hover:bg-amber-50 rounded-lg transition-all" title="Withdraw">
+                        <button (click)="withdrawRequest(req)" class="p-2 text-ink-muted hover:text-caution-text hover:bg-caution-tint rounded-lg transition-all" title="Withdraw">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">undo</mat-icon>
                         </button>
                       }
@@ -208,12 +193,12 @@ interface RequestsData {
           <div class="p-6 border-b border-[var(--cc-line)] flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[var(--cc-panel-muted)]">
             <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Resource Availability</h2>
             <div class="relative w-full sm:w-auto">
-              <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-[20px] w-[20px] h-[20px]">search</mat-icon>
+              <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted text-[20px] w-[20px] h-[20px]">search</mat-icon>
               <input
                 type="text"
                 [formControl]="availabilitySearch"
                 placeholder="Search by name, role, or skills..."
-                class="w-full sm:w-72 pl-10 pr-4 py-2.5 rounded-xl border border-slate-300 bg-white focus:bg-white text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all duration-200 outline-none text-sm"
+                class="command-input sm:w-72 pl-10"
               >
             </div>
           </div>
@@ -233,53 +218,47 @@ interface RequestsData {
                   <tr class="transition-colors group">
                     <td>
                       <div class="flex items-center gap-4">
-                        <div class="w-12 h-12 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center text-white font-semibold text-lg shadow-inner shrink-0">
+                        <div class="w-12 h-12 bg-gradient-to-br from-accent to-accent rounded-full flex items-center justify-center text-white font-semibold text-lg shadow-inner shrink-0">
                           {{ res.name.charAt(0) }}
                         </div>
-                        <div class="font-semibold text-[var(--cc-ink)] group-hover:text-blue-700 transition-colors">{{ res.name }}</div>
+                        <div class="font-semibold text-[var(--cc-ink)] group-hover:text-accent-text transition-colors">{{ res.name }}</div>
                       </div>
                     </td>
                     <td>
-                      <div class="text-[var(--cc-ink)] font-semibold flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-slate-400">badge</mat-icon> {{ res.role }}</div>
+                      <div class="text-[var(--cc-ink)] font-semibold flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-ink-muted">badge</mat-icon> {{ res.role }}</div>
                       <div class="flex gap-1.5 mt-2 flex-wrap">
                         @for (skill of res.skills; track skill.name) {
-                          <span class="text-[11px] font-medium bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md border border-slate-200">{{ skill.name }}</span>
+                          <span class="text-[11px] font-medium bg-surface-muted text-ink-secondary px-2 py-0.5 rounded-md border border-line">{{ skill.name }}</span>
                         }
                       </div>
                     </td>
                     <td>
-                      <div class="text-[var(--cc-ink)] font-medium flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-slate-400">schedule</mat-icon> <span class="font-mono tabular-nums">{{ res.capacity }}h</span> / week</div>
+                      <div class="text-[var(--cc-ink)] font-medium flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-ink-muted">schedule</mat-icon> <span class="font-mono tabular-nums">{{ res.capacity }}h</span> / week</div>
                     </td>
                     <td>
                       <div class="flex flex-col gap-1.5">
                         <div class="flex items-center justify-between text-xs font-semibold">
-                          <span class="text-slate-700">Utilization</span>
+                          <span class="text-ink-secondary">Utilization</span>
                           <span class="font-mono tabular-nums"
-                                [class.text-emerald-700]="res.utilization >= 80 && res.utilization <= 100"
-                                [class.text-amber-700]="res.utilization > 0 && res.utilization < 80"
-                                [class.text-red-700]="res.utilization > 100"
-                                [class.text-slate-500]="res.utilization === 0">
+                                [class.text-positive-text]="res.utilization >= 80 && res.utilization <= 100"
+                                [class.text-caution-text]="res.utilization > 0 && res.utilization < 80"
+                                [class.text-critical-text]="res.utilization > 100"
+                                [class.text-ink-muted]="res.utilization === 0">
                             {{ res.utilization | number:'1.0-0' }}%
                           </span>
                         </div>
-                        <div class="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                        <div class="w-full bg-surface-muted rounded-full h-2 overflow-hidden">
                           <div class="h-2 rounded-full transition-all duration-1000 ease-out"
-                               [class.bg-emerald-500]="res.utilization >= 80 && res.utilization <= 100"
-                               [class.bg-amber-500]="res.utilization > 0 && res.utilization < 80"
-                               [class.bg-red-500]="res.utilization > 100"
-                               [class.bg-slate-300]="res.utilization === 0"
+                               [class.bg-positive]="res.utilization >= 80 && res.utilization <= 100"
+                               [class.bg-caution]="res.utilization > 0 && res.utilization < 80"
+                               [class.bg-critical]="res.utilization > 100"
+                               [class.bg-line-strong]="res.utilization === 0"
                                [style.width.%]="res.utilization > 100 ? 100 : res.utilization"></div>
                         </div>
                       </div>
                     </td>
                     <td>
-                      <span class="inline-flex items-center px-3 py-1.5 rounded-xl text-xs font-semibold tracking-wide ring-1"
-                            [class.bg-emerald-50]="getAvailableHours(res) > 0"
-                            [class.text-emerald-700]="getAvailableHours(res) > 0"
-                            [class.ring-emerald-200]="getAvailableHours(res) > 0"
-                            [class.bg-slate-100]="getAvailableHours(res) <= 0"
-                            [class.text-slate-700]="getAvailableHours(res) <= 0"
-                            [class.ring-slate-200]="getAvailableHours(res) <= 0">
+                      <span class="command-chip" [class]="getAvailableHours(res) > 0 ? 'is-positive' : 'is-neutral'">
                         {{ getAvailableHours(res) > 0 ? getAvailableHours(res) + 'h available' : 'Fully booked' }}
                       </span>
                     </td>
@@ -302,10 +281,10 @@ interface RequestsData {
       }
 
       @if (trackingDetails()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 sm:p-6"
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 sm:p-6"
              appModal ariaLabelledby="trackingModalTitle" (dismiss)="closeTracking()">
           <div class="command-card w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] flex items-start justify-between bg-gradient-to-br from-slate-50 to-transparent">
+            <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] flex items-start justify-between bg-gradient-to-br from-surface-muted to-transparent">
               <div>
                 <h2 id="trackingModalTitle" class="font-display text-2xl font-bold text-[var(--cc-ink)] tracking-tight">Staffing Progress</h2>
                 <p class="text-sm font-medium text-[var(--cc-muted)] mt-1.5 flex items-center gap-1.5">
@@ -313,7 +292,7 @@ interface RequestsData {
                   {{ trackingDetails()?.request?.name }}
                 </p>
               </div>
-              <button type="button" (click)="closeTracking()" aria-label="Close dialog" title="Close" class="text-slate-400 hover:text-slate-600 hover:bg-slate-50 p-2 rounded-full transition-colors">
+              <button type="button" (click)="closeTracking()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -322,21 +301,21 @@ interface RequestsData {
               <!-- Progress Bar -->
               <div class="command-card-muted mb-10 p-6">
                 <div class="flex justify-between items-end mb-3">
-                  <span class="font-semibold text-slate-700">Overall Progress</span>
+                  <span class="font-semibold text-ink-secondary">Overall Progress</span>
                   <span class="text-2xl font-bold text-[var(--cc-primary-text)] tracking-tight font-mono tabular-nums">{{ getStaffingPercentage(trackingDetails()!.request) }}%</span>
                 </div>
-                <div class="w-full bg-slate-100 rounded-full h-3 overflow-hidden shadow-inner">
+                <div class="w-full bg-surface-muted rounded-full h-3 overflow-hidden shadow-inner">
                   <div class="h-3 rounded-full transition-all duration-1000 ease-out relative"
-                       [class.bg-emerald-500]="getStaffingPercentage(trackingDetails()!.request) >= 100"
-                       [class.bg-amber-500]="getStaffingPercentage(trackingDetails()!.request) > 0 && getStaffingPercentage(trackingDetails()!.request) < 100"
-                       [class.bg-slate-300]="getStaffingPercentage(trackingDetails()!.request) === 0"
+                       [class.bg-positive]="getStaffingPercentage(trackingDetails()!.request) >= 100"
+                       [class.bg-caution]="getStaffingPercentage(trackingDetails()!.request) > 0 && getStaffingPercentage(trackingDetails()!.request) < 100"
+                       [class.bg-line-strong]="getStaffingPercentage(trackingDetails()!.request) === 0"
                        [style.width.%]="getStaffingPercentage(trackingDetails()!.request)">
-                    <div class="absolute inset-0 bg-white/20 w-full h-full"></div>
+                    <div class="absolute inset-0 bg-surface/20 w-full h-full"></div>
                   </div>
                 </div>
-                <div class="flex justify-between text-sm font-medium text-slate-500 mt-3">
-                  <span class="flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-emerald-600">check_circle</mat-icon> {{ trackingDetails()?.request?.staffedEffort || 0 }}h Staffed</span>
-                  <span class="flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-amber-600">pending</mat-icon> {{ trackingDetails()?.remaining }}h Remaining of {{ trackingDetails()?.request?.requiredEffort }}h</span>
+                <div class="flex justify-between text-sm font-medium text-ink-muted mt-3">
+                  <span class="flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-positive-text">check_circle</mat-icon> {{ trackingDetails()?.request?.staffedEffort || 0 }}h Staffed</span>
+                  <span class="flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px] text-caution-text">pending</mat-icon> {{ trackingDetails()?.remaining }}h Remaining of {{ trackingDetails()?.request?.requiredEffort }}h</span>
                 </div>
               </div>
 
@@ -350,11 +329,11 @@ interface RequestsData {
                 @for (item of trackingDetails()?.assignments; track item.assignment.id) {
                   <div class="command-card-muted flex items-center justify-between p-4 hover:shadow-md transition-all group">
                     <div class="flex items-center gap-4">
-                      <div class="w-12 h-12 bg-blue-50 border border-blue-200 rounded-full flex items-center justify-center text-blue-700 font-bold shadow-sm shrink-0">
+                      <div class="w-12 h-12 bg-accent-tint border border-accent rounded-full flex items-center justify-center text-accent-text font-bold shadow-sm shrink-0">
                         {{ item.resource?.name?.charAt(0) || '?' }}
                       </div>
                       <div>
-                        <h4 class="font-semibold text-[var(--cc-ink)] group-hover:text-blue-700 transition-colors">{{ item.resource?.name || 'Unknown Resource' }}</h4>
+                        <h4 class="font-semibold text-[var(--cc-ink)] group-hover:text-accent-text transition-colors">{{ item.resource?.name || 'Unknown Resource' }}</h4>
                         <p class="text-xs font-medium text-[var(--cc-muted)] mt-0.5 flex items-center gap-1"><mat-icon class="text-[14px] w-[14px] h-[14px]">badge</mat-icon> {{ item.resource?.role }}</p>
                       </div>
                     </div>
@@ -369,11 +348,11 @@ interface RequestsData {
                   </div>
                 }
                 @if (trackingDetails()?.assignments?.length === 0) {
-                  <div class="text-center p-8 border-2 border-dashed border-slate-200 rounded-lg bg-[var(--cc-panel-muted)]">
-                    <div class="w-16 h-16 bg-white rounded-full flex items-center justify-center mx-auto mb-3 shadow-sm border border-slate-200">
-                      <mat-icon class="text-slate-400 text-3xl">person_add_disabled</mat-icon>
+                  <div class="text-center p-8 border-2 border-dashed border-line rounded-lg bg-[var(--cc-panel-muted)]">
+                    <div class="w-16 h-16 bg-surface rounded-full flex items-center justify-center mx-auto mb-3 shadow-sm border border-line">
+                      <mat-icon class="text-ink-muted text-3xl">person_add_disabled</mat-icon>
                     </div>
-                    <p class="font-medium text-slate-600">No resources assigned yet</p>
+                    <p class="font-medium text-ink-secondary">No resources assigned yet</p>
                     <p class="text-sm text-[var(--cc-muted)] mt-1">Assignments will appear here once staffed.</p>
                   </div>
                 }
@@ -569,5 +548,21 @@ export class ResourceRequestsComponent {
     if (!req.requiredEffort) return 0;
     const staffed = req.staffedEffort || 0;
     return Math.min(100, Math.round((staffed / req.requiredEffort) * 100));
+  }
+
+  /** command-chip tone modifier for a request's lifecycle status. */
+  statusChipTone(status: ResourceRequest['status']): string {
+    switch (status) {
+      case 'Published':
+      case 'Fulfilled':
+        return 'is-positive';
+      case 'Open':
+        return 'is-info';
+      case 'Withdrawn':
+        return 'is-caution';
+      case 'Not Published':
+      default:
+        return 'is-neutral';
+    }
   }
 }

@@ -41,8 +41,8 @@ interface UtilizationData {
           </div>
           <div class="overflow-y-auto flex-1 divide-y divide-[var(--cc-line)]">
             @for (res of managedResources(); track res.id) {
-              <div class="p-6 hover:bg-slate-50 transition-all cursor-pointer group relative"
-                   [class.bg-blue-50]="selectedResource()?.id === res.id"
+              <div class="p-6 hover:bg-surface-muted transition-all cursor-pointer group relative"
+                   [class.bg-accent-tint]="selectedResource()?.id === res.id"
                    tabindex="0"
                    (keydown.enter)="selectResource(res)"
                    (click)="selectResource(res)">
@@ -65,7 +65,7 @@ interface UtilizationData {
                     <span class="command-kpi-label">Utilization</span>
                     <span class="font-black text-sm font-mono tabular-nums" [class]="getUtilizationColorText(res.utilization)">{{ res.utilization | number:'1.0-0' }}%</span>
                   </div>
-                  <div class="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                  <div class="w-full bg-surface-muted rounded-full h-2 overflow-hidden">
                     <div class="h-full rounded-full transition-all duration-500 ease-out"
                          [class]="getUtilizationColorClass(res.utilization)"
                          [style.width.%]="res.utilization > 100 ? 100 : res.utilization"></div>
@@ -86,7 +86,7 @@ interface UtilizationData {
             <div class="command-card p-6 sm:p-8 flex flex-col sm:flex-row sm:items-center justify-between gap-6">
               <div>
                 <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">{{ selectedResource()?.name }}</h2>
-                <p class="text-[var(--cc-muted)] font-medium mt-2">{{ selectedResource()?.role }} <span class="mx-2 text-slate-400">•</span> Capacity: <span class="font-bold text-[var(--cc-ink)] font-mono tabular-nums">{{ selectedResource()?.capacity }}h/week</span></p>
+                <p class="text-[var(--cc-muted)] font-medium mt-2">{{ selectedResource()?.role }} <span class="mx-2 text-ink-muted">•</span> Capacity: <span class="font-bold text-[var(--cc-ink)] font-mono tabular-nums">{{ selectedResource()?.capacity }}h/week</span></p>
               </div>
               <div class="text-left sm:text-right command-card-muted p-4">
                 <div class="text-4xl font-black tracking-tighter font-mono tabular-nums" [class]="getUtilizationColorText(selectedResource()?.utilization || 0)">
@@ -121,7 +121,7 @@ interface UtilizationData {
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                       <div class="md:col-span-2">
                         <label for="requestId" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Project / Request *</label>
-                        <select id="requestId" formControlName="requestId" class="w-full px-4 py-3 rounded-md border border-[var(--cc-line)] focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] focus:outline-none bg-white font-medium text-[var(--cc-ink)] placeholder:text-slate-400 transition-all">
+                        <select id="requestId" formControlName="requestId" class="command-select">
                           <option value="">Select a project...</option>
                           @for (req of allRequests(); track req.id) {
                             <option [value]="req.id">{{ req.name }} ({{ req.requiredRole }})</option>
@@ -130,7 +130,7 @@ interface UtilizationData {
                       </div>
                       <div>
                         <label for="assignedHours" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Hours *</label>
-                        <input id="assignedHours" type="number" formControlName="assignedHours" class="w-full px-4 py-3 rounded-md border border-[var(--cc-line)] focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] focus:outline-none bg-white font-bold text-[var(--cc-ink)] placeholder:text-slate-400 transition-all">
+                        <input id="assignedHours" type="number" formControlName="assignedHours" class="command-input">
                       </div>
                     </div>
                     <div class="flex justify-end gap-3 pt-2">
@@ -143,24 +143,24 @@ interface UtilizationData {
 
               <div class="divide-y divide-[var(--cc-line)] overflow-y-auto">
                 @for (assignment of resourceAssignments(); track assignment.id) {
-                  <div class="p-6 sm:p-8 hover:bg-slate-50 transition-colors flex flex-col sm:flex-row sm:items-center justify-between group gap-4">
+                  <div class="p-6 sm:p-8 hover:bg-surface-muted transition-colors flex flex-col sm:flex-row sm:items-center justify-between group gap-4">
                     <div>
                       <h4 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ getRequestName(assignment.requestId) }}</h4>
                       <div class="flex items-center gap-3 mt-2">
-                        <span class="text-sm font-bold text-slate-700 bg-slate-100 px-2.5 py-1 rounded-md font-mono tabular-nums">{{ assignment.assignedHours }} hours</span>
+                        <span class="text-sm font-bold text-ink-secondary bg-surface-muted px-2.5 py-1 rounded-md font-mono tabular-nums">{{ assignment.assignedHours }} hours</span>
                         <span class="command-status uppercase">
                           {{ assignment.status }}
                         </span>
                       </div>
                     </div>
                     <div class="flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-                      <button (click)="copyAssignment(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-slate-500 hover:text-[var(--cc-primary-text)] hover:border-blue-200 hover:bg-blue-50 transition-all flex items-center justify-center shadow-sm" title="Copy">
+                      <button (click)="copyAssignment(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" title="Copy">
                         <mat-icon class="text-[20px] w-[20px] h-[20px]">content_copy</mat-icon>
                       </button>
-                      <button (click)="openEditForm(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-slate-500 hover:text-[var(--cc-primary-text)] hover:border-blue-200 hover:bg-blue-50 transition-all flex items-center justify-center shadow-sm" title="Edit">
+                      <button (click)="openEditForm(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" title="Edit">
                         <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                       </button>
-                      <button (click)="deleteAssignment(assignment.id)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-slate-500 hover:text-red-700 hover:border-red-200 hover:bg-red-50 transition-all flex items-center justify-center shadow-sm" title="Delete">
+                      <button (click)="deleteAssignment(assignment.id)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all flex items-center justify-center shadow-sm" title="Delete">
                         <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                       </button>
                     </div>
@@ -194,10 +194,10 @@ interface UtilizationData {
                         {{ entry.status }}
                       </span>
                       @if (entry.status === 'Submitted') {
-                        <button (click)="approveTimeEntry(entry)" class="p-2 rounded-md text-emerald-700 hover:bg-emerald-50" title="Approve">
+                        <button (click)="approveTimeEntry(entry)" class="p-2 rounded-md text-positive-text hover:bg-positive-tint" title="Approve">
                           <mat-icon>check_circle</mat-icon>
                         </button>
-                        <button (click)="rejectTimeEntry(entry)" class="p-2 rounded-md text-red-700 hover:bg-red-50" title="Reject">
+                        <button (click)="rejectTimeEntry(entry)" class="p-2 rounded-md text-critical-text hover:bg-critical-tint" title="Reject">
                           <mat-icon>cancel</mat-icon>
                         </button>
                       }
@@ -396,28 +396,28 @@ export class UtilizationComponent {
   // --- UI Helpers ---
   // Bar fill colours (graphics: 3:1 large-area contrast is sufficient).
   getUtilizationColorClass(utilization: number): string {
-    if (utilization > 120) return 'bg-red-500';
-    if (utilization > 110) return 'bg-orange-500';
-    if (utilization >= 80) return 'bg-emerald-500';
-    if (utilization >= 70) return 'bg-orange-500';
-    return 'bg-red-500';
+    if (utilization > 120) return 'bg-critical';
+    if (utilization > 110) return 'bg-caution';
+    if (utilization >= 80) return 'bg-positive';
+    if (utilization >= 70) return 'bg-caution';
+    return 'bg-critical';
   }
 
   // Text colours use the -700 shades so small bold text stays WCAG AA on white.
   getUtilizationColorText(utilization: number): string {
-    if (utilization > 120) return 'text-red-700';
-    if (utilization > 110) return 'text-orange-700';
-    if (utilization >= 80) return 'text-emerald-700';
-    if (utilization >= 70) return 'text-orange-700';
-    return 'text-red-700';
+    if (utilization > 120) return 'text-critical-text';
+    if (utilization > 110) return 'text-caution-text';
+    if (utilization >= 80) return 'text-positive-text';
+    if (utilization >= 70) return 'text-caution-text';
+    return 'text-critical-text';
   }
 
   getStatusColorText(utilization: number): string {
-    if (utilization > 120) return 'text-red-700';
-    if (utilization > 110) return 'text-orange-700';
-    if (utilization >= 80) return 'text-emerald-700';
-    if (utilization >= 70) return 'text-orange-700';
-    return 'text-red-700';
+    if (utilization > 120) return 'text-critical-text';
+    if (utilization > 110) return 'text-caution-text';
+    if (utilization >= 80) return 'text-positive-text';
+    if (utilization >= 70) return 'text-caution-text';
+    return 'text-critical-text';
   }
 
   getStatusText(utilization: number): string {

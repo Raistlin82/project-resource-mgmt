@@ -34,7 +34,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
         @if (!(projectId() || selectedProjectId())) {
           <div class="command-card p-12 text-center">
-            <mat-icon class="text-slate-400 mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
+            <mat-icon class="text-ink-muted mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
             <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] mt-4">No Project Selected</h3>
             <p class="text-[var(--cc-muted)] mt-1">Please select a project from the dropdown above to view documents.</p>
           </div>
@@ -45,11 +45,11 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <div class="command-card p-6 group">
               <div class="flex items-start justify-between mb-4">
                 <div class="w-12 h-12 rounded-xl flex items-center justify-center ring-1"
-                     [class.bg-red-50]="doc.type === 'pdf'" [class.text-red-700]="doc.type === 'pdf'" [class.ring-red-200]="doc.type === 'pdf'"
-                     [class.bg-blue-50]="doc.type === 'word'" [class.text-blue-700]="doc.type === 'word'" [class.ring-blue-200]="doc.type === 'word'">
+                     [class.bg-critical-tint]="doc.type === 'pdf'" [class.text-critical-text]="doc.type === 'pdf'" [class.ring-critical]="doc.type === 'pdf'"
+                     [class.bg-accent-tint]="doc.type === 'word'" [class.text-accent-text]="doc.type === 'word'" [class.ring-accent]="doc.type === 'word'">
                   <mat-icon>{{ doc.type === 'pdf' ? 'picture_as_pdf' : 'description' }}</mat-icon>
                 </div>
-                <button type="button" (click)="deleteDocument(doc)" aria-label="Delete document" class="text-[var(--cc-muted)] hover:text-red-700 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button type="button" (click)="deleteDocument(doc)" aria-label="Delete document" class="text-[var(--cc-muted)] hover:text-critical-text opacity-0 group-hover:opacity-100 transition-opacity">
                   <mat-icon class="text-sm">delete</mat-icon>
                 </button>
               </div>
@@ -74,12 +74,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
       <!-- Upload Document Modal -->
       @if (showForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
              appModal ariaLabelledby="documentModalTitle" (dismiss)="closeForm()">
           <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="documentModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Add Document Entry</h2>
-              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-[var(--cc-muted)] hover:text-[var(--cc-ink)] hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-[var(--cc-muted)] hover:text-[var(--cc-ink)] hover:bg-surface-muted p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -88,13 +88,13 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               <form [formGroup]="docForm" (ngSubmit)="saveDocument()" class="space-y-6">
                 <p class="text-xs text-[var(--cc-muted)]">This records document metadata only. No file is uploaded.</p>
                 <div>
-                  <label for="docName" class="block text-sm font-semibold text-slate-700 mb-1.5">Document Name *</label>
-                  <input id="docName" type="text" formControlName="name" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="e.g. Requirements_Spec.docx">
+                  <label for="docName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Document Name *</label>
+                  <input id="docName" type="text" formControlName="name" class="command-input" placeholder="e.g. Requirements_Spec.docx">
                 </div>
 
                 <div>
-                  <label for="docType" class="block text-sm font-semibold text-slate-700 mb-1.5">Document Type *</label>
-                  <select id="docType" formControlName="type" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900">
+                  <label for="docType" class="block text-sm font-semibold text-ink-secondary mb-1.5">Document Type *</label>
+                  <select id="docType" formControlName="type" class="command-select">
                     <option value="pdf">PDF</option>
                     <option value="word">Word</option>
                     <option value="excel">Excel</option>

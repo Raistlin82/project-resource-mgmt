@@ -5,9 +5,11 @@ import { forkJoin, of } from 'rxjs';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, OrderLine, FinancialItem, TimeEntry, Issue, ChangeRequest, Milestone, BillingPlanItem, Contract, Customer, FxRate, BASE_CURRENCY } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
-import { computeProjectFinancials, FinanceData, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, realizationMetrics, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity } from '../services/finance.util';
+import { computeProjectFinancials, FinanceData, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, realizationMetrics, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, recognitionSchedule, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity } from '../services/finance.util';
 import { NotificationService } from '../services/notification.service';
 import { toCsv, downloadCsv } from '../services/export.util';
+import { CommandBarChartComponent, CommandTrendChartComponent, CommandDonutChartComponent, BarSeries, TrendSeries } from '../shared/charts';
+import { ListStateComponent } from '../shared/list-state.component';
 
 interface Kpi {
   label: string;
@@ -46,7 +48,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
 @Component({
   selector: 'app-reporting',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, CurrencyPipe, DecimalPipe],
+  imports: [MatIconModule, CurrencyPipe, DecimalPipe, CommandBarChartComponent, CommandTrendChartComponent, CommandDonutChartComponent, ListStateComponent],
   template: `
     <div class="command-page space-y-6">
       <div class="command-header">
@@ -56,7 +58,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           <p class="command-subtitle">Cross-functional control view across resource demand, utilization, project finance, risks, milestones and change control.</p>
         </div>
         <div class="flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto">
-          <select [value]="period()" (change)="onPeriodChange($event)" class="w-full sm:w-auto rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
+          <select [value]="period()" (change)="onPeriodChange($event)" class="command-select w-full sm:w-auto">
             <option value="30d">Last 30 Days</option>
             <option value="quarter">This Quarter</option>
             <option value="year">This Year</option>
@@ -84,8 +86,8 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
               </div>
               <!-- Real trend only; hidden entirely when no prior period is derivable (#15). -->
               @if (kpi.trend?.direction; as dir) {
-                <span class="command-status inline-flex items-center gap-0.5"
-                      [class]="dir === 'up' ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : dir === 'down' ? 'bg-red-50 text-red-700 ring-1 ring-red-200' : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'"
+                <span class="command-chip inline-flex items-center gap-0.5"
+                      [class]="dir === 'up' ? 'is-positive' : dir === 'down' ? 'is-critical' : 'is-neutral'"
                       [attr.aria-label]="trendAriaLabel(kpi.trend)">
                   <mat-icon class="text-[14px] w-[14px] h-[14px]">{{ dir === 'up' ? 'trending_up' : dir === 'down' ? 'trending_down' : 'trending_flat' }}</mat-icon>
                   {{ kpi.trend?.deltaPct !== null ? (kpi.trend!.deltaPct! > 0 ? '+' : '') + (kpi.trend!.deltaPct! | number:'1.0-0') + '%' : '—' }}
@@ -101,7 +103,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
       <!-- Portfolio financials (real, from commercial + finance data) -->
       <div class="command-section-label flex items-center justify-between">
         <span>Portfolio Financials</span>
-        <span class="text-xs font-semibold text-slate-500 normal-case tracking-normal">{{ baseCurrency }} (base)</span>
+        <span class="text-xs font-semibold text-ink-muted normal-case tracking-normal">{{ baseCurrency }} (base)</span>
       </div>
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
         <div class="command-kpi">
@@ -110,11 +112,11 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
         </div>
         <div class="command-kpi" [class.danger]="totalMargin() < 0">
           <p class="command-kpi-label">Total Margin</p>
-          <p class="command-kpi-value font-mono tabular-nums" [class.text-emerald-700]="totalMargin() >= 0" [class.text-red-700]="totalMargin() < 0">{{ totalMargin() | currency:'EUR':'symbol':'1.0-0' }}</p>
+          <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="totalMargin() >= 0" [class.text-critical-text]="totalMargin() < 0">{{ totalMargin() | currency:'EUR':'symbol':'1.0-0' }}</p>
         </div>
         <div class="command-kpi" [class.warning]="portfolioMarginPct() >= 0 && portfolioMarginPct() < 15" [class.danger]="portfolioMarginPct() < 0">
           <p class="command-kpi-label">Margin %</p>
-          <p class="command-kpi-value font-mono tabular-nums" [class.text-emerald-700]="portfolioMarginPct() >= 0" [class.text-red-700]="portfolioMarginPct() < 0">{{ portfolioMarginPct() | number:'1.0-1' }}%</p>
+          <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="portfolioMarginPct() >= 0" [class.text-critical-text]="portfolioMarginPct() < 0">{{ portfolioMarginPct() | number:'1.0-1' }}%</p>
         </div>
         <div class="command-kpi info">
           <p class="command-kpi-label">Backlog</p>
@@ -126,7 +128,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
         </div>
         <div class="command-kpi" [class.danger]="totalVac() < 0">
           <p class="command-kpi-label">VAC</p>
-          <p class="command-kpi-value font-mono tabular-nums" [class.text-emerald-700]="totalVac() >= 0" [class.text-red-700]="totalVac() < 0">{{ totalVac() | currency:'EUR':'symbol':'1.0-0' }}</p>
+          <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="totalVac() >= 0" [class.text-critical-text]="totalVac() < 0">{{ totalVac() | currency:'EUR':'symbol':'1.0-0' }}</p>
         </div>
         <div class="command-kpi warning">
           <p class="command-kpi-label">Open Changes</p>
@@ -134,14 +136,14 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
         </div>
         <div class="command-kpi" [class.danger]="highRiskIssues() > 0">
           <p class="command-kpi-label">High Risk Issues</p>
-          <p class="command-kpi-value font-mono tabular-nums" [class.text-red-700]="highRiskIssues() > 0">{{ highRiskIssues() }}</p>
+          <p class="command-kpi-value font-mono tabular-nums" [class.text-critical-text]="highRiskIssues() > 0">{{ highRiskIssues() }}</p>
         </div>
       </div>
 
       <!-- Realization & revenue-per-FTE strip (real, recognised revenue vs rate-card) -->
       <div class="command-section-label flex items-center justify-between">
         <span>Realization &amp; Productivity</span>
-        <span class="text-xs font-semibold text-slate-500 normal-case tracking-normal">Recognised revenue vs rate-card &middot; {{ baseCurrency }} (base)</span>
+        <span class="text-xs font-semibold text-ink-muted normal-case tracking-normal">Recognised revenue vs rate-card &middot; {{ baseCurrency }} (base)</span>
       </div>
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
         <div class="command-kpi" [class.warning]="realization().realizationPct > 0 && realization().realizationPct < 85">
@@ -149,8 +151,8 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
             <p class="command-kpi-label">Realization</p>
             <!-- Real recognised-revenue trend; hidden when no prior window is derivable (#15). -->
             @if (recognizedTrend().direction; as dir) {
-              <span class="command-status inline-flex items-center gap-0.5"
-                    [class]="dir === 'up' ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : dir === 'down' ? 'bg-red-50 text-red-700 ring-1 ring-red-200' : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'"
+              <span class="command-chip inline-flex items-center gap-0.5"
+                    [class]="dir === 'up' ? 'is-positive' : dir === 'down' ? 'is-critical' : 'is-neutral'"
                     [attr.aria-label]="trendAriaLabel(recognizedTrend())">
                 <mat-icon class="text-[14px] w-[14px] h-[14px]">{{ dir === 'up' ? 'trending_up' : dir === 'down' ? 'trending_down' : 'trending_flat' }}</mat-icon>
                 {{ recognizedTrend().deltaPct !== null ? (recognizedTrend().deltaPct! > 0 ? '+' : '') + (recognizedTrend().deltaPct! | number:'1.0-0') + '%' : '—' }}
@@ -179,63 +181,109 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
 
       <!-- Charts Area -->
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <!-- Resource Utilization Trend -->
+        <!-- Resource Utilization (bar chart) -->
         <div class="command-card p-6 sm:p-8">
           <div class="flex items-center justify-between mb-8">
-            <h3 class="text-xl font-bold text-slate-900 tracking-tight">Current Resource Utilization</h3>
+            <h3 class="text-xl font-bold text-ink tracking-tight">Current Resource Utilization</h3>
           </div>
-          <div class="h-64 flex items-end gap-2 sm:gap-4">
-            @for (bar of utilizationData(); track bar.month) {
-              <div class="flex-1 flex flex-col items-center gap-3 group relative h-full justify-end">
-                <!-- Tooltip -->
-                <div class="absolute -top-12 bg-white ring-1 ring-slate-900/5 border border-slate-200 text-blue-700 font-mono tabular-nums text-xs font-bold py-1.5 px-3 rounded-lg opacity-0 group-hover:opacity-100 transition-all transform group-hover:-translate-y-1 pointer-events-none whitespace-nowrap z-10 shadow-md">
-                  {{ bar.value }}%
-                  <div class="absolute -bottom-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-white border-b border-r border-slate-200 rotate-45"></div>
-                </div>
-                <div class="w-full bg-slate-100 rounded-t-xl relative flex-1 flex items-end overflow-hidden group-hover:bg-slate-200 transition-colors">
-                  <div class="w-full bg-gradient-to-t from-blue-500 to-blue-600 rounded-t-xl transition-all duration-700 ease-out group-hover:opacity-90" [style.height.%]="bar.value"></div>
-                </div>
-                <span class="text-xs text-slate-500 font-semibold uppercase tracking-wider">{{ bar.month }}</span>
-              </div>
-            }
-          </div>
+          @defer (hydrate on viewport) {
+            <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="block" [rows]="1" label="utilization" (retry)="reloadData()">
+              @if (utilizationChartCategories().length > 0) {
+                <command-bar-chart
+                  [categories]="utilizationChartCategories()"
+                  [series]="utilizationChartSeries()"
+                  [maxValue]="100"
+                  [showValues]="true"
+                  [height]="256"
+                  [format]="utilizationPctFormat"
+                  ariaLabel="Resource utilization by person"
+                  caption="Current utilization percentage per resource" />
+              } @else {
+                <p class="text-ink-muted text-sm">No resources to chart yet.</p>
+              }
+            </app-list-state>
+          } @placeholder {
+            <div class="command-skeleton h-64"></div>
+          } @loading {
+            <div class="command-skeleton h-64"></div>
+          }
         </div>
 
-        <!-- Project Margin (real) -->
+        <!-- Project Margin (real, bar chart + numbers) -->
         <div class="command-card p-6 sm:p-8">
           <div class="flex items-center justify-between mb-8">
-            <h3 class="text-xl font-bold text-slate-900 tracking-tight">Project Margin</h3>
+            <h3 class="text-xl font-bold text-ink tracking-tight">Project Margin <span class="ml-1 text-xs font-semibold text-ink-muted normal-case tracking-normal">{{ baseCurrency }} (base)</span></h3>
           </div>
-          <div class="space-y-6">
-            @for (p of marginBars(); track p.name) {
-              <div class="group">
-                <div class="flex justify-between items-end mb-2">
-                  <span class="font-bold text-slate-700 group-hover:text-slate-900 transition-colors">{{ p.name }}</span>
-                  <span class="text-sm font-bold tracking-wide font-mono tabular-nums" [class.text-emerald-700]="p.margin >= 0" [class.text-red-700]="p.margin < 0">
-                    {{ p.margin | currency:'EUR':'symbol':'1.0-0' }} · {{ p.marginPct | number:'1.0-0' }}%
-                  </span>
-                </div>
-                <div class="w-full bg-slate-100 rounded-full h-3 overflow-hidden shadow-inner">
-                  <div class="h-full rounded-full transition-all duration-1000 ease-out"
-                       [class.bg-emerald-500]="p.margin >= 0" [class.bg-red-500]="p.margin < 0"
-                       [style.width.%]="p.width"></div>
-                </div>
-              </div>
-            } @empty {
-              <p class="text-slate-500 text-sm">No projects with customer revenue yet. Add Customer orders in Commercial → Orders.</p>
-            }
-          </div>
+          @defer (hydrate on viewport) {
+            <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="block" [rows]="1" label="project margin" (retry)="reloadData()">
+              @if (marginChartCategories().length > 0) {
+                <command-bar-chart
+                  [categories]="marginChartCategories()"
+                  [series]="marginChartSeries()"
+                  orientation="horizontal"
+                  [showValues]="true"
+                  [format]="eurCompact"
+                  ariaLabel="Margin by project in base currency"
+                  caption="Margin per project (base currency)" />
+                <!-- Numeric margin / margin% kept alongside the chart -->
+                <dl class="mt-4 space-y-1.5 border-t border-line pt-4">
+                  @for (p of marginBars(); track p.name) {
+                    <div class="flex justify-between items-baseline gap-3 text-sm">
+                      <dt class="font-semibold text-ink-secondary truncate">{{ p.name }}</dt>
+                      <dd class="font-mono tabular-nums font-bold shrink-0" [class.text-positive-text]="p.margin >= 0" [class.text-critical-text]="p.margin < 0">
+                        {{ p.margin | currency:'EUR':'symbol':'1.0-0' }} · {{ p.marginPct | number:'1.0-0' }}%
+                      </dd>
+                    </div>
+                  }
+                </dl>
+              } @else {
+                <p class="text-ink-muted text-sm">No projects with customer revenue yet. Add Customer orders in Commercial → Orders.</p>
+              }
+            </app-list-state>
+          } @placeholder {
+            <div class="command-skeleton h-64"></div>
+          } @loading {
+            <div class="command-skeleton h-64"></div>
+          }
         </div>
       </div>
 
+      <!-- Recognised-revenue trend (real monthly series, 12-month trailing) -->
+      <div class="command-card p-6 sm:p-8">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-8">
+          <h3 class="text-xl font-bold text-ink tracking-tight">Recognised Revenue Trend</h3>
+          <span class="text-xs font-semibold uppercase tracking-wider text-ink-muted normal-case">Trailing 12 months &middot; {{ baseCurrency }} (base)</span>
+        </div>
+        @defer (hydrate on viewport) {
+          <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="block" [rows]="1" label="recognised revenue" (retry)="reloadData()">
+            @if (recognizedTrendCategories().length > 0) {
+              <command-trend-chart
+                [categories]="recognizedTrendCategories()"
+                [series]="recognizedTrendSeries()"
+                mode="area" [smooth]="true"
+                [format]="eurCompact"
+                ariaLabel="Recognised revenue by month, trailing 12 months"
+                caption="Monthly recognised revenue (base currency)" />
+            } @else {
+              <p class="text-ink-muted text-sm">No dated revenue-recognition data to trend yet.</p>
+            }
+          </app-list-state>
+        } @placeholder {
+          <div class="command-skeleton h-64"></div>
+        } @loading {
+          <div class="command-skeleton h-64"></div>
+        }
+      </div>
+
       <!-- Detailed Reports Table -->
+      @defer (hydrate on viewport) {
       <div class="command-card overflow-hidden">
-        <div class="p-6 sm:p-8 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-          <h3 class="text-xl font-bold text-slate-900 tracking-tight">Available Reports</h3>
+        <div class="p-6 sm:p-8 border-b border-line flex items-center justify-between bg-surface-muted">
+          <h3 class="text-xl font-bold text-ink tracking-tight">Available Reports</h3>
         </div>
         <div class="overflow-x-auto">
           <table class="command-data-table">
-            <thead class="bg-slate-50 border-b border-slate-200 text-slate-500">
+            <thead class="bg-surface-muted border-b border-line text-ink-muted">
               <tr>
                 <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs">Report Name</th>
                 <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs">Category</th>
@@ -243,26 +291,26 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
                 <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs text-right">Actions</th>
               </tr>
             </thead>
-            <tbody class="divide-y divide-slate-100">
+            <tbody class="divide-y divide-line">
               @for (report of reports(); track report.name) {
-                <tr class="hover:bg-slate-50 transition-colors group">
-                  <td class="px-6 sm:px-8 py-5 font-bold text-slate-900 flex items-center gap-3">
-                    <div class="w-8 h-8 rounded-lg bg-blue-50 ring-1 ring-blue-200 flex items-center justify-center text-blue-700">
+                <tr class="hover:bg-surface-muted transition-colors group">
+                  <td class="px-6 sm:px-8 py-5 font-bold text-ink flex items-center gap-3">
+                    <div class="w-8 h-8 rounded-lg bg-accent-tint ring-1 ring-accent flex items-center justify-center text-accent-text">
                       <mat-icon class="text-[18px] w-[18px] h-[18px]">description</mat-icon>
                     </div>
                     {{ report.name }}
                   </td>
                   <td class="px-6 sm:px-8 py-5">
                     <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide ring-1"
-                          [class.bg-blue-50]="report.category === 'Resource Management'" [class.text-blue-700]="report.category === 'Resource Management'" [class.ring-blue-200]="report.category === 'Resource Management'"
-                          [class.bg-emerald-50]="report.category === 'Project Management'" [class.text-emerald-700]="report.category === 'Project Management'" [class.ring-emerald-200]="report.category === 'Project Management'"
-                          [class.bg-blue-50]="report.category === 'Cross-Functional'" [class.text-blue-700]="report.category === 'Cross-Functional'" [class.ring-blue-200]="report.category === 'Cross-Functional'">
+                          [class.bg-accent-tint]="report.category === 'Resource Management'" [class.text-accent-text]="report.category === 'Resource Management'" [class.ring-accent]="report.category === 'Resource Management'"
+                          [class.bg-positive-tint]="report.category === 'Project Management'" [class.text-positive-text]="report.category === 'Project Management'" [class.ring-positive]="report.category === 'Project Management'"
+                          [class.bg-accent-tint]="report.category === 'Cross-Functional'" [class.text-accent-text]="report.category === 'Cross-Functional'" [class.ring-accent]="report.category === 'Cross-Functional'">
                       {{ report.category }}
                     </span>
                   </td>
-                  <td class="px-6 sm:px-8 py-5 text-slate-600 font-medium">{{ report.lastGenerated }}</td>
+                  <td class="px-6 sm:px-8 py-5 text-ink-secondary font-medium">{{ report.lastGenerated }}</td>
                   <td class="px-6 sm:px-8 py-5 text-right">
-                    <button (click)="exportReport()" class="text-blue-700 hover:text-blue-800 font-semibold text-sm transition-colors opacity-0 group-hover:opacity-100 focus-within:opacity-100 flex items-center justify-end gap-1 ml-auto">
+                    <button (click)="exportReport()" class="text-accent-text hover:text-accent-strong hover:underline font-semibold text-sm transition-colors opacity-0 group-hover:opacity-100 focus-within:opacity-100 flex items-center justify-end gap-1 ml-auto">
                       Export <mat-icon class="text-[16px] w-[16px] h-[16px]">download</mat-icon>
                     </button>
                   </td>
@@ -272,19 +320,24 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           </table>
         </div>
       </div>
+      } @placeholder {
+        <div class="command-skeleton h-48"></div>
+      }
 
       <!-- Margin & Variance -->
       <div class="command-section-label">Margin &amp; Variance</div>
 
       <!-- Per-project drill-down with stacked cost-driver mini-bar -->
+      @defer (hydrate on viewport) {
+      <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="6" [columns]="10" label="margin &amp; variance" (retry)="reloadData()">
       <div class="command-card overflow-hidden">
-        <div class="p-6 sm:p-8 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50">
-          <h3 class="text-xl font-bold text-slate-900 tracking-tight">Project Margin &amp; Variance</h3>
+        <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-muted">
+          <h3 class="text-xl font-bold text-ink tracking-tight">Project Margin &amp; Variance</h3>
           <div class="flex items-center gap-4">
-            <div class="hidden sm:flex items-center gap-4 text-xs font-semibold text-slate-500">
-              <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-blue-600"></span>Labor</span>
-              <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-amber-500"></span>External</span>
-              <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-slate-400"></span>Expense</span>
+            <div class="hidden sm:flex items-center gap-4 text-xs font-semibold text-ink-muted">
+              <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-accent"></span>Labor</span>
+              <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-caution"></span>External</span>
+              <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-series-6"></span>Expense</span>
             </div>
             <button type="button" (click)="exportMarginVarianceCsv()" [disabled]="marginRows().length === 0" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
               <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> Export CSV
@@ -293,7 +346,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
         </div>
         <div class="overflow-x-auto">
           <table class="command-data-table">
-            <thead class="bg-slate-50 border-b border-slate-200 text-slate-500">
+            <thead class="bg-surface-muted border-b border-line text-ink-muted">
               <tr>
                 <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs">Project</th>
                 <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Revenue</th>
@@ -307,48 +360,48 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
                 <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Burn %</th>
               </tr>
             </thead>
-            <tbody class="divide-y divide-slate-100">
+            <tbody class="divide-y divide-line">
               @for (r of marginRows(); track r.id) {
-                <tr class="hover:bg-slate-50 transition-colors">
+                <tr class="hover:bg-surface-muted transition-colors">
                   <td class="px-6 sm:px-8 py-5 min-w-[180px]">
-                    <div class="font-bold text-slate-900">{{ r.name }}</div>
+                    <div class="font-bold text-ink">{{ r.name }}</div>
                     <!-- Stacked cost-driver mini-bar -->
-                    <div class="mt-2 flex w-full h-2 rounded-full overflow-hidden bg-slate-100 shadow-inner"
+                    <div class="mt-2 flex w-full h-2 rounded-full overflow-hidden bg-surface-muted shadow-inner"
                          role="img"
                          [attr.aria-label]="'Cost drivers — labor ' + (r.laborCost | currency:'EUR':'symbol':'1.0-0') + ', external ' + (r.externalCost | currency:'EUR':'symbol':'1.0-0') + ', expense ' + (r.expenseCost | currency:'EUR':'symbol':'1.0-0')">
-                      <div class="h-full bg-blue-600" [style.width.%]="r.laborW"></div>
-                      <div class="h-full bg-amber-500" [style.width.%]="r.externalW"></div>
-                      <div class="h-full bg-slate-400" [style.width.%]="r.expenseW"></div>
+                      <div class="h-full bg-accent" [style.width.%]="r.laborW"></div>
+                      <div class="h-full bg-caution" [style.width.%]="r.externalW"></div>
+                      <div class="h-full bg-series-6" [style.width.%]="r.expenseW"></div>
                     </div>
                   </td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums text-slate-700">{{ r.revenue | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums text-slate-600">{{ r.laborCost | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums text-slate-600">{{ r.externalCost | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums text-slate-600">{{ r.expenseCost | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums font-bold" [class.text-emerald-700]="r.margin >= 0" [class.text-red-700]="r.margin < 0">{{ r.margin | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-emerald-700]="r.marginPct >= 0" [class.text-red-700]="r.marginPct < 0">{{ r.marginPct | number:'1.0-1' }}%</td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums text-slate-700">{{ r.eac | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-emerald-700]="r.vac >= 0" [class.text-red-700]="r.vac < 0">{{ r.vac | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-red-700]="r.burnPct >= alertThresholds.burnWarnPct" [class.text-slate-700]="r.burnPct < alertThresholds.burnWarnPct">{{ r.burnPct | number:'1.0-0' }}%</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ r.revenue | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ r.laborCost | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ r.externalCost | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ r.expenseCost | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums font-bold" [class.text-positive-text]="r.margin >= 0" [class.text-critical-text]="r.margin < 0">{{ r.margin | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-positive-text]="r.marginPct >= 0" [class.text-critical-text]="r.marginPct < 0">{{ r.marginPct | number:'1.0-1' }}%</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ r.eac | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-positive-text]="r.vac >= 0" [class.text-critical-text]="r.vac < 0">{{ r.vac | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-critical-text]="r.burnPct >= alertThresholds.burnWarnPct" [class.text-ink-secondary]="r.burnPct < alertThresholds.burnWarnPct">{{ r.burnPct | number:'1.0-0' }}%</td>
                 </tr>
               } @empty {
                 <tr>
-                  <td colspan="10" class="px-6 sm:px-8 py-8 text-center text-slate-500 text-sm">No projects with revenue or cost yet.</td>
+                  <td colspan="10" class="px-6 sm:px-8 py-8 text-center text-ink-muted text-sm">No projects with revenue or cost yet.</td>
                 </tr>
               }
             </tbody>
             @if (marginRows().length > 0) {
-              <tfoot class="border-t-2 border-slate-200 bg-slate-50 font-bold text-slate-900">
+              <tfoot class="border-t-2 border-line bg-surface-muted font-bold text-ink">
                 <tr>
-                  <td class="px-6 sm:px-8 py-4">Portfolio <span class="ml-1 text-xs font-semibold text-slate-500 normal-case tracking-normal">{{ baseCurrency }} (base)</span></td>
+                  <td class="px-6 sm:px-8 py-4">Portfolio <span class="ml-1 text-xs font-semibold text-ink-muted normal-case tracking-normal">{{ baseCurrency }} (base)</span></td>
                   <td class="px-4 py-4 text-right font-mono tabular-nums">{{ marginTotals().revenue | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-4 text-right font-mono tabular-nums">{{ marginTotals().laborCost | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-4 text-right font-mono tabular-nums">{{ marginTotals().externalCost | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-4 text-right font-mono tabular-nums">{{ marginTotals().expenseCost | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-emerald-700]="marginTotals().margin >= 0" [class.text-red-700]="marginTotals().margin < 0">{{ marginTotals().margin | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-positive-text]="marginTotals().margin >= 0" [class.text-critical-text]="marginTotals().margin < 0">{{ marginTotals().margin | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-4"></td>
                   <td class="px-4 py-4 text-right font-mono tabular-nums">{{ marginTotals().eac | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-emerald-700]="marginTotals().vac >= 0" [class.text-red-700]="marginTotals().vac < 0">{{ marginTotals().vac | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-positive-text]="marginTotals().vac >= 0" [class.text-critical-text]="marginTotals().vac < 0">{{ marginTotals().vac | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-4"></td>
                 </tr>
               </tfoot>
@@ -356,27 +409,33 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           </table>
         </div>
       </div>
+      </app-list-state>
+      } @placeholder {
+        <div class="command-skeleton h-64"></div>
+      }
 
       <!-- Threshold-breach alerts -->
+      @defer (hydrate on viewport) {
+      <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="4" label="portfolio alerts" (retry)="reloadData()">
       <div class="command-card overflow-hidden">
-        <div class="p-6 sm:p-8 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-slate-50">
-          <h3 class="text-xl font-bold text-slate-900 tracking-tight">Portfolio Alerts</h3>
-          <span class="text-xs font-semibold text-slate-500">Margin &le; {{ alertThresholds.marginTargetPct }}% &middot; Burn &ge; {{ alertThresholds.burnWarnPct }}% &middot; EAC &gt; budget</span>
+        <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-surface-muted">
+          <h3 class="text-xl font-bold text-ink tracking-tight">Portfolio Alerts</h3>
+          <span class="text-xs font-semibold text-ink-muted">Margin &le; {{ alertThresholds.marginTargetPct }}% &middot; Burn &ge; {{ alertThresholds.burnWarnPct }}% &middot; EAC &gt; budget</span>
         </div>
-        <ul class="divide-y divide-slate-100">
+        <ul class="divide-y divide-line">
           @for (row of alertRows(); track row.projectId) {
-            <li class="px-6 sm:px-8 py-5 flex flex-col sm:flex-row sm:items-start gap-3 hover:bg-slate-50 transition-colors">
+            <li class="px-6 sm:px-8 py-5 flex flex-col sm:flex-row sm:items-start gap-3 hover:bg-surface-muted transition-colors">
               <span class="command-status shrink-0"
-                    [class]="alertSeverity(row) === 'critical' ? 'bg-red-50 text-red-700 ring-1 ring-red-200' : 'bg-amber-50 text-amber-700 ring-1 ring-amber-200'">
+                    [class]="alertSeverity(row) === 'critical' ? 'bg-critical-tint text-critical-text ring-1 ring-critical' : 'bg-caution-tint text-caution-text ring-1 ring-caution'">
                 {{ alertSeverity(row) === 'critical' ? 'Critical' : 'Warning' }}
               </span>
               <div class="min-w-0 flex-1">
-                <div class="font-bold text-slate-900">{{ row.name ?? row.projectId }}</div>
+                <div class="font-bold text-ink">{{ row.name ?? row.projectId }}</div>
                 <ul class="mt-1.5 space-y-1">
                   @for (reason of row.alerts.items; track reason) {
-                    <li class="flex items-start gap-2 text-sm text-slate-600">
+                    <li class="flex items-start gap-2 text-sm text-ink-secondary">
                       <mat-icon class="text-[16px] w-[16px] h-[16px] mt-0.5 shrink-0"
-                                [class.text-red-700]="alertSeverity(row) === 'critical'" [class.text-amber-700]="alertSeverity(row) === 'warning'">error_outline</mat-icon>
+                                [class.text-critical-text]="alertSeverity(row) === 'critical'" [class.text-caution-text]="alertSeverity(row) === 'warning'">error_outline</mat-icon>
                       <span class="font-mono tabular-nums">{{ reason }}</span>
                     </li>
                   }
@@ -384,103 +443,159 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
               </div>
             </li>
           } @empty {
-            <li class="px-6 sm:px-8 py-8 flex items-center justify-center gap-2 text-sm text-emerald-700 font-semibold">
+            <li class="px-6 sm:px-8 py-8 flex items-center justify-center gap-2 text-sm text-positive-text font-semibold">
               <mat-icon class="text-[18px] w-[18px] h-[18px]">check_circle</mat-icon>
               No projects breaching margin, burn or EAC thresholds.
             </li>
           }
         </ul>
       </div>
+      </app-list-state>
+      } @placeholder {
+        <div class="command-skeleton h-48"></div>
+      }
 
       <!-- Margin-Compression alerts (project + customer, severity-graded) -->
+      @defer (hydrate on viewport) {
+      <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="4" label="margin-compression alerts" (retry)="reloadData()">
       <div class="command-card overflow-hidden">
-        <div class="p-6 sm:p-8 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50">
+        <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-muted">
           <div>
-            <h3 class="text-xl font-bold text-slate-900 tracking-tight">Margin-Compression Alerts</h3>
-            <span class="text-xs font-semibold text-slate-500">Margin &le; {{ marginCompressionThresholds.marginTargetPct }}% or thin bill-vs-cost spread &middot; project &amp; customer</span>
+            <h3 class="text-xl font-bold text-ink tracking-tight">Margin-Compression Alerts</h3>
+            <span class="text-xs font-semibold text-ink-muted">Margin &le; {{ marginCompressionThresholds.marginTargetPct }}% or thin bill-vs-cost spread &middot; project &amp; customer</span>
           </div>
           <button type="button" (click)="exportMarginCompressionCsv()" [disabled]="compressionAlerts().length === 0" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
             <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> Export CSV
           </button>
         </div>
-        <ul class="divide-y divide-slate-100">
+        <ul class="divide-y divide-line">
           @for (a of compressionAlerts(); track a.scope + ':' + a.id) {
-            <li class="px-6 sm:px-8 py-5 flex flex-col sm:flex-row sm:items-start gap-3 hover:bg-slate-50 transition-colors">
+            <li class="px-6 sm:px-8 py-5 flex flex-col sm:flex-row sm:items-start gap-3 hover:bg-surface-muted transition-colors">
               <span class="command-status shrink-0" [class]="severityBadgeClass(a.severity)">
                 {{ severityLabel(a.severity) }}
               </span>
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2 flex-wrap">
-                  <span class="font-bold text-slate-900">{{ a.name ?? a.id }}</span>
+                  <span class="font-bold text-ink">{{ a.name ?? a.id }}</span>
                   <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold uppercase tracking-wide ring-1"
-                        [class.bg-blue-50]="a.scope === 'project'" [class.text-blue-700]="a.scope === 'project'" [class.ring-blue-200]="a.scope === 'project'"
-                        [class.bg-violet-50]="a.scope === 'customer'" [class.text-violet-700]="a.scope === 'customer'" [class.ring-violet-200]="a.scope === 'customer'">
+                        [class.bg-accent-tint]="a.scope === 'project'" [class.text-accent-text]="a.scope === 'project'" [class.ring-accent]="a.scope === 'project'"
+                        [class.bg-surface-muted]="a.scope === 'customer'" [class.text-series-3]="a.scope === 'customer'" [class.ring-series-3]="a.scope === 'customer'">
                     {{ a.scope }}
                   </span>
-                  <span class="text-xs font-semibold text-slate-500 font-mono tabular-nums">{{ a.marginPct | number:'1.0-1' }}% margin &middot; {{ a.gapPts | number:'1.0-1' }}pt gap</span>
+                  <span class="text-xs font-semibold text-ink-muted font-mono tabular-nums">{{ a.marginPct | number:'1.0-1' }}% margin &middot; {{ a.gapPts | number:'1.0-1' }}pt gap</span>
                 </div>
                 <ul class="mt-1.5 space-y-1">
                   @for (reason of a.reasons; track reason) {
-                    <li class="flex items-start gap-2 text-sm text-slate-600">
+                    <li class="flex items-start gap-2 text-sm text-ink-secondary">
                       <mat-icon class="text-[16px] w-[16px] h-[16px] mt-0.5 shrink-0"
-                                [class.text-red-700]="a.severity === 'high'" [class.text-amber-700]="a.severity === 'medium'" [class.text-slate-500]="a.severity === 'low'">error_outline</mat-icon>
+                                [class.text-critical-text]="a.severity === 'high'" [class.text-caution-text]="a.severity === 'medium'" [class.text-ink-muted]="a.severity === 'low'">error_outline</mat-icon>
                       <span class="font-mono tabular-nums">{{ reason }}</span>
                     </li>
                   }
                 </ul>
               </div>
-              <div class="shrink-0 text-right font-mono tabular-nums text-sm text-slate-700">
+              <div class="shrink-0 text-right font-mono tabular-nums text-sm text-ink-secondary">
                 {{ a.revenue | currency:'EUR':'symbol':'1.0-0' }}
-                <div class="text-xs text-slate-500">revenue</div>
+                <div class="text-xs text-ink-muted">revenue</div>
               </div>
             </li>
           } @empty {
-            <li class="px-6 sm:px-8 py-8 flex items-center justify-center gap-2 text-sm text-emerald-700 font-semibold">
+            <li class="px-6 sm:px-8 py-8 flex items-center justify-center gap-2 text-sm text-positive-text font-semibold">
               <mat-icon class="text-[18px] w-[18px] h-[18px]">check_circle</mat-icon>
               No projects or customers showing margin compression.
             </li>
           }
         </ul>
       </div>
+      </app-list-state>
+      } @placeholder {
+        <div class="command-skeleton h-48"></div>
+      }
 
       <!-- Customer Profitability & Concentration ------------------------------- -->
       <div class="command-section-label">Customer Profitability &amp; Concentration</div>
 
-      <!-- Concentration KPI cards (single-customer dependency risk) -->
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
-        <div class="command-kpi">
-          <p class="command-kpi-label">Customers</p>
-          <p class="command-kpi-value font-mono tabular-nums">{{ concentration().customerCount }}</p>
-          <p class="command-note">With customer revenue</p>
+      <!-- Concentration KPI cards (single-customer dependency risk) + HHI gauge -->
+      @defer (hydrate on viewport) {
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
+        <div class="command-card p-6 sm:p-8 lg:col-span-2 grid grid-cols-2 gap-4 sm:gap-6 content-start">
+          <div class="command-kpi">
+            <p class="command-kpi-label">Customers</p>
+            <p class="command-kpi-value font-mono tabular-nums">{{ concentration().customerCount }}</p>
+            <p class="command-note">With customer revenue</p>
+          </div>
+          <div class="command-kpi" [class.warning]="concentration().topCustomerSharePct >= 40 && concentration().topCustomerSharePct < 60" [class.danger]="concentration().topCustomerSharePct >= 60">
+            <p class="command-kpi-label">Top Customer Share</p>
+            <p class="command-kpi-value font-mono tabular-nums">{{ concentration().topCustomerSharePct | number:'1.0-1' }}%</p>
+            <p class="command-note">{{ concentration().topCustomerName ?? '—' }}</p>
+          </div>
+          <div class="command-kpi" [class.warning]="concentration().top3SharePct >= 75">
+            <p class="command-kpi-label">Top-3 Share</p>
+            <p class="command-kpi-value font-mono tabular-nums">{{ concentration().top3SharePct | number:'1.0-1' }}%</p>
+            <p class="command-note">Combined revenue share</p>
+          </div>
+          <div class="command-kpi" [class.warning]="concentration().hhi >= 2500 && concentration().hhi < 5000" [class.danger]="concentration().hhi >= 5000">
+            <p class="command-kpi-label">HHI</p>
+            <p class="command-kpi-value font-mono tabular-nums">{{ concentration().hhi | number:'1.0-0' }}</p>
+            <p class="command-note">Concentration index (0–10000)</p>
+          </div>
         </div>
-        <div class="command-kpi" [class.warning]="concentration().topCustomerSharePct >= 40 && concentration().topCustomerSharePct < 60" [class.danger]="concentration().topCustomerSharePct >= 60">
-          <p class="command-kpi-label">Top Customer Share</p>
-          <p class="command-kpi-value font-mono tabular-nums">{{ concentration().topCustomerSharePct | number:'1.0-1' }}%</p>
-          <p class="command-note">{{ concentration().topCustomerName ?? '—' }}</p>
-        </div>
-        <div class="command-kpi" [class.warning]="concentration().top3SharePct >= 75">
-          <p class="command-kpi-label">Top-3 Share</p>
-          <p class="command-kpi-value font-mono tabular-nums">{{ concentration().top3SharePct | number:'1.0-1' }}%</p>
-          <p class="command-note">Combined revenue share</p>
-        </div>
-        <div class="command-kpi" [class.warning]="concentration().hhi >= 2500 && concentration().hhi < 5000" [class.danger]="concentration().hhi >= 5000">
-          <p class="command-kpi-label">HHI</p>
-          <p class="command-kpi-value font-mono tabular-nums">{{ concentration().hhi | number:'1.0-0' }}</p>
-          <p class="command-note">Concentration index (0–10000)</p>
+        <!-- HHI radial gauge: arc fills hhi/10000, centered text shows the raw index -->
+        <div class="command-card p-6 sm:p-8 flex flex-col items-center justify-center gap-3">
+          <command-donut-chart
+            [value]="concentrationHhiRatio()" [max]="1"
+            label="HHI" [tone]="concentrationHhiTone()"
+            [size]="180"
+            [displayText]="(concentration().hhi | number:'1.0-0') ?? '0'"
+            ariaLabel="Revenue concentration HHI gauge"
+            caption="Revenue-concentration HHI out of 10000" />
+          <p class="command-note text-center">Single-customer dependency risk &middot; higher is more concentrated</p>
         </div>
       </div>
+      } @placeholder {
+        <div class="command-skeleton h-48"></div>
+      }
+
+      <!-- Top customers by revenue (bar chart) -->
+      @defer (hydrate on viewport) {
+      <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="block" [rows]="1" label="customer revenue" (retry)="reloadData()">
+        <div class="command-card p-6 sm:p-8">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-8">
+            <h3 class="text-xl font-bold text-ink tracking-tight">Top Customers by Revenue</h3>
+            <span class="text-xs font-semibold uppercase tracking-wider text-ink-muted normal-case">Top {{ customerChartCategories().length }} &middot; {{ baseCurrency }} (base)</span>
+          </div>
+          @if (customerChartCategories().length > 0) {
+            <command-bar-chart
+              [categories]="customerChartCategories()"
+              [series]="customerChartSeries()"
+              orientation="horizontal"
+              [showValues]="true"
+              [format]="eurCompact"
+              [height]="320"
+              ariaLabel="Revenue by customer in base currency"
+              caption="Revenue per customer (base currency)" />
+          } @else {
+            <p class="text-ink-muted text-sm">No customer revenue to chart yet.</p>
+          }
+        </div>
+      </app-list-state>
+      } @placeholder {
+        <div class="command-skeleton h-64"></div>
+      }
 
       <!-- Top customers by margin -->
+      @defer (hydrate on viewport) {
+      <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="6" [columns]="7" label="customer profitability" (retry)="reloadData()">
       <div class="command-card overflow-hidden">
-        <div class="p-6 sm:p-8 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50">
-          <h3 class="text-xl font-bold text-slate-900 tracking-tight">Top Customers by Margin <span class="ml-1 text-xs font-semibold text-slate-500 normal-case tracking-normal">{{ baseCurrency }} (base)</span></h3>
+        <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-muted">
+          <h3 class="text-xl font-bold text-ink tracking-tight">Top Customers by Margin <span class="ml-1 text-xs font-semibold text-ink-muted normal-case tracking-normal">{{ baseCurrency }} (base)</span></h3>
           <button type="button" (click)="exportCustomerProfitabilityCsv()" [disabled]="customerRows().length === 0" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
             <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> Export CSV
           </button>
         </div>
         <div class="overflow-x-auto">
           <table class="command-data-table">
-            <thead class="bg-slate-50 border-b border-slate-200 text-slate-500">
+            <thead class="bg-surface-muted border-b border-line text-ink-muted">
               <tr>
                 <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs">Customer</th>
                 <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Revenue</th>
@@ -491,38 +606,38 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
                 <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Projects</th>
               </tr>
             </thead>
-            <tbody class="divide-y divide-slate-100">
+            <tbody class="divide-y divide-line">
               @for (c of customerRows(); track c.customerId) {
-                <tr class="hover:bg-slate-50 transition-colors">
-                  <td class="px-6 sm:px-8 py-5 font-bold text-slate-900 min-w-[160px]">{{ c.customerName }}</td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums text-slate-700">{{ c.revenue | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums text-slate-600">{{ c.cost | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums font-bold" [class.text-emerald-700]="c.margin >= 0" [class.text-red-700]="c.margin < 0">{{ c.margin | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-emerald-700]="c.marginPct >= 0" [class.text-red-700]="c.marginPct < 0">{{ c.marginPct | number:'1.0-1' }}%</td>
+                <tr class="hover:bg-surface-muted transition-colors">
+                  <td class="px-6 sm:px-8 py-5 font-bold text-ink min-w-[160px]">{{ c.customerName }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ c.revenue | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ c.cost | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums font-bold" [class.text-positive-text]="c.margin >= 0" [class.text-critical-text]="c.margin < 0">{{ c.margin | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-positive-text]="c.marginPct >= 0" [class.text-critical-text]="c.marginPct < 0">{{ c.marginPct | number:'1.0-1' }}%</td>
                   <td class="px-4 py-5 text-right">
                     <div class="flex items-center justify-end gap-2">
-                      <span class="font-mono tabular-nums text-slate-700">{{ c.sharePct | number:'1.0-1' }}%</span>
-                      <span class="hidden sm:block w-16 bg-slate-100 rounded-full h-2 overflow-hidden shadow-inner">
-                        <span class="block h-full bg-blue-600 rounded-full" [style.width.%]="c.shareW"></span>
+                      <span class="font-mono tabular-nums text-ink-secondary">{{ c.sharePct | number:'1.0-1' }}%</span>
+                      <span class="hidden sm:block w-16 bg-surface-muted rounded-full h-2 overflow-hidden shadow-inner">
+                        <span class="block h-full bg-accent rounded-full" [style.width.%]="c.shareW"></span>
                       </span>
                     </div>
                   </td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums text-slate-500">{{ c.projectIds.length }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-muted">{{ c.projectIds.length }}</td>
                 </tr>
               } @empty {
                 <tr>
-                  <td colspan="7" class="px-6 sm:px-8 py-8 text-center text-slate-500 text-sm">No customer revenue yet. Link projects to contracts and add Customer orders.</td>
+                  <td colspan="7" class="px-6 sm:px-8 py-8 text-center text-ink-muted text-sm">No customer revenue yet. Link projects to contracts and add Customer orders.</td>
                 </tr>
               }
             </tbody>
             @if (customerRows().length > 0) {
-              <tfoot class="border-t-2 border-slate-200 bg-slate-50 font-bold text-slate-900">
+              <tfoot class="border-t-2 border-line bg-surface-muted font-bold text-ink">
                 <tr>
-                  <td class="px-6 sm:px-8 py-4">Total <span class="ml-1 text-xs font-semibold text-slate-500 normal-case tracking-normal">{{ baseCurrency }} (base)</span></td>
+                  <td class="px-6 sm:px-8 py-4">Total <span class="ml-1 text-xs font-semibold text-ink-muted normal-case tracking-normal">{{ baseCurrency }} (base)</span></td>
                   <td class="px-4 py-4 text-right font-mono tabular-nums">{{ customerTotals().revenue | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-4 text-right font-mono tabular-nums">{{ customerTotals().cost | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-emerald-700]="customerTotals().margin >= 0" [class.text-red-700]="customerTotals().margin < 0">{{ customerTotals().margin | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-emerald-700]="customerTotals().marginPct >= 0" [class.text-red-700]="customerTotals().marginPct < 0">{{ customerTotals().marginPct | number:'1.0-1' }}%</td>
+                  <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-positive-text]="customerTotals().margin >= 0" [class.text-critical-text]="customerTotals().margin < 0">{{ customerTotals().margin | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-positive-text]="customerTotals().marginPct >= 0" [class.text-critical-text]="customerTotals().marginPct < 0">{{ customerTotals().marginPct | number:'1.0-1' }}%</td>
                   <td class="px-4 py-4 text-right font-mono tabular-nums">100%</td>
                   <td class="px-4 py-4"></td>
                 </tr>
@@ -531,11 +646,16 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           </table>
         </div>
       </div>
+      </app-list-state>
+      } @placeholder {
+        <div class="command-skeleton h-64"></div>
+      }
 
       <!-- Accounts Receivable (A/R aging) -->
       <div class="command-section-label">Accounts Receivable</div>
 
       <!-- A/R KPI cards -->
+      @defer (hydrate on viewport) {
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
         <div class="command-kpi">
           <p class="command-kpi-label">Total Outstanding</p>
@@ -544,60 +664,81 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
         </div>
         <div class="command-kpi" [class.danger]="arOverdue() > 0">
           <p class="command-kpi-label">Overdue</p>
-          <p class="command-kpi-value font-mono tabular-nums" [class.text-red-700]="arOverdue() > 0">{{ arOverdue() | currency:'EUR':'symbol':'1.0-0' }}</p>
+          <p class="command-kpi-value font-mono tabular-nums" [class.text-critical-text]="arOverdue() > 0">{{ arOverdue() | currency:'EUR':'symbol':'1.0-0' }}</p>
           <p class="command-note">Past due date</p>
         </div>
         <div class="command-kpi info">
           <p class="command-kpi-label">DSO</p>
-          <p class="command-kpi-value font-mono tabular-nums">{{ arDso() | number:'1.0-0' }} <span class="text-base font-semibold text-slate-500">days</span></p>
+          <p class="command-kpi-value font-mono tabular-nums">{{ arDso() | number:'1.0-0' }} <span class="text-base font-semibold text-ink-muted">days</span></p>
           <p class="command-note">Amount-weighted age of A/R</p>
         </div>
       </div>
+      } @placeholder {
+        <div class="command-skeleton h-24"></div>
+      }
 
-      <!-- Aging bar (0-30 / 31-60 / 61-90 / 90+) -->
+      <!-- Aging bar chart (0-30 / 31-60 / 61-90 / 90+) -->
+      @defer (hydrate on viewport) {
+      <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="block" [rows]="1" label="A/R aging" (retry)="reloadData()">
       <div class="command-card p-6 sm:p-8">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-8">
-          <h3 class="text-xl font-bold text-slate-900 tracking-tight">A/R Aging</h3>
+          <h3 class="text-xl font-bold text-ink tracking-tight">A/R Aging</h3>
           <div class="flex items-center gap-4">
-            <span class="text-xs font-semibold uppercase tracking-wider text-slate-500">Days overdue &middot; {{ baseCurrency }} (base)</span>
+            <span class="text-xs font-semibold uppercase tracking-wider text-ink-muted">Days overdue &middot; {{ baseCurrency }} (base)</span>
             <button type="button" (click)="exportArAgingCsv()" class="command-button secondary">
               <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> Export CSV
             </button>
           </div>
         </div>
-        <div class="space-y-6">
+        <!-- Horizontal bar chart over the fixed aging buckets -->
+        <command-bar-chart
+          [categories]="arAgingChartCategories()"
+          [series]="arAgingChartSeries()"
+          orientation="horizontal"
+          [showValues]="true"
+          [format]="eurCompact"
+          ariaLabel="Accounts receivable aging buckets"
+          caption="A/R balance by aging bucket (base currency)" />
+        <!-- Numeric amounts + invoice counts kept alongside the chart -->
+        <div class="space-y-6 mt-6 border-t border-line pt-6">
           @for (b of arBucketBars(); track b.bucket) {
             <div class="group">
               <div class="flex justify-between items-end mb-2">
-                <span class="font-bold tracking-wide" [class.text-red-700]="b.bucket === '90+'" [class.text-slate-700]="b.bucket !== '90+'">
+                <span class="font-bold tracking-wide" [class.text-critical-text]="b.bucket === '90+'" [class.text-ink-secondary]="b.bucket !== '90+'">
                   {{ b.bucket }} days
-                  <span class="ml-2 text-xs font-semibold text-slate-500 tabular-nums">{{ b.count }} {{ b.count === 1 ? 'invoice' : 'invoices' }}</span>
+                  <span class="ml-2 text-xs font-semibold text-ink-muted tabular-nums">{{ b.count }} {{ b.count === 1 ? 'invoice' : 'invoices' }}</span>
                 </span>
-                <span class="text-sm font-bold tracking-wide font-mono tabular-nums" [class.text-red-700]="b.bucket === '90+'" [class.text-slate-700]="b.bucket !== '90+'">
+                <span class="text-sm font-bold tracking-wide font-mono tabular-nums" [class.text-critical-text]="b.bucket === '90+'" [class.text-ink-secondary]="b.bucket !== '90+'">
                   {{ b.amount | currency:'EUR':'symbol':'1.0-0' }}
                 </span>
               </div>
-              <div class="w-full bg-slate-100 rounded-full h-3 overflow-hidden shadow-inner">
+              <div class="w-full bg-surface-muted rounded-full h-3 overflow-hidden shadow-inner">
                 <div class="h-full rounded-full transition-all duration-1000 ease-out"
-                     [class.bg-red-500]="b.bucket === '90+'" [class.bg-blue-600]="b.bucket !== '90+'"
+                     [class.bg-critical]="b.bucket === '90+'" [class.bg-accent]="b.bucket !== '90+'"
                      [style.width.%]="b.width"></div>
               </div>
             </div>
           }
         </div>
       </div>
+      </app-list-state>
+      } @placeholder {
+        <div class="command-skeleton h-64"></div>
+      }
 
       <!-- Per-customer A/R table -->
+      @defer (hydrate on viewport) {
+      <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="5" [columns]="4" label="A/R by customer" (retry)="reloadData()">
       <div class="command-card overflow-hidden">
-        <div class="p-6 sm:p-8 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50">
-          <h3 class="text-xl font-bold text-slate-900 tracking-tight">A/R by Customer <span class="ml-1 text-xs font-semibold text-slate-500 normal-case">{{ baseCurrency }} (base)</span></h3>
+        <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-muted">
+          <h3 class="text-xl font-bold text-ink tracking-tight">A/R by Customer <span class="ml-1 text-xs font-semibold text-ink-muted normal-case">{{ baseCurrency }} (base)</span></h3>
           <button type="button" (click)="exportArByCustomerCsv()" [disabled]="arByCustomer().length === 0" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
             <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> Export CSV
           </button>
         </div>
         <div class="overflow-x-auto">
           <table class="command-data-table">
-            <thead class="bg-slate-50 border-b border-slate-200 text-slate-500">
+            <thead class="bg-surface-muted border-b border-line text-ink-muted">
               <tr>
                 <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs">Customer</th>
                 <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs text-right">Outstanding</th>
@@ -605,28 +746,32 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
                 <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs">Oldest Bucket</th>
               </tr>
             </thead>
-            <tbody class="divide-y divide-slate-100">
+            <tbody class="divide-y divide-line">
               @for (row of arByCustomer(); track row.customerId) {
-                <tr class="hover:bg-slate-50 transition-colors">
-                  <td class="px-6 sm:px-8 py-5 font-bold text-slate-900">{{ row.customerName }}</td>
-                  <td class="px-6 sm:px-8 py-5 text-right font-mono tabular-nums text-slate-700">{{ row.totalOutstanding | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-6 sm:px-8 py-5 text-right font-mono tabular-nums" [class.text-red-700]="row.overdue > 0" [class.text-slate-700]="row.overdue === 0">{{ row.overdue | currency:'EUR':'symbol':'1.0-0' }}</td>
+                <tr class="hover:bg-surface-muted transition-colors">
+                  <td class="px-6 sm:px-8 py-5 font-bold text-ink">{{ row.customerName }}</td>
+                  <td class="px-6 sm:px-8 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ row.totalOutstanding | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-6 sm:px-8 py-5 text-right font-mono tabular-nums" [class.text-critical-text]="row.overdue > 0" [class.text-ink-secondary]="row.overdue === 0">{{ row.overdue | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-6 sm:px-8 py-5">
                     <span class="command-status"
-                          [class]="row.oldestBucket === '90+' ? 'bg-red-50 text-red-700 ring-1 ring-red-200' : 'bg-blue-50 text-blue-700 ring-1 ring-blue-200'">
+                          [class]="row.oldestBucket === '90+' ? 'bg-critical-tint text-critical-text ring-1 ring-critical' : 'bg-accent-tint text-accent-text ring-1 ring-accent'">
                       {{ row.oldestBucket === '—' ? '—' : row.oldestBucket + ' days' }}
                     </span>
                   </td>
                 </tr>
               } @empty {
                 <tr>
-                  <td colspan="4" class="px-6 sm:px-8 py-8 text-center text-slate-500 text-sm">No outstanding receivables.</td>
+                  <td colspan="4" class="px-6 sm:px-8 py-8 text-center text-ink-muted text-sm">No outstanding receivables.</td>
                 </tr>
               }
             </tbody>
           </table>
         </div>
       </div>
+      </app-list-state>
+      } @placeholder {
+        <div class="command-skeleton h-48"></div>
+      }
     </div>
   `
 })
@@ -700,6 +845,14 @@ export class Reporting {
   protected readonly baseCurrency = BASE_CURRENCY;
 
   /**
+   * Compact base-currency formatter shared by the SVG charts' value/axis labels so
+   * they read like the surrounding tables (e.g. "€48K") rather than long figures.
+   * Passed to the charts' `format` input, which always wins over formatKind/locale.
+   */
+  protected readonly eurCompact = (v: number): string =>
+    new Intl.NumberFormat('en-US', { style: 'currency', currency: BASE_CURRENCY, notation: 'compact', maximumFractionDigits: 1 }).format(v);
+
+  /**
    * ACCESS FEEDBACK: this report reads role-gated collections in a fail-fast
    * forkJoin, and 401s are deliberately NOT toasted by the error interceptor.
    * Without this notice, an anonymous or under-privileged user would see a page
@@ -713,6 +866,21 @@ export class Reporting {
       ? 'Your role does not have access to the financial reporting data. The figures below are incomplete.'
       : 'Sign in to view portfolio analytics — financial data requires an authenticated role.';
   });
+
+  /**
+   * Loading/error flags for the ListState wrappers around the data-backed panels.
+   * `dataLoading` covers both the gated data load and the FX table; `dataError`
+   * mirrors the same error state the access notice keys on, so a 401 shows the
+   * documented under-privileged notice AND a Retry-able panel instead of zero-flash.
+   */
+  protected dataLoading = computed(() => this.dataRes.isLoading() || this.fxRes.isLoading());
+  protected dataError = computed(() => this.dataRes.status() === 'error' || this.fxRes.status() === 'error');
+
+  /** Reload both gated resources behind the ListState Retry affordance. */
+  protected reloadData(): void {
+    this.dataRes.reload();
+    this.fxRes.reload();
+  }
 
   private financeData = computed<FinanceData>(() => {
     const d = this.dataRes.value();
@@ -964,9 +1132,9 @@ export class Reporting {
   /** Tailwind classes for a severity badge (AA-contrast light theme). */
   severityBadgeClass(s: AlertSeverity): string {
     switch (s) {
-      case 'high': return 'bg-red-50 text-red-700 ring-1 ring-red-200';
-      case 'medium': return 'bg-amber-50 text-amber-700 ring-1 ring-amber-200';
-      default: return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200';
+      case 'high': return 'bg-critical-tint text-critical-text ring-1 ring-critical';
+      case 'medium': return 'bg-caution-tint text-caution-text ring-1 ring-caution';
+      default: return 'bg-surface-muted text-ink-secondary ring-1 ring-line';
     }
   }
 
@@ -980,10 +1148,10 @@ export class Reporting {
     // derive a prior period from, so their trend is null and the indicator is
     // HIDDEN (never a fabricated %). The one metric we can trend honestly —
     // recognised revenue — drives the Realization strip below via recognizedTrend().
-    { label: 'Total Active Projects', value: String(this.activeProjectsCount()), trend: null, icon: 'folder', colorClass: 'bg-blue-500' },
-    { label: 'Avg Resource Utilization', value: `${Math.round(this.avgUtilization())}%`, trend: null, icon: 'bar_chart', colorClass: 'bg-emerald-500' },
-    { label: 'Open Resource Requests', value: String(this.openRequestsCount()), trend: null, icon: 'person_add', colorClass: 'bg-amber-500' },
-    { label: 'Delivery Risk Items', value: String(this.highRiskIssues() + this.openChanges() + this.pendingMilestones()), trend: null, icon: 'warning', colorClass: 'bg-red-500' },
+    { label: 'Total Active Projects', value: String(this.activeProjectsCount()), trend: null, icon: 'folder', colorClass: 'bg-accent' },
+    { label: 'Avg Resource Utilization', value: `${Math.round(this.avgUtilization())}%`, trend: null, icon: 'bar_chart', colorClass: 'bg-positive' },
+    { label: 'Open Resource Requests', value: String(this.openRequestsCount()), trend: null, icon: 'person_add', colorClass: 'bg-caution' },
+    { label: 'Delivery Risk Items', value: String(this.highRiskIssues() + this.openChanges() + this.pendingMilestones()), trend: null, icon: 'warning', colorClass: 'bg-critical' },
   ]);
 
   /** Human-readable label for a real trend badge (used as aria-label on the icon chip). */
@@ -997,6 +1165,90 @@ export class Reporting {
     month: r.name.split(' ')[0] || r.name,
     value: Math.round(r.utilization ?? 0),
   })));
+
+  // --- Chart input contracts (Ledger SVG chart library) -----------------------
+  /**
+   * Per-resource utilization as a vertical bar chart. Categories are the same
+   * first-name labels the old div-bar used (`utilizationData().month`); values are
+   * the same rounded utilization %. Built-in `percent` treats raw as a fraction, so
+   * a custom `format` renders the already-scaled 0–100 value as "NN%".
+   */
+  utilizationChartCategories = computed<readonly string[]>(() => this.utilizationData().map(b => b.month));
+  utilizationChartSeries = computed<readonly BarSeries[]>(() => [
+    { name: 'Utilization', values: this.utilizationData().map(b => b.value) },
+  ]);
+  protected readonly utilizationPctFormat = (v: number): string => `${Math.round(v)}%`;
+
+  /**
+   * Project margin as a horizontal bar chart (one bar per project, base-currency).
+   * Same source as `projectMargins()`; the chart's signed baseline renders negative
+   * margins to the left of zero, replacing the abs()-width div-bar.
+   */
+  marginChartCategories = computed<readonly string[]>(() => this.projectMargins().map(p => p.name));
+  marginChartSeries = computed<readonly BarSeries[]>(() => [
+    { name: 'Margin', values: this.projectMargins().map(p => p.margin) },
+  ]);
+
+  /**
+   * A/R aging as a horizontal bar chart over the fixed oldest-last buckets. Same
+   * amounts as `arBuckets()`; the 90+ bucket is tinted critical to match the old
+   * div-bar's red highlight, others use the accent.
+   */
+  arAgingChartCategories = computed<readonly string[]>(() => this.arBuckets().map(b => `${b.bucket} days`));
+  arAgingChartSeries = computed<readonly BarSeries[]>(() => [
+    {
+      name: 'Outstanding',
+      values: this.arBuckets().map(b => b.amount),
+      color: 'var(--color-accent)',
+    },
+  ]);
+
+  /**
+   * Top customers by revenue as a horizontal bar chart, mirroring the table's
+   * revenue column. Capped at the top 8 so the chart stays legible; the full table
+   * remains the source of truth below it.
+   */
+  private customerChartRows = computed(() => this.customerRows().slice(0, 8));
+  customerChartCategories = computed<readonly string[]>(() => this.customerChartRows().map(c => c.customerName));
+  customerChartSeries = computed<readonly BarSeries[]>(() => [
+    { name: 'Revenue', values: this.customerChartRows().map(c => c.revenue) },
+  ]);
+
+  /**
+   * Revenue-concentration HHI normalised to a 0–1 ratio for the donut gauge (raw
+   * HHI is 0–10000). The centered text shows the raw index via `displayText` so the
+   * figure matches the KPI card; the arc fills hhi/10000. Tone escalates with risk.
+   */
+  protected readonly hhiMax = 10000;
+  concentrationHhiRatio = computed(() => Math.min(1, Math.max(0, this.concentration().hhi / this.hhiMax)));
+  concentrationHhiTone = computed<'accent' | 'caution' | 'critical'>(() => {
+    const hhi = this.concentration().hhi;
+    return hhi >= 5000 ? 'critical' : hhi >= 2500 ? 'caution' : 'accent';
+  });
+
+  /**
+   * Recognised-revenue monthly trend over a trailing 12-month window, derived from
+   * the same dated recognition schedule that powers `recognizedTrend()`. Each point
+   * is that month's `recognized` amount in base currency — a real time series, not a
+   * fabricated curve. Empty when there are no derivable periods.
+   */
+  private recognizedSchedule = computed(() => {
+    const periods = this.recentPeriods(12);
+    if (periods.length === 0) return [];
+    return recognitionSchedule(this.financeData(), periods);
+  });
+  recognizedTrendCategories = computed<readonly string[]>(() =>
+    this.recognizedSchedule().map(r => {
+      const [, m] = r.period.split('-');
+      const monthIdx = Number(m) - 1;
+      return Number.isFinite(monthIdx) && monthIdx >= 0 && monthIdx < 12
+        ? ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][monthIdx]
+        : r.period;
+    }),
+  );
+  recognizedTrendSeries = computed<readonly TrendSeries[]>(() => [
+    { name: 'Recognised Revenue', values: this.recognizedSchedule().map(r => r.recognized) },
+  ]);
 
   reports = signal([
     { name: 'Monthly Resource Utilization', category: 'Resource Management', lastGenerated: '2 days ago' },

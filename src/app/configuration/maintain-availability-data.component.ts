@@ -23,9 +23,9 @@ import { NotificationService } from '../services/notification.service';
       <input type="file" id="csvUploadAvail" accept=".csv" class="hidden" (change)="onFileSelected($event)">
 
       <div class="p-6 sm:p-8">
-        <div class="bg-blue-50 border border-blue-200 rounded-lg p-5 mb-8">
+        <div class="bg-accent-tint border border-accent rounded-lg p-5 mb-8">
           <div class="flex items-start gap-3">
-            <mat-icon class="text-blue-700 mt-0.5">info</mat-icon>
+            <mat-icon class="text-accent-text mt-0.5">info</mat-icon>
             <p class="text-sm text-[var(--cc-muted)] font-medium leading-relaxed">
               Maintain the workforce person availability data that is used in resource management. Download a template, edit it, and upload it back.
             </p>
@@ -45,10 +45,10 @@ import { NotificationService } from '../services/notification.service';
             <tbody>
               @for (res of resources(); track res.id) {
                 <tr>
-                  <td><span class="text-blue-700 font-mono text-xs font-bold">{{ res.id }}</span></td>
+                  <td><span class="text-accent-text font-mono text-xs font-bold">{{ res.id }}</span></td>
                   <td class="font-bold text-base">{{ res.name }}</td>
                   <td>
-                    <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide bg-slate-100 text-slate-700 ring-1 ring-slate-200">
+                    <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide bg-surface-muted text-ink-secondary ring-1 ring-line">
                       {{ res.role }}
                     </span>
                   </td>

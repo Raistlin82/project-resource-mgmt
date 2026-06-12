@@ -27,9 +27,9 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
       <!-- Search and Filter -->
       <div class="command-card p-4 flex flex-col sm:flex-row gap-4">
         <div class="flex-1 relative">
-          <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-[20px] w-[20px] h-[20px]">search</mat-icon>
+          <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted text-[20px] w-[20px] h-[20px]">search</mat-icon>
           <input [formControl]="searchControl" type="text" placeholder="Search projects by name, ID, or location..."
-                 class="w-full pl-10 pr-4 py-3 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25 transition-all outline-none">
+                 class="w-full pl-10 pr-4 py-3 bg-surface border border-line-strong rounded-xl text-sm text-ink placeholder:text-ink-muted focus:bg-surface focus:border-accent focus:ring-2 focus:ring-accent/25 transition-all outline-none">
         </div>
       </div>
 
@@ -40,21 +40,21 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <div class="p-6 sm:p-8 flex-1 flex flex-col">
               <div class="flex justify-between items-start mb-4 gap-4">
                 <div class="flex-1 min-w-0">
-                  <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-1 truncate group-hover:text-blue-700 transition-colors">
+                  <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-1 truncate group-hover:text-accent-text transition-colors">
                     <a [routerLink]="['/projects', project.id]" class="focus:outline-none before:absolute before:inset-0">{{ project.name }}</a>
                   </h3>
-                  <p class="text-xs text-blue-700 font-mono bg-blue-50 ring-1 ring-blue-200 inline-block px-2 py-0.5 rounded-md">{{ project.id }}</p>
+                  <p class="text-xs text-accent-text font-mono bg-accent-tint ring-1 ring-accent inline-block px-2 py-0.5 rounded-md">{{ project.id }}</p>
                 </div>
                 <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-wide shrink-0 ring-1"
-                      [class.bg-blue-50]="project.status === 'In Planning'"
-                      [class.text-blue-700]="project.status === 'In Planning'"
-                      [class.ring-blue-200]="project.status === 'In Planning'"
-                      [class.bg-emerald-50]="project.status === 'In Execution'"
-                      [class.text-emerald-700]="project.status === 'In Execution'"
-                      [class.ring-emerald-200]="project.status === 'In Execution'"
-                      [class.bg-slate-100]="project.status === 'Completed'"
-                      [class.text-slate-700]="project.status === 'Completed'"
-                      [class.ring-slate-200]="project.status === 'Completed'">
+                      [class.bg-accent-tint]="project.status === 'In Planning'"
+                      [class.text-accent-text]="project.status === 'In Planning'"
+                      [class.ring-accent]="project.status === 'In Planning'"
+                      [class.bg-positive-tint]="project.status === 'In Execution'"
+                      [class.text-positive-text]="project.status === 'In Execution'"
+                      [class.ring-positive]="project.status === 'In Execution'"
+                      [class.bg-surface-muted]="project.status === 'Completed'"
+                      [class.text-ink-secondary]="project.status === 'Completed'"
+                      [class.ring-line]="project.status === 'Completed'">
                   {{ project.status }}
                 </span>
               </div>
@@ -63,19 +63,19 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
               <div class="space-y-3 mt-auto pt-4 border-t border-[var(--cc-line)]">
                 <div class="flex items-center gap-3 text-sm text-[var(--cc-muted)] font-medium">
-                  <div class="w-8 h-8 rounded-full bg-slate-50 flex items-center justify-center text-slate-400 group-hover:bg-blue-50 group-hover:text-blue-700 transition-colors">
+                  <div class="w-8 h-8 rounded-full bg-surface-muted flex items-center justify-center text-ink-muted group-hover:bg-accent-tint group-hover:text-accent-text transition-colors">
                     <mat-icon class="text-[18px] w-[18px] h-[18px]">location_on</mat-icon>
                   </div>
                   <span class="truncate">{{ project.location }}</span>
                 </div>
                 <div class="flex items-center gap-3 text-sm text-[var(--cc-muted)] font-medium">
-                  <div class="w-8 h-8 rounded-full bg-slate-50 flex items-center justify-center text-slate-400 group-hover:bg-blue-50 group-hover:text-blue-700 transition-colors">
+                  <div class="w-8 h-8 rounded-full bg-surface-muted flex items-center justify-center text-ink-muted group-hover:bg-accent-tint group-hover:text-accent-text transition-colors">
                     <mat-icon class="text-[18px] w-[18px] h-[18px]">date_range</mat-icon>
                   </div>
                   <span class="truncate font-mono tabular-nums">{{ project.startDate | date:'mediumDate' }} - {{ project.endDate | date:'mediumDate' }}</span>
                 </div>
                 <div class="flex items-center gap-3 text-sm text-[var(--cc-muted)] font-medium">
-                  <div class="w-8 h-8 rounded-full bg-slate-50 flex items-center justify-center text-slate-400 group-hover:bg-blue-50 group-hover:text-blue-700 transition-colors">
+                  <div class="w-8 h-8 rounded-full bg-surface-muted flex items-center justify-center text-ink-muted group-hover:bg-accent-tint group-hover:text-accent-text transition-colors">
                     <mat-icon class="text-[18px] w-[18px] h-[18px]">gavel</mat-icon>
                   </div>
                   <span class="truncate">{{ contractName(project.contractId) }}</span>
@@ -84,10 +84,10 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             </div>
 
             <div class="px-6 py-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity focus-within:opacity-100 relative z-10">
-              <button (click)="editProject(project); $event.stopPropagation()" class="p-2 text-slate-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors" aria-label="Edit project">
+              <button (click)="editProject(project); $event.stopPropagation()" class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-colors" aria-label="Edit project">
                 <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
               </button>
-              <button (click)="deleteProject(project.id); $event.stopPropagation()" class="p-2 text-slate-500 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors" aria-label="Delete project">
+              <button (click)="deleteProject(project.id); $event.stopPropagation()" class="p-2 text-ink-muted hover:text-critical-text hover:bg-critical-tint rounded-lg transition-colors" aria-label="Delete project">
                 <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
               </button>
             </div>
@@ -95,8 +95,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
         }
         @if (!filteredProjects().length) {
           <div class="col-span-full command-card p-12 text-center border-2 border-dashed">
-            <div class="w-20 h-20 bg-[var(--cc-panel-muted)] ring-1 ring-slate-900/5 rounded-full flex items-center justify-center mx-auto mb-4">
-              <mat-icon class="text-slate-400 text-4xl">folder_off</mat-icon>
+            <div class="w-20 h-20 bg-[var(--cc-panel-muted)] ring-1 ring-line/5 rounded-full flex items-center justify-center mx-auto mb-4">
+              <mat-icon class="text-ink-muted text-4xl">folder_off</mat-icon>
             </div>
             <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-2">No projects found</h3>
             <p class="text-[var(--cc-muted)]">Get started by creating a new collaborative project.</p>
@@ -107,12 +107,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
     <!-- Create/Edit Modal -->
     @if (showForm()) {
-      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+      <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
            appModal ariaLabelledby="projectModalTitle" (dismiss)="closeForm()">
         <div class="command-card shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
           <div class="command-card-header">
             <h2 id="projectModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Project' : 'Create Collaborative Project' }}</h2>
-            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
+            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
               <mat-icon>close</mat-icon>
             </button>
           </div>
@@ -121,38 +121,63 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <form [formGroup]="projectForm" (ngSubmit)="saveProject()" class="space-y-6">
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div class="sm:col-span-2">
-                  <label for="projectName" class="block text-sm font-semibold text-slate-700 mb-1.5">Project Name *</label>
-                  <input id="projectName" type="text" formControlName="name" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. Project Alpha">
+                  <label for="projectName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Project Name *</label>
+                  <input id="projectName" type="text" formControlName="name" class="command-input" placeholder="e.g. Project Alpha"
+                         [attr.aria-invalid]="projectForm.controls.name.invalid && (projectForm.controls.name.touched || projectForm.controls.name.dirty)"
+                         [attr.aria-describedby]="projectForm.controls.name.invalid && (projectForm.controls.name.touched || projectForm.controls.name.dirty) ? 'projectNameError' : null">
+                  @if (projectForm.controls.name.invalid && (projectForm.controls.name.touched || projectForm.controls.name.dirty)) {
+                    <p id="projectNameError" class="command-field-error" role="alert">Project name is required.</p>
+                  }
                 </div>
 
                 <div class="sm:col-span-2">
-                  <label for="projectLocation" class="block text-sm font-semibold text-slate-700 mb-1.5">Location *</label>
-                  <input id="projectLocation" type="text" formControlName="location" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. New York, NY">
+                  <label for="projectLocation" class="block text-sm font-semibold text-ink-secondary mb-1.5">Location *</label>
+                  <input id="projectLocation" type="text" formControlName="location" class="command-input" placeholder="e.g. New York, NY"
+                         [attr.aria-invalid]="projectForm.controls.location.invalid && (projectForm.controls.location.touched || projectForm.controls.location.dirty)"
+                         [attr.aria-describedby]="projectForm.controls.location.invalid && (projectForm.controls.location.touched || projectForm.controls.location.dirty) ? 'projectLocationError' : null">
+                  @if (projectForm.controls.location.invalid && (projectForm.controls.location.touched || projectForm.controls.location.dirty)) {
+                    <p id="projectLocationError" class="command-field-error" role="alert">Location is required.</p>
+                  }
                 </div>
 
                 <div>
-                  <label for="projectStartDate" class="block text-sm font-semibold text-slate-700 mb-1.5">Start Date *</label>
-                  <input id="projectStartDate" type="date" formControlName="startDate" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
+                  <label for="projectStartDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Start Date *</label>
+                  <input id="projectStartDate" type="date" formControlName="startDate" class="command-input"
+                         [attr.aria-invalid]="projectForm.controls.startDate.invalid && (projectForm.controls.startDate.touched || projectForm.controls.startDate.dirty)"
+                         [attr.aria-describedby]="projectForm.controls.startDate.invalid && (projectForm.controls.startDate.touched || projectForm.controls.startDate.dirty) ? 'projectStartDateError' : null">
+                  @if (projectForm.controls.startDate.invalid && (projectForm.controls.startDate.touched || projectForm.controls.startDate.dirty)) {
+                    <p id="projectStartDateError" class="command-field-error" role="alert">Start date is required.</p>
+                  }
                 </div>
 
                 <div>
-                  <label for="projectEndDate" class="block text-sm font-semibold text-slate-700 mb-1.5">End Date *</label>
-                  <input id="projectEndDate" type="date" formControlName="endDate" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
+                  <label for="projectEndDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">End Date *</label>
+                  <input id="projectEndDate" type="date" formControlName="endDate" class="command-input"
+                         [attr.aria-invalid]="projectForm.controls.endDate.invalid && (projectForm.controls.endDate.touched || projectForm.controls.endDate.dirty)"
+                         [attr.aria-describedby]="projectForm.controls.endDate.invalid && (projectForm.controls.endDate.touched || projectForm.controls.endDate.dirty) ? 'projectEndDateError' : null">
+                  @if (projectForm.controls.endDate.invalid && (projectForm.controls.endDate.touched || projectForm.controls.endDate.dirty)) {
+                    <p id="projectEndDateError" class="command-field-error" role="alert">End date is required.</p>
+                  }
                 </div>
 
                 <div class="sm:col-span-2">
-                  <label for="projectStatus" class="block text-sm font-semibold text-slate-700 mb-1.5">Status *</label>
-                  <select id="projectStatus" formControlName="status" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white">
+                  <label for="projectStatus" class="block text-sm font-semibold text-ink-secondary mb-1.5">Status *</label>
+                  <select id="projectStatus" formControlName="status" class="command-select"
+                          [attr.aria-invalid]="projectForm.controls.status.invalid && (projectForm.controls.status.touched || projectForm.controls.status.dirty)"
+                          [attr.aria-describedby]="projectForm.controls.status.invalid && (projectForm.controls.status.touched || projectForm.controls.status.dirty) ? 'projectStatusError' : null">
                     <option value="In Planning">In Planning</option>
                     <option value="In Execution">In Execution</option>
                     <option value="Completed">Completed</option>
                     <option value="On Hold">On Hold</option>
                   </select>
+                  @if (projectForm.controls.status.invalid && (projectForm.controls.status.touched || projectForm.controls.status.dirty)) {
+                    <p id="projectStatusError" class="command-field-error" role="alert">Status is required.</p>
+                  }
                 </div>
 
                 <div class="sm:col-span-2">
-                  <label for="projectContract" class="block text-sm font-semibold text-slate-700 mb-1.5">Contract</label>
-                  <select id="projectContract" formControlName="contractId" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white">
+                  <label for="projectContract" class="block text-sm font-semibold text-ink-secondary mb-1.5">Contract</label>
+                  <select id="projectContract" formControlName="contractId" class="command-select">
                     <option value="">No contract linked</option>
                     @for (contract of contracts(); track contract.id) {
                       <option [value]="contract.id">{{ contract.name }}</option>
@@ -161,8 +186,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 </div>
 
                 <div class="sm:col-span-2">
-                  <label for="projectDescription" class="block text-sm font-semibold text-slate-700 mb-1.5">Description</label>
-                  <textarea id="projectDescription" formControlName="description" rows="3" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white resize-none" placeholder="Brief project description..."></textarea>
+                  <label for="projectDescription" class="block text-sm font-semibold text-ink-secondary mb-1.5">Description</label>
+                  <textarea id="projectDescription" formControlName="description" rows="3" class="command-textarea" placeholder="Brief project description..."></textarea>
                 </div>
               </div>
             </form>
@@ -180,19 +205,19 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
     <!-- Delete Confirmation Modal -->
     @if (deletingId()) {
-      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+      <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
            appModal ariaLabelledby="projectDeleteTitle" (dismiss)="cancelDelete()">
         <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col transform transition-all">
           <div class="p-8 text-center">
-            <div class="w-20 h-20 bg-red-50 ring-1 ring-red-200 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner">
-              <mat-icon class="text-red-700 text-4xl">warning</mat-icon>
+            <div class="w-20 h-20 bg-critical-tint ring-1 ring-critical rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner">
+              <mat-icon class="text-critical-text text-4xl">warning</mat-icon>
             </div>
             <h3 id="projectDeleteTitle" class="font-display text-2xl font-bold text-[var(--cc-ink)] mb-2 tracking-tight">Delete Project</h3>
             <p class="text-[var(--cc-muted)] text-sm">Are you sure you want to delete this project? This action cannot be undone.</p>
           </div>
           <div class="p-5 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
             <button (click)="cancelDelete()" class="command-button secondary">Cancel</button>
-            <button (click)="confirmDelete()" class="px-6 py-2.5 bg-red-600 text-white rounded-xl text-sm font-semibold hover:bg-red-700 hover:shadow-lg hover:-translate-y-0.5 transition-all">Delete</button>
+            <button (click)="confirmDelete()" class="px-6 py-2.5 bg-critical text-white rounded-xl text-sm font-semibold hover:bg-critical-text hover:shadow-lg hover:-translate-y-0.5 transition-all">Delete</button>
           </div>
         </div>
       </div>

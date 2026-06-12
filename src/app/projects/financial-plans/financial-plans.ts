@@ -35,7 +35,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
         @if (!(projectId() || selectedProjectId())) {
           <div class="command-card p-12 text-center">
-            <mat-icon class="text-slate-400 mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
+            <mat-icon class="text-ink-muted mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
             <h3 class="font-display text-lg font-semibold text-[var(--cc-ink)] mt-4">No Project Selected</h3>
             <p class="text-[var(--cc-muted)] mt-1">Please select a project from the dropdown above to view financial plans.</p>
           </div>
@@ -68,19 +68,19 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             </thead>
             <tbody class="divide-y divide-[var(--cc-line)]">
               @for (item of filteredFinancials(); track item.id) {
-                <tr class="hover:bg-slate-50 transition-colors">
+                <tr class="hover:bg-surface-muted transition-colors">
                   <td class="px-6 py-4 font-medium text-[var(--cc-ink)]">{{ item.category }}</td>
                   <td class="px-6 py-4 text-right text-[var(--cc-muted)] font-mono tabular-nums">{{ item.budget | currency:'USD':'symbol':'1.0-0' }}</td>
                   <td class="px-6 py-4 text-right text-[var(--cc-muted)] font-mono tabular-nums">{{ item.actual | currency:'USD':'symbol':'1.0-0' }}</td>
-                  <td class="px-6 py-4 text-right font-mono tabular-nums" [class.text-emerald-700]="item.budget - item.actual > 0" [class.text-red-700]="item.budget - item.actual < 0" [class.text-slate-600]="item.budget - item.actual === 0">
+                  <td class="px-6 py-4 text-right font-mono tabular-nums" [class.text-positive-text]="item.budget - item.actual > 0" [class.text-critical-text]="item.budget - item.actual < 0" [class.text-ink-secondary]="item.budget - item.actual === 0">
                     {{ item.budget - item.actual > 0 ? '+' : '' }}{{ item.budget - item.actual | currency:'USD':'symbol':'1.0-0' }}
                   </td>
                   <td class="px-6 py-4 text-right">
                     <div class="flex items-center justify-end gap-2">
-                      <button type="button" (click)="editPlan(item)" class="text-slate-400 hover:text-blue-700 hover:bg-blue-50 p-1.5 rounded-lg transition-colors" aria-label="Edit financial plan">
+                      <button type="button" (click)="editPlan(item)" class="text-ink-muted hover:text-accent-text hover:bg-accent-tint p-1.5 rounded-lg transition-colors" aria-label="Edit financial plan">
                         <mat-icon class="text-sm">edit</mat-icon>
                       </button>
-                      <button type="button" (click)="deletePlan(item)" class="text-slate-400 hover:text-red-700 hover:bg-red-50 p-1.5 rounded-lg transition-colors" aria-label="Delete financial plan">
+                      <button type="button" (click)="deletePlan(item)" class="text-ink-muted hover:text-critical-text hover:bg-critical-tint p-1.5 rounded-lg transition-colors" aria-label="Delete financial plan">
                         <mat-icon class="text-sm">delete</mat-icon>
                       </button>
                     </div>
@@ -100,12 +100,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
       <!-- Create Financial Plan Modal -->
       @if (showForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
              appModal ariaLabelledby="financialPlanModalTitle" (dismiss)="closeForm()">
           <div class="command-card shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
             <div class="command-card-header">
               <h2 id="financialPlanModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Financial Plan' : 'Create Financial Plan' }}</h2>
-              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-slate-400 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -113,18 +113,18 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <div class="p-6 sm:p-8 overflow-y-auto flex-1">
               <form [formGroup]="finForm" (ngSubmit)="savePlan()" class="space-y-6">
                 <div>
-                  <label for="finCategory" class="block text-sm font-semibold text-slate-700 mb-1.5">Category *</label>
-                  <input id="finCategory" type="text" formControlName="category" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="e.g. Software Licenses">
+                  <label for="finCategory" class="block text-sm font-semibold text-ink-secondary mb-1.5">Category *</label>
+                  <input id="finCategory" type="text" formControlName="category" class="command-input" placeholder="e.g. Software Licenses">
                 </div>
 
                 <div class="grid grid-cols-2 gap-4">
                   <div>
-                    <label for="finBudget" class="block text-sm font-semibold text-slate-700 mb-1.5">Budget ($) *</label>
-                    <input id="finBudget" type="number" formControlName="budget" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="0">
+                    <label for="finBudget" class="block text-sm font-semibold text-ink-secondary mb-1.5">Budget ($) *</label>
+                    <input id="finBudget" type="number" formControlName="budget" class="command-input" placeholder="0">
                   </div>
                   <div>
-                    <label for="finActual" class="block text-sm font-semibold text-slate-700 mb-1.5">Actual Spent ($) *</label>
-                    <input id="finActual" type="number" formControlName="actual" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="0">
+                    <label for="finActual" class="block text-sm font-semibold text-ink-secondary mb-1.5">Actual Spent ($) *</label>
+                    <input id="finActual" type="number" formControlName="actual" class="command-input" placeholder="0">
                   </div>
                 </div>
               </form>

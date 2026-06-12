@@ -41,7 +41,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
         @if (!(projectId() || selectedProjectId())) {
           <div class="command-card p-12 text-center">
-            <mat-icon class="text-slate-400 mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
+            <mat-icon class="text-ink-muted mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
             <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] mt-4">No Project Selected</h3>
             <p class="text-[var(--cc-muted)] mt-1">Please select a project from the dropdown above to view cost centers.</p>
           </div>
@@ -63,7 +63,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <tbody>
               @for (cc of filteredCostCenters(); track cc.id) {
                 <tr>
-                  <td class="font-mono text-blue-700">{{ cc.id }}</td>
+                  <td class="font-mono text-accent-text">{{ cc.id }}</td>
                   <td class="font-medium">{{ cc.name }}</td>
                   <td>{{ cc.manager }}</td>
                   <td class="text-right">{{ cc.allocated | currency:'EUR' }}</td>
@@ -78,7 +78,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                     </span>
                   </td>
                   <td class="text-right">
-                    <button type="button" (click)="openEditForm(cc)" [attr.aria-label]="'Edit ' + cc.name" [attr.title]="'Edit ' + cc.name" class="text-[var(--cc-muted)] hover:text-blue-700 transition-colors">
+                    <button type="button" (click)="openEditForm(cc)" [attr.aria-label]="'Edit ' + cc.name" [attr.title]="'Edit ' + cc.name" class="text-[var(--cc-muted)] hover:text-accent-text transition-colors">
                       <mat-icon class="text-sm">edit</mat-icon>
                     </button>
                   </td>
@@ -98,12 +98,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
       <!-- Create Cost Center Modal -->
       @if (showForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
              appModal ariaLabelledby="projectCostCenterModalTitle" (dismiss)="closeForm()">
           <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="projectCostCenterModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Cost Center' : 'Add Cost Center' }}</h2>
-              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-[var(--cc-muted)] hover:text-[var(--cc-ink)] hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-[var(--cc-muted)] hover:text-[var(--cc-ink)] hover:bg-surface-muted p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -111,24 +111,24 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <div class="p-6 sm:p-8 overflow-y-auto flex-1">
               <form [formGroup]="ccForm" (ngSubmit)="saveCostCenter()" class="space-y-6">
                 <div>
-                  <label for="ccId" class="block text-sm font-semibold text-slate-700 mb-1.5">Cost Center ID *</label>
-                  <input id="ccId" type="text" formControlName="id" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. CC-1234">
+                  <label for="ccId" class="block text-sm font-semibold text-ink-secondary mb-1.5">Cost Center ID *</label>
+                  <input id="ccId" type="text" formControlName="id" class="command-input" placeholder="e.g. CC-1234">
                 </div>
 
                 <div>
-                  <label for="ccName" class="block text-sm font-semibold text-slate-700 mb-1.5">Name *</label>
-                  <input id="ccName" type="text" formControlName="name" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. Engineering">
+                  <label for="ccName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Name *</label>
+                  <input id="ccName" type="text" formControlName="name" class="command-input" placeholder="e.g. Engineering">
                 </div>
 
                 <div class="grid grid-cols-2 gap-4">
                   <div>
-                    <label for="ccBudget" class="block text-sm font-semibold text-slate-700 mb-1.5">Allocated Budget *</label>
-                    <input id="ccBudget" type="number" formControlName="allocatedBudget" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
+                    <label for="ccBudget" class="block text-sm font-semibold text-ink-secondary mb-1.5">Allocated Budget *</label>
+                    <input id="ccBudget" type="number" formControlName="allocatedBudget" class="command-input">
                   </div>
 
                   <div>
-                    <label for="ccManager" class="block text-sm font-semibold text-slate-700 mb-1.5">Manager</label>
-                    <input id="ccManager" type="text" formControlName="manager" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. John Doe">
+                    <label for="ccManager" class="block text-sm font-semibold text-ink-secondary mb-1.5">Manager</label>
+                    <input id="ccManager" type="text" formControlName="manager" class="command-input" placeholder="e.g. John Doe">
                   </div>
                 </div>
               </form>

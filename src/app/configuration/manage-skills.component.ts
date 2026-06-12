@@ -35,11 +35,16 @@ import { NotificationService } from '../services/notification.service';
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <label for="skillName" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Name</label>
-                <input id="skillName" type="text" formControlName="name" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-bold text-slate-900 placeholder:text-slate-400 transition-all">
+                <input id="skillName" type="text" formControlName="name" class="command-input"
+                       [attr.aria-invalid]="skillForm.get('name')!.invalid && (skillForm.get('name')!.touched || skillForm.get('name')!.dirty)"
+                       [attr.aria-describedby]="skillForm.get('name')!.invalid && (skillForm.get('name')!.touched || skillForm.get('name')!.dirty) ? 'skillNameError' : null">
+                @if (skillForm.get('name')!.invalid && (skillForm.get('name')!.touched || skillForm.get('name')!.dirty)) {
+                  <p id="skillNameError" class="command-field-error" role="alert">Name is required.</p>
+                }
               </div>
               <div>
                 <label for="skillProficiencySet" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Proficiency Set</label>
-                <select id="skillProficiencySet" formControlName="proficiencySetId" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-medium text-slate-900 transition-all appearance-none">
+                <select id="skillProficiencySet" formControlName="proficiencySetId" class="command-select">
                   <option [ngValue]="null">Not specified</option>
                   @for (set of proficiencySets(); track set.id) {
                     <option [value]="set.id">{{ set.name }}</option>
@@ -50,12 +55,12 @@ import { NotificationService } from '../services/notification.service';
 
             <div>
               <label for="skillDescription" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Description</label>
-              <textarea id="skillDescription" formControlName="description" rows="3" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-medium text-slate-900 placeholder:text-slate-400 transition-all"></textarea>
+              <textarea id="skillDescription" formControlName="description" rows="3" class="command-textarea"></textarea>
             </div>
 
             <div>
               <label for="skillCatalogs" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Catalogs</label>
-              <select id="skillCatalogs" formControlName="catalogs" multiple class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-medium text-slate-900 transition-all min-h-[120px]">
+              <select id="skillCatalogs" formControlName="catalogs" multiple class="command-select min-h-[120px]">
                 @for (cat of catalogs(); track cat.id) {
                   <option [value]="cat.id" class="py-1">{{ cat.name }}</option>
                 }
@@ -106,10 +111,10 @@ import { NotificationService } from '../services/notification.service';
                   }
                 </td>
                 <td class="text-right">
-                  <button type="button" (click)="toggleRestrict(skill)" class="w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-amber-700 hover:border-amber-200 hover:bg-amber-50 transition-all inline-flex items-center justify-center shadow-sm mr-2" [attr.aria-label]="(skill.restricted ? 'Unrestrict ' : 'Restrict ') + skill.name" [title]="skill.restricted ? 'Unrestrict' : 'Restrict'">
+                  <button type="button" (click)="toggleRestrict(skill)" class="w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-caution-text hover:border-caution hover:bg-caution-tint transition-all inline-flex items-center justify-center shadow-sm mr-2" [attr.aria-label]="(skill.restricted ? 'Unrestrict ' : 'Restrict ') + skill.name" [title]="skill.restricted ? 'Unrestrict' : 'Restrict'">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">{{ skill.restricted ? 'lock_open' : 'block' }}</mat-icon>
                   </button>
-                  <button type="button" (click)="deleteSkill(skill.id)" class="w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-red-700 hover:border-red-200 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm" [attr.aria-label]="'Delete ' + skill.name" [attr.title]="'Delete ' + skill.name">
+                  <button type="button" (click)="deleteSkill(skill.id)" class="w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm" [attr.aria-label]="'Delete ' + skill.name" [attr.title]="'Delete ' + skill.name">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                   </button>
                 </td>

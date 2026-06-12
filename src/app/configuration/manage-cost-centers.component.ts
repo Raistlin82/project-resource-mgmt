@@ -25,10 +25,10 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
       <div class="command-card overflow-hidden">
         <div class="p-4 border-b border-[var(--cc-line)] flex gap-4 bg-[var(--cc-panel-muted)]">
           <div class="flex-1 relative">
-            <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">search</mat-icon>
+            <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted">search</mat-icon>
             <input type="text" placeholder="Search cost centers..."
                    [ngModel]="search()" (ngModelChange)="search.set($event)"
-                   class="w-full pl-10 pr-4 py-2 bg-white focus:bg-white border border-slate-300 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25 transition-all outline-none">
+                   class="w-full pl-10 pr-4 py-2 bg-surface focus:bg-surface border border-line-strong rounded-xl text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:ring-2 focus:ring-accent/25 transition-all outline-none">
           </div>
         </div>
 
@@ -47,13 +47,13 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
               <tr>
                 <td class="font-bold">{{ cc.name }}</td>
                 <td>{{ cc.manager }}</td>
-                <td class="text-right"><span class="text-blue-700">{{ cc.allocated }}</span></td>
+                <td class="text-right"><span class="text-accent-text">{{ cc.allocated }}</span></td>
                 <td class="text-right">{{ cc.actual }}</td>
                 <td class="text-right">
-                  <button type="button" (click)="openForm(cc)" [attr.aria-label]="'Edit ' + cc.name" [attr.title]="'Edit ' + cc.name" class="text-slate-500 hover:text-blue-700 transition-colors p-1">
+                  <button type="button" (click)="openForm(cc)" [attr.aria-label]="'Edit ' + cc.name" [attr.title]="'Edit ' + cc.name" class="text-ink-muted hover:text-accent-text transition-colors p-1">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                   </button>
-                  <button type="button" (click)="deleteCostCenter(cc.id)" [attr.aria-label]="'Delete ' + cc.name" [attr.title]="'Delete ' + cc.name" class="text-slate-500 hover:text-red-600 transition-colors p-1 ml-2">
+                  <button type="button" (click)="deleteCostCenter(cc.id)" [attr.aria-label]="'Delete ' + cc.name" [attr.title]="'Delete ' + cc.name" class="text-ink-muted hover:text-critical-text transition-colors p-1 ml-2">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                   </button>
                 </td>
@@ -70,35 +70,35 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 
       <!-- Form Modal -->
       @if (showForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
              appModal ariaLabelledby="costCenterModalTitle" (dismiss)="closeForm()">
           <div class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col">
             <div class="command-card-header">
               <h2 id="costCenterModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Cost Center' : 'Add Cost Center' }}</h2>
-              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 transition-colors">
+              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
 
             <form [formGroup]="form" (ngSubmit)="saveCostCenter()" class="p-6 space-y-4">
               <div>
-                <label for="name" class="block text-sm font-medium text-slate-700 mb-1">Name</label>
-                <input id="name" type="text" formControlName="name" class="w-full px-3 py-2 bg-white focus:bg-white border border-slate-300 rounded-lg text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm" placeholder="e.g. Engineering & Dev">
+                <label for="name" class="block text-sm font-medium text-ink-secondary mb-1">Name</label>
+                <input id="name" type="text" formControlName="name" class="command-input" placeholder="e.g. Engineering & Dev">
               </div>
 
               <div>
-                <label for="manager" class="block text-sm font-medium text-slate-700 mb-1">Manager</label>
-                <input id="manager" type="text" formControlName="manager" class="w-full px-3 py-2 bg-white focus:bg-white border border-slate-300 rounded-lg text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm" placeholder="e.g. Alice Smith">
+                <label for="manager" class="block text-sm font-medium text-ink-secondary mb-1">Manager</label>
+                <input id="manager" type="text" formControlName="manager" class="command-input" placeholder="e.g. Alice Smith">
               </div>
 
               <div>
-                <label for="allocated" class="block text-sm font-medium text-slate-700 mb-1">Allocated</label>
-                <input id="allocated" type="number" formControlName="allocated" class="w-full px-3 py-2 bg-white focus:bg-white border border-slate-300 rounded-lg text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm" placeholder="e.g. 100000">
+                <label for="allocated" class="block text-sm font-medium text-ink-secondary mb-1">Allocated</label>
+                <input id="allocated" type="number" formControlName="allocated" class="command-input" placeholder="e.g. 100000">
               </div>
 
               <div>
-                <label for="actual" class="block text-sm font-medium text-slate-700 mb-1">Actual</label>
-                <input id="actual" type="number" formControlName="actual" class="w-full px-3 py-2 bg-white focus:bg-white border border-slate-300 rounded-lg text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm" placeholder="e.g. 75000">
+                <label for="actual" class="block text-sm font-medium text-ink-secondary mb-1">Actual</label>
+                <input id="actual" type="number" formControlName="actual" class="command-input" placeholder="e.g. 75000">
               </div>
 
               <div class="pt-4 flex justify-end gap-3">
@@ -113,19 +113,19 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
       }
       <!-- Delete Confirmation Modal -->
       @if (deletingId()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
              appModal ariaLabelledby="costCenterDeleteTitle" (dismiss)="cancelDelete()">
           <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col">
             <div class="p-6 text-center">
-              <div class="w-16 h-16 bg-red-50 ring-1 ring-red-200 rounded-full flex items-center justify-center mx-auto mb-4">
-                <mat-icon class="text-red-700 text-3xl">warning</mat-icon>
+              <div class="w-16 h-16 bg-critical-tint ring-1 ring-critical rounded-full flex items-center justify-center mx-auto mb-4">
+                <mat-icon class="text-critical-text text-3xl">warning</mat-icon>
               </div>
               <h3 id="costCenterDeleteTitle" class="font-display text-lg font-bold text-[var(--cc-ink)] mb-2">Delete Cost Center</h3>
               <p class="text-[var(--cc-muted)] text-sm">Are you sure you want to delete this cost center? This action cannot be undone.</p>
             </div>
             <div class="p-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
               <button (click)="cancelDelete()" class="command-button secondary">Cancel</button>
-              <button (click)="confirmDelete()" class="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 transition-colors shadow-sm">Delete</button>
+              <button (click)="confirmDelete()" class="px-4 py-2 bg-critical text-white rounded-lg text-sm font-medium hover:bg-critical-strong transition-colors shadow-sm">Delete</button>
             </div>
           </div>
         </div>

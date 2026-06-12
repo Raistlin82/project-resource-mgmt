@@ -22,11 +22,11 @@ import { NotificationService } from '../services/notification.service';
           <form [formGroup]="catalogForm" (ngSubmit)="onSubmit()" class="space-y-6 max-w-md">
             <div>
               <label for="catalogName" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Name</label>
-              <input id="catalogName" type="text" formControlName="name" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-bold text-slate-900 placeholder:text-slate-400 transition-all">
+              <input id="catalogName" type="text" formControlName="name" class="command-input">
             </div>
             <div>
               <label for="catalogDescription" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Description</label>
-              <textarea id="catalogDescription" formControlName="description" rows="3" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-medium text-slate-900 placeholder:text-slate-400 transition-all"></textarea>
+              <textarea id="catalogDescription" formControlName="description" rows="3" class="command-textarea"></textarea>
             </div>
             <div class="flex justify-end gap-3 pt-2">
               <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
@@ -55,7 +55,7 @@ import { NotificationService } from '../services/notification.service';
                   <span class="command-status">{{ catalog.skills.length }}</span>
                 </td>
                 <td class="text-right">
-                  <button (click)="deleteCatalog(catalog.id)" class="w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-red-700 hover:border-red-200 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm" title="Delete">
+                  <button (click)="deleteCatalog(catalog.id)" class="w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm" title="Delete">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                   </button>
                 </td>

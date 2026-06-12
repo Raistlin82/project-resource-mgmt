@@ -34,7 +34,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
         @if (!(projectId() || selectedProjectId())) {
           <div class="command-card p-12 text-center">
-            <mat-icon class="text-slate-400 mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
+            <mat-icon class="text-ink-muted mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
             <h3 class="text-lg font-medium text-[var(--cc-ink)] mt-4">No Project Selected</h3>
             <p class="text-[var(--cc-muted)] mt-1">Please select a project from the dropdown above to view partners.</p>
           </div>
@@ -62,7 +62,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                     </span>
                   </td>
                   <td class="px-6 py-4 text-right">
-                    <button type="button" (click)="removePartner(partner)" [attr.aria-label]="'Remove ' + partner.company" [attr.title]="'Remove ' + partner.company" class="text-slate-400 hover:text-blue-700 transition-colors">
+                    <button type="button" (click)="removePartner(partner)" [attr.aria-label]="'Remove ' + partner.company" [attr.title]="'Remove ' + partner.company" class="text-ink-muted hover:text-accent-text transition-colors">
                       <mat-icon class="text-sm">more_vert</mat-icon>
                     </button>
                   </td>
@@ -81,12 +81,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
       <!-- Invite Partner Modal -->
       @if (showForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
              appModal ariaLabelledby="partnerModalTitle" (dismiss)="closeForm()">
           <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="partnerModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Invite Partner</h2>
-              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-slate-400 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -94,18 +94,18 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <div class="p-6 sm:p-8 overflow-y-auto flex-1">
               <form [formGroup]="partnerForm" (ngSubmit)="savePartner()" class="space-y-6">
                 <div>
-                  <label for="partnerCompany" class="block text-sm font-semibold text-slate-700 mb-1.5">Company Name *</label>
-                  <input id="partnerCompany" type="text" formControlName="company" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white placeholder:text-slate-400" placeholder="e.g. TechCorp Inc.">
+                  <label for="partnerCompany" class="block text-sm font-semibold text-ink-secondary mb-1.5">Company Name *</label>
+                  <input id="partnerCompany" type="text" formControlName="company" class="command-input" placeholder="e.g. TechCorp Inc.">
                 </div>
 
                 <div>
-                  <label for="partnerRole" class="block text-sm font-semibold text-slate-700 mb-1.5">Role *</label>
-                  <input id="partnerRole" type="text" formControlName="role" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white placeholder:text-slate-400" placeholder="e.g. Development Partner">
+                  <label for="partnerRole" class="block text-sm font-semibold text-ink-secondary mb-1.5">Role *</label>
+                  <input id="partnerRole" type="text" formControlName="role" class="command-input" placeholder="e.g. Development Partner">
                 </div>
 
                 <div>
-                  <label for="partnerContact" class="block text-sm font-semibold text-slate-700 mb-1.5">Key Contact</label>
-                  <input id="partnerContact" type="text" formControlName="contact" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white placeholder:text-slate-400" placeholder="e.g. Jane Doe">
+                  <label for="partnerContact" class="block text-sm font-semibold text-ink-secondary mb-1.5">Key Contact</label>
+                  <input id="partnerContact" type="text" formControlName="contact" class="command-input" placeholder="e.g. Jane Doe">
                 </div>
               </form>
             </div>

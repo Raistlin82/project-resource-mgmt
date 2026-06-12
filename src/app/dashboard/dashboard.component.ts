@@ -28,8 +28,17 @@ import {
   PortfolioAlertRow,
   portfolioAlerts,
   ProjectAlerts,
+  recognitionSchedule,
   recognizedRevenueTrend,
 } from '../services/finance.util';
+import {
+  BarSeries,
+  CommandBarChartComponent,
+  CommandDonutChartComponent,
+  CommandTrendChartComponent,
+  TrendSeries,
+} from '../shared/charts';
+import { ListStateComponent } from '../shared/list-state.component';
 
 interface DashboardData {
   resources: Resource[];
@@ -65,7 +74,16 @@ interface ProjectCommandRow {
 @Component({
   selector: 'app-dashboard',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, CurrencyPipe, DecimalPipe, RouterLink],
+  imports: [
+    MatIconModule,
+    CurrencyPipe,
+    DecimalPipe,
+    RouterLink,
+    CommandTrendChartComponent,
+    CommandBarChartComponent,
+    CommandDonutChartComponent,
+    ListStateComponent,
+  ],
   template: `
     <div class="command-page space-y-6">
       <header class="command-header">
@@ -88,9 +106,37 @@ interface ProjectCommandRow {
         </div>
       </header>
 
+      @if (hasError()) {
+        <!-- Whole-page fetch failure: never contradict the failure with zero KPIs. -->
+        <app-list-state
+          [error]="true"
+          label="the command center"
+          (retry)="reload()" />
+      } @else if (isLoading()) {
+        <!-- 11-endpoint load in flight: skeletons in place of fabricated zeros. -->
+        <div class="space-y-6" aria-busy="true" aria-label="Loading delivery command center">
+          <div class="command-eyebrow">Portfolio Financials</div>
+          <section class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-4">
+            <div class="command-skeleton h-28 xl:col-span-2"></div>
+            @for (tile of [1, 2, 3, 4]; track tile) {
+              <div class="command-skeleton h-28"></div>
+            }
+          </section>
+          <section class="grid grid-cols-1 lg:grid-cols-4 gap-4">
+            @for (tile of [1, 2, 3, 4]; track tile) {
+              <div class="command-skeleton h-24"></div>
+            }
+          </section>
+          <div class="command-skeleton h-48"></div>
+          <div class="grid grid-cols-1 xl:grid-cols-[1.45fr_.85fr] gap-5">
+            <div class="command-skeleton h-72"></div>
+            <div class="command-skeleton h-72"></div>
+          </div>
+        </div>
+      } @else {
       <div class="flex items-center justify-between gap-3">
         <div class="command-eyebrow">Portfolio Financials</div>
-        <span class="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500">
+        <span class="inline-flex items-center gap-1.5 text-xs font-medium text-ink-muted">
           <mat-icon class="text-[16px] w-[16px] h-[16px]">payments</mat-icon>
           {{ baseCurrency }} (base)
         </span>
@@ -113,8 +159,32 @@ interface ProjectCommandRow {
                 </div>
               }
             </div>
-            <mat-icon class="text-[28px] text-[var(--cc-primary)]">stacked_line_chart</mat-icon>
+            <!-- Portfolio margin% as a radial gauge (capped at a 40% full ring). -->
+            <command-donut-chart
+              [value]="marginGaugeValue()"
+              [max]="40"
+              [size]="76"
+              [thickness]="12"
+              [tone]="marginGaugeTone()"
+              [displayText]="(portfolioMarginPct() | number:'1.0-0') + '%'"
+              ariaLabel="Portfolio margin gauge"
+              caption="Portfolio margin percent of a 40 percent target ring" />
           </div>
+          @if (hasRecognitionChart()) {
+            <!-- Real trailing-6-month recognised-revenue spark (same dated source as the chip). -->
+            <div class="mt-3">
+              <command-trend-chart
+                [categories]="recognitionLabels()"
+                [series]="recognitionSeries()"
+                mode="area"
+                [smooth]="true"
+                [showDots]="false"
+                formatKind="currency"
+                currency="EUR"
+                ariaLabel="Recognized revenue, trailing six months"
+                caption="Recognized revenue by month (trailing 6 months), base currency EUR" />
+            </div>
+          }
         </div>
 
         <div class="command-kpi" [class.danger]="totalVac() < 0" [class.warning]="totalVac() >= 0 && totalVac() < 10000">
@@ -167,22 +237,24 @@ interface ProjectCommandRow {
         <div class="command-card-muted p-4">
           <div class="command-kpi-label">Delivery Health</div>
           <div class="mt-3 grid grid-cols-3 gap-2 text-center">
-            <div class="rounded-md ring-1 ring-emerald-200 bg-emerald-50 py-2">
-              <div class="font-mono text-lg font-semibold text-emerald-700">{{ healthDistribution().green }}</div>
-              <div class="text-[10px] font-bold uppercase text-emerald-700">Green</div>
+            <div class="rounded-md ring-1 ring-positive bg-positive-tint py-2">
+              <div class="font-mono text-lg font-semibold text-positive-text">{{ healthDistribution().green }}</div>
+              <div class="text-[10px] font-bold uppercase text-positive-text">Green</div>
             </div>
-            <div class="rounded-md ring-1 ring-amber-200 bg-amber-50 py-2">
-              <div class="font-mono text-lg font-semibold text-amber-700">{{ healthDistribution().amber }}</div>
-              <div class="text-[10px] font-bold uppercase text-amber-700">Amber</div>
+            <div class="rounded-md ring-1 ring-caution bg-caution-tint py-2">
+              <div class="font-mono text-lg font-semibold text-caution-text">{{ healthDistribution().amber }}</div>
+              <div class="text-[10px] font-bold uppercase text-caution-text">Amber</div>
             </div>
-            <div class="rounded-md ring-1 ring-red-200 bg-red-50 py-2">
-              <div class="font-mono text-lg font-semibold text-red-700">{{ healthDistribution().red }}</div>
-              <div class="text-[10px] font-bold uppercase text-red-700">Red</div>
+            <div class="rounded-md ring-1 ring-critical bg-critical-tint py-2">
+              <div class="font-mono text-lg font-semibold text-critical-text">{{ healthDistribution().red }}</div>
+              <div class="text-[10px] font-bold uppercase text-critical-text">Red</div>
             </div>
           </div>
         </div>
       </section>
 
+      <!-- Below-the-fold: server-rendered into the SSR payload, hydration deferred until scrolled into view. -->
+      @defer (hydrate on viewport) {
       <section class="command-card overflow-hidden">
         <div class="command-card-header">
           <div>
@@ -198,12 +270,12 @@ interface ProjectCommandRow {
             <div class="p-4">
               <div class="flex items-start justify-between gap-3">
                 <div class="min-w-0">
-                  <a [routerLink]="['/projects', row.projectId]" class="font-bold text-blue-700 hover:underline">
+                  <a [routerLink]="['/projects', row.projectId]" class="font-bold text-accent-text hover:underline">
                     {{ row.name || projectName(row.projectId) }}
                   </a>
                   <div class="mt-2 flex flex-wrap items-center gap-1.5">
                     @for (flag of alertFlags(row.alerts); track flag) {
-                      <span class="inline-flex items-center rounded-md bg-amber-50 px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-amber-700 ring-1 ring-amber-200">{{ flag }}</span>
+                      <span class="inline-flex items-center rounded-md bg-caution-tint px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide text-caution-text ring-1 ring-caution">{{ flag }}</span>
                     }
                   </div>
                 </div>
@@ -222,7 +294,11 @@ interface ProjectCommandRow {
           }
         </div>
       </section>
+      } @placeholder {
+        <div class="command-skeleton h-48"></div>
+      }
 
+      @defer (hydrate on viewport) {
       <div class="grid grid-cols-1 xl:grid-cols-[1.45fr_.85fr] gap-5">
         <section class="command-card overflow-hidden">
           <div class="command-card-header">
@@ -232,6 +308,21 @@ interface ProjectCommandRow {
             </div>
             <a routerLink="/projects" class="command-status">Open Project 360</a>
           </div>
+          @if (hasVacChart()) {
+            <!-- Variance-at-completion of the same top rows below; overruns dip below zero. -->
+            <div class="px-4 pt-4">
+              <command-bar-chart
+                [categories]="vacChartCategories()"
+                [series]="vacChartSeries()"
+                orientation="horizontal"
+                [showValues]="false"
+                [height]="200"
+                formatKind="currency"
+                currency="EUR"
+                ariaLabel="Variance at completion by project"
+                caption="Variance at completion (budget minus EAC) by project, base currency EUR" />
+            </div>
+          }
           <div class="overflow-x-auto">
             <table class="command-data-table">
               <thead>
@@ -339,7 +430,14 @@ interface ProjectCommandRow {
           </div>
         </section>
       </div>
+      } @placeholder {
+        <div class="grid grid-cols-1 xl:grid-cols-[1.45fr_.85fr] gap-5">
+          <div class="command-skeleton h-72"></div>
+          <div class="command-skeleton h-72"></div>
+        </div>
+      }
 
+      @defer (hydrate on viewport) {
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <section class="command-card overflow-hidden">
           <div class="command-card-header">
@@ -398,6 +496,13 @@ interface ProjectCommandRow {
           </div>
         </section>
       </div>
+      } @placeholder {
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          <div class="command-skeleton h-72"></div>
+          <div class="command-skeleton h-72"></div>
+        </div>
+      }
+      }
     </div>
   `,
 })
@@ -483,6 +588,27 @@ export class DashboardComponent {
     };
   });
 
+  // --- Load lifecycle (loading / error gating) --------------------------------
+  // The 11-endpoint forkJoin previously rendered the whole command center with
+  // zeros while in-flight, and a fetch failure left it indistinguishable from a
+  // genuinely empty portfolio — the audit's biggest trust gap. We surface the
+  // resource status so the template can show skeletons while loading and an
+  // error+retry panel on failure instead of fabricated zero KPIs. Both the data
+  // and FX resources gate the view: FX feeds the base-currency rollups, so its
+  // status matters too. `reload()` re-fires both.
+  protected readonly isLoading = computed(
+    () => this.dataRes.isLoading() || this.fxRes.isLoading(),
+  );
+  protected readonly hasError = computed(
+    () => this.dataRes.status() === 'error' || this.fxRes.status() === 'error',
+  );
+
+  /** Re-run both gated resources after an error (wired to ListState Retry). */
+  protected reload(): void {
+    this.dataRes.reload();
+    this.fxRes.reload();
+  }
+
   // --- Real period-over-period trend (#15) ------------------------------------
   // The ONLY portfolio KPI here with a prior period derivable from finance.util
   // is recognised revenue: recognizedRevenueTrend compares revenue recognised in
@@ -515,6 +641,83 @@ export class DashboardComponent {
 
   /** True only when a real prior reading was derived (caller renders the chip). */
   hasRecognizedRevTrend = computed(() => this.recognizedRevTrend().direction !== null);
+
+  // --- Inline charts -----------------------------------------------------------
+  // Real, dated portfolio signal rendered with the Ledger SVG chart library —
+  // no fabricated series. The recognised-revenue spark is built from the SAME
+  // dated recognitionSchedule that backs the trailing-window trend chip, so the
+  // chart and the chip agree by construction.
+
+  /** Trailing 6 calendar months (sorted YYYY-MM) for the recognised-revenue chart. */
+  private readonly chartPeriods = ((): string[] => {
+    const now = new Date();
+    const out: string[] = [];
+    for (let back = 5; back >= 0; back--) {
+      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1));
+      out.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+    }
+    return out;
+  })();
+
+  /** Per-period recognised revenue over the trailing 6 months (whole portfolio). */
+  private readonly recognitionRows = computed(() =>
+    recognitionSchedule(this.financeData(), this.chartPeriods),
+  );
+
+  /** Short month labels (e.g. "Jan") for the recognised-revenue trend x-axis. */
+  protected readonly recognitionLabels = computed<string[]>(() =>
+    this.chartPeriods.map(p => {
+      const [y, m] = p.split('-').map(Number);
+      return new Date(Date.UTC(y, (m || 1) - 1, 1)).toLocaleString('en-US', {
+        month: 'short',
+        timeZone: 'UTC',
+      });
+    }),
+  );
+
+  /** Single recognised-revenue series, index-aligned with recognitionLabels. */
+  protected readonly recognitionSeries = computed<TrendSeries[]>(() => [
+    { name: 'Recognized revenue', values: this.recognitionRows().map(r => r.recognized) },
+  ]);
+
+  /** True once there is at least one non-zero recognised month to plot. */
+  protected readonly hasRecognitionChart = computed(() =>
+    this.recognitionRows().some(r => r.recognized !== 0),
+  );
+
+  // --- Portfolio margin gauge --------------------------------------------------
+  // The donut arc fills against a 40% full ring; the centred text shows the true
+  // margin % (the gauge is a visual cue, the number is the truth). A negative
+  // margin fills nothing (arc clamps at 0) but the centred text still shows it.
+  protected readonly marginGaugeValue = computed(() => Math.max(0, this.portfolioMarginPct()));
+  protected readonly marginGaugeTone = computed<'positive' | 'caution' | 'critical'>(() => {
+    const pct = this.portfolioMarginPct();
+    if (pct < 0) return 'critical';
+    if (pct < 15) return 'caution';
+    return 'positive';
+  });
+
+  // --- Portfolio control-board chart -------------------------------------------
+  // The control-board table lists projects by attention; a companion horizontal
+  // bar of the same top rows' VAC (budget − EAC) gives an at-a-glance read of
+  // which projects are most over/under their CR-adjusted budget. Negative bars
+  // (overruns) render below the zero baseline. Values come straight from
+  // projectRows() — identical to the table — so chart and table never diverge.
+  protected readonly vacChartCategories = computed<string[]>(() =>
+    this.projectRows().map(p => p.name),
+  );
+  protected readonly vacChartSeries = computed<BarSeries[]>(() => {
+    const values = this.projectRows().map(p => p.vac);
+    // Tone each bar by sign so overruns read as critical, not the default accent
+    // blue: negative VAC (EAC over budget) => critical, non-negative => positive.
+    // Mirrors the table's text-critical-text treatment of over-budget rows.
+    const colors = values.map(v =>
+      v < 0 ? 'var(--color-critical)' : 'var(--color-positive)',
+    );
+    return [{ name: 'VAC', values, colors }];
+  });
+  /** Only worth charting once there are at least two projects to compare. */
+  protected readonly hasVacChart = computed(() => this.projectRows().length >= 2);
 
   /** All projects scored + sorted (NOT truncated). Source of truth for KPIs. */
   allProjectRows = computed<ProjectCommandRow[]>(() =>
