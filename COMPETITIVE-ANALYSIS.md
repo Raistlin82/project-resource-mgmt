@@ -1,158 +1,175 @@
-# Competitive Analysis — Professional Services Automation (PSA) Platform
+# Competitive Analysis — Delivery Control (PSA Platform)
 
 _Prepared for product & executive review. Status: internal, candid._
+
+**Last updated: 2026-06-12** (verified against the codebase; supersedes the 2026-06-08 "modeled, not operational" baseline)
 
 ---
 
 ## 1. Executive Summary
 
-We have built a credible **PSA system-of-record foundation**: resource profiles with skills and proficiency, projects with rich governance sub-tabs (partners, documents, work packages, milestones-with-approval, tasks, issues, change requests), a comprehensive **billing-conditions model** (Milestone, SAL, T&M, Capped, Recurring, Advance, Expense, Credit Note), and genuinely strong **finance math** (POC revenue recognition, margin, EAC/VAC, burn, a DSO proxy) exposed through a delivery command-center dashboard. Skills inventory and proficiency tracking are fully on par with the market.
+Delivery Control is no longer a demo. As of 2026-06-12 it is an **operational PSA platform** built on real infrastructure, verified by reading the code — not the prior roadmap.
 
-**But the product stops at "modeled, not operational."** Across every market scan — Planview, Workday, Kantata, Certinia, NetSuite/OpenAir, Projector, plus the mid-market field of Wrike, Smartsheet, Scoro, Productive.io, Projectworks, Float, Runn, Forecast, Mosaic, Resource Guru, and Dayshape — the same gaps surface repeatedly:
+What is now genuinely operational:
 
-- **No forward-looking view.** We hold all the inputs (capacity, bookings, requests, skills) but produce **zero demand/capacity forecasting**. This is the single most-cited table-stakes gap in the analysis.
-- **Finance is modeled but not actioned.** We compute revenue recognition and DSO, but there is **no dated recognition schedule, no AR aging, no invoice document, no GL posting**. Leaders auto-generate journals and invoices; we do not.
-- **No real integrations and no real auth.** The backend is a mock, RBAC is illustrative and unenforced, and there are no ERP/CRM/HRIS connectors. These are hard enterprise blockers.
-- **Scheduling is manual.** Our staffing match is a naïve boolean filter; leaders (Dayshape, Wrike, Forecast) sell rule-based and AI-driven matching as premium differentiators.
-- **Web-only.** No mobile/offline, which blocks field-services use cases.
+- **Real persistence.** A dual-adapter Repository pattern (`src/db/`) selects Postgres + Drizzle when `DATABASE_URL` is set (31 typed `pgTable`s, FK constraints, indexes, forward migrations, idempotent parent-before-child seeding) and falls back to in-memory otherwise. `GET /storage-status` reports which is live. Dev still defaults to in-memory; Postgres is opt-in.
+- **Real authentication & server-side authorization.** Keycloak OIDC (Authorization Code + PKCE) on the client; the server cryptographically verifies every bearer token against the IdP's JWKS via `jose` (`src/server.ts`). A `roleGate` middleware enforces a server-trusted role (JWT realm role wins; spoofable headers honored only in opt-in dev mode) on both reads and writes. Segregation of Duties (no self-approval) is enforced in three flows on server-pinned principals. An append-only audit trail records actor/role/method/path + before/after deltas.
+- **Forward-looking resourcing.** A tested capacity-forecasting engine (`forecast.util.ts`) produces rolling 8/12-week supply-vs-demand, bench and over-allocation lists, and per-skill gap analysis, surfaced in `forecast.ts`. A fully working **what-if scenario sandbox** (`what-if.ts`) overlays win-deal / hire / slip-project levers and shows side-by-side deltas. A deterministic **resource-match scorer** (`match.util.ts`, weighted 0-100 across skill/proficiency/role/availability/margin) is wired into Staffing.
+- **Actioned finance.** `finance.util.ts` (1,600+ lines, unit-tested) delivers dated ASC-606-style **revenue-recognition schedules** (POC / straight-line / as-incurred / deferred-advance) with a **balanced double-entry journal preview**, **AR aging + DSO** (buckets, per-customer, amount-weighted), **customer profitability + concentration (real HHI)**, **margin drill-down + variance alerts**, and **realization / revenue-per-FTE**. All cross-currency rollups normalize to a base currency via a real FX rate table.
+- **Real billing.** Server-side **sequential invoice numbering** under a lock, **batch invoice generation**, a printable invoice artifact, **capped not-to-exceed enforcement** (hard reject + accrual flag), tax/retention modifiers, and a **FatturaPA e-invoice XML** builder.
+- **Approval workflow engine.** Multi-step, amount-threshold (>50k → delivery-executive → finance) sequential routing with per-step role enforcement, SLA stamping, and race-safe locked decisions.
+- **Integration seam.** Four adapters (GL journal export, FatturaPA e-invoice, CRM outbox, BI feed) produce well-formed, spec-tested artifacts behind a registry — explicitly `connected:false`, `mode:'local-artifact'`.
+- **Multi-currency.** FX rate table with admin CRUD, `convertToBase` wired pervasively through all financial rollups.
 
-**The good news:** much of the highest-value work is **pure derivation over data we already hold**. Demand forecasting, AR aging, resource-match scoring, and margin drill-down/alerts can be built as signal-driven pure functions with no backend rework — capturing most of the perceived value of the leaders' premium features at modest effort. The expensive, structural items (real auth/OIDC, GL/ERP posting, dated ASC 606 schedules, an approval workflow engine) should be sequenced deliberately behind those quick wins.
+**What still separates us from enterprise leaders** (Workday, Certinia, NetSuite/OpenAir, Kantata, Planview, Dayshape, Mosaic, Runn) is now sharper and smaller, but real:
 
-**Bottom line:** We are a strong demo and a competent SMB system-of-record, **not yet an enterprise-ready PSA**. Closing the forecasting, AR-aging, and resource-scoring gaps moves us from "tracks what happened" to "tells you what to do" — the threshold buyers expect.
+1. **The integration seam produces artifacts, not connections.** GL posting, e-invoice transmission (SDI/PEPPOL), and CRM sync all stop at a downloadable/parked file — no network, credentials, acknowledgement, or reverse-sync. There is **no inbound CRM deal → project** handoff.
+2. **No payments or collections.** Mark-paid is a status flip; there is no payment gateway, partial payments/cash application, dunning, or bank reconciliation.
+3. **No true scheduling Gantt.** Forecasting and conflict detection are aggregate (util > 110%), not per-resource date-level booking bars with drag-and-drop and overlap detection — `Assignment` has no start/end dates.
+4. **No performance-obligation / SSP model.** Recognition is per-billing-line heuristic, the journal is a preview (no posted ledger, no period close), and FX is current-rate-only (no dated rates).
+5. **Greenfield areas remain:** AI/ML matching & anomaly detection, mobile/offline, client/partner portals, SCIM/HRIS sync, multi-entity (legal entity) consolidation, an ad-hoc BI/report builder, GDPR/data-privacy tooling, and equipment/asset tracking.
+
+**Bottom line:** we have crossed the threshold from "tracks what happened" to "tells you what to do" on an enterprise-grade auth + persistence + governance spine. The remaining frontier is **the outside world** — live external integrations, payments, AI, mobile, and portals — plus accounting depth (posted ledgers, performance obligations, dated FX).
 
 ---
 
-## 2. Capability Matrix
+## 2. Delivered Since the 2026-06-08 Baseline
 
-Legend — **TS** = Table-stakes. **Have**: yes / partial / no.
+The prior §4 roadmap (P0/P1/P2) is largely complete. Status verified in code.
 
-| Capability | Market leaders | TS | Have | Note |
+| Roadmap item (old §4) | Tier | Status | One-line evidence |
+|---|:--:|:--:|---|
+| Demand & capacity forecasting + bench view | P0 | **Partial→Done (engine)** | `forecast.util.ts` `capacityForecast`/`benchList`/`overAllocated` + `forecast.ts` UI; tested. No per-resource heatmap/calendars. |
+| AR aging & collections view | P0 | **Done** | `arAging` (0-30/31-60/61-90/90+), `arAgingByCustomer`, `dsoOutstanding` surfaced in `reporting.ts` with CSV export. |
+| Rule-based resource-match scoring | P0 | **Done** | `match.util.ts` weighted 0-100 scorer wired into `staffing.component.ts`; `match.util.spec.ts`. |
+| Dated revenue-recognition schedules + journal preview | P0 | **Done (preview)** | `recognitionSchedule` + balanced `recognitionJournal` in `finance.util.ts`, shown in `contract-details.ts`. Not posted. |
+| Real auth / OIDC SSO | P0 | **Done** | `auth.service.ts` (PKCE) + `jose` JWKS `jwtVerify` in `src/server.ts`; `roleGate` server-side. |
+| What-if scenario sandbox | P1 | **Done (ephemeral)** | `what-if.ts` win/hire/slip levers, side-by-side deltas; not persisted. |
+| Invoice generation + batch + sequence | P1 | **Done** | `nextInvoiceNumber()` under `withLock('invoice-seq')`; batch `generateSelectedInvoices`; printable artifact. |
+| Project/customer margin drill-down + variance alerts | P1 | **Done** | `marginDrivers`/`projectAlerts`/`portfolioAlerts` in `finance.util.ts`, rendered in `reporting.ts` + dashboard. |
+| CR-driven contract-modification budget recalc | P1 | **Partial** | `effectiveBudgetForProject` folds approved CR `impactBudget` into budget/EAC/VAC. Revenue/recognition **not** recalculated. |
+| Enforce RBAC seam | P1 | **Done** | `roleGate` + `READ_RULES` on every `/api` call; client guards are defense-in-depth only. |
+| Integrity-credible audit log | P1 | **Partial** | Append-only by convention (no update/delete path), before/after deltas, trusted actor. No hash-chain/WORM; best-effort writes. |
+| Approval workflow engine | P1 | **Partial** | Multi-step threshold routing + SoD + SLA stamp + locked decisions. No active escalation, delegation, or parallel/quorum. |
+| GL/ERP posting adapter | P1 | **Partial** | `GenericLedgerExportAdapter` balanced journal export at `/integrations/erp/journal-export`. Local artifact only, no posting. |
+| CRM deal-to-project handoff | P1 | **Partial** | `WebhookJsonOutboxCrmAdapter` outbound payload, parked in ephemeral array. No inbound deal ingestion. |
+| Capped & Progress billing automation | P2 | **Partial** | Capped hard-reject + accrual flag; `progressAutoAdvance` → Ready at ≥100%. Progress % is manual; cap is a flag, not a billing stop. |
+| Real period-over-period KPI deltas | P2 | **Partial** | `periodDelta`/`recognizedRevenueTrend` real for recognised revenue (nulls when no basis). Other KPIs intentionally show no delta. |
+| BI/data export (CSV/Excel + JSON) | P2 | **Partial** | Hardened `toCsv`/`escapeCsv` wired across reports; JSON export implemented but **not wired** into any UI. |
+| Multi-currency foundation | P2 | **Done (current-rate)** | `fx_rates` table + admin CRUD; `convertToBase` pervasive. No dated/historical rates, no FX gain/loss. |
+| GL/ERP, CRM, e-invoice, BI **adapter seam** (new) | — | **Done (artifacts)** | 4 spec-tested adapters in `src/server/integrations/`, registry, all `connected:false`. |
+
+---
+
+## 3. Capability Matrix
+
+Legend — **TS** = Table-stakes. **Have**: yes / partial / no. Updated to verified 2026-06-12 status.
+
+| Capability | Market leaders | TS | Have | Note (current state + residual gap) |
 |---|---|:--:|:--:|---|
-| Resource Scheduling & Optimization | Planview, Workday (constraint solvers, AI matching); Wrike, Projectworks (embedded) | Yes | no/partial | We have staffing requests/assignments but **no optimizer**. Premium differentiator for leaders. |
-| Demand Planning & Capacity Forecasting | Kantata, Workday, Forecast, Runn, Smartsheet (3–12mo rolling, heatmaps, scenarios) | Yes | **no** | **Most-cited gap.** Only a simple backlog view; no forecasting engine. |
-| Skills Marketplace & Gig Integration | Kantata (Upwork/Toptal), Workday ML, Certinia Einstein | No | partial | Profiles + skills + proficiency, but no marketplace or ML matching. |
-| Revenue Recognition (ASC 606 / IFRS 15) | Kantata, SAP, Certinia, Oracle, Workday, NetSuite, Certinia (five-step engine) | Yes | partial | POC + conditions UI exist; **no auto journals, no deferral schedules, no five-step model**. |
-| Billing & Accounts Receivable | All leaders (auto-invoice, retainage, AR aging, DSO, consolidation) | Yes | partial | Conditions UI only; **no auto-invoice, no AR aging, no retainage/tax mechanics**. |
-| Invoicing & Payment Integration | Stripe, Bill.com, SAP Cash App, UBL/EDIFACT e-invoice | Yes | **no** | All mock. No invoice generation, payment gateways, or reconciliation. |
-| Project Financials & Margin Analysis | Realized/contribution/FAC margin, SPI/CPI variance, profitability by dimension | Yes | partial | Strong base (margin, EAC/VAC, burn); lacks trend/alerts, variance breakdown, drill-down. |
-| Time & Expense Management | Native mobile, offline, OCR, per-diem/mileage, payroll sync | Yes | partial | Time entries + approval UI; **no mobile, OCR, mileage/per-diem, payroll sync**. |
-| Approvals & Workflow Orchestration | Multi-step conditional routing, SLA/escalation, bulk/mobile, Slack/Teams | No/Yes | partial | Mock RBAC + per-entity status flips; **no workflow engine, SLA, escalation, SOD**. |
-| ERP & HCM Integrations | SAP, Oracle, NetSuite, Dynamics, Salesforce; real-time GL/AR/HCM/CRM | Yes | **no** | Mock backend, no real integrations. Hard enterprise blocker. |
-| Reporting & Analytics | Real-time dashboards, AR aging, DSO, ad-hoc BI, Tableau/Power BI/Looker | Yes | partial | Command center + portfolio margin; lacks ad-hoc BI, AR aging detail, BI connectors. |
-| Multi-Entity & Multi-Currency | Intercompany billing, FX revaluation, consolidated reporting, entity GL | No/Yes | **no** | TS only for global firms. SAP/Oracle/Workday core strength. |
-| Project Governance & Contract Controls | CR workflows, sign-off, doc mgmt, risk/issue registers, audit, email capture | No | partial | Strong base (sub-tabs, mock RBAC, audit log). Gaps: email capture, real RBAC. |
-| Client & Partner Portals | Status/billing/payment portals, partner time/payables, white-label, SSO | No | **no** | All-internal today. Kantata, Certinia, Runn, Float strong here. |
-| AI & Automation | Predictive matching, risk/cost prediction, anomaly detection, OCR, chatbots | No | **no** | Emerging differentiator (Workday ML, Certinia Einstein, Wrike/Smartsheet copilots). |
-| Mobile & Offline | iOS/Android, offline sync, push, geolocation, receipt capture | Yes | **no** | Web-only. Blocks field-heavy services (construction, utilities, telecom). |
-| Enterprise Governance & Compliance | RBAC + hierarchy, data residency (GDPR/HIPAA/SOC 2), 2FA, encryption, ISO 27001 | Yes | partial | Mock RBAC + audit log; **no real auth, residency, or certs**. Enterprise blocker. |
-| Visual Capacity Planning (Gantt/Timeline) | Float, Runn, Forecast, Resource Guru (drag-drop, conflict detection, heatmaps) | Yes | partial | Assignments/requests exist; **no visual timeline, over-allocation/conflict UI**. |
-| Skills-Based Matching & Gap ID | Kantata, Kimble, Dayshape, Mosaic (ontology, best-fit, gap analysis) | No | partial | Skills/proficiency exist; **no matching algorithm or gap tool**. |
-| AI-Powered Scheduling | **Dayshape** (constraint-solving ML), Forecast (AI-assisted) | No | **no** | Manual assignments only. Dayshape is AI-first leader. |
-| Project Portfolio Management | Wrike, Smartsheet, Mosaic, Runn (strategic scoring, conflict resolution, scenarios) | No/Yes | partial | Portfolio margin/backlog; **no strategic scoring, cross-project conflict, scenarios**. |
-| What-If / Capacity Simulation | Runn, Forecast, Mosaic, Planview (hire/loss/slip scenarios) | No | **no** | No scenario engine. |
-| Utilization & Billability Analytics | Billable hours, utilization by dimension, revenue/FTE, bench cost, realization % | Yes | partial | Utilization + DSO + bill-vs-cost; lacks cohort, revenue/FTE trend, realization %. |
-| Performance Obligations & Contract Segmentation | Certinia, NetSuite (distinct POBs, separate recognition) | Yes | partial | Projects + milestones, but no POB data model. |
-| Contract-Modification Rev Recalc | Certinia, NetSuite (CR scope/timing → catch-up) | Yes | **no** | CR tracker exists but no revenue-impact recalculation. |
-| Progress POC Billing | Kantata, Projector (% earned → invoice) | Yes | partial | Other triggers exist; **Progress POC automation missing**. |
-| Bill-Rate vs Cost-Rate Gap Analysis | Kantata, Projector, Certinia (margin-compression alerts) | Yes | partial | Margin metrics exist; no rate reconciliation/compression alerts. |
-| Tax / Retention / Discount / FX Modifiers | All (VAT/GST, holdback, early-pay/volume discount, FX) | Yes | partial | Tax + retention; **no discount models or currency conversion**. |
-| Invoice Batch / PDF / Sequence | All (batch gen, PDF render, e-delivery, compliant numbering) | Yes | partial | Invoice structure only; one-at-a-time, no PDF/number sequence. |
-| Subscription/Recurring w/ Proration & True-Up | Kantata, NetSuite, Certinia | Yes | partial | Recurring model exists; no proration or usage true-up. |
-| Earned Value & Burndown (progress curves) | Projector, NetSuite | Yes | partial | EAC/VAC metrics; no progress POC models or burndown viz. |
-| Budget vs Actual w/ Alerts & Re-forecast | All (variance %, escalation, re-forecast) | Yes | partial | Basic variance; no alerts or re-forecast. |
-| Subcontractor / Vendor Mgmt (PO, 3-way match) | NetSuite, Projector, Mosaic, Runn | No/Yes | **no** | No vendor/PO module. Gap for staff-aug/outsource practices. |
-| Project Costing & Allocation Engine | Projector (labor, burden, overhead, equipment) | Yes | partial | Cost centers + resource cost; no overhead/equipment allocation. |
-| Hierarchical / Conditional Approval Routing | All (amount thresholds, escalation, multi-level) | Yes | partial | Time approval only; no dynamic routing. |
-| Concurrent vs Sequential Approval | Certinia, NetSuite (parallel/sequential/OR) | No | **no** | Likely sequential only. |
-| Audit Trail & Immutability (SOX/GDPR) | NetSuite, Certinia (immutable, full change history) | Yes | partial | Mutable in-memory log capped at 500, method/path/status only. |
-| Segregation of Duties (SOD) | NetSuite, Certinia (no self-approval) | Yes | partial | Roles exist; no SOD rule engine. |
-| Project-Level Financial Statements (P&L) | NetSuite, Projector, Certinia | Yes | **no** | No project P&L / WIP balance / deferred statements. |
-| Customer Profitability & Concentration Risk | All (margin by customer, DSO trend, concentration %) | Yes | partial | Customer exists; no deep profitability/concentration analysis. |
-| Resource Profitability & Realization % | Kantata, Kimble, Projector | Yes | partial | Utilization only; no revenue/FTE, margin/resource, realization %. |
-| BI Export / Ad-hoc / Drill-down | Runn, Forecast, Mosaic; Tableau/Power BI/Looker | Yes | partial | Fixed dashboards; no CSV/Excel export, BI connectors, ad-hoc builder. |
-| Custom Metrics & KPI Dashboards | Runn, Forecast (user-defined KPIs, alert thresholds) | No | partial | Fixed metrics only. |
-| Multi-Currency & FX | NetSuite, Certinia, Projector (spot rates, realized/unrealized FX) | Yes | **no** | Hardcoded EUR; no currency in data model. |
-| Bank Feed & Cash Reconciliation | NetSuite, Sage Intacct | Yes | **no** | No bank feed or AR reconciliation. |
-| Dunning & Collections Automation | Kantata, Certinia, NetSuite | Yes | **no** | No payment/AR integration, so no dunning. |
-| Data Privacy & Retention (GDPR/RTBF) | Certinia, NetSuite | Yes | **no** | No GDPR/erasure framework. |
-| Skills Inventory & Proficiency & Certs | Kantata, Kimble, Projector | Yes | **yes** | **Fully implemented.** Foundational strength. |
-| Skill-Based Rate Cards | Projector, Kantata (rates by skill+proficiency) | Yes | partial | Bill rate at assignment level; no rate-card library. |
-| Equipment & Asset Tracking | NetSuite, Projector | No | **no** | No equipment module. |
-| Anomaly Detection / Early Warning | Certinia (Einstein), NetSuite | No | **no** | No anomaly detection. |
+| Resource Scheduling & Optimization | Planview, Workday (constraint solvers, AI matching); Wrike | Yes | partial | Deterministic match scorer + forecasting now exist; **no constraint-based auto-assignment or multi-request optimizer**. |
+| Demand Planning & Capacity Forecasting | Kantata, Workday, Forecast, Runn, Smartsheet | Yes | **partial** | Real rolling 8/12-wk supply-vs-demand engine + bench/over-alloc/skill-gap (`forecast.util.ts`). Gap: per-resource **heatmap/calendars**, PTO/ramp, weighted pipeline, longer horizons. |
+| Skills Marketplace & Gig Integration | Kantata (Upwork/Toptal), Workday ML | No | partial | Profiles + skills + proficiency + governed catalog; no marketplace or ML matching. |
+| Revenue Recognition (ASC 606 / IFRS 15) | Certinia, SAP, Oracle, Workday, NetSuite | Yes | **partial** | Dated `recognitionSchedule` (POC/straight-line/as-incurred/deferred) + balanced journal preview. Gap: **no five-step / performance-obligation / SSP allocation**, preview-only (no posted ledger/period close), currency-naive schedule. |
+| Billing & Accounts Receivable | All leaders (auto-invoice, retainage, AR aging, DSO) | Yes | **yes** | Full AR subsystem (aging buckets, per-customer, weighted DSO, retention, tax, WIP, deferred), status lifecycle enforced. Gap: payment application/partial payments, GL-posted AR subledger. |
+| Invoicing & Payment Integration | Stripe, Bill.com, SAP Cash App, UBL/e-invoice | Yes | **partial** | Sequential numbering, batch gen, printable artifact, FatturaPA XML. Gap: **no payment gateway/reconciliation**, browser-print PDF only, in-memory counter, no PEPPOL/UBL. |
+| Project Financials & Margin Analysis | Realized/contribution/FAC margin, SPI/CPI, profitability by dimension | Yes | **yes** | `computeProjectFinancials` full per-project P&L (rev/cost/margin/EAC/ETC/VAC/burn) + drivers + alerts. Gap: no overhead/G&A burden, no SPI/CPI. |
+| Time & Expense Management | Native mobile, offline, OCR, per-diem/mileage | Yes | partial | Time entries + approval + actual-cost drive. Gap: **no mobile/offline/OCR/mileage/per-diem**, no claimed-expense workflow. |
+| Approvals & Workflow Orchestration | Multi-step conditional routing, SLA/escalation, Slack/Teams | Yes | **partial** | Real engine: threshold routing, sequential chain, per-step role enforcement, SLA stamp, locked decisions. Gap: **active escalation, delegation, parallel/quorum, configurable thresholds, designer UI**. |
+| ERP & HCM Integrations | SAP, Oracle, NetSuite, Salesforce; real-time GL/AR/HCM/CRM | Yes | **partial** | Balanced GL **journal export** adapter exists. Gap: **no live posting**, no chart-of-accounts mapping, no ack/retry, no reverse-sync, no HCM/HRIS. |
+| Reporting & Analytics | Real-time dashboards, AR aging, DSO, ad-hoc BI, Tableau/Power BI/Looker | Yes | **yes** | Two data-backed surfaces (Command Center + Portfolio Analytics) with real charts/states. Gap: **no ad-hoc/drag-drop builder**, saved views, scheduled distribution, drill-through nav. |
+| Multi-Entity & Multi-Currency | Intercompany billing, FX revaluation, consolidated reporting | No/Yes | **partial** | Multi-currency real (FX table, `convertToBase`). Gap: **no legal-entity model**, no intercompany, no per-entity ledgers, no dated FX/gain-loss. |
+| Project Governance & Contract Controls | CR workflows, sign-off, doc mgmt, risk/issue registers, audit | No | **yes** | 9 working sub-tabs, RAG delivery-health, issue/risk + change-control workflows w/ SoD, milestone approval, append-only audit. Gap: real **file upload/versioning**, contract clause library/e-sign, stage-gates. |
+| Client & Partner Portals | Status/billing/payment portals, white-label, SSO | No | **no** | All-internal, Keycloak-gated. No external/guest scope or self-service surface. |
+| AI & Automation | Predictive matching, risk/cost prediction, anomaly detection, OCR | No | **no** | Match scoring is deterministic (static weights), not ML. No anomaly detection, no learning loop. |
+| Mobile & Offline | iOS/Android, offline sync, push, receipt capture | Yes | **no** | Responsive Tailwind only. SSR with no service worker/PWA/offline. |
+| Enterprise Governance & Compliance | RBAC + hierarchy, residency, 2FA, encryption, ISO 27001 | Yes | **partial** | Real OIDC + server RBAC + SoD + append-only audit + rate limiting + prod auth guard. Gap: **no admin config layer** (hard-coded rules/thresholds), no policy engine, no residency/retention, no e-sign/attestation. |
+| Visual Capacity Planning (Gantt/Timeline) | Float, Runn, Forecast, Resource Guru (drag-drop, conflict detection) | Yes | **partial** | Timeline as charts + colored gap bands + aggregate over-alloc. Gap: **no per-resource swimlanes/booking bars, no drag-drop, no date-level conflict detection** (Assignment has no dates). |
+| Skills-Based Matching & Gap ID | Kantata, Dayshape, Mosaic (ontology, best-fit, gap analysis) | No | **yes** | Request-level missing-skills + portfolio-level `skillGap` (tested), surfaced in Staffing + Forecast. Gap: no taxonomy/synonym/adjacency credit, gap ignores min-proficiency. |
+| AI-Powered Scheduling | Dayshape (constraint-solving ML), Forecast | No | **no** | Manual + deterministic scoring only. No constraint solver / ML. |
+| Project Portfolio Management | Wrike, Smartsheet, Mosaic, Runn (scoring, conflict, scenarios) | No/Yes | partial | Portfolio analytics + what-if scenarios + alerts. Gap: strategic scoring, cross-project conflict resolution, persisted scenarios. |
+| What-If / Capacity Simulation | Runn, Forecast, Mosaic, Planview | No | **yes** | Working client-side sandbox (`what-if.ts`): win/hire/slip levers, side-by-side deltas. Gap: **ephemeral** (no save/name/compare), coarse levers, no financial/margin impact, no probability-weighting. |
+| Utilization & Billability Analytics | Billable hours, util by dimension, revenue/FTE, realization % | Yes | **yes** | Team utilization (manager-scoped), assignment CRUD → server recompute, realization %/revenue-per-FTE/revenue-per-head. Gap: **billable vs non-billable split** (no billable flag), per-resource realization, target-vs-actual, bench cost. |
+| Performance Obligations & Contract Segmentation | Certinia, NetSuite (distinct POBs, separate recognition) | Yes | **no** | No performance-obligation entity; each billing line is its own obligation by heuristic. No SSP, no allocation. |
+| Contract-Modification Rev Recalc | Certinia, NetSuite (CR scope/timing → catch-up) | Yes | **partial** | Approved CR `impactBudget` recalculates budget/EAC/VAC. Gap: **no revenue/transaction-price recalc or recognition catch-up** on CR approval. |
+| Progress POC Billing | Kantata, Projector (% earned → invoice) | Yes | **partial** | `progressAutoAdvance` → Ready at ≥100%; recognition is POC. Gap: **progress % is manual** (no cost-to-cost / effort-derived POC). |
+| Bill-Rate vs Cost-Rate Gap Analysis | Kantata, Projector, Certinia (margin-compression alerts) | Yes | **yes** | `marginCompressionAlerts` (graded severity on margin gap + thin bill-vs-cost) for projects + customers. Gap: per-resource rate-realization leakage. |
+| Tax / Retention / Discount / FX Modifiers | All (VAT/GST, holdback, discounts, FX) | Yes | **partial** | Tax (IVA) + retention (ritenuta) first-class + FX to base + FatturaPA 22% VAT. Gap: **no discount modifier**, single flat tax rate (no multi-jurisdiction/reverse-charge). |
+| Invoice Batch / PDF / Sequence | All (batch gen, PDF render, e-delivery, compliant numbering) | Yes | **yes** | Server-side gapless-under-lock numbering, batch from Ready queue, printable artifact, FatturaPA. Gap: in-memory counter (resets on restart), browser-print not server PDF, no templates/branding. |
+| Subscription/Recurring w/ Proration & True-Up | Kantata, NetSuite, Certinia | Yes | **partial** | Monthly/Quarterly/Annual straight-line recognition over recurrence window. Gap: **no mid-period proration, no true-up, no recurrence start/end, no auto-invoice generation**. |
+| Earned Value & Burndown (progress curves) | Projector, NetSuite | Yes | **no** | EAC/ETC/VAC + burn% exist, but **no PV/EV/AC, SPI/CPI, schedule variance, or burndown**. |
+| Budget vs Actual w/ Alerts & Re-forecast | All (variance %, escalation, re-forecast) | Yes | **yes** | CR-aware budget vs actual; `burnOver`/`eacOverBudget`/margin-compression alerts with reasons. Gap: **screen-only** (no push/subscription), global thresholds, point-in-time. |
+| Subcontractor / Vendor Mgmt (PO, 3-way match) | NetSuite, Projector, Mosaic, Runn | No/Yes | **partial** | POs as first-class order type → external cost; partners; subco task coverage check. Gap: **no goods-receipt/3-way match**, no vendor master, no PO approval, no subco settlement. |
+| Project Costing & Allocation Engine | Projector (labor, burden, overhead, equipment) | Yes | **yes** | Per-project cost centers, rate-based labor (cost/bill rates), external PO cost, CR-adjusted budget. Gap: **no overhead/G&A burden engine**, single rate per resource (no dated rate cards). |
+| Hierarchical / Conditional Approval Routing | All (amount thresholds, escalation, multi-level) | Yes | **partial** | Amount-threshold 2-step chain; per-step role enforcement. Gap: single threshold, no per-kind/project config, no designer. |
+| Concurrent vs Sequential Approval | Certinia, NetSuite (parallel/sequential/OR) | No | **partial** | Sequential multi-step fully implemented + race-safe. Gap: **no concurrent/parallel/quorum mode**. |
+| Audit Trail & Immutability (SOX/GDPR) | NetSuite, Certinia (immutable, full change history) | Yes | **partial** | Append-only (no update/delete path), before/after deltas, trusted-actor attribution, paged admin-only read. Gap: **no hash-chain/WORM**, best-effort (swallows failures), only `/api` mutations <400. |
+| Segregation of Duties (SOD) | NetSuite, Certinia (no self-approval) | Yes | **yes** | Enforced in 3 flows (approval decision, time-entry, CR) on server-pinned principals. Gap: **no configurable conflict-of-duties matrix**, no indirect-conflict detection. |
+| Project-Level Financial Statements (P&L) | NetSuite, Projector, Certinia | Yes | **yes** | Full per-project contribution P&L surfaced in project + contract roll-up. Gap: no fully-burdened net P&L, no closed-period/WIP balance, preview-only journal. |
+| Customer Profitability & Concentration Risk | All (margin by customer, DSO trend, concentration %) | Yes | **yes** | `customerProfitability` + `customerConcentration` (real HHI, top-share) with risk-tinted KPIs + gauge. Gap: no CLV/retention, no overhead allocation, snapshot only. |
+| Resource Profitability & Realization % | Kantata, Kimble, Projector | Yes | **partial** | `realizationMetrics` (realization %, revenue/FTE, revenue/head) at portfolio level; `resourceBillability` exists. Gap: **no per-resource table/ranking**, no billable split, no per-person margin. |
+| BI Export / Ad-hoc / Drill-down | Runn, Forecast, Mosaic; Tableau/Power BI/Looker | Yes | **partial** | Hardened CSV export across reports (injection-guarded, RFC-4180). Gap: **JSON export not wired to UI**, no BI data feed/warehouse connector, no xlsx, no ad-hoc builder. |
+| Custom Metrics & KPI Dashboards | Runn, Forecast (user-defined KPIs, thresholds) | No | **no** | KPIs hardcoded; no definition model/formula editor/targets. |
+| Multi-Currency & FX | NetSuite, Certinia, Projector (spot rates, realized/unrealized FX) | Yes | **yes** | FX table keyed by currency + admin CRUD; `convertToBase` pervasive. Gap: **no dated/historical rates, no provider feed, no FX gain-loss, floats not decimals, single global base**. |
+| Bank Feed & Cash Reconciliation | NetSuite, Sage Intacct | Yes | **no** | No bank entity, statement import, or reconciliation engine. |
+| Dunning & Collections Automation | Kantata, Certinia, NetSuite | Yes | **partial** | Overdue exposure + aging + DSO computed/surfaced (reporting-only). Gap: **no dunning levels, reminders, escalation, promise-to-pay, worklist**. |
+| Data Privacy & Retention (GDPR/RTBF) | Certinia, NetSuite | Yes | **no** | No DSAR/erasure/consent/PII-classification/retention. Audit retains PII indefinitely (a liability). |
+| Skills Inventory & Proficiency & Certs | Kantata, Kimble, Projector | Yes | **yes** | Self-service skill CRUD (1-3 levels) + governed catalog (ESCO conceptUri, proficiency sets). Gap: **inconsistent scales (1-3 vs /5)**, free-text not validated to catalog, no cert/endorsement/recency. |
+| Skill-Based Rate Cards | Projector, Kantata (rates by skill+proficiency) | Yes | partial | Bill/cost rate per resource; no rate-card library by skill+proficiency+period. |
+| Equipment & Asset Tracking | NetSuite, Projector | No | **no** | No asset register/booking/depreciation. (Possibly intentionally out of scope for people-centric PSA.) |
+| Anomaly Detection / Early Warning | Certinia (Einstein), NetSuite | No | **no** | Threshold alerts exist but no statistical/ML anomaly detection. |
+| Persistence (real DB) | All enterprise (RDBMS-backed) | Yes | **yes** | _New row._ Dual Postgres/Drizzle + in-memory Repository pattern; 31 tables, migrations, seeding; `GET /storage-status`. Gap: dev defaults in-memory, money as float, forward-only migrations, no row-level multi-tenancy. |
+| Real Authentication / SSO (OIDC + PKCE) | All enterprise (SAML/OIDC) | Yes | **yes** | _New row._ Keycloak OIDC + PKCE client; server JWKS `jwtVerify`. Gap: optional audience in dev, single realm, **no SAML/SCIM**, no token revocation/introspection, no MFA/step-up policy. |
+| SCIM 2.0 / HRIS Sync | Workday, BambooHR, SuccessFactors | Yes | **no** | _New row._ No SCIM endpoint or HRIS connector; resources seeded/CRUD'd. |
+| E-invoicing (FatturaPA / UBL / PEPPOL) | Certinia, NetSuite, IT/EU compliance | Yes | **partial** | _New row._ FatturaPA FPR12 XML builder (spec-tested). Gap: **no SDI transmission, no digital signature/PEC, no UBL/PEPPOL**, simplified flat 22% IVA. |
 
 ---
 
-## 3. Gap Analysis
+## 4. Remaining Gaps (prioritized — confirmed absent or partial in code)
 
-Three workstreams. **Priority**: P0 (do now) → P2 (later). **Effort**: S / M / L.
+Ordered by enterprise-deal impact. Each is verified as genuinely missing or partial.
 
-### 3.1 ADD — new capabilities
-
-| Item | Why | Priority | Effort |
-|---|---|:--:|:--:|
-| **Demand & capacity forecasting + bench view** (rolling 3–12mo): supply from availability data, demand from open ResourceRequests + bookings; skill-level capacity-gap heatmap, bench list, over/under-allocation. Pure-function engine over existing /requests, /assignments, /resources, /availability. | Single most-cited table-stakes gap across **every** scan (Kantata, Workday, Forecast, Runn, Smartsheet). We hold all inputs but offer zero forward view. Highest leverage — pure aggregation, no ML, no backend rework. Drives hire/bench/win-this-deal decisions. | **P0** | M |
-| **AR aging & collections view**: aging buckets (0–30/31–60/61–90/90+) and overdue flags from BillingPlanItem dates + status; portfolio DSO trend; dedicated AR tab with per-customer rollup and "overdue" chips. | We already compute `dsoProxy()` and hold issuedDate/dueDate/paidDate/paymentTermsDays but never surface aging — the #1 CFO-facing gap behind invoicing. Pure derivation, no new persistence. | **P0** | S |
-| **Rule-based resource-match scoring in Staffing**: replace boolean role-OR-skill filter with a weighted score (skill+proficiency coverage, role fit, availability headroom, cost-vs-bill margin); rank candidates; show score breakdown + skills-gap. | Resource optimization/AI scheduling is the top PSA differentiator (Dayshape, Wrike, Forecast). Our match is a naïve `includes()`. A deterministic scorer captures ~80% of the perceived value at modest effort; big demo/sales lift. | **P0** | M |
-| **What-if capacity scenario sandbox**: client-side overlay on the forecasting engine — "win this deal," "hire N of skill X," "slip project B" — recompute utilization, skill gaps, portfolio margin. No persistence. | Recurring strategic differentiator (Runn, Forecast, Mosaic, Planview). Because forecasting is pure-function, scenarios are incremental: clone, mutate, recompute. High executive appeal. **Depends on forecasting landing first.** | P1 | M |
-| **Invoice document generation + batch + sequence**: render invoice artifact (HTML/PDF) with compliant sequential numbering; multi-select batch generation from the Ready queue. | `generateInvoice()` flips status but produces no document, no number sequence, one-at-a-time. Concrete table-stakes step toward real invoicing; mostly frontend/templating over existing billing logic. | P1 | M |
-| **Multi-step / conditional approval workflow engine** for time/expense/milestone/CR/invoice: amount-threshold routing, sequential vs parallel, SLA/aging escalation, SOD guard (requester ≠ approver). Generic ApprovalRequest store + rules evaluator + Approvals inbox. | Governance is table-stakes; we have ad-hoc per-entity status flips with no routing, SLA, escalation, or SOD. A single engine consolidates scattered logic and unblocks enterprise/regulated buyers. Spans many entities → larger. | P1 | L |
-| **Project- & customer-level margin drill-down + variance alerts** (margin < target, burn > 90%, EAC > budget): per-driver breakdown (labor vs external vs expense); portfolio alert feed on dashboard. | `computeProjectFinancials` already yields margin/EAC/VAC/burnPct per project, but reporting shows only portfolio bars with hardcoded trends. Real drill-down + alerts (pure derivation) deliver the variance/alerting buyers expect. | P1 | S |
-| **BI/data export**: CSV/Excel on every report + read-only JSON export of portfolio/finance rollups for Power BI/Tableau/Looker ingestion. | Reporting is consistently rated "partial — missing BI connectors/export." A generic export utility over existing computed datasets is cheap and clears a frequent procurement checkbox. | P2 | S |
-| **Multi-currency foundation**: currency + FX-rate on orders/billing; conversion to a base reporting currency; show original and converted. Stop hardcoding EUR. | Hardcoded EUR across seed and every pipe. TS only for global firms (lower SMB priority) but structural — touches data model, finance.util, all pipes. Scope deliberately rather than retrofit. | P2 | L |
-
-### 3.2 MODIFY — deepen what exists
-
-| Item | Why | Priority | Effort |
-|---|---|:--:|:--:|
-| **Auditable, dated revenue-recognition schedules**: extend finance.util to emit per-period schedule (recognized this period, cumulative, Advance deferral amortization, expense pass-through with markup) + a recognition "journal" preview per milestone-approval/invoice event with an audit row. | Solid POC math exists but is point-in-time, not dated, with no journal/catch-up. ASC 606/IFRS 15 auto-recognition is the most-repeated finance gap. Building schedules on the existing tested pure functions is the realistic next layer without a real GL. | **P0** | L |
-| **Contract-modification revenue & budget recalc on CR approval**: when a CR with impactBudget/impactScheduleDays is Approved, fold impact into budget/EAC and trigger recognition catch-up. | ChangeRequest already carries impactBudget/impactScheduleDays + approval status, but `computeProjectFinancials` ignores them — approved scope changes never move budget, EAC, or revenue. High value for change-order-heavy practices. | P1 | M |
-| **Enforce mock RBAC into an authorization seam**: move AuthService capability computeds into route guards + per-endpoint checks in the mock server (audit log records actorRole but endpoints don't enforce). Keep single-file swap for OIDC/SSO drop-in. | `auth.service.ts` is the explicit swap point and derives capabilities, but nothing enforces them — any role can call any endpoint. Enforcement is the prerequisite for SOD, approval routing, and SSO/SCIM. | P1 | M |
-| **Make the audit log integrity-credible**: append-only (no in-place edits), capture before/after field deltas, remove/justify the silent 500-entry truncation, add export, filterable viewer. | Currently a mutable in-memory array capped at 500 with only method/path/status — undermines the SOX/immutability claim that's table-stakes for regulated/PE-backed buyers. Focused change to existing audit middleware. | P1 | M |
-| **Capped & Progress billing automation**: enforce Capped not-to-exceed against accrued T&M (block/flag when accrued > cap); auto-advance Progress items as % complete changes, mirroring the milestone→Ready trigger. | Billing types exist as data (capAmount, progressPct) and one automated trigger already works (milestone→Ready), but Capped enforcement and Progress auto-advance aren't wired. Extends the proven trigger pattern. | P2 | M |
-| **Replace illustrative dashboard/reporting trends with real period-over-period deltas**; remove hardcoded `trendFactor` multipliers. | KPI trends use hardcoded factors (12/4/−5 × trendFactor) presented as percentages — misleading in a financial product. Once period data exists, real deltas are a small, high-trust fix benefiting the command center too. | P2 | S |
-
-### 3.3 INTEGRATE — connect to the outside world
-
-| Item | Why | Priority | Effort |
-|---|---|:--:|:--:|
-| **Real authentication / SSO via OIDC** (OAuth2 Auth Code + PKCE) replacing mock AuthService; claim→UserRole mapping; Angular auth interceptor for token attach/refresh alongside the error interceptor. | No real auth is a hard enterprise blocker cited across scans. AuthService and the new interceptors/ folder are purpose-built as the swap seam. **P0 because it gates SCIM, real RBAC enforcement, audit attribution, and portals.** | **P0** | L |
-| **GL/ERP posting integration** (NetSuite/QuickBooks/SAP/Dynamics) via a posting-adapter abstraction: emit revenue/WIP/deferred/labor-cost/invoice journals from the recognition schedule + invoicing events to an outbound connector (start QuickBooks/Xero-style REST), feature-flagged. | Real-time GL posting is the most-cited enterprise TS integration and the natural consumer of rev-rec + invoicing work. A clean adapter boundary now prevents hard-coding to one ERP. **Depends on rev-rec + invoicing landing first.** | P1 | L |
-| **CRM deal-to-project handoff** (Salesforce/HubSpot/Pipedrive): import won opportunities as Customers/Contracts/Projects; feed weighted pipeline into demand forecasting so "if we win this" uses real deal probability. | CRM integration is TS for mid-market and makes demand forecasting probabilistic rather than guesswork. Inbound mapper into existing Customer/Contract/Project + the forecasting engine. **Secondary to internal forecasting existing first.** | P1 | M |
-| **E-invoicing / payment & AR integration** (Stripe / Bill.com / UBL export) + payment-status webhooks feeding AR aging + dunning. | Invoicing/payment integration is legally required for real revenue and the endpoint for AR aging + dunning. **Sequenced after invoice generation and AR aging exist internally.** | P2 | L |
-| **SCIM 2.0 + HRIS sync** (Workday/BambooHR) for employees, org units, cost centers, capacity — feeding resource master + forecasting capacity side. | Enterprise-governance and capacity enabler, but only meaningful once OIDC identity exists. Lower priority than the auth seam; pairs naturally with forecasting capacity inputs once SSO is in. | P2 | L |
+1. **Live external integrations (vs local artifacts).** GL posting, e-invoice transmission (SDI/PEPPOL), and CRM sync all stop at a file/parked payload (`connected:false`). No network, credentials, chart-of-accounts mapping, acknowledgement/idempotency, retry queue, or reverse-sync. **No inbound CRM deal → auto-provision Contract+Project+billing plan.** _The single biggest commercial gap._
+2. **Payments, cash application & collections/dunning.** Mark-paid is a status flip. No payment gateway, partial payments, remittance/cash matching, dunning levels/reminders/escalation, or bank feed/reconciliation. AR analytics feed no collections action.
+3. **Performance obligations + posted ledger + period close.** No PObj/SSP/allocation model; recognition is per-line heuristic and the journal is preview-only (no posted GL, no period lock, no reversal/catch-up). Recognition schedule is currency-naive.
+4. **True resource-scheduling Gantt + date-level conflict detection.** `Assignment` has no start/end dates, so no per-resource booking bars, drag-and-drop, or overlapping-booking detection — only aggregate util>110% flags.
+5. **AI/ML matching & anomaly detection.** Scoring is static-weight deterministic; alerts are threshold-based. No learning loop, predictive risk/cost, optimal multi-request allocation, or statistical anomaly detection.
+6. **Mobile & offline.** No PWA/service worker/native app/offline time-expense capture. Responsive CSS only.
+7. **Client / partner portals.** Entirely internal; no external/guest auth scope or scoped self-service.
+8. **SCIM 2.0 / HRIS sync.** No provisioning endpoint or connector to populate the people roster, rates, org, capacity.
+9. **Multi-entity (legal entity) consolidation.** Multi-currency exists, but no company/legal-entity model, intercompany, per-entity ledgers, or entity-scoped numbering. FX has no dated rates or gain/loss.
+10. **Ad-hoc BI / report & dashboard builder + custom KPIs.** Dashboards are fixed; no drag-drop builder, saved views, scheduled distribution, JSON/BI feed (JSON export exists but is unwired), or user-defined metrics.
+11. **Active approval governance.** Engine lacks SLA escalation/reminders, delegation/out-of-office, parallel/quorum approval, configurable per-kind/per-project thresholds, and an admin workflow designer.
+12. **GDPR / data privacy.** Zero implementation; append-only audit retains PII indefinitely with no purge path.
+13. **Tamper-evident audit.** Append-only by convention only — no hash-chain/WORM/signing; best-effort writes; coverage limited to `/api` mutations <400 (no auth events).
+14. **Accounting depth tail.** No discount modifiers, multi-jurisdiction tax engine, overhead/G&A burden allocation, EVM (SPI/CPI/burndown), recurring proration/true-up, dated rate cards, or document management (real file upload/versioning).
+15. **Equipment / asset tracking.** Absent (may be intentional for a people-centric PSA).
 
 ---
 
-## 4. Recommended Roadmap
+## 5. Recommended Roadmap (revised 2026-06-12)
 
-### NOW (P0) — turn data we already hold into forward-looking value
-1. **Demand & capacity forecasting + bench view** (ADD, M) — close the #1 gap; pure functions, no backend.
-2. **AR aging & collections view** (ADD, S) — fastest CFO-facing win; derive from existing billing dates.
-3. **Rule-based resource-match scoring** (ADD, M) — biggest demo/sales lift; deterministic scorer over skills/availability.
-4. **Dated revenue-recognition schedules + journal preview** (MODIFY, L) — the most-repeated finance gap; build on existing tested POC math.
-5. **Real auth / OIDC SSO** (INTEGRATE, L) — start now; it gates everything enterprise (RBAC enforcement, SOD, SCIM, portals). Long pole — begin in parallel.
+Most P0/P1 from the prior plan is done. The new frontier is **the outside world plus accounting depth**.
 
-> Sequencing note: items 1–3 are pure-function, parallelizable, and unblock the "Next" tier. Items 4–5 are long poles that should start immediately even though they land later.
+### NOW — connect to reality & take money
+1. **Live GL/ERP posting** behind the existing adapter seam: real connector (REST/OData), chart-of-accounts + dimension mapping, posting acknowledgement + idempotency keys, posted-ledger persistence with period close. _Consumes the journal export we already emit._
+2. **Payments + cash application**: payment gateway, partial payments, remittance matching, mark-paid → cash receipt; then **dunning/collections workflow** on the AR aging we already compute.
+3. **Inbound CRM deal → project handoff**: Closed-Won → auto-provision Contract + Project + billing plan; field mapping; persisted (non-ephemeral) outbox with delivery/retry. _Makes forecasting pipeline real._
+4. **Date-level scheduling**: add start/end to `Assignment`, build a per-resource timeline/Gantt with booking bars + overlap-conflict detection (the core leaders sell).
 
-### NEXT (P1) — make it operational and governable
-6. **What-if scenario sandbox** (ADD, M) — overlay on the forecasting engine (item 1).
-7. **Invoice generation + batch + sequence** (ADD, M) — first real invoicing step.
-8. **Project/customer margin drill-down + variance alerts** (ADD, S) — quick credibility win on existing math.
-9. **CR-driven contract-modification revenue/budget recalc** (MODIFY, M) — wire impactBudget/impactScheduleDays into finance.util.
-10. **Enforce RBAC seam** + **integrity-credible audit log** (MODIFY, M+M) — prerequisites for SOD and approval routing; depend on item 5.
-11. **Approval workflow engine** (ADD, L) — consolidates scattered approvals; needs RBAC enforcement first.
-12. **GL/ERP posting adapter** (INTEGRATE, L) — consumes rev-rec (item 4) + invoicing (item 7).
-13. **CRM deal-to-project handoff** (INTEGRATE, M) — makes forecasting probabilistic; consumes item 1.
+### NEXT — accounting depth & governance polish
+5. **Performance-obligation model + SSP allocation + posted journals + period close** (true ASC 606 step 2-4); CR approval triggers revenue/recognition catch-up.
+6. **E-invoice transmission**: SDI/PEC for FatturaPA, digital signature, plus UBL/PEPPOL BIS; credit-memo (TD04) flow.
+7. **Dated multi-currency** (transaction/period-end rates, FX gain/loss) + **legal-entity model** for multi-entity consolidation.
+8. **Active approval governance**: SLA escalation/reminders, delegation, parallel/quorum, configurable thresholds, designer UI; admin-configurable RBAC/SoD matrix.
+9. **Tamper-evident audit** (hash-chain/WORM, guaranteed writes, auth-event coverage) + GDPR tooling (DSAR/erasure/retention) — paired since erasure complicates append-only audit.
 
-### LATER (P2) — breadth, scale, and global reach
-14. **Capped & Progress billing automation** (MODIFY, M).
-15. **Real period-over-period KPI deltas** (MODIFY, S) — remove hardcoded trend factors.
-16. **BI/data export** (ADD, S) — CSV/Excel + JSON for Power BI/Tableau/Looker.
-17. **E-invoicing / payment & AR + dunning** (INTEGRATE, L) — after invoicing + AR aging exist.
-18. **SCIM 2.0 + HRIS sync** (INTEGRATE, L) — after OIDC.
-19. **Multi-currency foundation** (ADD, L) — structural; only when pursuing global/multi-entity buyers.
+### LATER — breadth, intelligence & reach
+10. **AI/ML**: predictive match learning loop, anomaly/early-warning detection, probability-weighted pipeline.
+11. **Mobile/offline PWA** (offline time/expense + sync queue) — gates field-services segment.
+12. **Client/partner portals** (scoped self-service, white-label, external auth scope).
+13. **SCIM 2.0 / HRIS sync**; **ad-hoc BI/report builder + custom KPIs + scheduled distribution + JSON/BI feed**; per-resource realization & rate-card library.
+14. **Accounting tail**: discount modifiers, multi-jurisdiction tax engine, overhead/burden allocation, EVM (SPI/CPI/burndown), recurring proration/true-up, document management.
 
-**Deferred / opportunistic** (track but not roadmapped now): mobile & offline apps (blocks field-services segment — revisit if that market is targeted), client/partner portals, AI/anomaly detection, subcontractor/PO management, multi-entity consolidation, equipment/asset tracking.
-
-### Guiding principle
-Roughly **70% of P0/P1 value is pure derivation or wiring over data and seams we already have** (forecasting, AR aging, match scoring, margin drill-down, CR recalc, RBAC enforcement). Bank those first. Reserve the heavy structural lifts — OIDC, GL posting, dated ASC 606 schedules, the approval engine, multi-currency — for deliberate, dependency-ordered investment. This path moves us from "system of record" to "system of decision" without a backend rewrite.
+### Guiding principle (revised)
+The "pure derivation over data we hold" era is **largely banked** — forecasting, AR aging, match scoring, rev-rec schedules, margin drill-down, what-if, approvals, and real auth/persistence all shipped. The remaining value is **structural and outward-facing**: live connectors, money movement, and accounting-grade ledgers. Sequence the external-integration long poles deliberately, because each (ERP posting, payments, e-invoice transmission, CRM ingestion) carries credentials, compliance, and reverse-sync complexity that the local-artifact seam deliberately deferred. This path moves us from "system of decision" to **"system of execution"** — acting in the customer's real financial and operational systems.
