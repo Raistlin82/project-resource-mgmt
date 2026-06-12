@@ -1,8 +1,9 @@
 import { ChangeDetectionStrategy, Component, input, signal, computed, inject, DestroyRef } from '@angular/core';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Project, Partner } from '../../services/api.service';
+import { ApiService, Project, Partner, Vendor, PartnerRole } from '../../services/api.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
@@ -95,12 +96,30 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               <form [formGroup]="partnerForm" (ngSubmit)="savePartner()" class="space-y-6">
                 <div>
                   <label for="partnerCompany" class="block text-sm font-semibold text-ink-secondary mb-1.5">Company Name *</label>
-                  <input id="partnerCompany" type="text" formControlName="company" class="command-input" placeholder="e.g. TechCorp Inc.">
+                  <!-- Company is a config FK to the vendors catalog (store = company name). -->
+                  <select id="partnerCompany" formControlName="company" class="command-select">
+                    <option value="" disabled>Select a vendor...</option>
+                    @for (v of vendorOptions(); track v.id) {
+                      <option [value]="v.name">{{ v.name }}</option>
+                    }
+                    @if (orphanCompany(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
                 </div>
 
                 <div>
                   <label for="partnerRole" class="block text-sm font-semibold text-ink-secondary mb-1.5">Role *</label>
-                  <input id="partnerRole" type="text" formControlName="role" class="command-input" placeholder="e.g. Development Partner">
+                  <!-- Role is a config FK to the partner-roles catalog (store = role name). -->
+                  <select id="partnerRole" formControlName="role" class="command-select">
+                    <option value="" disabled>Select a role...</option>
+                    @for (r of roleOptions(); track r.id) {
+                      <option [value]="r.name">{{ r.name }}</option>
+                    }
+                    @if (orphanRole(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
                 </div>
 
                 <div>
@@ -157,6 +176,27 @@ export class ProjectPartners {
     company: new FormControl('', Validators.required),
     role: new FormControl('', Validators.required),
     contact: new FormControl('')
+  });
+
+  // Company -> vendors, Role -> partner-roles (Phase F2). `contact` stays FREE (it is
+  // an external person name, not an internal FK). Both catalogs are open reads.
+  private vendorsRes = rxResource({ stream: () => this.api.getVendors(), defaultValue: [] as Vendor[] });
+  private rolesRes = rxResource({ stream: () => this.api.getPartnerRoles(), defaultValue: [] as PartnerRole[] });
+  vendorOptions = this.vendorsRes.value;
+  roleOptions = this.rolesRes.value;
+
+  // ORPHAN VALUE: a stored company/role not in the catalog stays selectable as a disabled option.
+  private companyValue = toSignal(this.partnerForm.controls.company.valueChanges, { initialValue: this.partnerForm.controls.company.value });
+  private roleValue = toSignal(this.partnerForm.controls.role.valueChanges, { initialValue: this.partnerForm.controls.role.value });
+  orphanCompany = computed<string | null>(() => {
+    const current = this.companyValue();
+    if (!current) return null;
+    return this.vendorOptions().some(v => v.name === current) ? null : current;
+  });
+  orphanRole = computed<string | null>(() => {
+    const current = this.roleValue();
+    if (!current) return null;
+    return this.roleOptions().some(r => r.name === current) ? null : current;
   });
   
   private partnersRes = rxResource({ stream: () => this.api.getProjectPartners(), defaultValue: [] as Partner[] });
