@@ -195,8 +195,10 @@ export const projectPartners: Partner[] = [
 ];
 
 export const projectDocuments: ProjectDocument[] = [
-  { id: 'D1', projectId: '1', name: 'Project_Charter_v1.pdf', type: 'pdf', size: '2.4 MB', uploadedAt: '2 days ago', author: 'Jane Doe', authorInitials: 'JD' },
-  { id: 'D2', projectId: '2', name: 'Requirements_Spec.docx', type: 'word', size: '1.1 MB', uploadedAt: '5 days ago', author: 'John Smith', authorInitials: 'JS' },
+  // PHASE D — author is an ACTOR field (the document's creator). Reconcile the seed
+  // names to existing resources so the displayed authors are real people.
+  { id: 'D1', projectId: '1', name: 'Project_Charter_v1.pdf', type: 'pdf', size: '2.4 MB', uploadedAt: '2 days ago', author: 'Julie Armstrong', authorInitials: 'JA' },
+  { id: 'D2', projectId: '2', name: 'Requirements_Spec.docx', type: 'word', size: '1.1 MB', uploadedAt: '5 days ago', author: 'John Miller', authorInitials: 'JM' },
 ];
 
 export const workPackages: WorkPackage[] = [
@@ -219,23 +221,30 @@ export const projectFinancials: FinancialItem[] = [
 
 export const projectCostCenters: ProjectCostCenter[] = [
   { id: 'CC-1001', projectId: '1', name: 'Engineering & Dev', manager: 'Alice Smith', allocated: 150000, actual: 125000 },
-  { id: 'CC-1002', projectId: '1', name: 'Design & UX', manager: 'Bob Jones', allocated: 50000, actual: 48000 },
-  { id: 'CC-1003', projectId: '2', name: 'Quality Assurance', manager: 'Charlie Brown', allocated: 40000, actual: 42000 },
+  // PHASE D — manager is a PERSON reference to the resources catalog; reconcile the
+  // orphan names ('Bob Jones'/'Charlie Brown') to existing resources.
+  { id: 'CC-1002', projectId: '1', name: 'Design & UX', manager: 'John Miller', allocated: 50000, actual: 48000 },
+  { id: 'CC-1003', projectId: '2', name: 'Quality Assurance', manager: 'Julie Armstrong', allocated: 40000, actual: 42000 },
 ];
 
 export const projectTasks: Task[] = [
-  { id: 'T1', projectId: '1', name: 'Finalize Requirements Document', assignee: 'Jane Doe', assigneeType: 'Subcontractor', partnerId: 'PT1', dueDate: '2026-04-15', status: 'Done', priority: 'High' },
+  // PHASE D — assignee is a PERSON reference to the resources catalog (or 'Unassigned').
+  // Reconcile the orphan names ('Jane Doe'/'John Smith') to existing resources.
+  { id: 'T1', projectId: '1', name: 'Finalize Requirements Document', assignee: 'Julie Armstrong', assigneeType: 'Subcontractor', partnerId: 'PT1', dueDate: '2026-04-15', status: 'Done', priority: 'High' },
   // Internal tasks have no partner. partnerId is a nullable FK to project_partners;
   // omit it (-> NULL) rather than '' so the Postgres FK is satisfied (an empty
   // string is a non-NULL value with no matching partner row).
-  { id: 'T2', projectId: '1', name: 'Design Database Schema', assignee: 'John Smith', assigneeType: 'Internal', dueDate: '2026-04-25', status: 'In Progress', priority: 'Medium' },
+  { id: 'T2', projectId: '1', name: 'Design Database Schema', assignee: 'John Miller', assigneeType: 'Internal', dueDate: '2026-04-25', status: 'In Progress', priority: 'Medium' },
   { id: 'T3', projectId: '2', name: 'Setup CI/CD Pipeline', assignee: 'Unassigned', assigneeType: 'Internal', dueDate: '2026-05-05', status: 'To Do', priority: 'Medium' },
 ];
 
 export const projectIssues: Issue[] = [
-  { id: 'I1', projectId: '1', title: 'API Rate Limiting', type: 'Bug', severity: 'High', status: 'Open', reportedBy: 'Jane Doe', owner: 'Julie Armstrong', dueDate: '2026-05-15', impact: 'May slow integration testing', actionPlan: 'Add rate-limit handling and retry policy', escalated: true },
-  { id: 'I2', projectId: '1', title: 'Delay in Hardware Delivery', type: 'Risk', severity: 'Medium', status: 'Mitigated', reportedBy: 'John Smith', owner: 'John Miller', dueDate: '2026-05-20', impact: 'Potential schedule slippage', actionPlan: 'Use cloud test environment until hardware arrives', escalated: false },
-  { id: 'I3', projectId: '2', title: 'UI Inconsistencies', type: 'Bug', severity: 'Low', status: 'Open', reportedBy: 'Alice Johnson', owner: 'Alice Smith', dueDate: '2026-06-01', impact: 'Client acceptance friction', actionPlan: 'Run design QA pass', escalated: false },
+  // PHASE D — reportedBy/owner are PERSON references to the resources catalog. Reconcile
+  // the orphan reportedBy names ('Jane Doe'/'John Smith'/'Alice Johnson') to existing
+  // resources; owners were already valid resource names.
+  { id: 'I1', projectId: '1', title: 'API Rate Limiting', type: 'Bug', severity: 'High', status: 'Open', reportedBy: 'Julie Armstrong', owner: 'Julie Armstrong', dueDate: '2026-05-15', impact: 'May slow integration testing', actionPlan: 'Add rate-limit handling and retry policy', escalated: true },
+  { id: 'I2', projectId: '1', title: 'Delay in Hardware Delivery', type: 'Risk', severity: 'Medium', status: 'Mitigated', reportedBy: 'John Miller', owner: 'John Miller', dueDate: '2026-05-20', impact: 'Potential schedule slippage', actionPlan: 'Use cloud test environment until hardware arrives', escalated: false },
+  { id: 'I3', projectId: '2', title: 'UI Inconsistencies', type: 'Bug', severity: 'Low', status: 'Open', reportedBy: 'Alice Smith', owner: 'Alice Smith', dueDate: '2026-06-01', impact: 'Client acceptance friction', actionPlan: 'Run design QA pass', escalated: false },
 ];
 
 export const changeRequests: ChangeRequest[] = [
@@ -245,8 +254,10 @@ export const changeRequests: ChangeRequest[] = [
 
 // Configuration-level cost centers (B16)
 export const costCenters: CostCenter[] = [
-  { id: 'CC-9001', name: 'Corporate IT', manager: 'Dana White', allocated: 200000, actual: 150000 },
-  { id: 'CC-9002', name: 'Shared Services', manager: 'Erik Stone', allocated: 80000, actual: 64000 },
+  // PHASE D — manager is a PERSON reference to the resources catalog; reconcile the
+  // orphan names ('Dana White'/'Erik Stone') to existing resources.
+  { id: 'CC-9001', name: 'Corporate IT', manager: 'Alice Smith', allocated: 200000, actual: 150000 },
+  { id: 'CC-9002', name: 'Shared Services', manager: 'John Miller', allocated: 80000, actual: 64000 },
 ];
 
 // --- Commercial domain (ADR-0001): Customers, Contracts, Orders, OrderLines ---

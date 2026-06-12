@@ -1,10 +1,15 @@
 import { ChangeDetectionStrategy, Component, input, signal, computed, inject, DestroyRef } from '@angular/core';
 import { rxResource, toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { of } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Order, OrderLine, Partner, Project, Task } from '../../services/api.service';
+import { ApiService, Order, OrderLine, Partner, Project, Resource, Task } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+
+/** Sentinel value for an explicitly unassigned task assignee (an empty person ref). */
+const UNASSIGNED = 'Unassigned';
 
 @Component({
   selector: 'app-project-tasks',
@@ -120,8 +125,20 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               </div>
 
               <div>
-                <label for="taskAssignee" class="block text-sm font-semibold text-ink-secondary mb-1.5">Assignee / Contact</label>
-                <input id="taskAssignee" type="text" formControlName="assignee" class="command-input" placeholder="e.g. Jane Doe">
+                <label for="taskAssignee" class="block text-sm font-semibold text-ink-secondary mb-1.5">Assignee</label>
+                <!-- A task assignee is a PERSON reference: bound to the resources (people)
+                     catalog by name, never free-typed. "Unassigned" is the explicit empty option. -->
+                <select id="taskAssignee" formControlName="assignee" class="command-select">
+                  <option [value]="unassigned">Unassigned</option>
+                  @for (r of resourceOptions(); track r.id) {
+                    <option [value]="r.name">{{ r.name }}</option>
+                  }
+                  <!-- ORPHAN VALUE: a stored assignee not in the catalog stays selectable as a
+                       disabled "(not in catalog)" option so editing never silently wipes it. -->
+                  @if (orphanAssignee(); as orphan) {
+                    <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                  }
+                </select>
               </div>
 
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -179,17 +196,40 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 export class ProjectTasks {
   projectId = input<string>();
   private api = inject(ApiService);
+  private auth = inject(AuthService);
   private notificationService = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
+
+  /** Exposed to the template for the explicit "Unassigned" empty option. */
+  protected readonly unassigned = UNASSIGNED;
 
   private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
   projects = computed(() => this.projectsRes.value());
   selectedProjectId = signal<string>('');
   showForm = signal(false);
-  
+
+  // Assignee option source: the resources (people) catalog. Stored value = resource
+  // name (Phase D). /resources is a principal-gated read (401 until the Keycloak JWT
+  // is restored), so key the load on authReady to fire only after the OAuth bootstrap
+  // settles — firing earlier 401s and latches the option list empty.
+  private resourcesRes = rxResource<Resource[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
+    defaultValue: [] as Resource[],
+  });
+  resourceOptions = this.resourcesRes.value;
+
+  // ORPHAN VALUE: a stored assignee that isn't a current resource name (and isn't the
+  // 'Unassigned' sentinel) is surfaced as a disabled option so editing never drops it.
+  orphanAssignee = computed<string | null>(() => {
+    const current = this.assigneeValue();
+    if (!current || current === UNASSIGNED) return null;
+    return this.resourceOptions().some(r => r.name === current) ? null : current;
+  });
+
   taskForm = new FormGroup({
     name: new FormControl('', Validators.required),
-    assignee: new FormControl('Unassigned'),
+    assignee: new FormControl(UNASSIGNED),
     assigneeType: new FormControl<'Internal' | 'Subcontractor'>('Internal', { nonNullable: true, validators: Validators.required }),
     partnerId: new FormControl('', { nonNullable: true }),
     dueDate: new FormControl('', Validators.required),
@@ -207,6 +247,8 @@ export class ProjectTasks {
   orderLines = this.orderLinesRes.value;
 
   selectedAssigneeType = toSignal(this.taskForm.controls.assigneeType.valueChanges, { initialValue: this.taskForm.controls.assigneeType.value });
+  /** The assignee value currently in the form (drives orphan detection). */
+  private assigneeValue = toSignal(this.taskForm.controls.assignee.valueChanges, { initialValue: this.taskForm.controls.assignee.value });
 
   filteredTasks = computed(() => {
     const pId = this.projectId() || this.selectedProjectId();

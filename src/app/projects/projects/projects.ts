@@ -3,8 +3,10 @@ import { MatIconModule } from '@angular/material/icon';
 import { DatePipe } from '@angular/common';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { toSignal, rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { of } from 'rxjs';
 import { RouterLink } from '@angular/router';
-import { ApiService, Project, Contract } from '../../services/api.service';
+import { ApiService, Project, Contract, Resource } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
 @Component({
@@ -19,7 +21,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
           <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">My Collaborative Projects</h1>
           <p class="mt-2 text-sm text-[var(--cc-muted)]">Manage and track all your ongoing and completed projects.</p>
         </div>
-        <button (click)="showForm.set(true)" class="command-button w-full sm:w-auto">
+        <button (click)="openCreateForm()" class="command-button w-full sm:w-auto">
           <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon> Create Project
         </button>
       </div>
@@ -176,6 +178,27 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 </div>
 
                 <div class="sm:col-span-2">
+                  <label for="projectOwner" class="block text-sm font-semibold text-ink-secondary mb-1.5">Owner *</label>
+                  <!-- The project owner is a PERSON reference. ownerId is an ID field, so the
+                       SELECT stores the resource id (label = resource name) bound to the
+                       resources (people) catalog. -->
+                  <select id="projectOwner" formControlName="ownerId" class="command-select"
+                          [attr.aria-invalid]="projectForm.controls.ownerId.invalid && (projectForm.controls.ownerId.touched || projectForm.controls.ownerId.dirty)"
+                          [attr.aria-describedby]="projectForm.controls.ownerId.invalid && (projectForm.controls.ownerId.touched || projectForm.controls.ownerId.dirty) ? 'projectOwnerError' : null">
+                    <option value="" disabled>Select an owner...</option>
+                    @for (r of resourceOptions(); track r.id) {
+                      <option [value]="r.id">{{ r.name }}</option>
+                    }
+                    @if (orphanOwner(); as orphan) {
+                      <option [value]="orphan.id" disabled>{{ orphan.label }} (not in catalog)</option>
+                    }
+                  </select>
+                  @if (projectForm.controls.ownerId.invalid && (projectForm.controls.ownerId.touched || projectForm.controls.ownerId.dirty)) {
+                    <p id="projectOwnerError" class="command-field-error" role="alert">Owner is required.</p>
+                  }
+                </div>
+
+                <div class="sm:col-span-2">
                   <label for="projectContract" class="block text-sm font-semibold text-ink-secondary mb-1.5">Contract</label>
                   <select id="projectContract" formControlName="contractId" class="command-select">
                     <option value="">No contract linked</option>
@@ -226,6 +249,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 })
 export class ProjectsComponent {
   private api = inject(ApiService);
+  private auth = inject(AuthService);
   private destroyRef = inject(DestroyRef);
 
   private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
@@ -236,6 +260,17 @@ export class ProjectsComponent {
   editingId = signal<string | null>(null);
   deletingId = signal<string | null>(null);
 
+  // The project owner is a PERSON reference. ownerId is an ID field, so the SELECT
+  // stores the resource id (label = resource name) bound to the resources (people)
+  // catalog (Phase D). /resources is a principal-gated read, so key the load on
+  // authReady to avoid a 401 race that would latch the option list empty.
+  private resourcesRes = rxResource<Resource[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
+    defaultValue: [] as Resource[],
+  });
+  resourceOptions = this.resourcesRes.value;
+
   searchControl = new FormControl('');
   searchValue = toSignal(this.searchControl.valueChanges, { initialValue: '' });
 
@@ -245,8 +280,18 @@ export class ProjectsComponent {
     startDate: new FormControl('', Validators.required),
     endDate: new FormControl('', Validators.required),
     status: new FormControl('In Planning', Validators.required),
+    ownerId: new FormControl('', Validators.required),
     contractId: new FormControl(''),
     description: new FormControl('')
+  });
+
+  // ORPHAN VALUE: a stored ownerId that isn't a current resource id is surfaced as a
+  // disabled option (showing the raw id) so editing never silently discards it.
+  private ownerIdValue = toSignal(this.projectForm.controls.ownerId.valueChanges, { initialValue: this.projectForm.controls.ownerId.value });
+  orphanOwner = computed<{ id: string; label: string } | null>(() => {
+    const current = this.ownerIdValue();
+    if (!current) return null;
+    return this.resourceOptions().some(r => r.id === current) ? null : { id: current, label: current };
   });
 
   filteredProjects = computed(() => {
@@ -273,6 +318,7 @@ export class ProjectsComponent {
       startDate: project.startDate,
       endDate: project.endDate,
       status: project.status,
+      ownerId: project.ownerId || '',
       contractId: project.contractId || '',
       description: project.description
     });
@@ -281,9 +327,10 @@ export class ProjectsComponent {
 
   saveProject() {
     if (this.projectForm.invalid) return;
-    
+
+    // ownerId is a real resource-id reference chosen in the Owner SELECT (no longer a
+    // hardcoded mock id). The required validator guarantees it is set here.
     const projectData = this.projectForm.value as Partial<Project>;
-    projectData.ownerId = '1'; // Mock current user
 
     if (this.editingId()) {
       this.api.updateProject(this.editingId()!, projectData)
@@ -322,9 +369,16 @@ export class ProjectsComponent {
     this.deletingId.set(null);
   }
 
+  /** Open the create form, defaulting the owner to the signed-in user's resource id. */
+  openCreateForm() {
+    this.editingId.set(null);
+    this.projectForm.reset({ status: 'In Planning', ownerId: this.auth.userId(), contractId: '' });
+    this.showForm.set(true);
+  }
+
   closeForm() {
     this.showForm.set(false);
     this.editingId.set(null);
-    this.projectForm.reset({ status: 'In Planning', contractId: '' });
+    this.projectForm.reset({ status: 'In Planning', ownerId: '', contractId: '' });
   }
 }
