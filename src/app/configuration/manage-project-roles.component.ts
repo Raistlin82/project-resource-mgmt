@@ -22,16 +22,16 @@ import { NotificationService } from '../services/notification.service';
           <form [formGroup]="roleForm" (ngSubmit)="onSubmit()" class="space-y-6 max-w-md">
             <div>
               <label for="roleCode" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Code</label>
-              <input id="roleCode" type="text" formControlName="code" maxlength="4" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-bold text-blue-700 font-mono placeholder:text-slate-400 transition-all uppercase">
+              <input id="roleCode" type="text" formControlName="code" maxlength="4" class="command-input font-mono uppercase">
               <p class="text-[10px] font-bold text-[var(--cc-muted)] uppercase tracking-wider mt-2">Up to 4 alphanumeric characters.</p>
             </div>
             <div>
               <label for="roleName" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Name</label>
-              <input id="roleName" type="text" formControlName="name" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-bold text-slate-900 placeholder:text-slate-400 transition-all">
+              <input id="roleName" type="text" formControlName="name" class="command-input">
             </div>
             <div>
               <label for="roleDescription" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Description</label>
-              <textarea id="roleDescription" formControlName="description" rows="3" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-medium text-slate-700 placeholder:text-slate-400 transition-all"></textarea>
+              <textarea id="roleDescription" formControlName="description" rows="3" class="command-textarea"></textarea>
             </div>
             <div class="flex justify-end gap-3 pt-2">
               <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
@@ -66,7 +66,7 @@ import { NotificationService } from '../services/notification.service';
                   }
                 </td>
                 <td class="text-right">
-                  <button type="button" (click)="toggleRestrict(role)" class="w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-amber-700 hover:border-amber-200 hover:bg-amber-50 transition-all inline-flex items-center justify-center shadow-sm" [attr.aria-label]="(role.restricted ? 'Unrestrict ' : 'Restrict ') + role.name" [title]="role.restricted ? 'Unrestrict' : 'Restrict'">
+                  <button type="button" (click)="toggleRestrict(role)" class="w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-caution-text hover:border-caution hover:bg-caution-tint transition-all inline-flex items-center justify-center shadow-sm" [attr.aria-label]="(role.restricted ? 'Unrestrict ' : 'Restrict ') + role.name" [title]="role.restricted ? 'Unrestrict' : 'Restrict'">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">{{ role.restricted ? 'lock_open' : 'block' }}</mat-icon>
                   </button>
                 </td>

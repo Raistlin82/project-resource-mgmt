@@ -45,7 +45,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               @for (c of contracts(); track c.id) {
                 <tr>
                   <td class="font-semibold">
-                    <a [routerLink]="['/contracts', c.id]" class="hover:text-blue-700 transition-colors">{{ c.name }}</a>
+                    <a [routerLink]="['/contracts', c.id]" class="hover:text-accent-text transition-colors">{{ c.name }}</a>
                   </td>
                   <td class="text-[var(--cc-muted)]">{{ customerName(c.customerId) }}</td>
                   <td class="text-[var(--cc-muted)]">{{ c.type }}</td>
@@ -81,12 +81,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
     <!-- New Contract Modal -->
     @if (showForm()) {
-      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+      <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
            appModal ariaLabelledby="contractModalTitle" (dismiss)="closeForm()">
         <div class="command-card w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
           <div class="command-card-header">
             <h2 id="contractModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">New Contract</h2>
-            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-colors">
+            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-ink-muted hover:text-ink-secondary hover:bg-surface-muted transition-colors">
               <mat-icon>close</mat-icon>
             </button>
           </div>
@@ -95,8 +95,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <form [formGroup]="contractForm" (ngSubmit)="save()" class="space-y-6">
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div class="sm:col-span-2">
-                  <label for="contractCustomer" class="block text-sm font-semibold text-slate-700 mb-1.5">Customer *</label>
-                  <select id="contractCustomer" formControlName="customerId" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white">
+                  <label for="contractCustomer" class="block text-sm font-semibold text-ink-secondary mb-1.5">Customer *</label>
+                  <select id="contractCustomer" formControlName="customerId" class="command-select">
                     <option value="">Select a customer...</option>
                     @for (customer of customers(); track customer.id) {
                       <option [value]="customer.id">{{ customer.name }}</option>
@@ -105,13 +105,13 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 </div>
 
                 <div class="sm:col-span-2">
-                  <label for="contractName" class="block text-sm font-semibold text-slate-700 mb-1.5">Name *</label>
-                  <input id="contractName" type="text" formControlName="name" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white placeholder:text-slate-400" placeholder="e.g. Master Services Agreement">
+                  <label for="contractName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Name *</label>
+                  <input id="contractName" type="text" formControlName="name" class="command-input" placeholder="e.g. Master Services Agreement">
                 </div>
 
                 <div>
-                  <label for="contractType" class="block text-sm font-semibold text-slate-700 mb-1.5">Type *</label>
-                  <select id="contractType" formControlName="type" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white">
+                  <label for="contractType" class="block text-sm font-semibold text-ink-secondary mb-1.5">Type *</label>
+                  <select id="contractType" formControlName="type" class="command-select">
                     <option value="T&M">T&M</option>
                     <option value="Fixed Price">Fixed Price</option>
                     <option value="Framework">Framework</option>
@@ -119,8 +119,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 </div>
 
                 <div>
-                  <label for="contractStatus" class="block text-sm font-semibold text-slate-700 mb-1.5">Status *</label>
-                  <select id="contractStatus" formControlName="status" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white">
+                  <label for="contractStatus" class="block text-sm font-semibold text-ink-secondary mb-1.5">Status *</label>
+                  <select id="contractStatus" formControlName="status" class="command-select">
                     <option value="Draft">Draft</option>
                     <option value="Active">Active</option>
                     <option value="Closed">Closed</option>
@@ -128,23 +128,23 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 </div>
 
                 <div>
-                  <label for="contractTotalValue" class="block text-sm font-semibold text-slate-700 mb-1.5">Total Value *</label>
-                  <input id="contractTotalValue" type="number" formControlName="totalValue" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white placeholder:text-slate-400" placeholder="0">
+                  <label for="contractTotalValue" class="block text-sm font-semibold text-ink-secondary mb-1.5">Total Value *</label>
+                  <input id="contractTotalValue" type="number" formControlName="totalValue" class="command-input" placeholder="0">
                 </div>
 
                 <div>
-                  <label for="contractCurrency" class="block text-sm font-semibold text-slate-700 mb-1.5">Currency *</label>
-                  <input id="contractCurrency" type="text" formControlName="currency" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white placeholder:text-slate-400" placeholder="EUR">
+                  <label for="contractCurrency" class="block text-sm font-semibold text-ink-secondary mb-1.5">Currency *</label>
+                  <input id="contractCurrency" type="text" formControlName="currency" class="command-input" placeholder="EUR">
                 </div>
 
                 <div>
-                  <label for="contractStartDate" class="block text-sm font-semibold text-slate-700 mb-1.5">Start Date *</label>
-                  <input id="contractStartDate" type="date" formControlName="startDate" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white">
+                  <label for="contractStartDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Start Date *</label>
+                  <input id="contractStartDate" type="date" formControlName="startDate" class="command-input">
                 </div>
 
                 <div>
-                  <label for="contractEndDate" class="block text-sm font-semibold text-slate-700 mb-1.5">End Date *</label>
-                  <input id="contractEndDate" type="date" formControlName="endDate" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white">
+                  <label for="contractEndDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">End Date *</label>
+                  <input id="contractEndDate" type="date" formControlName="endDate" class="command-input">
                 </div>
               </div>
             </form>

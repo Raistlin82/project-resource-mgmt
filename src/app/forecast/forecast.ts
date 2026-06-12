@@ -16,6 +16,12 @@ import {
   skillGap,
 } from '../services/forecast.util';
 import { toCsv, downloadCsv, CsvColumn } from '../services/export.util';
+import {
+  CommandBarChartComponent,
+  CommandTrendChartComponent,
+  BarSeries,
+  TrendSeries,
+} from '../shared/charts';
 
 /** Selectable rolling horizon, in weeks. */
 type Horizon = 8 | 12;
@@ -23,14 +29,8 @@ type Horizon = 8 | 12;
 /** Gap band used to colour utilisation: spare / healthy / over capacity. */
 type GapBand = 'under' | 'tight' | 'over';
 
-/** A capacity period enriched with display-only geometry (bar widths + band). */
+/** A capacity period enriched with display-only band + label for the table. */
 interface PeriodRow extends CapacityPeriod {
-  /** Supply bar width as a % of the horizon's busiest period. */
-  supplyPct: number;
-  /** Committed-demand bar width as a % of the horizon's busiest period. */
-  committedPct: number;
-  /** Pipeline-demand bar width as a % of the horizon's busiest period. */
-  pipelinePct: number;
   /** Utilisation band driving the gap colour. */
   band: GapBand;
   /** Short label for the period start (e.g. "12 May"). */
@@ -40,7 +40,7 @@ interface PeriodRow extends CapacityPeriod {
 @Component({
   selector: 'app-forecast',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [DecimalPipe],
+  imports: [DecimalPipe, CommandBarChartComponent, CommandTrendChartComponent],
   template: `
     <div class="command-page space-y-6">
       <header class="command-header">
@@ -61,7 +61,7 @@ interface PeriodRow extends CapacityPeriod {
                 (click)="setHorizon(h)"
                 [attr.aria-pressed]="horizon() === h"
                 class="rounded px-4 py-1.5 text-sm font-semibold font-mono tabular-nums transition-colors"
-                [class]="horizon() === h ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 hover:text-blue-700'">
+                [class]="horizon() === h ? 'bg-accent text-white shadow-sm' : 'text-ink-secondary hover:text-accent-text'">
                 {{ h }}w
               </button>
             }
@@ -107,13 +107,33 @@ interface PeriodRow extends CapacityPeriod {
               <p class="mt-1 text-sm text-[var(--cc-muted)]">Per week: committed plus pipeline demand against available supply.</p>
             </div>
             <div class="flex flex-wrap items-center gap-3 text-xs text-[var(--cc-muted)]">
-              <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-slate-300"></span>Supply</span>
-              <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-blue-600"></span>Committed</span>
-              <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-blue-300"></span>Pipeline</span>
               @if (canExport()) {
                 <button type="button" class="command-button secondary" (click)="exportTimeline()">Export CSV</button>
               }
             </div>
+          </div>
+
+          <!-- Supply (Σ capacity) vs the committed + pipeline demand stack, per week. -->
+          <div class="px-5 pt-4">
+            <command-bar-chart
+              [categories]="weekLabels()"
+              [series]="capacitySeries()"
+              [stacked]="false"
+              [height]="300"
+              formatKind="number"
+              ariaLabel="Supply versus committed and pipeline demand by week"
+              caption="Weekly supply, committed and pipeline demand in hours" />
+          </div>
+
+          <!-- Utilisation trend across the horizon, against the 100% capacity line. -->
+          <div class="px-5 pb-2">
+            <command-trend-chart
+              [categories]="weekLabels()"
+              [series]="utilizationSeries()"
+              mode="area" [smooth]="true"
+              formatKind="percent"
+              ariaLabel="Weekly utilization versus 100% capacity"
+              caption="Weekly utilization percentage against the 100% capacity line" />
           </div>
 
           <div class="overflow-x-auto">
@@ -121,7 +141,6 @@ interface PeriodRow extends CapacityPeriod {
               <thead>
                 <tr>
                   <th scope="col">Week of</th>
-                  <th scope="col">Capacity profile</th>
                   <th scope="col" class="num">Supply</th>
                   <th scope="col" class="num">Demand</th>
                   <th scope="col" class="num">Util %</th>
@@ -132,19 +151,6 @@ interface PeriodRow extends CapacityPeriod {
                 @for (row of periodRows(); track row.period) {
                   <tr>
                     <td class="font-mono whitespace-nowrap">{{ row.label }}</td>
-                    <td class="min-w-[14rem]">
-                      <div class="space-y-1.5" [attr.aria-label]="row.committed + ' committed plus ' + row.pipeline + ' pipeline hours against ' + row.supply + ' supply'">
-                        <!-- Supply track -->
-                        <div class="h-2 overflow-hidden rounded-full bg-slate-100">
-                          <span class="block h-full rounded-full bg-slate-300" [style.width.%]="row.supplyPct"></span>
-                        </div>
-                        <!-- Demand track: committed + pipeline stacked -->
-                        <div class="flex h-2 overflow-hidden rounded-full bg-slate-100">
-                          <span class="block h-full bg-blue-600" [style.width.%]="row.committedPct"></span>
-                          <span class="block h-full bg-blue-300" [style.width.%]="row.pipelinePct"></span>
-                        </div>
-                      </div>
-                    </td>
                     <td class="num">{{ row.supply | number: '1.0-0' }}</td>
                     <td class="num">{{ row.demand | number: '1.0-0' }}</td>
                     <td class="num">
@@ -362,20 +368,42 @@ export class Forecast {
     capacityForecast(this.forecastData(), this.horizonStartIso(), this.horizon(), 'weekly'),
   );
 
-  /** Capacity periods enriched with bar geometry + colour band for the timeline. */
+  /** Capacity periods enriched with colour band + short label for the table. */
   readonly periodRows = computed<PeriodRow[]>(() => {
-    const rows = this.periods();
-    // Scale every bar against the busiest figure across the horizon (>=1 to avoid /0).
-    const scale = Math.max(1, ...rows.map(r => Math.max(r.supply, r.demand)));
-    const pct = (v: number) => Math.min(100, Math.max(0, (v / scale) * 100));
-    return rows.map(r => ({
+    return this.periods().map(r => ({
       ...r,
-      supplyPct: pct(r.supply),
-      committedPct: pct(r.committed),
-      pipelinePct: pct(r.pipeline),
       band: this.bandFor(r.utilizationPct),
       label: this.shortDate(r.period),
     }));
+  });
+
+  /** Week-start labels (e.g. "12 May") shared by the bar + trend charts. */
+  readonly weekLabels = computed<string[]>(() => this.periods().map(r => this.shortDate(r.period)));
+
+  /**
+   * Capacity bar series — Supply (series-6/slate), Committed (accent), Pipeline (series-2/teal).
+   * Committed and Pipeline get genuinely distinct tones so the two demand bands (and
+   * their matching legend swatches) never collapse to the same colour.
+   */
+  readonly capacitySeries = computed<BarSeries[]>(() => {
+    const rows = this.periods();
+    return [
+      { name: 'Supply', values: rows.map(r => r.supply), color: 'var(--color-series-6)' },
+      { name: 'Committed', values: rows.map(r => r.committed), color: 'var(--color-accent)' },
+      { name: 'Pipeline', values: rows.map(r => r.pipeline), color: 'var(--color-series-2)' },
+    ];
+  });
+
+  /**
+   * Utilisation trend (as a 0..1 fraction so the percent formatter renders 42%
+   * etc.) against a flat 100%-capacity reference line.
+   */
+  readonly utilizationSeries = computed<TrendSeries[]>(() => {
+    const rows = this.periods();
+    return [
+      { name: 'Utilization', values: rows.map(r => r.utilizationPct / 100) },
+      { name: 'Capacity', values: rows.map(() => 1) },
+    ];
   });
 
   // --- KPI strip ---

@@ -72,12 +72,12 @@ import { ListStateComponent } from '../../shared/list-state.component';
 
     <!-- Create Modal -->
     @if (showForm()) {
-      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+      <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
            appModal ariaLabelledby="customerModalTitle" (dismiss)="closeForm()">
         <div class="command-card w-full max-w-xl overflow-hidden flex flex-col max-h-[90vh]">
           <div class="command-card-header">
             <h2 id="customerModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">New Customer</h2>
-            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-colors">
+            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-ink-muted hover:text-ink-secondary hover:bg-surface-muted transition-colors">
               <mat-icon>close</mat-icon>
             </button>
           </div>
@@ -86,16 +86,21 @@ import { ListStateComponent } from '../../shared/list-state.component';
             <form [formGroup]="customerForm" (ngSubmit)="save()" class="space-y-6">
               <div class="grid grid-cols-1 gap-6">
                 <div>
-                  <label for="customerName" class="block text-sm font-semibold text-slate-700 mb-1.5">Name *</label>
-                  <input id="customerName" type="text" formControlName="name" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. Acme Corporation">
+                  <label for="customerName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Name *</label>
+                  <input id="customerName" type="text" formControlName="name" class="command-input" placeholder="e.g. Acme Corporation"
+                         [attr.aria-invalid]="customerForm.controls.name.invalid && (customerForm.controls.name.touched || customerForm.controls.name.dirty)"
+                         [attr.aria-describedby]="customerForm.controls.name.invalid && (customerForm.controls.name.touched || customerForm.controls.name.dirty) ? 'customerNameError' : null">
+                  @if (customerForm.controls.name.invalid && (customerForm.controls.name.touched || customerForm.controls.name.dirty)) {
+                    <p id="customerNameError" class="command-field-error" role="alert">Name is required.</p>
+                  }
                 </div>
                 <div>
-                  <label for="customerIndustry" class="block text-sm font-semibold text-slate-700 mb-1.5">Industry</label>
-                  <input id="customerIndustry" type="text" formControlName="industry" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. Manufacturing">
+                  <label for="customerIndustry" class="block text-sm font-semibold text-ink-secondary mb-1.5">Industry</label>
+                  <input id="customerIndustry" type="text" formControlName="industry" class="command-input" placeholder="e.g. Manufacturing">
                 </div>
                 <div>
-                  <label for="customerCountry" class="block text-sm font-semibold text-slate-700 mb-1.5">Country</label>
-                  <input id="customerCountry" type="text" formControlName="country" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. United States">
+                  <label for="customerCountry" class="block text-sm font-semibold text-ink-secondary mb-1.5">Country</label>
+                  <input id="customerCountry" type="text" formControlName="country" class="command-input" placeholder="e.g. United States">
                 </div>
               </div>
             </form>

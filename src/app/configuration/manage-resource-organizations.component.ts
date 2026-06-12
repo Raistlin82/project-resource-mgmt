@@ -25,11 +25,11 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <label for="orgName" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Name</label>
-                <input id="orgName" type="text" formControlName="name" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-bold text-slate-900 placeholder:text-slate-400 transition-all">
+                <input id="orgName" type="text" formControlName="name" class="command-input">
               </div>
               <div>
                 <label for="orgDescription" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Description</label>
-                <input id="orgDescription" type="text" formControlName="description" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-medium text-slate-900 placeholder:text-slate-400 transition-all">
+                <input id="orgDescription" type="text" formControlName="description" class="command-input">
               </div>
             </div>
 
@@ -45,9 +45,9 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
                 @for (cc of costCenters.controls; track i; let i = $index) {
                   <div class="command-card flex gap-4 items-center p-4 group">
                     <div class="flex-1">
-                      <input type="text" [formControlName]="i" placeholder="Cost Center ID" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white font-mono font-bold text-blue-700 placeholder:text-slate-400 transition-all">
+                      <input type="text" [formControlName]="i" placeholder="Cost Center ID" class="command-input font-mono">
                     </div>
-                    <button type="button" (click)="removeCostCenter(i)" class="w-10 h-10 rounded-full bg-slate-50 border border-slate-200 text-slate-500 hover:text-red-600 hover:border-red-300 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm">
+                    <button type="button" (click)="removeCostCenter(i)" class="w-10 h-10 rounded-full bg-surface-muted border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">remove_circle</mat-icon>
                     </button>
                   </div>
@@ -89,7 +89,7 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
                     </div>
                   </td>
                   <td class="text-right">
-                    <button (click)="deleteOrg(org.id)" class="w-10 h-10 rounded-full bg-slate-50 border border-slate-200 text-slate-500 hover:text-red-600 hover:border-red-300 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm" title="Delete">
+                    <button (click)="deleteOrg(org.id)" class="w-10 h-10 rounded-full bg-surface-muted border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm" title="Delete">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                     </button>
                   </td>
@@ -102,19 +102,19 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
     </div>
 
     @if (deletingId()) {
-      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+      <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
            appModal ariaLabelledby="resourceOrgDeleteTitle" (dismiss)="cancelDelete()">
         <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col transform transition-all">
           <div class="p-8 text-center">
-            <div class="w-20 h-20 bg-red-50 ring-1 ring-red-200 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner">
-              <mat-icon class="text-red-700 text-4xl">warning</mat-icon>
+            <div class="w-20 h-20 bg-critical-tint ring-1 ring-critical rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner">
+              <mat-icon class="text-critical-text text-4xl">warning</mat-icon>
             </div>
             <h3 id="resourceOrgDeleteTitle" class="font-display text-2xl font-bold text-[var(--cc-ink)] mb-2 tracking-tight">Delete Resource Organization</h3>
             <p class="text-[var(--cc-muted)] text-sm">Are you sure you want to delete this resource organization? This action cannot be undone.</p>
           </div>
           <div class="p-5 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
             <button (click)="cancelDelete()" class="command-button secondary">Cancel</button>
-            <button (click)="confirmDelete()" class="px-6 py-2.5 bg-red-50 text-red-700 ring-1 ring-red-200 rounded-xl text-sm font-semibold hover:bg-red-100 hover:shadow-md hover:-translate-y-0.5 transition-all">Delete</button>
+            <button (click)="confirmDelete()" class="px-6 py-2.5 bg-critical-tint text-critical-text ring-1 ring-critical rounded-xl text-sm font-semibold hover:bg-[color-mix(in_oklch,var(--color-critical)_16%,var(--color-surface))] hover:shadow-md hover:-translate-y-0.5 transition-all">Delete</button>
           </div>
         </div>
       </div>

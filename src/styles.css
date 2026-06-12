@@ -1,48 +1,130 @@
-@import url('https://fonts.googleapis.com/icon?family=Material+Icons');
 @import "tailwindcss";
+
+/* ============================================================
+   DESIGN SYSTEM — "Ledger"
+   Two-layer semantic token system in OKLCH.
+
+   Layer 1  (@theme, color + radius namespaces): Tailwind v4 design tokens,
+            authored in OKLCH and matched to the original light hex values.
+            These GENERATE semantic color utilities (bg-surface, text-ink,
+            border-line, …) and the radius scale (rounded-md to 8px, …).
+   Layer 2  (:root, legacy cc- palette): now pure ALIASES of the semantic
+            tokens so every existing command- primitive keeps working AND
+            inherits dark mode automatically.
+
+   Dark theme lives in :root[data-theme="dark"] and overrides ONLY the
+   semantic color tokens; everything downstream flips with it.
+   ============================================================ */
 
 @theme {
   --font-sans: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
   --font-display: "Schibsted Grotesk", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* ---- Semantic surfaces (light) ---- */
+  --color-canvas: oklch(0.971 0.002 264);          /* #f5f6f8 — page bg */
+  --color-surface: oklch(1 0 0);                   /* #ffffff — cards/panels */
+  --color-surface-muted: oklch(0.984 0.003 248);   /* #f8fafc */
+  --color-surface-raised: oklch(1 0 0);            /* #ffffff — overlays/popovers (= surface in light) */
+  --color-scrim: oklch(0.21 0.04 266);             /* ~#0f172a — modal backdrop veil; theme-STABLE (intentionally not overridden in dark, so modals dim consistently in both themes) */
+
+  /* ---- Ink (text) ---- */
+  --color-ink: oklch(0.193 0.027 277);             /* #0f1222 — headings / strong text */
+  --color-ink-secondary: oklch(0.346 0.018 273);   /* #3d4252 — body text */
+  --color-ink-muted: oklch(0.53 0.022 264);        /* muted text — ~5.2:1 on white, ~5.0:1 on surface-muted (AA margin) */
+  --color-ink-inverse: oklch(1 0 0);               /* #ffffff */
+
+  /* ---- Lines / borders ---- */
+  --color-line: oklch(0.921 0.006 274);            /* #e6e8ee */
+  --color-line-strong: oklch(0.873 0.009 275);     /* #d6d9e2 */
+
+  /* ---- Accent (cobalt) ---- */
+  --color-accent: oklch(0.546 0.215 263);          /* #2563eb — solid action bg */
+  --color-accent-strong: oklch(0.488 0.217 264);   /* #1d4ed8 */
+  --color-accent-text: oklch(0.488 0.217 264);     /* #1d4ed8 — accent as TEXT (5.9:1 on white) */
+  --color-accent-tint: oklch(0.97 0.014 254);      /* #eff6ff */
+
+  /* ---- Status: positive / caution / critical / info ---- */
+  --color-positive: oklch(0.598 0.134 163);        /* #059669 */
+  --color-positive-strong: oklch(0.52 0.13 165);   /* darker — hover for solid positive */
+  --color-positive-text: oklch(0.526 0.119 165);   /* #047857 */
+  --color-positive-tint: oklch(0.979 0.021 166);   /* #ecfdf5 */
+
+  --color-caution: oklch(0.687 0.169 56);          /* #d97706 */
+  --color-caution-strong: oklch(0.50 0.15 53);     /* darker — hover for solid caution */
+  --color-caution-text: oklch(0.55 0.15 53);       /* ~5.0:1 on caution-tint (AA) */
+  --color-caution-tint: oklch(0.987 0.022 95);     /* #fffbeb */
+
+  --color-critical: oklch(0.577 0.215 27);         /* #dc2626 */
+  --color-critical-strong: oklch(0.505 0.215 27);  /* #b91c1c — hover for solid critical */
+  --color-critical-text: oklch(0.505 0.213 27);    /* #b91c1c */
+  --color-critical-tint: oklch(0.971 0.013 18);    /* #fef2f2 */
+
+  --color-info: oklch(0.546 0.215 263);            /* #2563eb */
+  --color-info-text: oklch(0.488 0.217 264);       /* #1d4ed8 */
+  --color-info-tint: oklch(0.97 0.014 254);        /* #eff6ff */
+
+  /* ---- Categorical chart series (distinct, AA-ish on surface) ---- */
+  --color-series-1: oklch(0.546 0.215 263);        /* cobalt   #2563eb */
+  --color-series-2: oklch(0.52 0.118 192);         /* teal — darkened for AA as chip text (~4.9:1 on surface-muted) */
+  --color-series-3: oklch(0.541 0.247 293);        /* violet   ~#7c3aed */
+  --color-series-4: oklch(0.687 0.169 56);         /* amber    #d97706 */
+  --color-series-5: oklch(0.586 0.222 17);         /* rose     ~#e11d48 */
+  --color-series-6: oklch(0.554 0.034 257);        /* slate    ~#64748b */
+  --color-series-7: oklch(0.50 0.24 330);          /* magenta  ~#a21caf (AA-safe as text on light) */
+
+  /* ---- Radius scale (rounded-sm → 6px, rounded-md → 8px, …) ---- */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 12px;
+  --radius-2xl: 12px;
+  --radius-3xl: 12px;
+  --radius-full: 9999px;
 }
 
 :root {
-  --cc-bg: #f5f6f8;
-  --cc-surface: #ffffff;
-  --cc-panel: #ffffff;
-  --cc-panel-muted: #f8fafc;
-  --cc-ink: #0f1222;
-  --cc-muted: #6b7280;
-  --cc-line: #e6e8ee;
-  --cc-line-strong: #d6d9e2;
-  --cc-sidebar: #ffffff;
-  --cc-sidebar-2: #f8fafc;
-  --cc-primary: #2563eb;
-  --cc-primary-strong: #1d4ed8;
-  /* Accent TEXT token — blue-700 (~5.9:1 on white) for accent text on light surfaces.
-     Use this, NOT --cc-primary (#2563eb, ~4.0:1, fails AA for normal text), wherever an
-     accent color renders as readable TEXT on a light/white background. Keep --cc-primary
-     for solid button/bar BACKGROUNDS only. */
-  --cc-primary-text: #1d4ed8;
-  --cc-primary-tint: #eff6ff;
-  --cc-blue: #2563eb;
-  --cc-amber: #d97706;
-  --cc-red: #dc2626;
-  --cc-green: #059669;
-  /* Green/amber TEXT tokens — emerald-700 (#047857, ~5.5:1 on white) and amber-700
-     (#b45309, ~5.0:1 on white) for financial figures rendered as readable TEXT on light
-     surfaces. Use these, NOT --cc-green (#059669, ~3.8:1) / --cc-amber (#d97706, ~3.2:1)
-     which fail AA for normal text. Keep --cc-green/--cc-amber for borders/backgrounds only.
-     Mirrors the chips (.command-status.green/.amber) which already use these -700 shades. */
-  --cc-green-text: #047857;
-  --cc-amber-text: #b45309;
-  --cc-violet: #7c3aed;
+  color-scheme: light;
+
+  /* ============================================================
+     Legacy --cc-* palette — now pure ALIASES of semantic tokens.
+     Keeps every existing .command-* primitive working and makes them
+     inherit dark mode automatically (the semantic tokens flip).
+     ============================================================ */
+  --cc-bg: var(--color-canvas);
+  --cc-surface: var(--color-surface);
+  --cc-panel: var(--color-surface);
+  --cc-panel-muted: var(--color-surface-muted);
+  --cc-ink: var(--color-ink);
+  --cc-muted: var(--color-ink-muted);
+  --cc-line: var(--color-line);
+  --cc-line-strong: var(--color-line-strong);
+  --cc-sidebar: var(--color-surface);
+  --cc-sidebar-2: var(--color-surface-muted);
+  --cc-primary: var(--color-accent);
+  --cc-primary-strong: var(--color-accent-strong);
+  /* Accent TEXT token — use for accent rendered as readable TEXT on a light
+     surface (≥5.9:1). Keep --cc-primary for solid button/bar BACKGROUNDS. */
+  --cc-primary-text: var(--color-accent-text);
+  --cc-primary-tint: var(--color-accent-tint);
+  --cc-blue: var(--color-accent);
+  --cc-amber: var(--color-caution);
+  --cc-red: var(--color-critical);
+  --cc-green: var(--color-positive);
+  /* Financial-figure TEXT tokens — emerald-700 / amber-700 equivalents for
+     readable numbers on light surfaces (AA). Keep --cc-green/--cc-amber for
+     borders/backgrounds only. */
+  --cc-green-text: var(--color-positive-text);
+  --cc-amber-text: var(--color-caution-text);
+  --cc-violet: var(--color-series-3);
+
+  /* Elevation + glow (tuned for light; overridden in dark to be subtler) */
   --cc-shadow: 0 1px 2px rgb(16 18 34 / 4%), 0 12px 32px -14px rgb(16 18 34 / 16%);
   --cc-shadow-sm: 0 1px 2px rgb(16 18 34 / 4%), 0 8px 24px -12px rgb(16 18 34 / 10%);
-  --cc-glow: 0 0 0 1px rgb(37 99 235 / 12%), 0 6px 18px -8px rgb(37 99 235 / 35%);
+  --cc-glow: 0 0 0 1px color-mix(in oklch, var(--color-accent) 12%, transparent),
+             0 6px 18px -8px color-mix(in oklch, var(--color-accent) 35%, transparent);
 
-  /* Spacing rhythm — consistent vertical/horizontal scale */
+  /* Spacing rhythm — authored design tokens (use via var(--space-md)). */
   --space-3xs: 0.25rem;
   --space-2xs: 0.5rem;
   --space-xs: 0.75rem;
@@ -52,7 +134,7 @@
   --space-xl: 3rem;
   --space-2xl: 4rem;
 
-  /* Fluid type scale (1.20 minor-third-ish, clamped for fluidity) */
+  /* Fluid type scale (authored design tokens; use via var(--text-md) etc.). */
   --text-2xs: clamp(0.625rem, 0.6rem + 0.1vw, 0.6875rem);
   --text-xs: clamp(0.72rem, 0.7rem + 0.12vw, 0.78rem);
   --text-sm: clamp(0.84rem, 0.82rem + 0.15vw, 0.92rem);
@@ -68,6 +150,75 @@
   /* Motion */
   --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
   --reveal-distance: 12px;
+
+  /* Z-index scale — components adopt these incrementally. */
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-dropdown: 1000;
+  --z-overlay: 1100;
+  --z-modal: 1200;
+  --z-toast: 1300;
+}
+
+/* ============================================================
+   DARK THEME — overrides ONLY the semantic --color-* tokens.
+   Because --cc-* alias these, every primitive flips automatically.
+   Every *-text token verified ≥4.5:1 on its surface.
+   ============================================================ */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-canvas: oklch(0.17 0.015 270);
+  --color-surface: oklch(0.205 0.018 270);
+  --color-surface-muted: oklch(0.235 0.02 270);
+  --color-surface-raised: oklch(0.25 0.02 270);
+
+  --color-ink: oklch(0.96 0.004 250);
+  --color-ink-secondary: oklch(0.80 0.01 255);
+  --color-ink-muted: oklch(0.68 0.015 258);
+  --color-ink-inverse: oklch(0.205 0.018 270);
+
+  --color-line: oklch(0.30 0.02 270);
+  --color-line-strong: oklch(0.38 0.02 270);
+
+  --color-accent: oklch(0.64 0.16 258);
+  --color-accent-strong: oklch(0.72 0.15 258);
+  --color-accent-text: oklch(0.80 0.12 255);
+  --color-accent-tint: oklch(0.30 0.06 260);
+
+  --color-positive: oklch(0.62 0.13 163);
+  --color-positive-strong: oklch(0.70 0.13 163);
+  --color-positive-text: oklch(0.82 0.13 165);
+  --color-positive-tint: oklch(0.30 0.05 165);
+
+  --color-caution: oklch(0.70 0.16 60);
+  --color-caution-strong: oklch(0.78 0.15 65);
+  --color-caution-text: oklch(0.84 0.13 75);
+  --color-caution-tint: oklch(0.32 0.06 65);
+
+  --color-critical: oklch(0.62 0.20 25);
+  --color-critical-strong: oklch(0.70 0.20 25);
+  --color-critical-text: oklch(0.80 0.13 22);
+  --color-critical-tint: oklch(0.30 0.07 22);
+
+  --color-info: oklch(0.64 0.16 258);
+  --color-info-text: oklch(0.80 0.12 255);
+  --color-info-tint: oklch(0.30 0.06 260);
+
+  /* Series — lifted for visibility on dark surfaces */
+  --color-series-1: oklch(0.70 0.15 258);
+  --color-series-2: oklch(0.72 0.11 192);
+  --color-series-3: oklch(0.70 0.17 293);
+  --color-series-4: oklch(0.78 0.14 70);
+  --color-series-5: oklch(0.70 0.17 17);
+  --color-series-6: oklch(0.72 0.025 257);
+  --color-series-7: oklch(0.74 0.18 330);          /* magenta — lifted for AA on dark (was inheriting the light value → 2.50:1) */
+
+  /* Shadows read poorly on dark — make them subtler and lean on borders. */
+  --cc-shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 12px 32px -16px rgb(0 0 0 / 55%);
+  --cc-shadow-sm: 0 1px 2px rgb(0 0 0 / 25%), 0 8px 24px -14px rgb(0 0 0 / 45%);
+  --cc-glow: 0 0 0 1px color-mix(in oklch, var(--color-accent) 35%, transparent),
+             0 6px 18px -10px color-mix(in oklch, var(--color-accent) 45%, transparent);
 }
 
 html {
@@ -75,11 +226,15 @@ html {
   background: var(--cc-bg);
 }
 
+:root[data-theme="dark"] html {
+  color-scheme: dark;
+}
+
 body {
   min-height: 100vh;
   margin: 0;
   background: var(--cc-bg);
-  color: #3d4252;
+  color: var(--color-ink-secondary);
   font-family: var(--font-sans);
   font-size: 15.5px;
   font-feature-settings: "tnum";
@@ -97,9 +252,9 @@ body::before {
   z-index: 0;
   pointer-events: none;
   background:
-    radial-gradient(60rem 60rem at 92% -12%, rgb(37 99 235 / 4%), transparent 62%),
-    radial-gradient(52rem 52rem at -8% 110%, rgb(37 99 235 / 3%), transparent 60%),
-    radial-gradient(rgb(15 18 34 / 3%) 1px, transparent 1px);
+    radial-gradient(60rem 60rem at 92% -12%, color-mix(in oklch, var(--color-accent) 4%, transparent), transparent 62%),
+    radial-gradient(52rem 52rem at -8% 110%, color-mix(in oklch, var(--color-accent) 3%, transparent), transparent 60%),
+    radial-gradient(color-mix(in oklch, var(--color-ink) 3%, transparent) 1px, transparent 1px);
   background-size: auto, auto, 26px 26px;
 }
 
@@ -136,7 +291,7 @@ h2,
 h3,
 h4 {
   font-family: var(--font-display);
-  color: var(--cc-ink);
+  color: var(--color-ink);
   letter-spacing: -0.018em;
   line-height: var(--leading-tight);
   text-wrap: balance;
@@ -158,13 +313,13 @@ kbd {
 }
 
 ::selection {
-  background: rgb(37 99 235 / 18%);
-  color: var(--cc-ink);
+  background: color-mix(in oklch, var(--color-accent) 18%, transparent);
+  color: var(--color-ink);
 }
 
-/* Confident blue a11y focus ring on every interactive surface */
+/* Confident accent a11y focus ring on every interactive surface */
 :focus-visible {
-  outline: 2px solid rgb(37 99 235 / 65%);
+  outline: 2px solid color-mix(in oklch, var(--color-accent) 65%, transparent);
   outline-offset: 2px;
   border-radius: 4px;
 }
@@ -177,15 +332,15 @@ textarea:focus-visible,
 [tabindex]:focus-visible,
 .command-button:focus-visible,
 .command-nav-link:focus-visible {
-  outline: 2px solid rgb(37 99 235 / 70%);
+  outline: 2px solid color-mix(in oklch, var(--color-accent) 70%, transparent);
   outline-offset: 2px;
-  box-shadow: 0 0 0 4px rgb(37 99 235 / 18%);
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--color-accent) 18%, transparent);
 }
 
-/* Thin custom light scrollbars */
+/* Thin custom scrollbars */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgb(148 163 184 / 55%) transparent;
+  scrollbar-color: color-mix(in oklch, var(--color-ink-muted) 55%, transparent) transparent;
 }
 
 *::-webkit-scrollbar {
@@ -198,14 +353,14 @@ textarea:focus-visible,
 }
 
 *::-webkit-scrollbar-thumb {
-  background: rgb(203 213 225 / 90%);
+  background: color-mix(in oklch, var(--color-line-strong) 90%, transparent);
   border: 2px solid transparent;
   background-clip: padding-box;
   border-radius: 999px;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background: rgb(148 163 184 / 90%);
+  background: color-mix(in oklch, var(--color-ink-muted) 90%, transparent);
   background-clip: padding-box;
 }
 
@@ -213,33 +368,21 @@ textarea:focus-visible,
   background: transparent;
 }
 
-.rounded-3xl {
-  border-radius: 8px !important;
-}
-
-.rounded-2xl {
-  border-radius: 8px !important;
-}
-
-.rounded-xl {
-  border-radius: 6px !important;
-}
-
 .command-shell {
   background: transparent;
-  color: var(--cc-ink);
+  color: var(--color-ink);
 }
 
 .command-sidebar {
-  /* Executive Workstation light theme — white surface, slate hairline */
-  background: #ffffff;
-  color: #475569;
-  border-right: 1px solid #e6e8ee;
+  /* Executive Workstation — surface with hairline divider */
+  background: var(--color-surface);
+  color: var(--color-ink-secondary);
+  border-right: 1px solid var(--color-line);
 }
 
 .command-brand {
   font-family: var(--font-display);
-  color: var(--cc-ink);
+  color: var(--color-ink);
   font-weight: 700;
   text-transform: uppercase;
   line-height: 0.95;
@@ -247,7 +390,7 @@ textarea:focus-visible,
 }
 
 .command-section-label {
-  color: #64748b;
+  color: var(--color-ink-muted);
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 500;
@@ -262,10 +405,9 @@ textarea:focus-visible,
   align-items: center;
   gap: 0.6rem;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 0.5rem 0.7rem;
-  /* slate-600 text on light surface */
-  color: #475569;
+  color: var(--color-ink-secondary);
   font-size: 0.875rem;
   transition:
     background-color 150ms ease,
@@ -275,18 +417,17 @@ textarea:focus-visible,
 }
 
 .command-nav-link:hover {
-  /* slate-50 hover wash, slate-900 ink */
-  background: #f8fafc;
-  color: #0f172a;
+  background: var(--color-surface-muted);
+  color: var(--color-ink);
 }
 
 .command-nav-link.active,
 .command-nav-link[aria-current="page"] {
-  /* blue-50 fill, blue-700 ink, 2px cobalt left accent bar */
-  background: #eff6ff;
-  color: #1d4ed8;
+  /* accent-tint fill, accent-text ink, accent left bar */
+  background: var(--color-accent-tint);
+  color: var(--color-accent-text);
   font-weight: 600;
-  box-shadow: inset 2px 0 0 #2563eb;
+  box-shadow: inset 2px 0 0 var(--color-accent);
 }
 
 .command-nav-badge {
@@ -294,10 +435,9 @@ textarea:focus-visible,
   min-width: 1.5rem;
   border: 1px solid transparent;
   border-radius: 999px;
-  /* neutral light pill with blue-700 text */
-  background: #eff6ff;
+  background: var(--color-accent-tint);
   padding: 0.05rem 0.45rem;
-  color: #1d4ed8;
+  color: var(--color-accent-text);
   font-family: var(--font-mono);
   font-size: 0.66rem;
   font-weight: 600;
@@ -306,13 +446,12 @@ textarea:focus-visible,
 }
 
 .command-nav-badge.danger {
-  /* red-50 fill, red-700 text (~5.9:1 on #fef2f2 — passes AA; red-600 was 4.41:1) */
-  background: #fef2f2;
-  color: #b91c1c;
+  background: var(--color-critical-tint);
+  color: var(--color-critical-text);
 }
 
 /* ============================================================
-   SIDEBAR NAV — accordion groups, chevron, live filter (light)
+   SIDEBAR NAV — accordion groups, chevron, live filter
    ============================================================ */
 .command-nav-search {
   position: relative;
@@ -327,38 +466,38 @@ textarea:focus-visible,
   font-size: 18px;
   width: 18px;
   height: 18px;
-  color: #94a3b8;
+  color: var(--color-ink-muted);
   pointer-events: none;
 }
 
 .command-nav-search input {
   width: 100%;
-  border: 1px solid #e6e8ee;
-  border-radius: 6px;
-  background: #ffffff;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
   padding: 0.45rem 2.6rem 0.45rem 2rem;
-  color: #0f172a;
+  color: var(--color-ink);
   font-size: 0.82rem;
 }
 
 .command-nav-search input::placeholder {
-  color: #64748b;
+  color: var(--color-ink-muted);
 }
 
 .command-nav-search input:focus {
-  border-color: #2563eb;
+  border-color: var(--color-accent);
   outline: none;
-  box-shadow: 0 0 0 3px rgb(37 99 235 / 12%);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--color-accent) 12%, transparent);
 }
 
 .command-nav-search kbd {
   position: absolute;
   right: 0.5rem;
-  border: 1px solid #e6e8ee;
+  border: 1px solid var(--color-line);
   border-radius: 4px;
-  background: #f8fafc;
+  background: var(--color-surface-muted);
   padding: 0.05rem 0.35rem;
-  color: #64748b;
+  color: var(--color-ink-muted);
   font-family: var(--font-mono);
   font-size: 0.62rem;
   line-height: 1.1;
@@ -373,13 +512,13 @@ textarea:focus-visible,
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: #94a3b8;
+  color: var(--color-ink-muted);
   cursor: pointer;
 }
 
 .command-nav-search .command-nav-clear:hover {
-  color: #475569;
-  background: #f1f5f9;
+  color: var(--color-ink-secondary);
+  background: var(--color-surface-muted);
 }
 
 .command-nav-group-header {
@@ -388,17 +527,17 @@ textarea:focus-visible,
   align-items: center;
   gap: 0.5rem;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   padding: 0.4rem 0.5rem;
-  color: #64748b;
+  color: var(--color-ink-muted);
   cursor: pointer;
   text-align: left;
 }
 
 .command-nav-group-header:hover {
-  background: #f8fafc;
-  color: #475569;
+  background: var(--color-surface-muted);
+  color: var(--color-ink-secondary);
 }
 
 .command-nav-group-header .command-section-label {
@@ -409,7 +548,7 @@ textarea:focus-visible,
   font-size: 18px;
   width: 18px;
   height: 18px;
-  color: #94a3b8;
+  color: var(--color-ink-muted);
   transition: transform 200ms var(--ease-out-quint);
 }
 
@@ -434,7 +573,7 @@ textarea:focus-visible,
 
 .command-nav-empty {
   padding: 1.25rem 0.75rem;
-  color: #64748b;
+  color: var(--color-ink-muted);
   font-size: 0.82rem;
   text-align: center;
 }
@@ -473,7 +612,8 @@ textarea:focus-visible,
   margin-top: var(--space-3xs);
   color: var(--cc-ink);
   font-family: var(--font-display);
-  font-size: clamp(2rem, 4vw, 3.4rem);
+  /* Capped for a dense cockpit (was clamp(2rem, 4vw, 3.4rem) ≈ 54px). */
+  font-size: clamp(1.6rem, 1.1rem + 1.4vw, 2rem);
   font-weight: 700;
   line-height: 1;
   letter-spacing: -0.022em;
@@ -491,7 +631,7 @@ textarea:focus-visible,
 
 .command-card {
   border: 1px solid var(--cc-line);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--cc-surface);
   box-shadow: var(--cc-shadow-sm);
   position: relative;
@@ -503,7 +643,7 @@ textarea:focus-visible,
 
 .command-card-muted {
   border: 1px solid var(--cc-line);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--cc-panel-muted);
 }
 
@@ -515,7 +655,7 @@ textarea:focus-visible,
   gap: var(--space-sm);
   border-bottom: 1px solid var(--cc-line);
   padding: var(--space-sm) var(--space-md);
-  background: linear-gradient(90deg, #f8fafc, transparent);
+  background: linear-gradient(90deg, var(--color-surface-muted), transparent);
 }
 
 .command-kpi {
@@ -523,7 +663,7 @@ textarea:focus-visible,
   min-width: 0;
   border: 1px solid var(--cc-line);
   border-top: 3px solid var(--cc-primary);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--cc-surface);
   box-shadow: var(--cc-shadow-sm);
   padding: var(--space-sm);
@@ -601,11 +741,11 @@ textarea:focus-visible,
   align-items: center;
   justify-content: center;
   gap: 0.45rem;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: var(--cc-primary);
   padding: 0.58rem 0.92rem;
-  color: #ffffff;
+  color: var(--color-ink-inverse);
   font-size: var(--text-sm);
   font-weight: 600;
   letter-spacing: 0.01em;
@@ -634,17 +774,22 @@ textarea:focus-visible,
 }
 
 .command-button.secondary:hover {
-  border-color: rgb(37 99 235 / 45%);
+  border-color: color-mix(in oklch, var(--color-accent) 45%, transparent);
   background: var(--cc-primary-tint);
   box-shadow: none;
 }
 
+/* ============================================================
+   STATUS / CHIP — shared pill language.
+   .command-status (legacy, kept intact) and .command-chip (forward-looking
+   primitive) share the same visual idiom. .command-chip uses tone modifiers.
+   ============================================================ */
 .command-status {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
   border-radius: 999px;
-  border: 1px solid rgb(37 99 235 / 20%);
+  border: 1px solid color-mix(in oklch, var(--color-accent) 20%, transparent);
   background: var(--cc-primary-tint);
   padding: 0.18rem 0.52rem;
   color: var(--cc-primary-strong);
@@ -655,29 +800,200 @@ textarea:focus-visible,
 }
 
 .command-status.green {
-  border-color: rgb(5 150 105 / 25%);
-  background: #ecfdf5;
-  color: #047857;
+  border-color: color-mix(in oklch, var(--color-positive) 25%, transparent);
+  background: var(--color-positive-tint);
+  color: var(--color-positive-text);
 }
 
 .command-status.amber {
-  border-color: rgb(217 119 6 / 28%);
-  background: #fffbeb;
-  color: #b45309;
+  border-color: color-mix(in oklch, var(--color-caution) 28%, transparent);
+  background: var(--color-caution-tint);
+  color: var(--color-caution-text);
 }
 
 .command-status.red {
-  border-color: rgb(220 38 38 / 25%);
-  background: #fef2f2;
-  color: #b91c1c;
+  border-color: color-mix(in oklch, var(--color-critical) 25%, transparent);
+  background: var(--color-critical-tint);
+  color: var(--color-critical-text);
 }
 
-/* Muted slate chip for not-yet-active workflow states (Draft, Open, ...) so
-   they stay visually distinct from the primary-blue default. */
+/* Muted chip for not-yet-active workflow states (Draft, Open, …). */
 .command-status.neutral {
-  border-color: rgb(100 116 139 / 25%);
-  background: #f1f5f9;
-  color: #334155;
+  border-color: color-mix(in oklch, var(--color-ink-muted) 25%, transparent);
+  background: var(--color-surface-muted);
+  color: var(--color-ink-secondary);
+}
+
+/* Forward-looking unified chip. Same pill language as .command-status,
+   but tone-modifier based: .is-neutral / .is-info / .is-positive /
+   .is-caution / .is-critical. */
+.command-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklch, var(--color-ink-muted) 25%, transparent);
+  background: var(--color-surface-muted);
+  padding: 0.18rem 0.52rem;
+  color: var(--color-ink-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.command-chip.is-neutral {
+  border-color: color-mix(in oklch, var(--color-ink-muted) 25%, transparent);
+  background: var(--color-surface-muted);
+  color: var(--color-ink-secondary);
+}
+
+.command-chip.is-info {
+  border-color: color-mix(in oklch, var(--color-info) 20%, transparent);
+  background: var(--color-info-tint);
+  color: var(--color-info-text);
+}
+
+.command-chip.is-positive {
+  border-color: color-mix(in oklch, var(--color-positive) 25%, transparent);
+  background: var(--color-positive-tint);
+  color: var(--color-positive-text);
+}
+
+.command-chip.is-caution {
+  border-color: color-mix(in oklch, var(--color-caution) 28%, transparent);
+  background: var(--color-caution-tint);
+  color: var(--color-caution-text);
+}
+
+.command-chip.is-critical {
+  border-color: color-mix(in oklch, var(--color-critical) 25%, transparent);
+  background: var(--color-critical-tint);
+  color: var(--color-critical-text);
+}
+
+/* ============================================================
+   FORM PRIMITIVES — input / select / textarea / checkbox / radio /
+   field stack. Replace ~80 inline input strings and the component-local
+   .cc-input / .cc-checkbox. Density ~14-15px, padding ~0.55rem 0.8rem.
+   ============================================================ */
+.command-input,
+.command-select,
+.command-textarea {
+  width: 100%;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  padding: 0.55rem 0.8rem;
+  color: var(--color-ink);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  outline: none;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    background-color 150ms ease;
+}
+
+.command-textarea {
+  min-height: 5rem;
+  resize: vertical;
+}
+
+.command-input::placeholder,
+.command-textarea::placeholder {
+  color: var(--color-ink-muted);
+}
+
+.command-input:focus,
+.command-select:focus,
+.command-textarea:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--color-accent) 18%, transparent);
+}
+
+.command-input:disabled,
+.command-select:disabled,
+.command-textarea:disabled {
+  background: var(--color-surface-muted);
+  color: var(--color-ink-muted);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.command-input[aria-invalid="true"],
+.command-select[aria-invalid="true"],
+.command-textarea[aria-invalid="true"] {
+  border-color: var(--color-critical);
+}
+
+.command-input[aria-invalid="true"]:focus,
+.command-select[aria-invalid="true"]:focus,
+.command-textarea[aria-invalid="true"]:focus {
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--color-critical) 20%, transparent);
+}
+
+/* Caret affordance for the select control (single-select only — a native
+   multiple listbox keeps its default appearance, no caret/appearance override) */
+.command-select:not([multiple]) {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+  padding-right: 2.2rem;
+}
+
+.command-checkbox,
+.command-radio {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.command-radio {
+  border-radius: 999px;
+}
+
+.command-checkbox:focus-visible,
+.command-radio:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--color-accent) 70%, transparent);
+  outline-offset: 2px;
+}
+
+.command-checkbox:disabled,
+.command-radio:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Field stack: label, control, hint, error */
+.command-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.command-field-label {
+  color: var(--color-ink-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.command-field-hint {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-snug);
+}
+
+.command-field-error {
+  color: var(--color-critical-text);
+  font-size: var(--text-xs);
+  line-height: var(--leading-snug);
 }
 
 /* ============================================================
@@ -695,8 +1011,8 @@ textarea:focus-visible,
   top: 0;
   z-index: 2;
   border-bottom: 1px solid var(--cc-line);
-  background: #f8fafc;
-  color: #64748b;
+  background: var(--color-surface-muted);
+  color: var(--color-ink-muted);
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
   font-weight: 500;
@@ -708,7 +1024,7 @@ textarea:focus-visible,
 }
 
 .command-data-table td {
-  border-bottom: 1px solid #f1f5f9;
+  border-bottom: 1px solid color-mix(in oklch, var(--color-line) 60%, transparent);
   color: var(--cc-ink);
   padding: 0.62rem 0.9rem;
   vertical-align: middle;
@@ -717,12 +1033,12 @@ textarea:focus-visible,
 
 /* Subtle zebra striping */
 .command-data-table tbody tr:nth-child(even) td {
-  background: rgb(248 250 252 / 60%);
+  background: color-mix(in oklch, var(--color-surface-muted) 60%, transparent);
 }
 
 /* Hover row highlight (wins over zebra) */
 .command-data-table tbody tr:hover td {
-  background: #f1f5f9;
+  background: var(--color-surface-muted);
 }
 
 /* Right-aligned numeric cells, monospace tabular */
@@ -744,7 +1060,7 @@ textarea:focus-visible,
   height: 0.48rem;
   overflow: hidden;
   border-radius: 999px;
-  background: #f1f5f9;
+  background: var(--color-surface-muted);
 }
 
 .command-meter > span {
@@ -771,7 +1087,7 @@ textarea:focus-visible,
 .command-empty .material-icons,
 .command-empty [class*="icon"] {
   font-size: 2.5rem;
-  color: rgb(148 163 184 / 70%);
+  color: color-mix(in oklch, var(--color-ink-muted) 70%, transparent);
 }
 
 .command-empty-title {
@@ -791,8 +1107,8 @@ textarea:focus-visible,
 .command-skeleton {
   position: relative;
   overflow: hidden;
-  border-radius: 6px;
-  background: #eef1f5;
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklch, var(--color-line) 70%, var(--color-surface-muted));
   min-height: 1rem;
 }
 
@@ -804,14 +1120,37 @@ textarea:focus-visible,
   background: linear-gradient(
     90deg,
     transparent,
-    rgb(255 255 255 / 70%) 50%,
+    color-mix(in oklch, var(--color-surface) 70%, transparent) 50%,
+    transparent
+  );
+}
+
+/* Table-row-height skeleton (for ListStateComponent's future table mode). */
+.command-skeleton-row {
+  position: relative;
+  overflow: hidden;
+  height: 2.4rem;
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklch, var(--color-line) 70%, var(--color-surface-muted));
+}
+
+.command-skeleton-row::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklch, var(--color-surface) 70%, transparent) 50%,
     transparent
   );
 }
 
 /* ============================================================
-   MOTION — page-load reveal, card hover lift, shimmer.
-   All wrapped so it only runs when motion is welcome.
+   MOTION — page-load reveal, card hover lift, shimmer, entrance pop,
+   view-transition cross-fade. All wrapped so they only run when motion
+   is welcome.
    ============================================================ */
 @media (prefers-reduced-motion: no-preference) {
   @keyframes cc-reveal {
@@ -829,6 +1168,22 @@ textarea:focus-visible,
     to {
       transform: translateX(100%);
     }
+  }
+
+  /* Entrance for toasts / modals (referenced as .animate-in in app.ts). */
+  @keyframes cc-pop {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-in {
+    animation: cc-pop 220ms var(--ease-out-quint) both;
   }
 
   /* Staggered reveal for top-level page children + card/section blocks */
@@ -863,8 +1218,15 @@ textarea:focus-visible,
     transform: translateY(-1px);
   }
 
-  .command-skeleton::after {
+  .command-skeleton::after,
+  .command-skeleton-row::after {
     animation: cc-shimmer 1.4s ease-in-out infinite;
+  }
+
+  /* Router cross-fade (works with withViewTransitions()). Kept subtle. */
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 180ms;
   }
 }
 
@@ -878,6 +1240,12 @@ textarea:focus-visible,
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
   }
+
+  /* Disable router cross-fade too. */
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none !important;
+  }
 }
 
 @media (max-width: 768px) {
@@ -886,6 +1254,6 @@ textarea:focus-visible,
   }
 
   .command-title {
-    font-size: 2rem;
+    font-size: 1.6rem;
   }
 }

@@ -48,7 +48,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
         @if (!(projectId() || selectedProjectId())) {
           <div class="command-card p-12 text-center">
-            <mat-icon class="text-slate-400 mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
+            <mat-icon class="text-ink-muted mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
             <h3 class="text-lg font-medium text-[var(--cc-ink)] mt-4">No Project Selected</h3>
             <p class="text-[var(--cc-muted)] mt-1">Please select a project from the dropdown above to view plans and milestones.</p>
           </div>
@@ -57,7 +57,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
           <!-- Work Packages (Main Content) -->
           <div class="lg:col-span-2 space-y-6">
             <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] flex items-center gap-2">
-              <mat-icon class="text-blue-600">account_tree</mat-icon> Work Packages
+              <mat-icon class="text-accent-text">account_tree</mat-icon> Work Packages
             </h3>
 
             <div class="command-card overflow-hidden">
@@ -76,7 +76,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                   <tr class="group">
                     <td class="py-4 px-4">
                       <div class="font-medium text-[var(--cc-ink)]">{{ wp.name }}</div>
-                      <div class="text-xs text-blue-700 font-mono mt-0.5">{{ wp.id }}</div>
+                      <div class="text-xs text-accent-text font-mono mt-0.5">{{ wp.id }}</div>
                     </td>
                     <td class="py-4 px-4">
                       <div class="flex items-center gap-1.5 text-[var(--cc-muted)] text-xs">
@@ -86,7 +86,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                     </td>
                     <td class="py-4 px-4">
                       <div class="flex items-center gap-2">
-                        <div class="w-6 h-6 rounded-full bg-blue-50 text-blue-700 ring-1 ring-blue-200 flex items-center justify-center text-xs font-bold">
+                        <div class="w-6 h-6 rounded-full bg-accent-tint text-accent-text ring-1 ring-accent flex items-center justify-center text-xs font-bold">
                           {{ wp.assignee.charAt(0) }}
                         </div>
                         <span class="text-xs font-medium">{{ wp.assignee }}</span>
@@ -94,20 +94,20 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                     </td>
                     <td class="py-4 px-4">
                       <div class="flex items-center gap-3">
-                        <div class="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+                        <div class="flex-1 h-2 bg-surface-muted rounded-full overflow-hidden">
                           <div class="h-full rounded-full transition-all duration-500"
-                               [class.bg-emerald-500]="wp.progress === 100"
+                               [class.bg-positive]="wp.progress === 100"
                                [class.bg-gradient-to-r]="wp.progress > 0 && wp.progress < 100"
-                               [class.from-blue-500]="wp.progress > 0 && wp.progress < 100"
-                               [class.to-blue-600]="wp.progress > 0 && wp.progress < 100"
-                               [class.bg-slate-100]="wp.progress === 0"
+                               [class.from-accent]="wp.progress > 0 && wp.progress < 100"
+                               [class.to-accent]="wp.progress > 0 && wp.progress < 100"
+                               [class.bg-surface-muted]="wp.progress === 0"
                                [style.width.%]="wp.progress"></div>
                         </div>
                         <span class="text-xs font-mono tabular-nums font-medium w-8 text-right">{{ wp.progress }}%</span>
                       </div>
                     </td>
                     <td class="py-4 px-4 text-right">
-                      <button type="button" (click)="openEditWpForm(wp)" [attr.aria-label]="'Edit ' + wp.name" [attr.title]="'Edit ' + wp.name" class="text-slate-400 hover:text-blue-700 transition-colors opacity-0 group-hover:opacity-100">
+                      <button type="button" (click)="openEditWpForm(wp)" [attr.aria-label]="'Edit ' + wp.name" [attr.title]="'Edit ' + wp.name" class="text-ink-muted hover:text-accent-text transition-colors opacity-0 group-hover:opacity-100">
                         <mat-icon class="text-sm">edit</mat-icon>
                       </button>
                     </td>
@@ -126,7 +126,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
         <!-- Milestones (Sidebar) -->
         <div class="space-y-6">
           <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] flex items-center gap-2">
-            <mat-icon class="text-amber-500">emoji_events</mat-icon> Key Milestones
+            <mat-icon class="text-caution">emoji_events</mat-icon> Key Milestones
           </h3>
 
           <div class="command-card p-6">
@@ -135,8 +135,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 <div class="relative pl-6">
                   <!-- Timeline Dot -->
                   <div class="absolute -left-[9px] top-1 w-4 h-4 rounded-full border-2 border-white flex items-center justify-center"
-                       [class.bg-emerald-500]="milestone.status === 'Achieved'"
-                       [class.bg-slate-200]="milestone.status === 'Pending'">
+                       [class.bg-positive]="milestone.status === 'Achieved'"
+                       [class.bg-surface-muted]="milestone.status === 'Pending'">
                     @if (milestone.status === 'Achieved') {
                       <mat-icon class="text-white text-[10px] w-[10px] h-[10px]">check</mat-icon>
                     }
@@ -148,12 +148,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                         {{ milestone.name }}
                       </h4>
                       <span class="text-xs font-medium px-2 py-0.5 rounded-full ring-1"
-                            [class.bg-emerald-50]="milestone.status === 'Achieved'"
-                            [class.text-emerald-700]="milestone.status === 'Achieved'"
-                            [class.ring-emerald-200]="milestone.status === 'Achieved'"
-                            [class.bg-slate-100]="milestone.status === 'Pending'"
-                            [class.text-slate-700]="milestone.status === 'Pending'"
-                            [class.ring-slate-200]="milestone.status === 'Pending'">
+                            [class.bg-positive-tint]="milestone.status === 'Achieved'"
+                            [class.text-positive-text]="milestone.status === 'Achieved'"
+                            [class.ring-positive]="milestone.status === 'Achieved'"
+                            [class.bg-surface-muted]="milestone.status === 'Pending'"
+                            [class.text-ink-secondary]="milestone.status === 'Pending'"
+                            [class.ring-line]="milestone.status === 'Pending'">
                         {{ milestone.status }}
                       </span>
                     </div>
@@ -162,7 +162,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                       {{ milestone.date | date:'mediumDate' }}
                     </div>
                     @if (milestone.status === 'Pending') {
-                      <button (click)="achieveMilestone(milestone)" class="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 ring-1 ring-emerald-200 px-3 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-100 transition-colors">
+                      <button (click)="achieveMilestone(milestone)" class="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-positive-tint ring-1 ring-positive px-3 py-1.5 text-xs font-bold text-positive-text hover:bg-[color-mix(in_oklch,var(--color-positive)_16%,var(--color-surface))] transition-colors">
                         <mat-icon class="text-[14px] w-[14px] h-[14px]">check_circle</mat-icon>
                         Approve
                       </button>
@@ -207,12 +207,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
       <!-- Add Milestone Modal -->
       @if (showMilestoneForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
              appModal ariaLabelledby="milestoneModalTitle" (dismiss)="closeMilestoneForm()">
           <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="milestoneModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Add Milestone</h2>
-              <button type="button" (click)="closeMilestoneForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <button type="button" (click)="closeMilestoneForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -220,13 +220,13 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <div class="p-6 sm:p-8 overflow-y-auto flex-1">
               <form [formGroup]="milestoneForm" (ngSubmit)="saveMilestone()" class="space-y-6">
                 <div>
-                  <label for="milestoneName" class="block text-sm font-semibold text-slate-700 mb-1.5">Milestone Name *</label>
-                  <input id="milestoneName" type="text" formControlName="name" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. Phase 1 Completion">
+                  <label for="milestoneName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Milestone Name *</label>
+                  <input id="milestoneName" type="text" formControlName="name" class="command-input" placeholder="e.g. Phase 1 Completion">
                 </div>
 
                 <div>
-                  <label for="milestoneDate" class="block text-sm font-semibold text-slate-700 mb-1.5">Date *</label>
-                  <input id="milestoneDate" type="date" formControlName="date" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
+                  <label for="milestoneDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Date *</label>
+                  <input id="milestoneDate" type="date" formControlName="date" class="command-input">
                 </div>
               </form>
             </div>
@@ -243,12 +243,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
       <!-- Add Work Package Modal -->
       @if (showWpForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
              appModal ariaLabelledby="wpModalTitle" (dismiss)="closeWpForm()">
           <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="wpModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Add Work Package</h2>
-              <button type="button" (click)="closeWpForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <button type="button" (click)="closeWpForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -256,24 +256,24 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <div class="p-6 sm:p-8 overflow-y-auto flex-1">
               <form [formGroup]="wpForm" (ngSubmit)="saveWp()" class="space-y-6">
                 <div>
-                  <label for="wpName" class="block text-sm font-semibold text-slate-700 mb-1.5">Work Package Name *</label>
-                  <input id="wpName" type="text" formControlName="name" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. Requirements Analysis">
+                  <label for="wpName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Work Package Name *</label>
+                  <input id="wpName" type="text" formControlName="name" class="command-input" placeholder="e.g. Requirements Analysis">
                 </div>
 
                 <div class="grid grid-cols-2 gap-4">
                   <div>
-                    <label for="wpStartDate" class="block text-sm font-semibold text-slate-700 mb-1.5">Start Date *</label>
-                    <input id="wpStartDate" type="date" formControlName="startDate" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
+                    <label for="wpStartDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Start Date *</label>
+                    <input id="wpStartDate" type="date" formControlName="startDate" class="command-input">
                   </div>
                   <div>
-                    <label for="wpEndDate" class="block text-sm font-semibold text-slate-700 mb-1.5">End Date *</label>
-                    <input id="wpEndDate" type="date" formControlName="endDate" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
+                    <label for="wpEndDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">End Date *</label>
+                    <input id="wpEndDate" type="date" formControlName="endDate" class="command-input">
                   </div>
                 </div>
 
                 <div>
-                  <label for="wpAssignee" class="block text-sm font-semibold text-slate-700 mb-1.5">Assignee *</label>
-                  <input id="wpAssignee" type="text" formControlName="assignee" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. John Doe">
+                  <label for="wpAssignee" class="block text-sm font-semibold text-ink-secondary mb-1.5">Assignee *</label>
+                  <input id="wpAssignee" type="text" formControlName="assignee" class="command-input" placeholder="e.g. John Doe">
                 </div>
               </form>
             </div>
@@ -290,12 +290,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
       <!-- Edit Work Package Modal -->
       @if (showEditWpForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
              appModal ariaLabelledby="editWpModalTitle" (dismiss)="closeEditWpForm()">
           <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="editWpModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Edit Work Package</h2>
-              <button type="button" (click)="closeEditWpForm()" aria-label="Close dialog" title="Close" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <button type="button" (click)="closeEditWpForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -303,38 +303,38 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <div class="p-6 sm:p-8 overflow-y-auto flex-1">
               <form [formGroup]="editWpForm" (ngSubmit)="saveEditWp()" class="space-y-6">
                 <div>
-                  <label for="editWpName" class="block text-sm font-semibold text-slate-700 mb-1.5">Work Package Name *</label>
-                  <input id="editWpName" type="text" formControlName="name" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. Requirements Analysis">
+                  <label for="editWpName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Work Package Name *</label>
+                  <input id="editWpName" type="text" formControlName="name" class="command-input" placeholder="e.g. Requirements Analysis">
                 </div>
 
                 <div class="grid grid-cols-2 gap-4">
                   <div>
-                    <label for="editWpStartDate" class="block text-sm font-semibold text-slate-700 mb-1.5">Start Date *</label>
-                    <input id="editWpStartDate" type="date" formControlName="startDate" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
+                    <label for="editWpStartDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Start Date *</label>
+                    <input id="editWpStartDate" type="date" formControlName="startDate" class="command-input">
                   </div>
                   <div>
-                    <label for="editWpEndDate" class="block text-sm font-semibold text-slate-700 mb-1.5">End Date *</label>
-                    <input id="editWpEndDate" type="date" formControlName="endDate" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
+                    <label for="editWpEndDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">End Date *</label>
+                    <input id="editWpEndDate" type="date" formControlName="endDate" class="command-input">
                   </div>
                 </div>
 
                 <div>
-                  <label for="editWpAssignee" class="block text-sm font-semibold text-slate-700 mb-1.5">Assignee *</label>
-                  <input id="editWpAssignee" type="text" formControlName="assignee" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. John Doe">
+                  <label for="editWpAssignee" class="block text-sm font-semibold text-ink-secondary mb-1.5">Assignee *</label>
+                  <input id="editWpAssignee" type="text" formControlName="assignee" class="command-input" placeholder="e.g. John Doe">
                 </div>
 
                 <div class="grid grid-cols-2 gap-4">
                   <div>
-                    <label for="editWpStatus" class="block text-sm font-semibold text-slate-700 mb-1.5">Status *</label>
-                    <select id="editWpStatus" formControlName="status" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white">
+                    <label for="editWpStatus" class="block text-sm font-semibold text-ink-secondary mb-1.5">Status *</label>
+                    <select id="editWpStatus" formControlName="status" class="command-select">
                       <option value="Planned">Planned</option>
                       <option value="In Progress">In Progress</option>
                       <option value="Completed">Completed</option>
                     </select>
                   </div>
                   <div>
-                    <label for="editWpProgress" class="block text-sm font-semibold text-slate-700 mb-1.5">Progress (%) *</label>
-                    <input id="editWpProgress" type="number" min="0" max="100" formControlName="progress" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
+                    <label for="editWpProgress" class="block text-sm font-semibold text-ink-secondary mb-1.5">Progress (%) *</label>
+                    <input id="editWpProgress" type="number" min="0" max="100" formControlName="progress" class="command-input">
                   </div>
                 </div>
               </form>

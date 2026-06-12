@@ -34,7 +34,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
         @if (!(projectId() || selectedProjectId())) {
           <div class="command-card p-12 text-center">
-            <mat-icon class="text-slate-400 mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
+            <mat-icon class="text-ink-muted mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
             <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] mt-4">No Project Selected</h3>
             <p class="text-[var(--cc-muted)] mt-1">Please select a project from the dropdown above to view issues.</p>
           </div>
@@ -69,8 +69,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                   <td>
                     <div class="flex items-center gap-2">
                       <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ring-1"
-                            [class.bg-blue-50]="issue.status === 'Open'" [class.text-blue-700]="issue.status === 'Open'" [class.ring-blue-200]="issue.status === 'Open'"
-                            [class.bg-slate-100]="issue.status === 'Mitigated' || issue.status === 'Closed'" [class.text-slate-700]="issue.status === 'Mitigated' || issue.status === 'Closed'" [class.ring-slate-200]="issue.status === 'Mitigated' || issue.status === 'Closed'">
+                            [class.bg-accent-tint]="issue.status === 'Open'" [class.text-accent-text]="issue.status === 'Open'" [class.ring-accent]="issue.status === 'Open'"
+                            [class.bg-surface-muted]="issue.status === 'Mitigated' || issue.status === 'Closed'" [class.text-ink-secondary]="issue.status === 'Mitigated' || issue.status === 'Closed'" [class.ring-line]="issue.status === 'Mitigated' || issue.status === 'Closed'">
                         {{ issue.status }}
                       </span>
                       <select [ngModel]="issue.status" (ngModelChange)="updateStatus(issue, $event)" class="rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-1.5 text-xs text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
@@ -82,7 +82,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                   </td>
                   <td>
                     <div class="font-medium">{{ issue.owner || 'Unassigned' }}</div>
-                    <div class="text-xs mt-1" [class.text-red-700]="isOverdue(issue)" [class.text-slate-500]="!isOverdue(issue)">
+                    <div class="text-xs mt-1" [class.text-critical-text]="isOverdue(issue)" [class.text-ink-muted]="!isOverdue(issue)">
                       {{ issue.dueDate || 'No due date' }}
                     </div>
                     @if (issue.escalated) {
@@ -112,12 +112,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
       <!-- Report Issue Modal -->
       @if (showForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
              appModal ariaLabelledby="issueModalTitle" (dismiss)="closeForm()">
           <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="issueModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Report Issue</h2>
-              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-[var(--cc-muted)] hover:text-[var(--cc-ink)] hover:bg-slate-100 p-2 rounded-full transition-colors">
+              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-[var(--cc-muted)] hover:text-[var(--cc-ink)] hover:bg-surface-muted p-2 rounded-full transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -125,14 +125,14 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <div class="p-6 sm:p-8 overflow-y-auto flex-1">
               <form [formGroup]="issueForm" (ngSubmit)="saveIssue()" class="space-y-6">
                 <div>
-                  <label for="issueTitle" class="block text-sm font-semibold text-slate-700 mb-1.5">Title *</label>
-                  <input id="issueTitle" type="text" formControlName="title" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. API Rate Limiting">
+                  <label for="issueTitle" class="block text-sm font-semibold text-ink-secondary mb-1.5">Title *</label>
+                  <input id="issueTitle" type="text" formControlName="title" class="command-input" placeholder="e.g. API Rate Limiting">
                 </div>
 
                 <div class="grid grid-cols-2 gap-4">
                   <div>
-                    <label for="issueType" class="block text-sm font-semibold text-slate-700 mb-1.5">Type *</label>
-                    <select id="issueType" formControlName="type" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white">
+                    <label for="issueType" class="block text-sm font-semibold text-ink-secondary mb-1.5">Type *</label>
+                    <select id="issueType" formControlName="type" class="command-select">
                       <option value="Bug">Bug</option>
                       <option value="Risk">Risk</option>
                       <option value="Task">Task</option>
@@ -140,8 +140,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                   </div>
 
                   <div>
-                    <label for="issueSeverity" class="block text-sm font-semibold text-slate-700 mb-1.5">Severity *</label>
-                    <select id="issueSeverity" formControlName="severity" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white">
+                    <label for="issueSeverity" class="block text-sm font-semibold text-ink-secondary mb-1.5">Severity *</label>
+                    <select id="issueSeverity" formControlName="severity" class="command-select">
                       <option value="Low">Low</option>
                       <option value="Medium">Medium</option>
                       <option value="High">High</option>
@@ -151,33 +151,33 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 </div>
 
                 <div>
-                  <label for="issueReportedBy" class="block text-sm font-semibold text-slate-700 mb-1.5">Reported By</label>
-                  <input id="issueReportedBy" type="text" formControlName="reportedBy" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. Jane Doe">
+                  <label for="issueReportedBy" class="block text-sm font-semibold text-ink-secondary mb-1.5">Reported By</label>
+                  <input id="issueReportedBy" type="text" formControlName="reportedBy" class="command-input" placeholder="e.g. Jane Doe">
                 </div>
 
                 <div class="grid grid-cols-2 gap-4">
                   <div>
-                    <label for="issueOwner" class="block text-sm font-semibold text-slate-700 mb-1.5">Owner</label>
-                    <input id="issueOwner" type="text" formControlName="owner" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. Delivery Lead">
+                    <label for="issueOwner" class="block text-sm font-semibold text-ink-secondary mb-1.5">Owner</label>
+                    <input id="issueOwner" type="text" formControlName="owner" class="command-input" placeholder="e.g. Delivery Lead">
                   </div>
                   <div>
-                    <label for="issueDueDate" class="block text-sm font-semibold text-slate-700 mb-1.5">Due Date</label>
-                    <input id="issueDueDate" type="date" formControlName="dueDate" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
+                    <label for="issueDueDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Due Date</label>
+                    <input id="issueDueDate" type="date" formControlName="dueDate" class="command-input">
                   </div>
                 </div>
 
                 <div>
-                  <label for="issueImpact" class="block text-sm font-semibold text-slate-700 mb-1.5">Impact</label>
-                  <input id="issueImpact" type="text" formControlName="impact" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="Budget, schedule, quality, or client impact">
+                  <label for="issueImpact" class="block text-sm font-semibold text-ink-secondary mb-1.5">Impact</label>
+                  <input id="issueImpact" type="text" formControlName="impact" class="command-input" placeholder="Budget, schedule, quality, or client impact">
                 </div>
 
                 <div>
-                  <label for="issueActionPlan" class="block text-sm font-semibold text-slate-700 mb-1.5">Action Plan</label>
-                  <textarea id="issueActionPlan" formControlName="actionPlan" rows="3" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white resize-none"></textarea>
+                  <label for="issueActionPlan" class="block text-sm font-semibold text-ink-secondary mb-1.5">Action Plan</label>
+                  <textarea id="issueActionPlan" formControlName="actionPlan" rows="3" class="command-textarea"></textarea>
                 </div>
 
-                <label class="inline-flex items-center gap-2 text-sm font-semibold text-slate-700">
-                  <input type="checkbox" formControlName="escalated" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500/25">
+                <label class="inline-flex items-center gap-2 text-sm font-semibold text-ink-secondary">
+                  <input type="checkbox" formControlName="escalated" class="command-checkbox">
                   Escalated
                 </label>
               </form>

@@ -34,7 +34,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
         @if (!(projectId() || selectedProjectId())) {
           <div class="command-card p-12 text-center">
-            <mat-icon class="text-slate-400 mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
+            <mat-icon class="text-ink-muted mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
             <h3 class="text-lg font-medium text-[var(--cc-ink)] mt-4">No Project Selected</h3>
             <p class="text-[var(--cc-muted)] mt-1">Please select a project from the dropdown above to view tasks.</p>
           </div>
@@ -70,10 +70,10 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                   <td class="px-6 py-4 text-[var(--cc-ink)] font-mono tabular-nums">{{ task.dueDate }}</td>
                   <td class="px-6 py-4">
                     <select [ngModel]="task.status" (ngModelChange)="updateStatus(task, $event)"
-                            class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border-0 ring-1 focus:ring-2 focus:ring-blue-500/25 cursor-pointer"
-                            [class.bg-emerald-50]="task.status === 'Done'" [class.text-emerald-700]="task.status === 'Done'" [class.ring-emerald-200]="task.status === 'Done'"
-                            [class.bg-blue-50]="task.status === 'In Progress'" [class.text-blue-700]="task.status === 'In Progress'" [class.ring-blue-200]="task.status === 'In Progress'"
-                            [class.bg-slate-100]="task.status === 'To Do'" [class.text-slate-700]="task.status === 'To Do'" [class.ring-slate-200]="task.status === 'To Do'">
+                            class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border-0 ring-1 focus:ring-2 focus:ring-accent/25 cursor-pointer"
+                            [class.bg-positive-tint]="task.status === 'Done'" [class.text-positive-text]="task.status === 'Done'" [class.ring-positive]="task.status === 'Done'"
+                            [class.bg-accent-tint]="task.status === 'In Progress'" [class.text-accent-text]="task.status === 'In Progress'" [class.ring-accent]="task.status === 'In Progress'"
+                            [class.bg-surface-muted]="task.status === 'To Do'" [class.text-ink-secondary]="task.status === 'To Do'" [class.ring-line]="task.status === 'To Do'">
                       <option value="To Do">To Do</option>
                       <option value="In Progress">In Progress</option>
                       <option value="Done">Done</option>
@@ -102,12 +102,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
     <!-- Create Task Modal -->
     @if (showForm()) {
-      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+      <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
            appModal ariaLabelledby="taskModalTitle" (dismiss)="closeForm()">
         <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
           <div class="command-card-header">
             <h2 id="taskModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Create Task</h2>
-            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-slate-400 hover:text-slate-600 hover:bg-slate-50 p-2 rounded-full transition-colors">
+            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
               <mat-icon>close</mat-icon>
             </button>
           </div>
@@ -115,19 +115,19 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
           <div class="p-6 sm:p-8 overflow-y-auto flex-1">
             <form [formGroup]="taskForm" (ngSubmit)="saveTask()" class="space-y-6">
               <div>
-                <label for="taskName" class="block text-sm font-semibold text-slate-700 mb-1.5">Task Name *</label>
-                <input id="taskName" type="text" formControlName="name" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. Design Database Schema">
+                <label for="taskName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Task Name *</label>
+                <input id="taskName" type="text" formControlName="name" class="command-input" placeholder="e.g. Design Database Schema">
               </div>
 
               <div>
-                <label for="taskAssignee" class="block text-sm font-semibold text-slate-700 mb-1.5">Assignee / Contact</label>
-                <input id="taskAssignee" type="text" formControlName="assignee" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white" placeholder="e.g. Jane Doe">
+                <label for="taskAssignee" class="block text-sm font-semibold text-ink-secondary mb-1.5">Assignee / Contact</label>
+                <input id="taskAssignee" type="text" formControlName="assignee" class="command-input" placeholder="e.g. Jane Doe">
               </div>
 
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label for="taskAssigneeType" class="block text-sm font-semibold text-slate-700 mb-1.5">Assignment Type *</label>
-                  <select id="taskAssigneeType" formControlName="assigneeType" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white">
+                  <label for="taskAssigneeType" class="block text-sm font-semibold text-ink-secondary mb-1.5">Assignment Type *</label>
+                  <select id="taskAssigneeType" formControlName="assigneeType" class="command-select">
                     <option value="Internal">Internal</option>
                     <option value="Subcontractor">Subcontractor</option>
                   </select>
@@ -135,8 +135,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
                 @if (selectedAssigneeType() === 'Subcontractor') {
                   <div>
-                    <label for="taskPartner" class="block text-sm font-semibold text-slate-700 mb-1.5">Subcontractor *</label>
-                    <select id="taskPartner" formControlName="partnerId" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white">
+                    <label for="taskPartner" class="block text-sm font-semibold text-ink-secondary mb-1.5">Subcontractor *</label>
+                    <select id="taskPartner" formControlName="partnerId" class="command-select">
                       <option value="">Select project partner...</option>
                       @for (partner of filteredPartners(); track partner.id) {
                         <option [value]="partner.id">{{ partner.company }}</option>
@@ -148,13 +148,13 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
               <div class="grid grid-cols-2 gap-4">
                 <div>
-                  <label for="taskDueDate" class="block text-sm font-semibold text-slate-700 mb-1.5">Due Date *</label>
-                  <input id="taskDueDate" type="date" formControlName="dueDate" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 placeholder:text-slate-400 bg-white focus:bg-white">
+                  <label for="taskDueDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Due Date *</label>
+                  <input id="taskDueDate" type="date" formControlName="dueDate" class="command-input">
                 </div>
 
                 <div>
-                  <label for="taskPriority" class="block text-sm font-semibold text-slate-700 mb-1.5">Priority *</label>
-                  <select id="taskPriority" formControlName="priority" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm text-slate-900 bg-white focus:bg-white">
+                  <label for="taskPriority" class="block text-sm font-semibold text-ink-secondary mb-1.5">Priority *</label>
+                  <select id="taskPriority" formControlName="priority" class="command-select">
                     <option value="Low">Low</option>
                     <option value="Medium">Medium</option>
                     <option value="High">High</option>

@@ -47,12 +47,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                   <td class="text-[var(--cc-muted)]">{{ orderProjectSummary(order.id) }}</td>
                   <td>
                     <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-wide ring-1"
-                          [class.bg-blue-50]="order.type === 'Customer'"
-                          [class.text-blue-700]="order.type === 'Customer'"
-                          [class.ring-blue-200]="order.type === 'Customer'"
-                          [class.bg-purple-50]="order.type === 'Purchase'"
-                          [class.text-purple-700]="order.type === 'Purchase'"
-                          [class.ring-purple-200]="order.type === 'Purchase'">
+                          [class.bg-accent-tint]="order.type === 'Customer'"
+                          [class.text-accent-text]="order.type === 'Customer'"
+                          [class.ring-accent]="order.type === 'Customer'"
+                          [class.bg-surface-muted]="order.type === 'Purchase'"
+                          [class.text-series-3]="order.type === 'Purchase'"
+                          [class.ring-series-3]="order.type === 'Purchase'">
                       {{ order.type }}
                     </span>
                   </td>
@@ -93,12 +93,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
     </div>
 
     @if (showForm()) {
-      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+      <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
            appModal ariaLabelledby="orderModalTitle" (dismiss)="closeForm()">
         <div class="command-card w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
           <div class="command-card-header">
             <h2 id="orderModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">New Order</h2>
-            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-colors">
+            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-ink-muted hover:text-ink-secondary hover:bg-surface-muted transition-colors">
               <mat-icon>close</mat-icon>
             </button>
           </div>
@@ -107,8 +107,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <form [formGroup]="orderForm" (ngSubmit)="saveOrder()" class="space-y-6">
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div class="sm:col-span-2">
-                  <label for="contractId" class="block text-sm font-semibold text-slate-700 mb-1.5">Contract *</label>
-                  <select id="contractId" formControlName="contractId" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
+                  <label for="contractId" class="block text-sm font-semibold text-ink-secondary mb-1.5">Contract *</label>
+                  <select id="contractId" formControlName="contractId" class="command-select">
                     <option value="">Select a contract...</option>
                     @for (contract of contracts(); track contract.id) {
                       <option [value]="contract.id">{{ contract.name }}</option>
@@ -117,8 +117,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 </div>
 
                 <div>
-                  <label for="type" class="block text-sm font-semibold text-slate-700 mb-1.5">Type *</label>
-                  <select id="type" formControlName="type" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
+                  <label for="type" class="block text-sm font-semibold text-ink-secondary mb-1.5">Type *</label>
+                  <select id="type" formControlName="type" class="command-select">
                     <option value="Customer">Customer</option>
                     <option value="Purchase">Purchase</option>
                   </select>
@@ -126,8 +126,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
                 @if (selectedType() === 'Purchase') {
                   <div>
-                    <label for="partnerId" class="block text-sm font-semibold text-slate-700 mb-1.5">Partner</label>
-                    <select id="partnerId" formControlName="partnerId" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
+                    <label for="partnerId" class="block text-sm font-semibold text-ink-secondary mb-1.5">Partner</label>
+                    <select id="partnerId" formControlName="partnerId" class="command-select">
                       <option value="">Select a partner...</option>
                       @for (partner of partners(); track partner.id) {
                         <option [value]="partner.id">{{ partner.company }}</option>
@@ -137,13 +137,13 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 }
 
                 <div>
-                  <label for="amount" class="block text-sm font-semibold text-slate-700 mb-1.5">Amount *</label>
-                  <input id="amount" type="number" formControlName="amount" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="0.00">
+                  <label for="amount" class="block text-sm font-semibold text-ink-secondary mb-1.5">Amount *</label>
+                  <input id="amount" type="number" formControlName="amount" class="command-input" placeholder="0.00">
                 </div>
 
                 <div>
-                  <label for="projectId" class="block text-sm font-semibold text-slate-700 mb-1.5">Project Imputation *</label>
-                  <select id="projectId" formControlName="projectId" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
+                  <label for="projectId" class="block text-sm font-semibold text-ink-secondary mb-1.5">Project Imputation *</label>
+                  <select id="projectId" formControlName="projectId" class="command-select">
                     <option value="">Select a project...</option>
                     @for (project of projectsForSelectedContract(); track project.id) {
                       <option [value]="project.id">{{ project.name }}</option>
@@ -152,18 +152,18 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 </div>
 
                 <div class="sm:col-span-2">
-                  <label for="lineDescription" class="block text-sm font-semibold text-slate-700 mb-1.5">Line Description</label>
-                  <input id="lineDescription" type="text" formControlName="lineDescription" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="e.g. Phase 1 delivery">
+                  <label for="lineDescription" class="block text-sm font-semibold text-ink-secondary mb-1.5">Line Description</label>
+                  <input id="lineDescription" type="text" formControlName="lineDescription" class="command-input" placeholder="e.g. Phase 1 delivery">
                 </div>
 
                 <div>
-                  <label for="currency" class="block text-sm font-semibold text-slate-700 mb-1.5">Currency *</label>
-                  <input id="currency" type="text" formControlName="currency" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="EUR">
+                  <label for="currency" class="block text-sm font-semibold text-ink-secondary mb-1.5">Currency *</label>
+                  <input id="currency" type="text" formControlName="currency" class="command-input" placeholder="EUR">
                 </div>
 
                 <div>
-                  <label for="status" class="block text-sm font-semibold text-slate-700 mb-1.5">Status *</label>
-                  <select id="status" formControlName="status" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
+                  <label for="status" class="block text-sm font-semibold text-ink-secondary mb-1.5">Status *</label>
+                  <select id="status" formControlName="status" class="command-select">
                     <option value="Open">Open</option>
                     <option value="Confirmed">Confirmed</option>
                     <option value="Invoiced">Invoiced</option>
@@ -172,8 +172,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 </div>
 
                 <div>
-                  <label for="orderDate" class="block text-sm font-semibold text-slate-700 mb-1.5">Order Date *</label>
-                  <input id="orderDate" type="date" formControlName="orderDate" class="w-full px-4 py-3 border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400">
+                  <label for="orderDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Order Date *</label>
+                  <input id="orderDate" type="date" formControlName="orderDate" class="command-input">
                 </div>
               </div>
             </form>

@@ -27,16 +27,16 @@ import { forkJoin, of } from 'rxjs';
       @if (profile()) {
         <!-- Profile Details -->
         <div class="command-card overflow-hidden">
-          <div class="p-8 sm:p-10 flex flex-col sm:flex-row items-center sm:items-start gap-6 sm:gap-8 bg-gradient-to-br from-slate-50 to-transparent">
+          <div class="p-8 sm:p-10 flex flex-col sm:flex-row items-center sm:items-start gap-6 sm:gap-8 bg-gradient-to-br from-surface-muted to-transparent">
             <div class="relative group shrink-0">
-              <div class="w-28 h-28 sm:w-32 sm:h-32 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center text-white text-4xl font-bold overflow-hidden shadow-inner border-4 border-slate-200">
+              <div class="w-28 h-28 sm:w-32 sm:h-32 bg-gradient-to-br from-accent to-accent rounded-full flex items-center justify-center text-white text-4xl font-bold overflow-hidden shadow-inner border-4 border-line">
                 @if (profile()?.profilePicture) {
                   <img [src]="profile()?.profilePicture" alt="Profile" class="w-full h-full object-cover">
                 } @else {
                   {{ profile()?.name?.charAt(0) }}
                 }
               </div>
-              <label class="absolute inset-0 bg-slate-900/40 backdrop-blur-sm rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 text-white cursor-pointer scale-95 group-hover:scale-100">
+              <label class="absolute inset-0 bg-ink/40 backdrop-blur-sm rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 text-white cursor-pointer scale-95 group-hover:scale-100">
                 <input type="file" class="hidden" accept="image/*" (change)="onProfilePictureSelected($event)">
                 <mat-icon class="text-[28px] w-[28px] h-[28px]">photo_camera</mat-icon>
               </label>
@@ -45,10 +45,10 @@ import { forkJoin, of } from 'rxjs';
               <h2 class="font-display text-3xl font-bold text-[var(--cc-ink)] tracking-tight">{{ profile()?.name }}</h2>
               <p class="text-lg font-medium text-[var(--cc-primary-text)] mt-1">{{ profile()?.role }}</p>
               <div class="mt-4 flex flex-wrap justify-center sm:justify-start gap-2">
-                <span class="inline-flex items-center px-3 py-1 rounded-lg text-xs font-bold tracking-wide bg-slate-100 text-slate-700 border border-slate-200">
+                <span class="inline-flex items-center px-3 py-1 rounded-lg text-xs font-bold tracking-wide bg-surface-muted text-ink-secondary border border-line">
                   <mat-icon class="text-[14px] w-[14px] h-[14px] mr-1">business</mat-icon> {{ profile()?.organization }}
                 </span>
-                <span class="inline-flex items-center px-3 py-1 rounded-lg text-xs font-bold tracking-wide bg-slate-100 text-slate-700 border border-slate-200">
+                <span class="inline-flex items-center px-3 py-1 rounded-lg text-xs font-bold tracking-wide bg-surface-muted text-ink-secondary border border-line">
                   <mat-icon class="text-[14px] w-[14px] h-[14px] mr-1">location_on</mat-icon> {{ profile()?.location || 'Remote' }}
                 </span>
               </div>
@@ -64,7 +64,7 @@ import { forkJoin, of } from 'rxjs';
           <div class="p-6 sm:p-8 overflow-x-auto">
             <table class="w-full text-left border-collapse min-w-[600px]">
               <thead>
-                <tr class="text-xs font-semibold text-slate-500 uppercase tracking-wider border-b border-slate-200">
+                <tr class="text-xs font-semibold text-ink-muted uppercase tracking-wider border-b border-line">
                   <th class="pb-4 pr-4">Month</th>
                   <th class="pb-4 px-4">Available (h)</th>
                   <th class="pb-4 px-4">Assigned (h)</th>
@@ -74,7 +74,7 @@ import { forkJoin, of } from 'rxjs';
               </thead>
               <tbody class="divide-y divide-[var(--cc-line)]">
                 @for (month of nextSixMonths; track month.name) {
-                  <tr class="text-sm text-slate-700 hover:bg-slate-50 transition-colors group">
+                  <tr class="text-sm text-ink-secondary hover:bg-surface-muted transition-colors group">
                     <td class="py-4 pr-4 font-bold text-[var(--cc-ink)]">{{ month.name }}</td>
                     <td class="py-4 px-4 font-medium font-mono tabular-nums">{{ profile()?.capacity! * 4 }}</td>
                     <td class="py-4 px-4 font-medium font-mono tabular-nums">{{ getAssignedHoursForMonth() }}</td>
@@ -85,8 +85,8 @@ import { forkJoin, of } from 'rxjs';
                         <span class="command-status w-16 justify-center" [class]="getUtilizationColorBg(util)">
                           {{ util | number:'1.0-0' }}%
                         </span>
-                        <div class="w-24 h-2 bg-slate-100 rounded-full overflow-hidden hidden sm:block">
-                          <div class="h-full rounded-full transition-all duration-500 bg-gradient-to-r from-blue-500 to-blue-600"
+                        <div class="w-24 h-2 bg-surface-muted rounded-full overflow-hidden hidden sm:block">
+                          <div class="h-full rounded-full transition-all duration-500 bg-gradient-to-r from-accent to-accent"
                                [style.width.%]="util > 100 ? 100 : util"></div>
                         </div>
                       </div>
@@ -109,8 +109,8 @@ import { forkJoin, of } from 'rxjs';
           <div class="p-6 sm:p-8">
             @if (showAddSkill()) {
               <form [formGroup]="skillForm" (ngSubmit)="addSkill()" class="command-card-muted flex flex-col sm:flex-row gap-4 mb-8 p-5">
-                <input formControlName="name" placeholder="Skill name (e.g. Angular)" class="flex-1 px-4 py-2.5 rounded-xl bg-white focus:bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all font-medium text-sm">
-                <select formControlName="level" class="px-4 py-2.5 rounded-xl bg-white focus:bg-white border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 transition-all font-medium text-sm">
+                <input formControlName="name" placeholder="Skill name (e.g. Angular)" class="command-input flex-1">
+                <select formControlName="level" class="command-select w-auto">
                   <option [value]="1">Beginner (1)</option>
                   <option [value]="2">Intermediate (2)</option>
                   <option [value]="3">Expert (3)</option>
@@ -123,22 +123,22 @@ import { forkJoin, of } from 'rxjs';
             <div class="flex flex-wrap gap-3">
               @for (skill of profile()?.skills; track skill.name) {
                 <div class="command-card group flex items-center gap-2 px-4 py-2 hover:shadow-md transition-all">
-                  <span class="font-bold text-slate-700 text-sm tracking-wide">{{ skill.name }}</span>
+                  <span class="font-bold text-ink-secondary text-sm tracking-wide">{{ skill.name }}</span>
                   <div class="flex gap-0.5 ml-2">
                     @for (i of [1, 2, 3]; track i) {
                       <div class="w-2 h-2 rounded-full transition-colors"
-                           [class.bg-blue-600]="i <= skill.level"
-                           [class.bg-slate-200]="i > skill.level">
+                           [class.bg-accent]="i <= skill.level"
+                           [class.bg-surface-muted]="i > skill.level">
                       </div>
                     }
                   </div>
-                  <button type="button" (click)="removeSkill(skill.name)" [attr.aria-label]="'Remove ' + skill.name" [attr.title]="'Remove ' + skill.name" class="ml-2 text-slate-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-all focus-within:opacity-100">
+                  <button type="button" (click)="removeSkill(skill.name)" [attr.aria-label]="'Remove ' + skill.name" [attr.title]="'Remove ' + skill.name" class="ml-2 text-ink-muted hover:text-critical-text opacity-0 group-hover:opacity-100 transition-all focus-within:opacity-100">
                     <mat-icon class="text-[16px] w-[16px] h-[16px]">close</mat-icon>
                   </button>
                 </div>
               }
               @if (!profile()?.skills?.length) {
-                <p class="text-slate-500 italic text-sm">No skills added yet.</p>
+                <p class="text-ink-muted italic text-sm">No skills added yet.</p>
               }
             </div>
           </div>
@@ -155,21 +155,21 @@ import { forkJoin, of } from 'rxjs';
           <div class="p-6">
             @if (showAddRole()) {
               <div class="command-card-muted flex gap-4 mb-6 p-4">
-                <input [formControl]="roleInput" placeholder="Role name (e.g. Scrum Master)" class="flex-1 px-4 py-2 rounded-lg bg-white focus:bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500">
+                <input [formControl]="roleInput" placeholder="Role name (e.g. Scrum Master)" class="command-input flex-1">
                 <button (click)="addRole()" [disabled]="!roleInput.value" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save</button>
               </div>
             }
             <div class="flex flex-wrap gap-3">
               @for (role of profile()?.projectRoles; track role) {
-                <div class="flex items-center gap-2 px-3 py-1.5 bg-slate-100 rounded-lg border border-slate-200">
-                  <span class="font-medium text-slate-700 text-sm">{{ role }}</span>
-                  <button type="button" (click)="removeRole(role)" [attr.aria-label]="'Remove ' + role" [attr.title]="'Remove ' + role" class="text-slate-400 hover:text-red-600 transition-colors ml-1">
+                <div class="flex items-center gap-2 px-3 py-1.5 bg-surface-muted rounded-lg border border-line">
+                  <span class="font-medium text-ink-secondary text-sm">{{ role }}</span>
+                  <button type="button" (click)="removeRole(role)" [attr.aria-label]="'Remove ' + role" [attr.title]="'Remove ' + role" class="text-ink-muted hover:text-critical-text transition-colors ml-1">
                     <mat-icon class="text-[16px] w-[16px] h-[16px]">close</mat-icon>
                   </button>
                 </div>
               }
               @if (!profile()?.projectRoles?.length) {
-                <p class="text-slate-500 text-sm">No project roles added yet.</p>
+                <p class="text-ink-muted text-sm">No project roles added yet.</p>
               }
             </div>
           </div>
@@ -188,31 +188,31 @@ import { forkJoin, of } from 'rxjs';
               <form [formGroup]="extExpForm" (ngSubmit)="addExtExp()" class="command-card-muted mb-6 p-5 space-y-4">
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
-                    <label for="projectName" class="block text-xs font-medium text-slate-700 mb-1">Project Name *</label>
-                    <input id="projectName" formControlName="projectName" class="w-full px-3 py-2 rounded-lg bg-white focus:bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500">
+                    <label for="projectName" class="block text-xs font-medium text-ink-secondary mb-1">Project Name *</label>
+                    <input id="projectName" formControlName="projectName" class="command-input">
                   </div>
                   <div>
-                    <label for="company" class="block text-xs font-medium text-slate-700 mb-1">Company *</label>
-                    <input id="company" formControlName="company" class="w-full px-3 py-2 rounded-lg bg-white focus:bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500">
+                    <label for="company" class="block text-xs font-medium text-ink-secondary mb-1">Company *</label>
+                    <input id="company" formControlName="company" class="command-input">
                   </div>
                   <div>
-                    <label for="role" class="block text-xs font-medium text-slate-700 mb-1">Project Role *</label>
-                    <input id="role" formControlName="role" class="w-full px-3 py-2 rounded-lg bg-white focus:bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500">
+                    <label for="role" class="block text-xs font-medium text-ink-secondary mb-1">Project Role *</label>
+                    <input id="role" formControlName="role" class="command-input">
                   </div>
                   <div class="grid grid-cols-2 gap-2">
                     <div>
-                      <label for="startDate" class="block text-xs font-medium text-slate-700 mb-1">Start Date *</label>
-                      <input id="startDate" type="date" formControlName="startDate" class="w-full px-3 py-2 rounded-lg bg-white focus:bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500">
+                      <label for="startDate" class="block text-xs font-medium text-ink-secondary mb-1">Start Date *</label>
+                      <input id="startDate" type="date" formControlName="startDate" class="command-input">
                     </div>
                     <div>
-                      <label for="endDate" class="block text-xs font-medium text-slate-700 mb-1">End Date *</label>
-                      <input id="endDate" type="date" formControlName="endDate" class="w-full px-3 py-2 rounded-lg bg-white focus:bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500">
+                      <label for="endDate" class="block text-xs font-medium text-ink-secondary mb-1">End Date *</label>
+                      <input id="endDate" type="date" formControlName="endDate" class="command-input">
                     </div>
                   </div>
                 </div>
                 <div>
-                  <label for="comment" class="block text-xs font-medium text-slate-700 mb-1">Comment</label>
-                  <textarea id="comment" formControlName="comment" rows="2" class="w-full px-3 py-2 rounded-lg bg-white focus:bg-white border border-slate-300 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500"></textarea>
+                  <label for="comment" class="block text-xs font-medium text-ink-secondary mb-1">Comment</label>
+                  <textarea id="comment" formControlName="comment" rows="2" class="command-textarea"></textarea>
                 </div>
                 <div class="flex justify-end gap-2">
                   <button type="button" (click)="toggleAddExtExp()" class="command-button secondary">Cancel</button>
@@ -224,19 +224,19 @@ import { forkJoin, of } from 'rxjs';
             <div class="space-y-4">
               @for (exp of profile()?.externalExperience; track exp.projectName) {
                 <div class="command-card-muted p-4 relative group">
-                  <button type="button" (click)="removeExtExp(exp)" [attr.aria-label]="'Remove ' + exp.projectName" [attr.title]="'Remove ' + exp.projectName" class="absolute top-4 right-4 text-slate-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <button type="button" (click)="removeExtExp(exp)" [attr.aria-label]="'Remove ' + exp.projectName" [attr.title]="'Remove ' + exp.projectName" class="absolute top-4 right-4 text-ink-muted hover:text-critical-text opacity-0 group-hover:opacity-100 transition-opacity">
                     <mat-icon>delete</mat-icon>
                   </button>
                   <h4 class="font-medium text-[var(--cc-ink)]">{{ exp.projectName }}</h4>
                   <p class="text-sm text-[var(--cc-muted)]">{{ exp.role }} at {{ exp.company }}</p>
                   <p class="text-xs text-[var(--cc-muted)] mt-1 font-mono">{{ exp.startDate }} to {{ exp.endDate }}</p>
                   @if (exp.comment) {
-                    <p class="text-sm text-slate-700 mt-3 bg-white p-3 rounded-lg border border-slate-200">{{ exp.comment }}</p>
+                    <p class="text-sm text-ink-secondary mt-3 bg-surface p-3 rounded-lg border border-line">{{ exp.comment }}</p>
                   }
                 </div>
               }
               @if (!profile()?.externalExperience?.length) {
-                <p class="text-slate-500 text-sm">No external experience added yet.</p>
+                <p class="text-ink-muted text-sm">No external experience added yet.</p>
               }
             </div>
           </div>
@@ -255,11 +255,11 @@ import { forkJoin, of } from 'rxjs';
                     <h4 class="font-medium text-[var(--cc-ink)]">{{ getRequestName(assignment.requestId) }}</h4>
                     <p class="text-sm text-[var(--cc-muted)] mt-1"><span class="font-mono tabular-nums text-[var(--cc-primary-text)]">{{ assignment.assignedHours }}</span> hours • <span class="capitalize">{{ assignment.status }}</span></p>
                   </div>
-                  <mat-icon class="text-slate-400">chevron_right</mat-icon>
+                  <mat-icon class="text-ink-muted">chevron_right</mat-icon>
                 </div>
               }
               @if (!myAssignments().length) {
-                <p class="text-slate-500 text-sm">No internal assignments found.</p>
+                <p class="text-ink-muted text-sm">No internal assignments found.</p>
               }
             </div>
           </div>
@@ -274,7 +274,7 @@ import { forkJoin, of } from 'rxjs';
             @if (profile()?.resume) {
               <div class="command-card-muted flex items-center justify-between p-4">
                 <div class="flex items-center gap-3">
-                  <div class="w-10 h-10 bg-blue-50 text-blue-700 ring-1 ring-blue-200 rounded-lg flex items-center justify-center">
+                  <div class="w-10 h-10 bg-accent-tint text-accent-text ring-1 ring-accent rounded-lg flex items-center justify-center">
                     <mat-icon>description</mat-icon>
                   </div>
                   <div>
@@ -283,20 +283,20 @@ import { forkJoin, of } from 'rxjs';
                   </div>
                 </div>
                 <div class="flex items-center gap-2">
-                  <a [href]="profile()?.resume" download="Resume" aria-label="Download resume" title="Download resume" class="text-slate-400 hover:text-blue-600 transition-colors">
+                  <a [href]="profile()?.resume" download="Resume" aria-label="Download resume" title="Download resume" class="text-ink-muted hover:text-accent-text transition-colors">
                     <mat-icon>download</mat-icon>
                   </a>
-                  <button type="button" (click)="removeResume()" aria-label="Remove resume" title="Remove resume" class="text-slate-400 hover:text-red-600 transition-colors">
+                  <button type="button" (click)="removeResume()" aria-label="Remove resume" title="Remove resume" class="text-ink-muted hover:text-critical-text transition-colors">
                     <mat-icon>delete</mat-icon>
                   </button>
                 </div>
               </div>
             } @else {
-              <label class="block border-2 border-dashed border-slate-300 rounded-xl p-8 text-center hover:bg-slate-50 transition-colors cursor-pointer">
+              <label class="block border-2 border-dashed border-line-strong rounded-xl p-8 text-center hover:bg-surface-muted transition-colors cursor-pointer">
                 <input type="file" class="hidden" accept=".pdf,.doc,.docx" (change)="onResumeSelected($event)">
-                <mat-icon class="text-slate-400 mb-2">cloud_upload</mat-icon>
-                <p class="text-sm font-medium text-slate-700">Click to upload resume</p>
-                <p class="text-xs text-slate-500 mt-1">PDF or DOCX up to 2MB</p>
+                <mat-icon class="text-ink-muted mb-2">cloud_upload</mat-icon>
+                <p class="text-sm font-medium text-ink-secondary">Click to upload resume</p>
+                <p class="text-xs text-ink-muted mt-1">PDF or DOCX up to 2MB</p>
               </label>
             }
           </div>
@@ -388,9 +388,9 @@ export class MyProfileComponent {
   }
 
   getUtilizationColorText(utilization: number): string {
-    if (utilization > 110) return 'text-red-700';
-    if (utilization >= 80) return 'text-emerald-700';
-    return 'text-amber-700';
+    if (utilization > 110) return 'text-critical-text';
+    if (utilization >= 80) return 'text-positive-text';
+    return 'text-caution-text';
   }
 
   /** command-status modifier for the utilization pill (visual class names only). */

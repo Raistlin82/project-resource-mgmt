@@ -64,8 +64,8 @@ interface BillingControlRow {
         <div class="command-card p-6 sm:p-8">
           <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-6">
             <div class="min-w-0">
-              <div class="flex items-center gap-2 text-xs text-slate-500 mb-2">
-                <a routerLink="/contracts" class="text-blue-700 hover:text-blue-800 transition-colors flex items-center gap-1">
+              <div class="flex items-center gap-2 text-xs text-ink-muted mb-2">
+                <a routerLink="/contracts" class="text-accent-text hover:underline transition-colors flex items-center gap-1">
                   <mat-icon class="text-[16px] w-[16px] h-[16px]">arrow_back</mat-icon> Contracts
                 </a>
               </div>
@@ -73,22 +73,22 @@ interface BillingControlRow {
               <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight truncate">{{ c.name }}</h1>
               <div class="flex flex-wrap items-center gap-3 mt-3 text-sm text-[var(--cc-muted)]">
                 <span class="inline-flex items-center gap-1.5 font-medium">
-                  <mat-icon class="text-[18px] w-[18px] h-[18px] text-slate-400">business</mat-icon>
+                  <mat-icon class="text-[18px] w-[18px] h-[18px] text-ink-muted">business</mat-icon>
                   {{ customerName() }}
                 </span>
-                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 font-mono">
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-surface-muted text-ink-secondary font-mono">
                   {{ c.type }}
                 </span>
                 <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-wide ring-1"
-                      [class.bg-amber-50]="c.status === 'Draft'"
-                      [class.text-amber-700]="c.status === 'Draft'"
-                      [class.ring-amber-200]="c.status === 'Draft'"
-                      [class.bg-emerald-50]="c.status === 'Active'"
-                      [class.text-emerald-700]="c.status === 'Active'"
-                      [class.ring-emerald-200]="c.status === 'Active'"
-                      [class.bg-slate-100]="c.status === 'Closed'"
-                      [class.text-slate-700]="c.status === 'Closed'"
-                      [class.ring-slate-200]="c.status === 'Closed'">
+                      [class.bg-caution-tint]="c.status === 'Draft'"
+                      [class.text-caution-text]="c.status === 'Draft'"
+                      [class.ring-caution]="c.status === 'Draft'"
+                      [class.bg-positive-tint]="c.status === 'Active'"
+                      [class.text-positive-text]="c.status === 'Active'"
+                      [class.ring-positive]="c.status === 'Active'"
+                      [class.bg-surface-muted]="c.status === 'Closed'"
+                      [class.text-ink-secondary]="c.status === 'Closed'"
+                      [class.ring-line]="c.status === 'Closed'">
                   {{ c.status }}
                 </span>
               </div>
@@ -117,16 +117,16 @@ interface BillingControlRow {
           <div class="command-kpi" [class.danger]="kpis().margin < 0">
             <p class="command-kpi-label">Margin</p>
             <p class="command-kpi-value"
-               [class.text-emerald-700]="kpis().margin >= 0"
-               [class.text-red-700]="kpis().margin < 0">
+               [class.text-positive-text]="kpis().margin >= 0"
+               [class.text-critical-text]="kpis().margin < 0">
               {{ kpis().margin | currency: c.currency }}
             </p>
           </div>
           <div class="command-kpi" [class.danger]="kpis().marginPct < 0">
             <p class="command-kpi-label">Margin %</p>
             <p class="command-kpi-value"
-               [class.text-emerald-700]="kpis().marginPct >= 0"
-               [class.text-red-700]="kpis().marginPct < 0">
+               [class.text-positive-text]="kpis().marginPct >= 0"
+               [class.text-critical-text]="kpis().marginPct < 0">
               {{ kpis().marginPct.toFixed(1) }}%
             </p>
           </div>
@@ -157,28 +157,28 @@ interface BillingControlRow {
                 @for (row of projectRows(); track row.project.id) {
                   <tr>
                     <td class="font-medium">
-                      <a [routerLink]="['/projects', row.project.id]" class="text-blue-700 hover:text-blue-800 transition-colors">
+                      <a [routerLink]="['/projects', row.project.id]" class="text-accent-text hover:underline transition-colors">
                         {{ row.project.name }}
                       </a>
                     </td>
-                    <td class="text-right text-slate-700 font-mono tabular-nums">{{ row.fin.revenue | currency: c.currency }}</td>
-                    <td class="text-right text-slate-700 font-mono tabular-nums">{{ row.fin.actualCost | currency: c.currency }}</td>
-                    <td class="text-right text-slate-700 font-mono tabular-nums">{{ row.fin.eac | currency: c.currency }}</td>
+                    <td class="text-right text-ink-secondary font-mono tabular-nums">{{ row.fin.revenue | currency: c.currency }}</td>
+                    <td class="text-right text-ink-secondary font-mono tabular-nums">{{ row.fin.actualCost | currency: c.currency }}</td>
+                    <td class="text-right text-ink-secondary font-mono tabular-nums">{{ row.fin.eac | currency: c.currency }}</td>
                     <td class="text-right font-medium font-mono tabular-nums"
-                        [class.text-emerald-700]="row.fin.margin >= 0"
-                        [class.text-red-700]="row.fin.margin < 0">
+                        [class.text-positive-text]="row.fin.margin >= 0"
+                        [class.text-critical-text]="row.fin.margin < 0">
                       {{ row.fin.margin | currency: c.currency }}
                     </td>
                     <td class="text-right font-medium font-mono tabular-nums"
-                        [class.text-emerald-700]="row.fin.marginPct >= 0"
-                        [class.text-red-700]="row.fin.marginPct < 0">
+                        [class.text-positive-text]="row.fin.marginPct >= 0"
+                        [class.text-critical-text]="row.fin.marginPct < 0">
                       {{ row.fin.marginPct.toFixed(1) }}%
                     </td>
                   </tr>
                 }
                 @if (!projectRows().length) {
                   <tr>
-                    <td colspan="6" class="px-6 sm:px-8 py-10 text-center text-slate-500">
+                    <td colspan="6" class="px-6 sm:px-8 py-10 text-center text-ink-muted">
                       No projects linked to this contract.
                     </td>
                   </tr>
@@ -236,7 +236,7 @@ interface BillingControlRow {
                     <td>{{ row.projectName }}</td>
                     <td class="text-right font-mono">{{ row.expected | currency: c.currency }}</td>
                     <td class="text-right font-mono">{{ row.actual | currency: c.currency }}</td>
-                    <td class="text-right font-mono font-semibold" [class.text-red-700]="row.variance < 0" [class.text-emerald-700]="row.variance >= 0">
+                    <td class="text-right font-mono font-semibold" [class.text-critical-text]="row.variance < 0" [class.text-positive-text]="row.variance >= 0">
                       {{ row.variance | currency: c.currency }}
                     </td>
                     <td>
@@ -255,7 +255,7 @@ interface BillingControlRow {
                 }
                 @if (!billingRows().length) {
                   <tr>
-                    <td colspan="7" class="px-6 sm:px-8 py-10 text-center text-slate-500">
+                    <td colspan="7" class="px-6 sm:px-8 py-10 text-center text-ink-muted">
                       No billing plan or actual invoices for this contract.
                     </td>
                   </tr>
@@ -313,15 +313,15 @@ interface BillingControlRow {
                 @for (item of contractBillingPlan(); track item.id) {
                   <tr>
                     <td>
-                      <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 font-mono">
+                      <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-surface-muted text-ink-secondary font-mono">
                         {{ item.type }}
                       </span>
                     </td>
-                    <td class="text-slate-700">{{ item.label }}</td>
+                    <td class="text-ink-secondary">{{ item.label }}</td>
                     <td class="text-[var(--cc-muted)]">{{ billingTrigger(item) }}</td>
                     <td class="text-right font-mono tabular-nums"
-                        [class.text-red-700]="item.amount < 0"
-                        [class.text-slate-700]="item.amount >= 0">
+                        [class.text-critical-text]="item.amount < 0"
+                        [class.text-ink-secondary]="item.amount >= 0">
                       {{ item.amount | currency: item.currency }}
                     </td>
                     <td>
@@ -332,12 +332,12 @@ interface BillingControlRow {
                         {{ item.status }}
                       </span>
                     </td>
-                    <td class="font-mono text-slate-600">{{ (item.dueDate ?? item.expectedDate) ? ((item.dueDate ?? item.expectedDate) | date: 'mediumDate') : '—' }}</td>
+                    <td class="font-mono text-ink-secondary">{{ (item.dueDate ?? item.expectedDate) ? ((item.dueDate ?? item.expectedDate) | date: 'mediumDate') : '—' }}</td>
                   </tr>
                 }
                 @if (!contractBillingPlan().length) {
                   <tr>
-                    <td colspan="6" class="px-6 sm:px-8 py-10 text-center text-slate-500">
+                    <td colspan="6" class="px-6 sm:px-8 py-10 text-center text-ink-muted">
                       No billing plan items for this contract.
                     </td>
                   </tr>
@@ -381,17 +381,17 @@ interface BillingControlRow {
               <div class="mt-3 space-y-2">
                 @for (row of recognitionPeriods(); track row.period) {
                   <div class="flex items-center gap-3">
-                    <span class="w-16 shrink-0 font-mono tabular-nums text-xs text-slate-500">{{ row.period }}</span>
-                    <div class="relative h-6 flex-1 rounded-md bg-slate-100 ring-1 ring-slate-200 overflow-hidden">
-                      <div class="absolute inset-y-0 left-0 rounded-md bg-blue-600 transition-[width]"
+                    <span class="w-16 shrink-0 font-mono tabular-nums text-xs text-ink-muted">{{ row.period }}</span>
+                    <div class="relative h-6 flex-1 rounded-md bg-surface-muted ring-1 ring-line overflow-hidden">
+                      <div class="absolute inset-y-0 left-0 rounded-md bg-accent transition-[width]"
                            [style.width.%]="cumulativeBarPct(row)"
                            [attr.aria-label]="'Cumulative recognized through ' + row.period"
                            role="img"></div>
                       <!-- per-period recognized marker -->
-                      <div class="absolute inset-y-0 left-0 border-r-2 border-blue-900/40"
+                      <div class="absolute inset-y-0 left-0 border-r-2 border-accent-strong/40"
                            [style.width.%]="recognizedBarPct(row)"></div>
                     </div>
-                    <span class="w-28 shrink-0 text-right font-mono tabular-nums text-xs text-slate-700">
+                    <span class="w-28 shrink-0 text-right font-mono tabular-nums text-xs text-ink-secondary">
                       {{ row.cumulative | currency: c.currency: 'symbol': '1.0-0' }}
                     </span>
                   </div>
@@ -418,31 +418,31 @@ interface BillingControlRow {
                     <tr>
                       <td class="font-mono font-semibold">{{ row.period }}</td>
                       <td class="text-right font-mono tabular-nums"
-                          [class.text-red-700]="row.recognized < 0"
-                          [class.text-slate-700]="row.recognized >= 0">
+                          [class.text-critical-text]="row.recognized < 0"
+                          [class.text-ink-secondary]="row.recognized >= 0">
                         {{ row.recognized | currency: c.currency }}
                       </td>
-                      <td class="text-right font-mono tabular-nums text-slate-700">{{ row.cumulative | currency: c.currency }}</td>
+                      <td class="text-right font-mono tabular-nums text-ink-secondary">{{ row.cumulative | currency: c.currency }}</td>
                       <td class="text-right font-mono tabular-nums"
-                          [class.text-amber-700]="row.deferred > 0"
-                          [class.text-slate-500]="row.deferred === 0">
+                          [class.text-caution-text]="row.deferred > 0"
+                          [class.text-ink-muted]="row.deferred === 0">
                         {{ row.deferred | currency: c.currency }}
                       </td>
                     </tr>
                   }
                 </tbody>
                 <tfoot>
-                  <tr class="border-t-2 border-slate-200">
-                    <td class="font-semibold text-slate-700">Total</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-slate-900">{{ recognitionSummary().totalRecognized | currency: c.currency }}</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-slate-900">{{ recognitionSummary().cumulative | currency: c.currency }}</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-slate-900">{{ recognitionSummary().deferred | currency: c.currency }}</td>
+                  <tr class="border-t-2 border-line">
+                    <td class="font-semibold text-ink-secondary">Total</td>
+                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().totalRecognized | currency: c.currency }}</td>
+                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().cumulative | currency: c.currency }}</td>
+                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().deferred | currency: c.currency }}</td>
                   </tr>
                 </tfoot>
               </table>
             </div>
           } @else {
-            <div class="command-empty px-6 sm:px-8 py-10 text-center text-slate-500">
+            <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted">
               No dated billing items or approved time entries to build a recognition schedule for this contract.
             </div>
           }
@@ -485,18 +485,18 @@ interface BillingControlRow {
                 <tbody>
                   @for (entry of journalEntries(); track entry.date) {
                     @for (line of entry.lines; track $index; let first = $first) {
-                      <tr [class.border-t-2]="first" [class.border-slate-200]="first">
+                      <tr [class.border-t-2]="first" [class.border-line]="first">
                         <td class="font-mono font-semibold align-top">{{ first ? entry.date : '' }}</td>
                         <td class="text-[var(--cc-muted)] align-top">{{ first ? entry.memo : '' }}</td>
-                        <td class="text-slate-700">{{ line.account }}</td>
+                        <td class="text-ink-secondary">{{ line.account }}</td>
                         <td class="text-right font-mono tabular-nums"
-                            [class.text-slate-700]="line.debit > 0"
-                            [class.text-slate-300]="line.debit === 0">
+                            [class.text-ink-secondary]="line.debit > 0"
+                            [class.text-ink-muted]="line.debit === 0">
                           {{ line.debit > 0 ? (line.debit | currency: c.currency) : '—' }}
                         </td>
                         <td class="text-right font-mono tabular-nums"
-                            [class.text-slate-700]="line.credit > 0"
-                            [class.text-slate-300]="line.credit === 0">
+                            [class.text-ink-secondary]="line.credit > 0"
+                            [class.text-ink-muted]="line.credit === 0">
                           {{ line.credit > 0 ? (line.credit | currency: c.currency) : '—' }}
                         </td>
                       </tr>
@@ -504,10 +504,10 @@ interface BillingControlRow {
                   }
                 </tbody>
                 <tfoot>
-                  <tr class="border-t-2 border-slate-300">
-                    <td class="font-semibold text-slate-700" colspan="3">Totals</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-slate-900">{{ journalTotalsRow().debit | currency: c.currency }}</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-slate-900">{{ journalTotalsRow().credit | currency: c.currency }}</td>
+                  <tr class="border-t-2 border-line-strong">
+                    <td class="font-semibold text-ink-secondary" colspan="3">Totals</td>
+                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ journalTotalsRow().debit | currency: c.currency }}</td>
+                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ journalTotalsRow().credit | currency: c.currency }}</td>
                   </tr>
                 </tfoot>
               </table>
@@ -517,7 +517,7 @@ interface BillingControlRow {
               These entries are a preview and have not been posted to the ledger.
             </p>
           } @else {
-            <div class="command-empty px-6 sm:px-8 py-10 text-center text-slate-500">
+            <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted">
               No journal movement to preview — there is nothing recognized or deferred for this contract yet.
             </div>
           }
@@ -542,30 +542,30 @@ interface BillingControlRow {
                 @for (o of contractOrders(); track o.id) {
                   <tr>
                     <td class="font-medium">{{ o.type }}</td>
-                    <td class="text-right text-slate-700 font-mono tabular-nums">{{ o.amount | currency: o.currency }}</td>
+                    <td class="text-right text-ink-secondary font-mono tabular-nums">{{ o.amount | currency: o.currency }}</td>
                     <td>
                       <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold tracking-wide ring-1"
-                            [class.bg-slate-100]="o.status === 'Open'"
-                            [class.text-slate-700]="o.status === 'Open'"
-                            [class.ring-slate-200]="o.status === 'Open'"
-                            [class.bg-blue-50]="o.status === 'Confirmed'"
-                            [class.text-blue-700]="o.status === 'Confirmed'"
-                            [class.ring-blue-200]="o.status === 'Confirmed'"
-                            [class.bg-amber-50]="o.status === 'Invoiced'"
-                            [class.text-amber-700]="o.status === 'Invoiced'"
-                            [class.ring-amber-200]="o.status === 'Invoiced'"
-                            [class.bg-emerald-50]="o.status === 'Paid'"
-                            [class.text-emerald-700]="o.status === 'Paid'"
-                            [class.ring-emerald-200]="o.status === 'Paid'">
+                            [class.bg-surface-muted]="o.status === 'Open'"
+                            [class.text-ink-secondary]="o.status === 'Open'"
+                            [class.ring-line]="o.status === 'Open'"
+                            [class.bg-accent-tint]="o.status === 'Confirmed'"
+                            [class.text-accent-text]="o.status === 'Confirmed'"
+                            [class.ring-accent]="o.status === 'Confirmed'"
+                            [class.bg-caution-tint]="o.status === 'Invoiced'"
+                            [class.text-caution-text]="o.status === 'Invoiced'"
+                            [class.ring-caution]="o.status === 'Invoiced'"
+                            [class.bg-positive-tint]="o.status === 'Paid'"
+                            [class.text-positive-text]="o.status === 'Paid'"
+                            [class.ring-positive]="o.status === 'Paid'">
                         {{ o.status }}
                       </span>
                     </td>
-                    <td class="text-slate-700">{{ o.orderDate | date: 'mediumDate' }}</td>
+                    <td class="text-ink-secondary">{{ o.orderDate | date: 'mediumDate' }}</td>
                   </tr>
                 }
                 @if (!contractOrders().length) {
                   <tr>
-                    <td colspan="4" class="px-6 sm:px-8 py-10 text-center text-slate-500">
+                    <td colspan="4" class="px-6 sm:px-8 py-10 text-center text-ink-muted">
                       No orders for this contract.
                     </td>
                   </tr>
@@ -576,12 +576,12 @@ interface BillingControlRow {
         </div>
 
         @if (showBillingPlanForm()) {
-          <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+          <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
                appModal ariaLabelledby="billingPlanModalTitle" (dismiss)="closeBillingPlanForm()">
             <div class="command-card w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
               <div class="command-card-header">
                 <h2 id="billingPlanModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Expected Billing</h2>
-                <button type="button" (click)="closeBillingPlanForm()" class="text-slate-500 hover:text-slate-700 hover:bg-slate-100 p-2 rounded-full transition-colors" aria-label="Close">
+                <button type="button" (click)="closeBillingPlanForm()" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors" aria-label="Close">
                   <mat-icon>close</mat-icon>
                 </button>
               </div>
@@ -589,14 +589,14 @@ interface BillingControlRow {
               <div class="p-6 sm:p-8 overflow-y-auto flex-1">
                 <form [formGroup]="billingPlanForm" (ngSubmit)="saveBillingPlanItem(c)" class="space-y-6">
                   <div>
-                    <label for="billingLabel" class="block text-sm font-semibold text-slate-700 mb-1.5">Label *</label>
-                    <input id="billingLabel" type="text" formControlName="label" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="e.g. Monthly T&M billing">
+                    <label for="billingLabel" class="block text-sm font-semibold text-ink-secondary mb-1.5">Label *</label>
+                    <input id="billingLabel" type="text" formControlName="label" class="command-input" placeholder="e.g. Monthly T&M billing">
                   </div>
 
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
                     <div>
-                      <label for="billingProject" class="block text-sm font-semibold text-slate-700 mb-1.5">Project</label>
-                      <select id="billingProject" formControlName="projectId" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900">
+                      <label for="billingProject" class="block text-sm font-semibold text-ink-secondary mb-1.5">Project</label>
+                      <select id="billingProject" formControlName="projectId" class="command-select">
                         <option value="">Contract level</option>
                         @for (project of contractProjects(); track project.id) {
                           <option [value]="project.id">{{ project.name }}</option>
@@ -605,8 +605,8 @@ interface BillingControlRow {
                     </div>
 
                     <div>
-                      <label for="billingRecurrence" class="block text-sm font-semibold text-slate-700 mb-1.5">Recurrence *</label>
-                      <select id="billingRecurrence" formControlName="recurrence" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900">
+                      <label for="billingRecurrence" class="block text-sm font-semibold text-ink-secondary mb-1.5">Recurrence *</label>
+                      <select id="billingRecurrence" formControlName="recurrence" class="command-select">
                         <option value="One-off">One-off</option>
                         <option value="Monthly">Monthly</option>
                         <option value="Quarterly">Quarterly</option>
@@ -615,23 +615,23 @@ interface BillingControlRow {
                     </div>
 
                     <div>
-                      <label for="billingExpectedDate" class="block text-sm font-semibold text-slate-700 mb-1.5">Expected Date *</label>
-                      <input id="billingExpectedDate" type="date" formControlName="expectedDate" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900">
+                      <label for="billingExpectedDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Expected Date *</label>
+                      <input id="billingExpectedDate" type="date" formControlName="expectedDate" class="command-input">
                     </div>
 
                     <div>
-                      <label for="billingAmount" class="block text-sm font-semibold text-slate-700 mb-1.5">Amount *</label>
-                      <input id="billingAmount" type="number" formControlName="amount" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900 placeholder:text-slate-400" placeholder="0">
+                      <label for="billingAmount" class="block text-sm font-semibold text-ink-secondary mb-1.5">Amount *</label>
+                      <input id="billingAmount" type="number" formControlName="amount" class="command-input" placeholder="0">
                     </div>
 
                     <div>
-                      <label for="billingCurrency" class="block text-sm font-semibold text-slate-700 mb-1.5">Currency *</label>
-                      <input id="billingCurrency" type="text" formControlName="currency" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900">
+                      <label for="billingCurrency" class="block text-sm font-semibold text-ink-secondary mb-1.5">Currency *</label>
+                      <input id="billingCurrency" type="text" formControlName="currency" class="command-input">
                     </div>
 
                     <div>
-                      <label for="billingStatus" class="block text-sm font-semibold text-slate-700 mb-1.5">Status *</label>
-                      <select id="billingStatus" formControlName="status" class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none transition-all text-sm bg-white focus:bg-white text-slate-900">
+                      <label for="billingStatus" class="block text-sm font-semibold text-ink-secondary mb-1.5">Status *</label>
+                      <select id="billingStatus" formControlName="status" class="command-select">
                         <option value="Planned">Planned</option>
                         <option value="Ready">Ready</option>
                         <option value="Blocked">Blocked</option>
@@ -652,8 +652,8 @@ interface BillingControlRow {
         }
       } @else {
         <div class="command-card-muted p-12 text-center">
-          <div class="w-20 h-20 bg-white shadow-sm ring-1 ring-slate-900/5 rounded-full flex items-center justify-center mx-auto mb-4">
-            <mat-icon class="text-slate-400 text-4xl">description</mat-icon>
+          <div class="w-20 h-20 bg-surface shadow-sm ring-1 ring-line rounded-full flex items-center justify-center mx-auto mb-4">
+            <mat-icon class="text-ink-muted text-4xl">description</mat-icon>
           </div>
           <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-2">Contract not found</h3>
           <p class="text-[var(--cc-muted)]">The contract you are looking for is unavailable or still loading.</p>

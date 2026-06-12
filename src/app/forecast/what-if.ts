@@ -20,6 +20,12 @@ import {
   benchList,
   skillGap,
 } from '../services/forecast.util';
+import {
+  CommandBarChartComponent,
+  CommandTrendChartComponent,
+  BarSeries,
+  TrendSeries,
+} from '../shared/charts';
 
 /** Rolling horizon (weeks) for the sandbox forecast. Fixed: this is a comparison, not a tuning, surface. */
 const HORIZON_WEEKS = 12;
@@ -38,7 +44,7 @@ interface KpiDelta {
   better: 'up' | 'down';
 }
 
-/** One scenario timeline row: scenario capacity profile plus the delta vs base demand. */
+/** One scenario timeline row: scenario capacity figures plus the delta vs base demand. */
 interface TimelineRow {
   /** Short label for the period start (e.g. "12 May"). */
   label: string;
@@ -47,12 +53,10 @@ interface TimelineRow {
   utilizationPct: number;
   /** Scenario demand − base demand for the same period (hours). */
   demandDelta: number;
-  /** Supply bar width as a % of the busiest figure in the horizon. */
-  supplyPct: number;
-  /** Committed-demand bar width as a % of the busiest figure. */
-  committedPct: number;
-  /** Pipeline-demand bar width as a % of the busiest figure. */
-  pipelinePct: number;
+  /** Committed-demand hours for the period (scenario). */
+  committed: number;
+  /** Pipeline-demand hours for the period (scenario). */
+  pipeline: number;
   /** Utilisation band driving the cell colour. */
   band: 'under' | 'tight' | 'over';
 }
@@ -76,7 +80,7 @@ interface TimelineRow {
 @Component({
   selector: 'app-what-if',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [DecimalPipe, ReactiveFormsModule],
+  imports: [DecimalPipe, ReactiveFormsModule, CommandBarChartComponent, CommandTrendChartComponent],
   template: `
     <div class="command-page space-y-6">
       <header class="command-header">
@@ -152,25 +156,25 @@ interface TimelineRow {
             </div>
             <div class="space-y-4 p-5">
               <div>
-                <label for="dealRole" class="block text-sm font-semibold text-slate-700 mb-1.5">Required role *</label>
-                <input id="dealRole" type="text" formControlName="requiredRole" class="cc-input" placeholder="e.g. Senior Developer">
+                <label for="dealRole" class="block text-sm font-semibold text-ink-secondary mb-1.5">Required role *</label>
+                <input id="dealRole" type="text" formControlName="requiredRole" class="command-input" placeholder="e.g. Senior Developer">
               </div>
               <div>
-                <label for="dealEffort" class="block text-sm font-semibold text-slate-700 mb-1.5">Required effort (h) *</label>
-                <input id="dealEffort" type="number" min="1" formControlName="requiredEffort" class="cc-input" placeholder="e.g. 320">
+                <label for="dealEffort" class="block text-sm font-semibold text-ink-secondary mb-1.5">Required effort (h) *</label>
+                <input id="dealEffort" type="number" min="1" formControlName="requiredEffort" class="command-input" placeholder="e.g. 320">
               </div>
               <div>
-                <label for="dealSkills" class="block text-sm font-semibold text-slate-700 mb-1.5">Skills (comma-separated)</label>
-                <input id="dealSkills" type="text" formControlName="skills" class="cc-input" placeholder="e.g. Java, AWS, Kafka">
+                <label for="dealSkills" class="block text-sm font-semibold text-ink-secondary mb-1.5">Skills (comma-separated)</label>
+                <input id="dealSkills" type="text" formControlName="skills" class="command-input" placeholder="e.g. Java, AWS, Kafka">
               </div>
               <div class="grid grid-cols-2 gap-3">
                 <div>
-                  <label for="dealStart" class="block text-sm font-semibold text-slate-700 mb-1.5">Start</label>
-                  <input id="dealStart" type="date" formControlName="startDate" class="cc-input">
+                  <label for="dealStart" class="block text-sm font-semibold text-ink-secondary mb-1.5">Start</label>
+                  <input id="dealStart" type="date" formControlName="startDate" class="command-input">
                 </div>
                 <div>
-                  <label for="dealEnd" class="block text-sm font-semibold text-slate-700 mb-1.5">End</label>
-                  <input id="dealEnd" type="date" formControlName="endDate" class="cc-input">
+                  <label for="dealEnd" class="block text-sm font-semibold text-ink-secondary mb-1.5">End</label>
+                  <input id="dealEnd" type="date" formControlName="endDate" class="command-input">
                 </div>
               </div>
             </div>
@@ -189,22 +193,22 @@ interface TimelineRow {
             </div>
             <div class="space-y-4 p-5">
               <div>
-                <label for="hireRole" class="block text-sm font-semibold text-slate-700 mb-1.5">Role *</label>
-                <input id="hireRole" type="text" formControlName="role" class="cc-input" placeholder="e.g. Developer">
+                <label for="hireRole" class="block text-sm font-semibold text-ink-secondary mb-1.5">Role *</label>
+                <input id="hireRole" type="text" formControlName="role" class="command-input" placeholder="e.g. Developer">
               </div>
               <div class="grid grid-cols-2 gap-3">
                 <div>
-                  <label for="hireCount" class="block text-sm font-semibold text-slate-700 mb-1.5">Headcount *</label>
-                  <input id="hireCount" type="number" min="1" max="50" formControlName="count" class="cc-input" placeholder="e.g. 3">
+                  <label for="hireCount" class="block text-sm font-semibold text-ink-secondary mb-1.5">Headcount *</label>
+                  <input id="hireCount" type="number" min="1" max="50" formControlName="count" class="command-input" placeholder="e.g. 3">
                 </div>
                 <div>
-                  <label for="hireCapacity" class="block text-sm font-semibold text-slate-700 mb-1.5">Capacity (h/wk) *</label>
-                  <input id="hireCapacity" type="number" min="1" formControlName="capacity" class="cc-input" placeholder="e.g. 40">
+                  <label for="hireCapacity" class="block text-sm font-semibold text-ink-secondary mb-1.5">Capacity (h/wk) *</label>
+                  <input id="hireCapacity" type="number" min="1" formControlName="capacity" class="command-input" placeholder="e.g. 40">
                 </div>
               </div>
               <div>
-                <label for="hireSkill" class="block text-sm font-semibold text-slate-700 mb-1.5">Skill</label>
-                <input id="hireSkill" type="text" formControlName="skill" class="cc-input" placeholder="e.g. Java">
+                <label for="hireSkill" class="block text-sm font-semibold text-ink-secondary mb-1.5">Skill</label>
+                <input id="hireSkill" type="text" formControlName="skill" class="command-input" placeholder="e.g. Java">
               </div>
             </div>
             <div class="mt-auto flex justify-end border-t border-[var(--cc-line)] p-4">
@@ -222,8 +226,8 @@ interface TimelineRow {
             </div>
             <div class="space-y-4 p-5">
               <div>
-                <label for="slipProjectId" class="block text-sm font-semibold text-slate-700 mb-1.5">Project *</label>
-                <select id="slipProjectId" formControlName="projectId" class="cc-input">
+                <label for="slipProjectId" class="block text-sm font-semibold text-ink-secondary mb-1.5">Project *</label>
+                <select id="slipProjectId" formControlName="projectId" class="command-select">
                   <option value="">Select a project…</option>
                   @for (p of slippableProjects(); track p.id) {
                     <option [value]="p.id">{{ p.name }} ({{ requestCountFor(p.id) }} req)</option>
@@ -234,8 +238,8 @@ interface TimelineRow {
                 }
               </div>
               <div>
-                <label for="slipWeeks" class="block text-sm font-semibold text-slate-700 mb-1.5">Shift by (weeks) *</label>
-                <input id="slipWeeks" type="number" formControlName="weeks" class="cc-input" placeholder="e.g. 4 (negative pulls in)">
+                <label for="slipWeeks" class="block text-sm font-semibold text-ink-secondary mb-1.5">Shift by (weeks) *</label>
+                <input id="slipWeeks" type="number" formControlName="weeks" class="command-input" placeholder="e.g. 4 (negative pulls in)">
                 <p class="mt-1.5 text-xs text-[var(--cc-muted)]">Positive delays the project; negative pulls it earlier.</p>
               </div>
             </div>
@@ -254,18 +258,36 @@ interface TimelineRow {
                 Weekly supply versus demand under the scenario, with the demand delta against baseline.
               </p>
             </div>
-            <div class="flex flex-wrap items-center gap-3 text-xs text-[var(--cc-muted)]">
-              <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-slate-300"></span>Supply</span>
-              <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-blue-600"></span>Committed</span>
-              <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-blue-300"></span>Pipeline</span>
-            </div>
           </div>
+
+          <!-- Scenario supply vs committed + pipeline demand stack, per week. -->
+          <div class="px-5 pt-4">
+            <command-bar-chart
+              [categories]="weekLabels()"
+              [series]="scenarioCapacitySeries()"
+              [stacked]="false"
+              [height]="300"
+              formatKind="number"
+              ariaLabel="Scenario supply versus committed and pipeline demand by week"
+              caption="Scenario weekly supply, committed and pipeline demand in hours" />
+          </div>
+
+          <!-- Base vs scenario demand trend, so the scenario's demand delta reads at a glance. -->
+          <div class="px-5 pb-2">
+            <command-trend-chart
+              [categories]="weekLabels()"
+              [series]="demandTrendSeries()"
+              mode="line" [smooth]="true"
+              formatKind="number"
+              ariaLabel="Baseline versus scenario weekly demand"
+              caption="Baseline versus scenario weekly demand in hours" />
+          </div>
+
           <div class="overflow-x-auto">
             <table class="command-data-table">
               <thead>
                 <tr>
                   <th scope="col">Week of</th>
-                  <th scope="col">Capacity profile</th>
                   <th scope="col" class="num">Supply</th>
                   <th scope="col" class="num">Demand</th>
                   <th scope="col" class="num">Util %</th>
@@ -276,18 +298,6 @@ interface TimelineRow {
                 @for (row of timeline(); track row.label) {
                   <tr>
                     <td class="font-mono whitespace-nowrap">{{ row.label }}</td>
-                    <td class="min-w-[14rem]">
-                      <div class="space-y-1.5"
-                           [attr.aria-label]="(row.demand | number: '1.0-0') + ' demand hours against ' + (row.supply | number: '1.0-0') + ' supply'">
-                        <div class="h-2 overflow-hidden rounded-full bg-slate-100">
-                          <span class="block h-full rounded-full bg-slate-300" [style.width.%]="row.supplyPct"></span>
-                        </div>
-                        <div class="flex h-2 overflow-hidden rounded-full bg-slate-100">
-                          <span class="block h-full bg-blue-600" [style.width.%]="row.committedPct"></span>
-                          <span class="block h-full bg-blue-300" [style.width.%]="row.pipelinePct"></span>
-                        </div>
-                      </div>
-                    </td>
                     <td class="num">{{ row.supply | number: '1.0-0' }}</td>
                     <td class="num">{{ row.demand | number: '1.0-0' }}</td>
                     <td class="num">
@@ -367,25 +377,6 @@ interface TimelineRow {
       }
     </div>
   `,
-  styles: [`
-    .cc-input {
-      width: 100%;
-      padding: 0.75rem 1rem;
-      border: 1px solid var(--cc-line);
-      border-radius: 0.75rem;
-      background: #ffffff;
-      color: var(--cc-ink);
-      font-size: var(--text-sm);
-      outline: none;
-      transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
-    }
-    .cc-input:focus {
-      border-color: rgb(37 99 235 / 100%);
-      background: #ffffff;
-      box-shadow: 0 0 0 2px rgb(59 130 246 / 25%);
-    }
-    .cc-input::placeholder { color: #94a3b8; }
-  `],
 })
 export class WhatIf {
   private readonly api = inject(ApiService);
@@ -545,20 +536,45 @@ export class WhatIf {
   readonly timeline = computed<TimelineRow[]>(() => {
     const rows = this.scenarioPeriods();
     const baseByPeriod = new Map(this.basePeriods().map(p => [p.period, p]));
-    // Scale bars against the busiest figure across the scenario horizon (>=1 to avoid /0).
-    const scale = Math.max(1, ...rows.map(r => Math.max(r.supply, r.demand)));
-    const pct = (v: number): number => Math.min(100, Math.max(0, (v / scale) * 100));
     return rows.map(r => ({
       label: this.shortDate(r.period),
       supply: r.supply,
       demand: r.demand,
       utilizationPct: r.utilizationPct,
       demandDelta: r.demand - (baseByPeriod.get(r.period)?.demand ?? 0),
-      supplyPct: pct(r.supply),
-      committedPct: pct(r.committed),
-      pipelinePct: pct(r.pipeline),
+      committed: r.committed,
+      pipeline: r.pipeline,
       band: this.bandFor(r.utilizationPct),
     }));
+  });
+
+  /** Week-start labels (e.g. "12 May") shared by the bar + trend charts. */
+  readonly weekLabels = computed<string[]>(() =>
+    this.scenarioPeriods().map(p => this.shortDate(p.period)),
+  );
+
+  /**
+   * Scenario capacity bars — Supply (series-6/slate), Committed (accent), Pipeline (series-2/teal).
+   * Committed and Pipeline get genuinely distinct tones so the two demand bands (and
+   * their matching legend swatches) never collapse to the same colour.
+   */
+  readonly scenarioCapacitySeries = computed<BarSeries[]>(() => {
+    const rows = this.scenarioPeriods();
+    return [
+      { name: 'Supply', values: rows.map(r => r.supply), color: 'var(--color-series-6)' },
+      { name: 'Committed', values: rows.map(r => r.committed), color: 'var(--color-accent)' },
+      { name: 'Pipeline', values: rows.map(r => r.pipeline), color: 'var(--color-series-2)' },
+    ];
+  });
+
+  /** Baseline vs scenario weekly demand, aligned on the scenario's period axis. */
+  readonly demandTrendSeries = computed<TrendSeries[]>(() => {
+    const rows = this.scenarioPeriods();
+    const baseByPeriod = new Map(this.basePeriods().map(p => [p.period, p]));
+    return [
+      { name: 'Base demand', values: rows.map(r => baseByPeriod.get(r.period)?.demand ?? 0) },
+      { name: 'Scenario demand', values: rows.map(r => r.demand) },
+    ];
   });
 
   // --- Skill rows: union of base + scenario skills ----------------------------

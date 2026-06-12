@@ -23,11 +23,11 @@ import { NotificationService } from '../services/notification.service';
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <label for="setName" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Name</label>
-                <input id="setName" type="text" formControlName="name" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-bold text-slate-900 placeholder:text-slate-400 transition-all">
+                <input id="setName" type="text" formControlName="name" class="command-input">
               </div>
               <div>
                 <label for="setDescription" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Description</label>
-                <input id="setDescription" type="text" formControlName="description" class="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white shadow-inner font-medium text-slate-700 placeholder:text-slate-400 transition-all">
+                <input id="setDescription" type="text" formControlName="description" class="command-input">
               </div>
             </div>
 
@@ -44,17 +44,17 @@ import { NotificationService } from '../services/notification.service';
                   <div [formGroupName]="i" class="flex flex-col sm:flex-row gap-4 items-start command-card p-4">
                     <div class="w-full sm:w-24">
                       <label [for]="'level' + i" class="block text-[10px] font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-1.5">Level</label>
-                      <input [id]="'level' + i" type="number" formControlName="level" class="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white font-mono font-bold text-blue-700 placeholder:text-slate-400 transition-all text-center">
+                      <input [id]="'level' + i" type="number" formControlName="level" class="command-input text-center">
                     </div>
                     <div class="flex-1 w-full">
                       <label [for]="'levelName' + i" class="block text-[10px] font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-1.5">Name</label>
-                      <input [id]="'levelName' + i" type="text" formControlName="name" class="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white font-bold text-slate-900 placeholder:text-slate-400 transition-all">
+                      <input [id]="'levelName' + i" type="text" formControlName="name" class="command-input">
                     </div>
                     <div class="flex-1 w-full">
                       <label [for]="'levelDesc' + i" class="block text-[10px] font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-1.5">Description</label>
-                      <input [id]="'levelDesc' + i" type="text" formControlName="description" class="w-full px-3 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 focus:outline-none bg-white focus:bg-white font-medium text-slate-700 placeholder:text-slate-400 transition-all">
+                      <input [id]="'levelDesc' + i" type="text" formControlName="description" class="command-input">
                     </div>
-                    <button type="button" (click)="removeLevel(i)" class="mt-0 sm:mt-6 w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-red-600 hover:border-red-300 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm self-end sm:self-auto">
+                    <button type="button" (click)="removeLevel(i)" class="mt-0 sm:mt-6 w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm self-end sm:self-auto">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">remove_circle</mat-icon>
                     </button>
                   </div>
@@ -88,8 +88,8 @@ import { NotificationService } from '../services/notification.service';
                 <td>
                   <div class="flex flex-wrap gap-2">
                     @for (lvl of set.levels; track lvl.id) {
-                      <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide bg-slate-100 text-slate-700 ring-1 ring-slate-200" title="{{lvl.description}}">
-                        <span class="text-blue-700 font-mono mr-1">{{ lvl.level }}:</span> {{ lvl.name }}
+                      <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold tracking-wide bg-surface-muted text-ink-secondary ring-1 ring-line" title="{{lvl.description}}">
+                        <span class="text-accent-text font-mono mr-1">{{ lvl.level }}:</span> {{ lvl.name }}
                       </span>
                     }
                   </div>
@@ -98,11 +98,11 @@ import { NotificationService } from '../services/notification.service';
                   @if (pendingDeleteId() === set.id) {
                     <div class="inline-flex items-center gap-2">
                       <span class="text-xs font-bold text-[var(--cc-muted)]">Delete?</span>
-                      <button (click)="confirmDelete(set.id)" class="px-3 py-1.5 text-xs font-bold text-red-700 bg-red-50 ring-1 ring-red-200 rounded-lg hover:bg-red-100 transition-all shadow-sm">Confirm</button>
-                      <button (click)="cancelDelete()" class="px-3 py-1.5 text-xs font-bold text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-all shadow-sm">Cancel</button>
+                      <button (click)="confirmDelete(set.id)" class="px-3 py-1.5 text-xs font-bold text-critical-text bg-critical-tint ring-1 ring-critical rounded-lg hover:bg-[color-mix(in_oklch,var(--color-critical)_16%,var(--color-surface))] transition-all shadow-sm">Confirm</button>
+                      <button (click)="cancelDelete()" class="px-3 py-1.5 text-xs font-bold text-ink-secondary bg-surface border border-line rounded-lg hover:bg-surface-muted transition-all shadow-sm">Cancel</button>
                     </div>
                   } @else {
-                    <button (click)="requestDelete(set.id)" class="w-10 h-10 rounded-full bg-white border border-slate-200 text-slate-500 hover:text-red-600 hover:border-red-300 hover:bg-red-50 transition-all inline-flex items-center justify-center shadow-sm" title="Delete">
+                    <button (click)="requestDelete(set.id)" class="w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm" title="Delete">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                     </button>
                   }

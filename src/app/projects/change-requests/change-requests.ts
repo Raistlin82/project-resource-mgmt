@@ -28,7 +28,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
         @if (!projectId()) {
           <div class="command-card p-4">
             <label for="changeProjectFilter" class="command-section-label block mb-2">Project Filter</label>
-            <select id="changeProjectFilter" [formControl]="projectFilter" class="w-full sm:w-96 px-4 py-3 border border-slate-300 rounded-xl bg-white focus:bg-white focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none text-sm text-slate-900">
+            <select id="changeProjectFilter" [formControl]="projectFilter" class="command-select sm:w-96">
               <option value="">All projects</option>
               @for (project of projects(); track project.id) {
                 <option [value]="project.id">{{ project.name }}</option>
@@ -72,7 +72,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               </thead>
               <tbody class="divide-y divide-[var(--cc-line)]">
                 @for (change of filteredChanges(); track change.id) {
-                  <tr class="hover:bg-slate-50 transition-colors">
+                  <tr class="hover:bg-surface-muted transition-colors">
                     <td class="px-6 py-5 min-w-72">
                       <div class="font-bold text-[var(--cc-ink)]">{{ change.title }}</div>
                       <div class="text-xs text-[var(--cc-muted)] mt-1 line-clamp-2">{{ change.description }}</div>
@@ -81,61 +81,61 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                     <td class="px-6 py-5 text-[var(--cc-muted)]">{{ projectName(change.projectId) }}</td>
                     <td class="px-6 py-5">
                       <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold ring-1"
-                            [class.bg-red-50]="change.priority === 'Critical'"
-                            [class.text-red-700]="change.priority === 'Critical'"
-                            [class.ring-red-200]="change.priority === 'Critical'"
-                            [class.bg-amber-50]="change.priority === 'High'"
-                            [class.text-amber-700]="change.priority === 'High'"
-                            [class.ring-amber-200]="change.priority === 'High'"
-                            [class.bg-blue-50]="change.priority === 'Medium'"
-                            [class.text-blue-700]="change.priority === 'Medium'"
-                            [class.ring-blue-200]="change.priority === 'Medium'"
-                            [class.bg-slate-100]="change.priority === 'Low'"
-                            [class.text-slate-700]="change.priority === 'Low'"
-                            [class.ring-slate-200]="change.priority === 'Low'">
+                            [class.bg-critical-tint]="change.priority === 'Critical'"
+                            [class.text-critical-text]="change.priority === 'Critical'"
+                            [class.ring-critical]="change.priority === 'Critical'"
+                            [class.bg-caution-tint]="change.priority === 'High'"
+                            [class.text-caution-text]="change.priority === 'High'"
+                            [class.ring-caution]="change.priority === 'High'"
+                            [class.bg-accent-tint]="change.priority === 'Medium'"
+                            [class.text-accent-text]="change.priority === 'Medium'"
+                            [class.ring-accent]="change.priority === 'Medium'"
+                            [class.bg-surface-muted]="change.priority === 'Low'"
+                            [class.text-ink-secondary]="change.priority === 'Low'"
+                            [class.ring-line]="change.priority === 'Low'">
                         {{ change.priority }}
                       </span>
                     </td>
-                    <td class="px-6 py-5 text-right font-semibold font-mono tabular-nums text-slate-900" [class.text-red-700]="change.impactBudget > 0" [class.text-emerald-700]="change.impactBudget < 0">
+                    <td class="px-6 py-5 text-right font-semibold font-mono tabular-nums text-ink" [class.text-critical-text]="change.impactBudget > 0" [class.text-positive-text]="change.impactBudget < 0">
                       {{ change.impactBudget | currency:'EUR':'symbol':'1.0-0' }}
                     </td>
-                    <td class="px-6 py-5 text-right font-semibold font-mono tabular-nums text-slate-900" [class.text-red-700]="change.impactScheduleDays > 0" [class.text-emerald-700]="change.impactScheduleDays < 0">
+                    <td class="px-6 py-5 text-right font-semibold font-mono tabular-nums text-ink" [class.text-critical-text]="change.impactScheduleDays > 0" [class.text-positive-text]="change.impactScheduleDays < 0">
                       {{ change.impactScheduleDays }}d
                     </td>
                     <td class="px-6 py-5">
                       <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold ring-1"
-                            [class.bg-slate-100]="change.status === 'Draft'"
-                            [class.text-slate-700]="change.status === 'Draft'"
-                            [class.ring-slate-200]="change.status === 'Draft'"
-                            [class.bg-amber-50]="change.status === 'Submitted'"
-                            [class.text-amber-700]="change.status === 'Submitted'"
-                            [class.ring-amber-200]="change.status === 'Submitted'"
-                            [class.bg-emerald-50]="change.status === 'Approved' || change.status === 'Implemented'"
-                            [class.text-emerald-700]="change.status === 'Approved' || change.status === 'Implemented'"
-                            [class.ring-emerald-200]="change.status === 'Approved' || change.status === 'Implemented'"
-                            [class.bg-red-50]="change.status === 'Rejected'"
-                            [class.text-red-700]="change.status === 'Rejected'"
-                            [class.ring-red-200]="change.status === 'Rejected'">
+                            [class.bg-surface-muted]="change.status === 'Draft'"
+                            [class.text-ink-secondary]="change.status === 'Draft'"
+                            [class.ring-line]="change.status === 'Draft'"
+                            [class.bg-caution-tint]="change.status === 'Submitted'"
+                            [class.text-caution-text]="change.status === 'Submitted'"
+                            [class.ring-caution]="change.status === 'Submitted'"
+                            [class.bg-positive-tint]="change.status === 'Approved' || change.status === 'Implemented'"
+                            [class.text-positive-text]="change.status === 'Approved' || change.status === 'Implemented'"
+                            [class.ring-positive]="change.status === 'Approved' || change.status === 'Implemented'"
+                            [class.bg-critical-tint]="change.status === 'Rejected'"
+                            [class.text-critical-text]="change.status === 'Rejected'"
+                            [class.ring-critical]="change.status === 'Rejected'">
                         {{ change.status }}
                       </span>
                     </td>
                     <td class="px-6 py-5 text-right">
                       <div class="inline-flex items-center gap-1">
                         @if (change.status === 'Draft') {
-                          <button (click)="setStatus(change, 'Submitted')" class="p-2 rounded-lg text-slate-400 hover:text-amber-700 hover:bg-amber-50" title="Submit">
+                          <button (click)="setStatus(change, 'Submitted')" class="p-2 rounded-lg text-ink-muted hover:text-caution-text hover:bg-caution-tint" title="Submit">
                             <mat-icon class="text-[20px] w-[20px] h-[20px]">send</mat-icon>
                           </button>
                         }
                         @if (change.status === 'Submitted') {
-                          <button (click)="setStatus(change, 'Approved')" class="p-2 rounded-lg text-slate-400 hover:text-emerald-700 hover:bg-emerald-50" title="Approve">
+                          <button (click)="setStatus(change, 'Approved')" class="p-2 rounded-lg text-ink-muted hover:text-positive-text hover:bg-positive-tint" title="Approve">
                             <mat-icon class="text-[20px] w-[20px] h-[20px]">check_circle</mat-icon>
                           </button>
-                          <button (click)="setStatus(change, 'Rejected')" class="p-2 rounded-lg text-slate-400 hover:text-red-700 hover:bg-red-50" title="Reject">
+                          <button (click)="setStatus(change, 'Rejected')" class="p-2 rounded-lg text-ink-muted hover:text-critical-text hover:bg-critical-tint" title="Reject">
                             <mat-icon class="text-[20px] w-[20px] h-[20px]">cancel</mat-icon>
                           </button>
                         }
                         @if (change.status === 'Approved') {
-                          <button (click)="setStatus(change, 'Implemented')" class="p-2 rounded-lg text-slate-400 hover:text-blue-700 hover:bg-blue-50" title="Mark implemented">
+                          <button (click)="setStatus(change, 'Implemented')" class="p-2 rounded-lg text-ink-muted hover:text-accent-text hover:bg-accent-tint" title="Mark implemented">
                             <mat-icon class="text-[20px] w-[20px] h-[20px]">task_alt</mat-icon>
                           </button>
                         }
@@ -155,20 +155,20 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
       </div>
 
       @if (showForm()) {
-        <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
              appModal ariaLabelledby="changeRequestModalTitle" (dismiss)="closeForm()">
           <div class="command-card shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h3 id="changeRequestModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">New Change Request</h3>
-              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100">
+              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-ink-muted hover:text-ink-secondary hover:bg-surface-muted">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
             <div class="p-6 sm:p-8 overflow-y-auto">
               <form [formGroup]="form" class="grid grid-cols-1 sm:grid-cols-2 gap-5">
                 <div class="sm:col-span-2">
-                  <label for="crProject" class="block text-sm font-semibold text-slate-700 mb-1.5">Project *</label>
-                  <select id="crProject" formControlName="projectId" class="w-full px-4 py-3 border border-slate-300 rounded-xl bg-white focus:bg-white focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none text-sm text-slate-900 placeholder:text-slate-400">
+                  <label for="crProject" class="block text-sm font-semibold text-ink-secondary mb-1.5">Project *</label>
+                  <select id="crProject" formControlName="projectId" class="command-select">
                     <option value="">Select a project...</option>
                     @for (project of projects(); track project.id) {
                       <option [value]="project.id">{{ project.name }}</option>
@@ -176,20 +176,20 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                   </select>
                 </div>
                 <div class="sm:col-span-2">
-                  <label for="crTitle" class="block text-sm font-semibold text-slate-700 mb-1.5">Title *</label>
-                  <input id="crTitle" formControlName="title" class="w-full px-4 py-3 border border-slate-300 rounded-xl bg-white focus:bg-white focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none text-sm text-slate-900 placeholder:text-slate-400">
+                  <label for="crTitle" class="block text-sm font-semibold text-ink-secondary mb-1.5">Title *</label>
+                  <input id="crTitle" formControlName="title" class="command-input">
                 </div>
                 <div class="sm:col-span-2">
-                  <label for="crDescription" class="block text-sm font-semibold text-slate-700 mb-1.5">Description *</label>
-                  <textarea id="crDescription" formControlName="description" rows="3" class="w-full px-4 py-3 border border-slate-300 rounded-xl bg-white focus:bg-white focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none text-sm text-slate-900 placeholder:text-slate-400"></textarea>
+                  <label for="crDescription" class="block text-sm font-semibold text-ink-secondary mb-1.5">Description *</label>
+                  <textarea id="crDescription" formControlName="description" rows="3" class="command-textarea"></textarea>
                 </div>
                 <div>
-                  <label for="crOwner" class="block text-sm font-semibold text-slate-700 mb-1.5">Owner *</label>
-                  <input id="crOwner" formControlName="owner" class="w-full px-4 py-3 border border-slate-300 rounded-xl bg-white focus:bg-white focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none text-sm text-slate-900 placeholder:text-slate-400">
+                  <label for="crOwner" class="block text-sm font-semibold text-ink-secondary mb-1.5">Owner *</label>
+                  <input id="crOwner" formControlName="owner" class="command-input">
                 </div>
                 <div>
-                  <label for="crPriority" class="block text-sm font-semibold text-slate-700 mb-1.5">Priority *</label>
-                  <select id="crPriority" formControlName="priority" class="w-full px-4 py-3 border border-slate-300 rounded-xl bg-white focus:bg-white focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none text-sm text-slate-900 placeholder:text-slate-400">
+                  <label for="crPriority" class="block text-sm font-semibold text-ink-secondary mb-1.5">Priority *</label>
+                  <select id="crPriority" formControlName="priority" class="command-select">
                     <option value="Low">Low</option>
                     <option value="Medium">Medium</option>
                     <option value="High">High</option>
@@ -197,16 +197,16 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                   </select>
                 </div>
                 <div>
-                  <label for="crBudget" class="block text-sm font-semibold text-slate-700 mb-1.5">Budget Impact</label>
-                  <input id="crBudget" type="number" formControlName="impactBudget" class="w-full px-4 py-3 border border-slate-300 rounded-xl bg-white focus:bg-white focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none text-sm text-slate-900 placeholder:text-slate-400">
+                  <label for="crBudget" class="block text-sm font-semibold text-ink-secondary mb-1.5">Budget Impact</label>
+                  <input id="crBudget" type="number" formControlName="impactBudget" class="command-input">
                 </div>
                 <div>
-                  <label for="crSchedule" class="block text-sm font-semibold text-slate-700 mb-1.5">Schedule Impact Days</label>
-                  <input id="crSchedule" type="number" formControlName="impactScheduleDays" class="w-full px-4 py-3 border border-slate-300 rounded-xl bg-white focus:bg-white focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none text-sm text-slate-900 placeholder:text-slate-400">
+                  <label for="crSchedule" class="block text-sm font-semibold text-ink-secondary mb-1.5">Schedule Impact Days</label>
+                  <input id="crSchedule" type="number" formControlName="impactScheduleDays" class="command-input">
                 </div>
                 <div class="sm:col-span-2">
-                  <label for="crScope" class="block text-sm font-semibold text-slate-700 mb-1.5">Scope Impact</label>
-                  <input id="crScope" formControlName="impactScope" class="w-full px-4 py-3 border border-slate-300 rounded-xl bg-white focus:bg-white focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500 outline-none text-sm text-slate-900 placeholder:text-slate-400">
+                  <label for="crScope" class="block text-sm font-semibold text-ink-secondary mb-1.5">Scope Impact</label>
+                  <input id="crScope" formControlName="impactScope" class="command-input">
                 </div>
               </form>
             </div>

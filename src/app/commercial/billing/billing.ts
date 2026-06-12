@@ -39,14 +39,14 @@ interface TypeMeta {
 
 /** Single source of truth for type → colour + copy. Drives chips, legend and the modal. */
 const TYPE_META: readonly TypeMeta[] = [
-  { type: 'Milestone', label: 'Milestone (SAL)', chip: 'bg-blue-50 text-blue-700 ring-1 ring-blue-200', dot: 'bg-blue-500', hint: 'Fixed-price stage billed when a project milestone is achieved.' },
-  { type: 'Recurring', label: 'Recurring', chip: 'bg-violet-50 text-violet-700 ring-1 ring-violet-200', dot: 'bg-violet-500', hint: 'Retainer billed on a fixed cadence.' },
-  { type: 'TimeAndMaterials', label: 'Time & Materials', chip: 'bg-sky-50 text-sky-700 ring-1 ring-sky-200', dot: 'bg-sky-500', hint: 'As incurred — approved hours × bill rate.' },
-  { type: 'Capped', label: 'Capped T&M', chip: 'bg-teal-50 text-teal-700 ring-1 ring-teal-200', dot: 'bg-teal-500', hint: 'Time & materials with a not-to-exceed ceiling.' },
-  { type: 'Advance', label: 'Advance', chip: 'bg-amber-50 text-amber-700 ring-1 ring-amber-200', dot: 'bg-amber-500', hint: 'Down payment taken up front.' },
-  { type: 'Progress', label: 'Progress (POC)', chip: 'bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200', dot: 'bg-indigo-500', hint: 'Percentage-of-completion billing.' },
-  { type: 'Expense', label: 'Expense', chip: 'bg-fuchsia-50 text-fuchsia-700 ring-1 ring-fuchsia-200', dot: 'bg-fuchsia-500', hint: 'Pass-through expenses, optionally marked up.' },
-  { type: 'CreditNote', label: 'Credit Note', chip: 'bg-rose-50 text-rose-700 ring-1 ring-rose-200', dot: 'bg-rose-500', hint: 'Credit note — reduces invoiced value (negative).' },
+  { type: 'Milestone', label: 'Milestone (SAL)', chip: 'bg-accent-tint text-accent-text ring-1 ring-accent', dot: 'bg-accent', hint: 'Fixed-price stage billed when a project milestone is achieved.' },
+  { type: 'Recurring', label: 'Recurring', chip: 'bg-surface-muted text-series-3 ring-1 ring-series-3', dot: 'bg-series-3', hint: 'Retainer billed on a fixed cadence.' },
+  { type: 'TimeAndMaterials', label: 'Time & Materials', chip: 'bg-surface-muted text-series-2 ring-1 ring-series-2', dot: 'bg-series-2', hint: 'As incurred — approved hours × bill rate.' },
+  { type: 'Capped', label: 'Capped T&M', chip: 'bg-positive-tint text-positive-text ring-1 ring-positive', dot: 'bg-positive', hint: 'Time & materials with a not-to-exceed ceiling.' },
+  { type: 'Advance', label: 'Advance', chip: 'bg-caution-tint text-caution-text ring-1 ring-caution', dot: 'bg-caution', hint: 'Down payment taken up front.' },
+  { type: 'Progress', label: 'Progress (POC)', chip: 'bg-surface-muted text-series-6 ring-1 ring-series-6', dot: 'bg-series-6', hint: 'Percentage-of-completion billing.' },
+  { type: 'Expense', label: 'Expense', chip: 'bg-surface-muted text-series-7 ring-1 ring-series-7', dot: 'bg-series-7', hint: 'Pass-through expenses, optionally marked up.' },
+  { type: 'CreditNote', label: 'Credit Note', chip: 'bg-critical-tint text-critical-text ring-1 ring-critical', dot: 'bg-critical', hint: 'Credit note — reduces invoiced value (negative).' },
 ] as const;
 
 const ALL_STATUSES: readonly BillingStatus[] = ['Planned', 'Ready', 'Invoiced', 'Paid', 'Blocked'] as const;
@@ -167,7 +167,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
         <p class="command-section-label mb-2">Condition types</p>
         <ul class="flex flex-wrap gap-x-5 gap-y-2">
           @for (meta of typeMeta; track meta.type) {
-            <li class="flex items-center gap-2 text-xs text-slate-600">
+            <li class="flex items-center gap-2 text-xs text-ink-secondary">
               <span class="inline-block w-2.5 h-2.5 rounded-full" [class]="meta.dot" aria-hidden="true"></span>
               <span class="font-medium">{{ meta.label }}</span>
             </li>
@@ -180,7 +180,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div>
             <label for="filterType" class="command-section-label block mb-1.5">Type</label>
-            <select id="filterType" [formControl]="typeFilter" class="cc-input">
+            <select id="filterType" [formControl]="typeFilter" class="command-select">
               <option value="">All types</option>
               @for (meta of typeMeta; track meta.type) {
                 <option [value]="meta.type">{{ meta.label }}</option>
@@ -189,7 +189,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
           </div>
           <div>
             <label for="filterStatus" class="command-section-label block mb-1.5">Status</label>
-            <select id="filterStatus" [formControl]="statusFilter" class="cc-input">
+            <select id="filterStatus" [formControl]="statusFilter" class="command-select">
               <option value="">All statuses</option>
               @for (status of statuses; track status) {
                 <option [value]="status">{{ status }}</option>
@@ -198,7 +198,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
           </div>
           <div>
             <label for="filterContract" class="command-section-label block mb-1.5">Contract</label>
-            <select id="filterContract" [formControl]="contractFilter" class="cc-input">
+            <select id="filterContract" [formControl]="contractFilter" class="command-select">
               <option value="">All contracts</option>
               @for (contract of contracts(); track contract.id) {
                 <option [value]="contract.id">{{ contract.name }}</option>
@@ -230,7 +230,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
               <tr>
                 <th scope="col" class="w-10">
                   @if (readyCount() > 0) {
-                    <input type="checkbox" class="cc-checkbox"
+                    <input type="checkbox" class="command-checkbox"
                            [checked]="allReadySelected()"
                            [indeterminate]="someReadySelected()"
                            (change)="toggleSelectAllReady($event)"
@@ -255,10 +255,10 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
             </thead>
             <tbody>
               @for (row of rows(); track row.item.id) {
-                <tr [class.bg-blue-50]="isSelected(row.item.id)">
+                <tr [class.bg-accent-tint]="isSelected(row.item.id)">
                   <td>
                     @if (row.item.status === 'Ready') {
-                      <input type="checkbox" class="cc-checkbox"
+                      <input type="checkbox" class="command-checkbox"
                              [checked]="isSelected(row.item.id)"
                              (change)="toggleRow(row.item.id, $event)"
                              [disabled]="batchRunning()"
@@ -270,45 +270,45 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                       {{ row.meta.label }}
                     </span>
                   </td>
-                  <td class="font-medium text-slate-900">{{ row.item.label }}</td>
-                  <td class="text-slate-600">{{ row.contractName }}</td>
-                  <td class="text-slate-600">{{ row.projectName }}</td>
-                  <td class="text-slate-500">{{ row.trigger }}</td>
-                  <td class="num font-semibold" [class.text-rose-600]="row.item.type === 'CreditNote'" [class.text-slate-900]="row.item.type !== 'CreditNote'">
+                  <td class="font-medium text-ink">{{ row.item.label }}</td>
+                  <td class="text-ink-secondary">{{ row.contractName }}</td>
+                  <td class="text-ink-secondary">{{ row.projectName }}</td>
+                  <td class="text-ink-muted">{{ row.trigger }}</td>
+                  <td class="num font-semibold" [class.text-critical-text]="row.item.type === 'CreditNote'" [class.text-ink]="row.item.type !== 'CreditNote'">
                     {{ row.item.amount | currency: row.item.currency : 'symbol' : '1.0-0' }}
                   </td>
-                  <td class="num text-slate-600">{{ (row.item.taxRatePct ?? 0) / 100 | percent: '1.0-0' }}</td>
-                  <td class="num text-slate-600">{{ (row.item.retentionPct ?? 0) / 100 | percent: '1.0-0' }}</td>
-                  <td class="num font-semibold text-slate-900">{{ row.netPayable | currency: row.item.currency : 'symbol' : '1.0-0' }}</td>
+                  <td class="num text-ink-secondary">{{ (row.item.taxRatePct ?? 0) / 100 | percent: '1.0-0' }}</td>
+                  <td class="num text-ink-secondary">{{ (row.item.retentionPct ?? 0) / 100 | percent: '1.0-0' }}</td>
+                  <td class="num font-semibold text-ink">{{ row.netPayable | currency: row.item.currency : 'symbol' : '1.0-0' }}</td>
                   <td>
                     <div class="flex flex-wrap items-center gap-1.5">
                       <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ring-1"
-                            [class.bg-slate-100]="row.item.status === 'Planned'"
-                            [class.text-slate-700]="row.item.status === 'Planned'"
-                            [class.ring-slate-200]="row.item.status === 'Planned'"
-                            [class.bg-emerald-50]="row.item.status === 'Ready'"
-                            [class.text-emerald-700]="row.item.status === 'Ready'"
-                            [class.ring-emerald-200]="row.item.status === 'Ready'"
-                            [class.bg-amber-50]="row.item.status === 'Invoiced'"
-                            [class.text-amber-700]="row.item.status === 'Invoiced'"
-                            [class.ring-amber-200]="row.item.status === 'Invoiced'"
-                            [class.bg-blue-50]="row.item.status === 'Paid'"
-                            [class.text-blue-700]="row.item.status === 'Paid'"
-                            [class.ring-blue-200]="row.item.status === 'Paid'"
-                            [class.bg-rose-50]="row.item.status === 'Blocked'"
-                            [class.text-rose-700]="row.item.status === 'Blocked'"
-                            [class.ring-rose-200]="row.item.status === 'Blocked'">
+                            [class.bg-surface-muted]="row.item.status === 'Planned'"
+                            [class.text-ink-secondary]="row.item.status === 'Planned'"
+                            [class.ring-line]="row.item.status === 'Planned'"
+                            [class.bg-positive-tint]="row.item.status === 'Ready'"
+                            [class.text-positive-text]="row.item.status === 'Ready'"
+                            [class.ring-positive]="row.item.status === 'Ready'"
+                            [class.bg-caution-tint]="row.item.status === 'Invoiced'"
+                            [class.text-caution-text]="row.item.status === 'Invoiced'"
+                            [class.ring-caution]="row.item.status === 'Invoiced'"
+                            [class.bg-accent-tint]="row.item.status === 'Paid'"
+                            [class.text-accent-text]="row.item.status === 'Paid'"
+                            [class.ring-accent]="row.item.status === 'Paid'"
+                            [class.bg-critical-tint]="row.item.status === 'Blocked'"
+                            [class.text-critical-text]="row.item.status === 'Blocked'"
+                            [class.ring-critical]="row.item.status === 'Blocked'">
                         {{ row.item.status }}
                       </span>
                       @if (row.overdueDays > 0) {
-                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold tabular-nums bg-rose-50 text-rose-700 ring-1 ring-rose-200"
+                        <span class="command-chip is-critical tabular-nums"
                               [attr.aria-label]="'Overdue by ' + row.overdueDays + ' days'"
                               [title]="'Overdue by ' + row.overdueDays + ' days'">
                           Overdue {{ row.overdueDays }}d
                         </span>
                       }
                       @if (row.capExceeded) {
-                        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 ring-1 ring-amber-300"
+                        <span class="command-chip is-caution"
                               aria-label="Accrued time and materials exceeded the not-to-exceed cap"
                               title="Accrued T&amp;M exceeded the not-to-exceed cap">
                           <mat-icon class="text-[14px] w-[14px] h-[14px] leading-none" aria-hidden="true">warning</mat-icon>
@@ -319,40 +319,40 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                   </td>
                   <td class="font-mono tabular-nums">
                     @if (row.invoiceNumber) {
-                      <span class="text-slate-700">{{ row.invoiceNumber }}</span>
+                      <span class="text-ink-secondary">{{ row.invoiceNumber }}</span>
                     } @else {
-                      <span class="text-slate-400">&mdash;</span>
+                      <span class="text-ink-muted">&mdash;</span>
                     }
                   </td>
-                  <td class="text-slate-500 font-mono tabular-nums">
+                  <td class="text-ink-muted font-mono tabular-nums">
                     @if (row.due) {
                       {{ row.due | date: 'mediumDate' }}
                     } @else {
-                      <span class="text-slate-400">&mdash;</span>
+                      <span class="text-ink-muted">&mdash;</span>
                     }
                   </td>
                   <td class="text-right">
                     <div class="inline-flex items-center gap-1">
-                      <button type="button" class="p-1.5 rounded-lg text-slate-500 hover:text-blue-700 hover:bg-blue-50 transition-colors"
+                      <button type="button" class="p-1.5 rounded-lg text-ink-muted hover:text-accent-text hover:bg-accent-tint transition-colors"
                               (click)="openEdit(row.item)" [attr.aria-label]="'Edit ' + row.item.label" title="Edit">
                         <mat-icon class="text-[18px] w-[18px] h-[18px]">edit</mat-icon>
                       </button>
                       @if (row.invoiceNumber) {
-                        <button type="button" class="p-1.5 rounded-lg text-slate-500 hover:text-indigo-700 hover:bg-indigo-50 transition-colors"
+                        <button type="button" class="p-1.5 rounded-lg text-ink-muted hover:text-accent-text hover:bg-accent-tint transition-colors"
                                 (click)="openInvoice(row)"
                                 [attr.aria-label]="'View invoice ' + row.invoiceNumber + ' for ' + row.item.label" title="View invoice">
                           <mat-icon class="text-[18px] w-[18px] h-[18px]">description</mat-icon>
                         </button>
                       }
                       @if (row.item.status === 'Ready') {
-                        <button type="button" class="p-1.5 rounded-lg text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 transition-colors"
+                        <button type="button" class="p-1.5 rounded-lg text-ink-muted hover:text-positive-text hover:bg-positive-tint transition-colors"
                                 (click)="generateInvoice(row.item)" [disabled]="busyId() === row.item.id"
                                 [attr.aria-label]="'Generate invoice for ' + row.item.label" title="Generate invoice">
                           <mat-icon class="text-[18px] w-[18px] h-[18px]">receipt_long</mat-icon>
                         </button>
                       }
                       @if (row.item.status === 'Invoiced') {
-                        <button type="button" class="p-1.5 rounded-lg text-slate-500 hover:text-blue-700 hover:bg-blue-50 transition-colors"
+                        <button type="button" class="p-1.5 rounded-lg text-ink-muted hover:text-accent-text hover:bg-accent-tint transition-colors"
                                 (click)="markPaid(row.item)" [disabled]="busyId() === row.item.id"
                                 [attr.aria-label]="'Mark ' + row.item.label + ' as paid'" title="Mark paid">
                           <mat-icon class="text-[18px] w-[18px] h-[18px]">paid</mat-icon>
@@ -380,7 +380,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
 
     <!-- CREATE / EDIT MODAL -->
     @if (showForm()) {
-      <div class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+      <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
            appModal ariaLabelledby="billingModalTitle" (dismiss)="closeForm()">
         <div class="command-card w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
           <div class="command-card-header">
@@ -388,7 +388,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
               <p class="command-eyebrow">{{ editingId() ? 'Edit condition' : 'New condition' }}</p>
               <h2 id="billingModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Billing Condition' : 'New Billing Condition' }}</h2>
             </div>
-            <button type="button" (click)="closeForm()" class="p-2 rounded-full text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-colors" aria-label="Close dialog">
+            <button type="button" (click)="closeForm()" class="p-2 rounded-full text-ink-muted hover:text-ink-secondary hover:bg-surface-muted transition-colors" aria-label="Close dialog">
               <mat-icon>close</mat-icon>
             </button>
           </div>
@@ -397,19 +397,19 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
             <form [formGroup]="form" class="grid grid-cols-1 sm:grid-cols-2 gap-5">
               <!-- TYPE selector -->
               <div class="sm:col-span-2">
-                <label for="bType" class="block text-sm font-semibold text-slate-700 mb-1.5">Type *</label>
-                <select id="bType" formControlName="type" class="cc-input">
+                <label for="bType" class="block text-sm font-semibold text-ink-secondary mb-1.5">Type *</label>
+                <select id="bType" formControlName="type" class="command-select">
                   @for (meta of typeMeta; track meta.type) {
                     <option [value]="meta.type">{{ meta.label }}</option>
                   }
                 </select>
-                <p class="text-xs text-slate-500 mt-1.5">{{ selectedMeta().hint }}</p>
+                <p class="text-xs text-ink-muted mt-1.5">{{ selectedMeta().hint }}</p>
               </div>
 
               <!-- Common: contract -->
               <div>
-                <label for="bContract" class="block text-sm font-semibold text-slate-700 mb-1.5">Contract *</label>
-                <select id="bContract" formControlName="contractId" class="cc-input">
+                <label for="bContract" class="block text-sm font-semibold text-ink-secondary mb-1.5">Contract *</label>
+                <select id="bContract" formControlName="contractId" class="command-select">
                   <option value="">Select a contract...</option>
                   @for (contract of contracts(); track contract.id) {
                     <option [value]="contract.id">{{ contract.name }}</option>
@@ -419,8 +419,8 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
 
               <!-- Common: project -->
               <div>
-                <label for="bProject" class="block text-sm font-semibold text-slate-700 mb-1.5">Project</label>
-                <select id="bProject" formControlName="projectId" class="cc-input">
+                <label for="bProject" class="block text-sm font-semibold text-ink-secondary mb-1.5">Project</label>
+                <select id="bProject" formControlName="projectId" class="command-select">
                   <option value="">Unassigned</option>
                   @for (project of projects(); track project.id) {
                     <option [value]="project.id">{{ project.name }}</option>
@@ -430,30 +430,30 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
 
               <!-- Common: label -->
               <div class="sm:col-span-2">
-                <label for="bLabel" class="block text-sm font-semibold text-slate-700 mb-1.5">Label *</label>
-                <input id="bLabel" type="text" formControlName="label" class="cc-input" placeholder="e.g. SAL 2 — UAT sign-off">
+                <label for="bLabel" class="block text-sm font-semibold text-ink-secondary mb-1.5">Label *</label>
+                <input id="bLabel" type="text" formControlName="label" class="command-input" placeholder="e.g. SAL 2 — UAT sign-off">
               </div>
 
               <!-- TYPE-ADAPTIVE FIELDS -->
               @switch (selectedType()) {
                 @case ('Milestone') {
                   <div class="sm:col-span-2">
-                    <label for="bMilestone" class="block text-sm font-semibold text-slate-700 mb-1.5">Milestone *</label>
-                    <select id="bMilestone" formControlName="milestoneId" class="cc-input">
+                    <label for="bMilestone" class="block text-sm font-semibold text-ink-secondary mb-1.5">Milestone *</label>
+                    <select id="bMilestone" formControlName="milestoneId" class="command-select">
                       <option value="">Select a milestone...</option>
                       @for (milestone of milestonesForSelectedProject(); track milestone.id) {
                         <option [value]="milestone.id">{{ milestone.name }} ({{ milestone.status }})</option>
                       }
                     </select>
                     @if (!milestonesForSelectedProject().length) {
-                      <p class="text-xs text-amber-700 mt-1.5">No milestones on the selected project — pick a project that has milestones.</p>
+                      <p class="text-xs text-caution-text mt-1.5">No milestones on the selected project — pick a project that has milestones.</p>
                     }
                   </div>
                 }
                 @case ('Recurring') {
                   <div>
-                    <label for="bRecurrence" class="block text-sm font-semibold text-slate-700 mb-1.5">Recurrence *</label>
-                    <select id="bRecurrence" formControlName="recurrence" class="cc-input">
+                    <label for="bRecurrence" class="block text-sm font-semibold text-ink-secondary mb-1.5">Recurrence *</label>
+                    <select id="bRecurrence" formControlName="recurrence" class="command-select">
                       @for (recurrence of recurrences; track recurrence) {
                         <option [value]="recurrence">{{ recurrence }}</option>
                       }
@@ -462,63 +462,63 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                 }
                 @case ('Capped') {
                   <div>
-                    <label for="bCap" class="block text-sm font-semibold text-slate-700 mb-1.5">Cap Amount *</label>
-                    <input id="bCap" type="number" formControlName="capAmount" class="cc-input" placeholder="Not-to-exceed">
+                    <label for="bCap" class="block text-sm font-semibold text-ink-secondary mb-1.5">Cap Amount *</label>
+                    <input id="bCap" type="number" formControlName="capAmount" class="command-input" placeholder="Not-to-exceed">
                   </div>
                 }
                 @case ('Progress') {
                   <div>
-                    <label for="bProgress" class="block text-sm font-semibold text-slate-700 mb-1.5">Progress % *</label>
-                    <input id="bProgress" type="number" min="0" max="100" formControlName="progressPct" class="cc-input" placeholder="0–100">
+                    <label for="bProgress" class="block text-sm font-semibold text-ink-secondary mb-1.5">Progress % *</label>
+                    <input id="bProgress" type="number" min="0" max="100" formControlName="progressPct" class="command-input" placeholder="0–100">
                   </div>
                 }
                 @case ('Expense') {
                   <div>
-                    <label for="bMarkup" class="block text-sm font-semibold text-slate-700 mb-1.5">Markup %</label>
-                    <input id="bMarkup" type="number" formControlName="markupPct" class="cc-input" placeholder="e.g. 10">
+                    <label for="bMarkup" class="block text-sm font-semibold text-ink-secondary mb-1.5">Markup %</label>
+                    <input id="bMarkup" type="number" formControlName="markupPct" class="command-input" placeholder="e.g. 10">
                   </div>
                 }
               }
 
               <!-- Amount (relabelled for credit notes) -->
               <div>
-                <label for="bAmount" class="block text-sm font-semibold text-slate-700 mb-1.5">
+                <label for="bAmount" class="block text-sm font-semibold text-ink-secondary mb-1.5">
                   {{ selectedType() === 'CreditNote' ? 'Credit Amount *' : 'Amount *' }}
                 </label>
-                <input id="bAmount" type="number" formControlName="amount" class="cc-input" [placeholder]="selectedType() === 'CreditNote' ? 'Entered as a credit' : '0.00'">
+                <input id="bAmount" type="number" formControlName="amount" class="command-input" [placeholder]="selectedType() === 'CreditNote' ? 'Entered as a credit' : '0.00'">
                 @if (selectedType() === 'CreditNote') {
-                  <p class="text-xs text-rose-700 mt-1.5">Stored as a negative value (credit note).</p>
+                  <p class="text-xs text-critical-text mt-1.5">Stored as a negative value (credit note).</p>
                 }
               </div>
 
               <!-- Currency -->
               <div>
-                <label for="bCurrency" class="block text-sm font-semibold text-slate-700 mb-1.5">Currency *</label>
-                <input id="bCurrency" type="text" formControlName="currency" class="cc-input" placeholder="EUR">
+                <label for="bCurrency" class="block text-sm font-semibold text-ink-secondary mb-1.5">Currency *</label>
+                <input id="bCurrency" type="text" formControlName="currency" class="command-input" placeholder="EUR">
               </div>
 
               <!-- Tax -->
               <div>
-                <label for="bTax" class="block text-sm font-semibold text-slate-700 mb-1.5">Tax (IVA) %</label>
-                <input id="bTax" type="number" formControlName="taxRatePct" class="cc-input" placeholder="22">
+                <label for="bTax" class="block text-sm font-semibold text-ink-secondary mb-1.5">Tax (IVA) %</label>
+                <input id="bTax" type="number" formControlName="taxRatePct" class="command-input" placeholder="22">
               </div>
 
               <!-- Retention -->
               <div>
-                <label for="bRetention" class="block text-sm font-semibold text-slate-700 mb-1.5">Retention %</label>
-                <input id="bRetention" type="number" formControlName="retentionPct" class="cc-input" placeholder="0">
+                <label for="bRetention" class="block text-sm font-semibold text-ink-secondary mb-1.5">Retention %</label>
+                <input id="bRetention" type="number" formControlName="retentionPct" class="command-input" placeholder="0">
               </div>
 
               <!-- Payment terms -->
               <div>
-                <label for="bTerms" class="block text-sm font-semibold text-slate-700 mb-1.5">Payment Terms (days)</label>
-                <input id="bTerms" type="number" formControlName="paymentTermsDays" class="cc-input" placeholder="30">
+                <label for="bTerms" class="block text-sm font-semibold text-ink-secondary mb-1.5">Payment Terms (days)</label>
+                <input id="bTerms" type="number" formControlName="paymentTermsDays" class="command-input" placeholder="30">
               </div>
 
               <!-- Expected date -->
               <div>
-                <label for="bExpected" class="block text-sm font-semibold text-slate-700 mb-1.5">Expected Date</label>
-                <input id="bExpected" type="date" formControlName="expectedDate" class="cc-input">
+                <label for="bExpected" class="block text-sm font-semibold text-ink-secondary mb-1.5">Expected Date</label>
+                <input id="bExpected" type="date" formControlName="expectedDate" class="command-input">
               </div>
             </form>
           </div>
@@ -535,7 +535,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
 
     <!-- #5 INVOICE DOCUMENT — printable artifact (window.print → PDF) -->
     @if (invoiceRow(); as inv) {
-      <div class="invoice-overlay fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
+      <div class="invoice-overlay fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
            appModal ariaLabelledby="invoiceDocTitle" (dismiss)="closeInvoice()">
         <div class="invoice-shell command-card w-full max-w-3xl overflow-hidden flex flex-col max-h-[92vh]">
           <!-- Toolbar (screen only) -->
@@ -550,7 +550,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                 <mat-icon class="text-[18px] w-[18px] h-[18px]">print</mat-icon>
                 Print / Save PDF
               </button>
-              <button type="button" (click)="closeInvoice()" class="p-2 rounded-full text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-colors" aria-label="Close invoice">
+              <button type="button" (click)="closeInvoice()" class="p-2 rounded-full text-ink-muted hover:text-ink-secondary hover:bg-surface-muted transition-colors" aria-label="Close invoice">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -558,12 +558,12 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
 
           <!-- The artifact (this is what prints) -->
           <div class="invoice-scroll overflow-y-auto flex-1">
-            <article id="invoiceArtifact" class="invoice-doc p-8 sm:p-10 text-slate-900">
+            <article id="invoiceArtifact" class="invoice-doc p-8 sm:p-10 text-ink">
               <!-- Header: issuer + invoice meta -->
-              <header class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-6 pb-6 border-b border-slate-200">
+              <header class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-6 pb-6 border-b border-line">
                 <div>
                   <p class="text-xl font-bold tracking-tight">{{ issuer.name }}</p>
-                  <address class="not-italic text-sm text-slate-600 mt-1 leading-relaxed">
+                  <address class="not-italic text-sm text-ink-secondary mt-1 leading-relaxed">
                     @for (line of issuer.addressLines; track line) {
                       <span class="block">{{ line }}</span>
                     }
@@ -574,18 +574,18 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                   <p class="text-2xl font-bold tracking-tight">INVOICE</p>
                   <dl class="mt-2 text-sm">
                     <div class="flex sm:justify-end gap-2">
-                      <dt class="text-slate-500">No.</dt>
+                      <dt class="text-ink-muted">No.</dt>
                       <dd class="font-mono font-semibold tabular-nums">{{ inv.invoiceNumber }}</dd>
                     </div>
                     <div class="flex sm:justify-end gap-2">
-                      <dt class="text-slate-500">Date</dt>
+                      <dt class="text-ink-muted">Date</dt>
                       <dd class="font-mono tabular-nums">
                         @if (inv.invoiceDate) { {{ inv.invoiceDate | date: 'mediumDate' }} } @else { &mdash; }
                       </dd>
                     </div>
                     @if (inv.due) {
                       <div class="flex sm:justify-end gap-2">
-                        <dt class="text-slate-500">Due</dt>
+                        <dt class="text-ink-muted">Due</dt>
                         <dd class="font-mono tabular-nums">{{ inv.due | date: 'mediumDate' }}</dd>
                       </div>
                     }
@@ -596,28 +596,28 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
               <!-- Bill-to + references -->
               <section class="grid grid-cols-1 sm:grid-cols-2 gap-6 py-6">
                 <div>
-                  <p class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1.5">Bill to</p>
+                  <p class="text-xs font-semibold uppercase tracking-wide text-ink-muted mb-1.5">Bill to</p>
                   @if (invoiceCustomer(); as customer) {
-                    <p class="text-sm font-semibold text-slate-900">{{ customer.name }}</p>
+                    <p class="text-sm font-semibold text-ink">{{ customer.name }}</p>
                     @if (customer.country) {
-                      <p class="text-sm text-slate-600">{{ customer.country }}</p>
+                      <p class="text-sm text-ink-secondary">{{ customer.country }}</p>
                     }
                   } @else {
-                    <p class="text-sm text-slate-500">&mdash;</p>
+                    <p class="text-sm text-ink-muted">&mdash;</p>
                   }
                 </div>
                 <div class="sm:text-right">
-                  <p class="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1.5">References</p>
-                  <p class="text-sm text-slate-700">{{ inv.contractName }}</p>
+                  <p class="text-xs font-semibold uppercase tracking-wide text-ink-muted mb-1.5">References</p>
+                  <p class="text-sm text-ink-secondary">{{ inv.contractName }}</p>
                   @if (inv.projectName && inv.projectName !== '—') {
-                    <p class="text-sm text-slate-600">Project: {{ inv.projectName }}</p>
+                    <p class="text-sm text-ink-secondary">Project: {{ inv.projectName }}</p>
                   }
                 </div>
               </section>
 
               <!-- Cap-exceeded notice (#14), if flagged -->
               @if (inv.capExceeded) {
-                <p class="invoice-warn flex items-center gap-2 text-sm font-medium text-amber-800 bg-amber-50 ring-1 ring-amber-300 rounded-lg px-3 py-2 mb-4">
+                <p class="invoice-warn flex items-center gap-2 text-sm font-medium text-caution-text bg-caution-tint ring-1 ring-caution rounded-lg px-3 py-2 mb-4">
                   <mat-icon class="text-[18px] w-[18px] h-[18px]" aria-hidden="true">warning</mat-icon>
                   Accrued time &amp; materials have exceeded the not-to-exceed cap for this engagement.
                 </p>
@@ -626,21 +626,21 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
               <!-- Line items -->
               <table class="w-full text-sm border-collapse">
                 <thead>
-                  <tr class="border-y border-slate-200 text-left">
-                    <th scope="col" class="py-2 pr-3 font-semibold text-slate-700">Description</th>
-                    <th scope="col" class="py-2 px-3 font-semibold text-slate-700">Type</th>
-                    <th scope="col" class="py-2 pl-3 text-right font-semibold text-slate-700">Amount</th>
+                  <tr class="border-y border-line text-left">
+                    <th scope="col" class="py-2 pr-3 font-semibold text-ink-secondary">Description</th>
+                    <th scope="col" class="py-2 px-3 font-semibold text-ink-secondary">Type</th>
+                    <th scope="col" class="py-2 pl-3 text-right font-semibold text-ink-secondary">Amount</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr class="border-b border-slate-100 align-top">
+                  <tr class="border-b border-line align-top">
                     <td class="py-3 pr-3">
-                      <p class="font-medium text-slate-900">{{ inv.item.label }}</p>
-                      <p class="text-xs text-slate-500 mt-0.5">{{ inv.trigger }}</p>
+                      <p class="font-medium text-ink">{{ inv.item.label }}</p>
+                      <p class="text-xs text-ink-muted mt-0.5">{{ inv.trigger }}</p>
                     </td>
-                    <td class="py-3 px-3 text-slate-600">{{ inv.meta.label }}</td>
+                    <td class="py-3 px-3 text-ink-secondary">{{ inv.meta.label }}</td>
                     <td class="py-3 pl-3 text-right font-semibold tabular-nums"
-                        [class.text-rose-600]="inv.item.type === 'CreditNote'">
+                        [class.text-critical-text]="inv.item.type === 'CreditNote'">
                       {{ inv.item.amount | currency: inv.item.currency : 'symbol' : '1.2-2' }}
                     </td>
                   </tr>
@@ -651,27 +651,27 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
               <section class="mt-6 flex justify-end">
                 <dl class="w-full sm:w-80 text-sm space-y-1.5">
                   <div class="flex justify-between">
-                    <dt class="text-slate-600">Net</dt>
+                    <dt class="text-ink-secondary">Net</dt>
                     <dd class="tabular-nums">{{ inv.item.amount | currency: inv.item.currency : 'symbol' : '1.2-2' }}</dd>
                   </div>
                   @if (inv.retention > 0) {
-                    <div class="flex justify-between text-slate-600">
+                    <div class="flex justify-between text-ink-secondary">
                       <dt>Retention ({{ (inv.item.retentionPct ?? 0) / 100 | percent: '1.0-0' }})</dt>
                       <dd class="tabular-nums">-{{ inv.retention | currency: inv.item.currency : 'symbol' : '1.2-2' }}</dd>
                     </div>
                   }
-                  <div class="flex justify-between text-slate-600">
+                  <div class="flex justify-between text-ink-secondary">
                     <dt>Tax / IVA ({{ (inv.item.taxRatePct ?? 0) / 100 | percent: '1.0-0' }})</dt>
                     <dd class="tabular-nums">{{ inv.tax | currency: inv.item.currency : 'symbol' : '1.2-2' }}</dd>
                   </div>
-                  <div class="flex justify-between border-t border-slate-300 pt-2 mt-1 text-base font-bold text-slate-900">
+                  <div class="flex justify-between border-t border-line-strong pt-2 mt-1 text-base font-bold text-ink">
                     <dt>Total due</dt>
                     <dd class="tabular-nums">{{ inv.netPayable | currency: inv.item.currency : 'symbol' : '1.2-2' }}</dd>
                   </div>
                 </dl>
               </section>
 
-              <footer class="mt-10 pt-4 border-t border-slate-200 text-xs text-slate-500">
+              <footer class="mt-10 pt-4 border-t border-line text-xs text-ink-muted">
                 <p>Invoice {{ inv.invoiceNumber }} &middot; {{ issuer.name }} &middot; VAT {{ issuer.vatId }}</p>
                 @if (inv.item.paymentTermsDays) {
                   <p class="mt-0.5">Payment terms: net {{ inv.item.paymentTermsDays }} days.</p>
@@ -684,37 +684,6 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
     }
   `,
   styles: [`
-    .cc-input {
-      width: 100%;
-      padding: 0.75rem 1rem;
-      border: 1px solid var(--cc-line);
-      border-radius: 0.75rem;
-      background: #ffffff;
-      color: var(--cc-ink);
-      font-size: var(--text-sm);
-      outline: none;
-      transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
-    }
-    .cc-input:focus {
-      border-color: rgb(37 99 235 / 100%);
-      background: #ffffff;
-      box-shadow: 0 0 0 2px rgb(59 130 246 / 25%);
-    }
-    .cc-input::placeholder { color: #94a3b8; }
-    .cc-checkbox {
-      width: 1rem;
-      height: 1rem;
-      cursor: pointer;
-      accent-color: rgb(37 99 235 / 100%);
-      border-radius: 0.25rem;
-      vertical-align: middle;
-    }
-    .cc-checkbox:focus-visible {
-      outline: 2px solid rgb(37 99 235 / 100%);
-      outline-offset: 2px;
-    }
-    .cc-checkbox:disabled { cursor: not-allowed; opacity: 0.5; }
-
     /* #5 Invoice document — print-to-PDF. On screen it is a normal modal; when
        printing, everything except the artifact is hidden so a single clean
        invoice page is produced. */

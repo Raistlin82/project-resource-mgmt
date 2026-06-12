@@ -45,8 +45,8 @@ interface DimensionMeter {
             <app-list-state [loading]="res.isLoading()" [error]="res.status() === 'error'" label="requests" (retry)="res.reload()">
             <div class="divide-y divide-[var(--cc-line)]">
             @for (req of openRequests(); track req.id) {
-              <div class="p-6 sm:p-8 hover:bg-slate-50 transition-all cursor-pointer group relative"
-                   [class.bg-blue-50]="selectedRequest()?.id === req.id"
+              <div class="p-6 sm:p-8 hover:bg-surface-muted transition-all cursor-pointer group relative"
+                   [class.bg-accent-tint]="selectedRequest()?.id === req.id"
                    role="button"
                    tabindex="0"
                    [attr.aria-label]="'Select request ' + req.name"
@@ -64,7 +64,7 @@ interface DimensionMeter {
                 <p class="text-sm font-semibold text-[var(--cc-muted)] mb-4 uppercase tracking-wider">{{ req.requiredRole }}</p>
                 <div class="flex gap-2 flex-wrap">
                   @for (skill of req.skills; track skill) {
-                    <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold tracking-wide bg-slate-100 text-slate-700 border border-slate-200">
+                    <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold tracking-wide bg-surface-muted text-ink-secondary border border-line">
                       {{ skill }}
                     </span>
                   }
@@ -97,24 +97,24 @@ interface DimensionMeter {
             </div>
 
             <div class="relative">
-              <mat-icon class="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-[20px] w-[20px] h-[20px]">search</mat-icon>
+              <mat-icon class="absolute left-4 top-1/2 -translate-y-1/2 text-ink-muted text-[20px] w-[20px] h-[20px]">search</mat-icon>
               <input
                 type="text"
                 [ngModel]="searchQuery()"
                 (ngModelChange)="searchQuery.set($event)"
                 placeholder="Search by name, role, or skills..."
-                class="w-full pl-12 pr-4 py-3 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] focus:outline-none text-sm font-medium text-[var(--cc-ink)] placeholder:text-slate-400 transition-all"
+                class="command-input pl-12"
               >
             </div>
 
             @if (missingSkillGap().length > 0) {
-              <div class="mt-6 flex items-start gap-3 rounded-md bg-amber-50 ring-1 ring-amber-200 p-4">
-                <mat-icon class="text-amber-700 text-[20px] w-[20px] h-[20px] shrink-0 mt-0.5">warning_amber</mat-icon>
+              <div class="mt-6 flex items-start gap-3 rounded-md bg-caution-tint ring-1 ring-caution p-4">
+                <mat-icon class="text-caution-text text-[20px] w-[20px] h-[20px] shrink-0 mt-0.5">warning_amber</mat-icon>
                 <div>
-                  <p class="text-sm font-bold text-amber-800">Skill gap: no available resource covers these skills</p>
+                  <p class="text-sm font-bold text-caution-text">Skill gap: no available resource covers these skills</p>
                   <div class="flex gap-2 flex-wrap mt-2">
                     @for (skill of missingSkillGap(); track skill) {
-                      <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold tracking-wide bg-white text-amber-800 ring-1 ring-amber-300">
+                      <span class="command-chip is-caution">
                         {{ skill }}
                       </span>
                     }
@@ -127,21 +127,21 @@ interface DimensionMeter {
             @if (rankedCandidates(); as candidates) {
               <!-- Ranked candidate mode: a request is selected. -->
               @for (cand of candidates; track cand.resourceId) {
-                <div class="p-6 sm:p-8 hover:bg-slate-50 transition-colors group">
+                <div class="p-6 sm:p-8 hover:bg-surface-muted transition-colors group">
                   <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                     <div class="flex items-start gap-5 min-w-0">
                       <div class="relative w-14 h-14 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex items-center justify-center font-display font-bold text-xl text-[var(--cc-ink)] shrink-0">
                         {{ cand.resource.name.charAt(0) }}
-                        <span class="absolute -bottom-2 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded-md bg-white ring-1 ring-slate-200 text-[10px] font-bold font-mono tabular-nums shadow-sm"
+                        <span class="absolute -bottom-2 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded-md bg-surface ring-1 ring-line text-[10px] font-bold font-mono tabular-nums shadow-sm"
                               [class]="scoreTextClass(cand.score)"
                               [title]="scoreTooltip(cand)">{{ cand.score | number:'1.0-0' }}</span>
                       </div>
                       <div class="min-w-0">
                         <h3 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ cand.resource.name }}</h3>
-                        <p class="text-sm font-medium text-[var(--cc-muted)] mt-0.5">{{ cand.resource.role }} <span class="mx-1.5 text-slate-400">•</span> <span class="font-mono tabular-nums" [class.text-red-700]="cand.resource.utilization > 100" [class.text-emerald-700]="cand.resource.utilization <= 100">{{ cand.resource.utilization | number:'1.0-0' }}% Utilized</span></p>
+                        <p class="text-sm font-medium text-[var(--cc-muted)] mt-0.5">{{ cand.resource.role }} <span class="mx-1.5 text-ink-muted">•</span> <span class="font-mono tabular-nums" [class.text-critical-text]="cand.resource.utilization > 100" [class.text-positive-text]="cand.resource.utilization <= 100">{{ cand.resource.utilization | number:'1.0-0' }}% Utilized</span></p>
                         <div class="flex gap-1.5 mt-3 flex-wrap">
                           @for (skill of cand.resource.skills; track skill.name) {
-                            <span class="text-[10px] font-bold tracking-wider uppercase bg-slate-100 text-slate-700 px-2 py-1 rounded-md border border-slate-200">{{ skill.name }}</span>
+                            <span class="text-[10px] font-bold tracking-wider uppercase bg-surface-muted text-ink-secondary px-2 py-1 rounded-md border border-line">{{ skill.name }}</span>
                           }
                         </div>
                       </div>
@@ -149,7 +149,7 @@ interface DimensionMeter {
                     <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0 w-full sm:w-auto">
                       @if (assigningResourceId() === cand.resourceId) {
                         <div class="flex items-center gap-2 w-full sm:w-auto">
-                          <input type="number" [ngModel]="assignHours()" (ngModelChange)="assignHours.set($event)" class="w-20 px-3 py-2 border border-[var(--cc-line)] rounded-md text-sm font-bold font-mono tabular-nums text-[var(--cc-ink)] placeholder:text-slate-400 bg-white focus:ring-2 focus:ring-blue-500/25 focus:border-[var(--cc-primary)] focus:outline-none" min="1" [max]="selectedRequest()?.requiredEffort || 1">
+                          <input type="number" [ngModel]="assignHours()" (ngModelChange)="assignHours.set($event)" class="w-20 px-3 py-2 border border-[var(--cc-line)] rounded-md text-sm font-bold font-mono tabular-nums text-[var(--cc-ink)] placeholder:text-ink-muted bg-surface focus:ring-2 focus:ring-accent/25 focus:border-[var(--cc-primary)] focus:outline-none" min="1" [max]="selectedRequest()?.requiredEffort || 1">
                           <button (click)="confirmAssign(cand.resourceId)" [disabled]="assigning()" class="command-button flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">Confirm</button>
                           <button type="button" (click)="cancelAssign()" aria-label="Cancel assignment" title="Cancel assignment" class="command-button secondary"><mat-icon class="text-[20px] w-[20px] h-[20px]">close</mat-icon></button>
                         </div>
@@ -167,7 +167,7 @@ interface DimensionMeter {
                       <span class="text-[10px] font-bold tracking-wider uppercase text-[var(--cc-muted)]">Match score</span>
                       <span class="text-sm font-bold font-mono tabular-nums" [class]="scoreTextClass(cand.score)">{{ cand.score | number:'1.0-1' }}<span class="text-[var(--cc-muted)]"> / 100</span></span>
                     </div>
-                    <div class="h-2 w-full rounded-full bg-slate-200 overflow-hidden" [title]="scoreTooltip(cand)">
+                    <div class="h-2 w-full rounded-full bg-surface-muted overflow-hidden" [title]="scoreTooltip(cand)">
                       <div class="h-full rounded-full transition-all" [class]="scoreBarClass(cand.score)" [style.width.%]="cand.score"></div>
                     </div>
 
@@ -175,21 +175,21 @@ interface DimensionMeter {
                       @for (m of meters(cand); track m.key) {
                         <div class="flex flex-col items-center text-center" [title]="m.label + ': ' + m.value.toFixed(1) + ' / ' + m.weight">
                           <span class="text-[10px] font-bold tracking-wider uppercase text-[var(--cc-muted)] mb-1.5">{{ m.short }}</span>
-                          <div class="h-1.5 w-full rounded-full bg-slate-200 overflow-hidden">
+                          <div class="h-1.5 w-full rounded-full bg-surface-muted overflow-hidden">
                             <div class="h-full rounded-full bg-[var(--cc-primary)]" [style.width.%]="m.pct"></div>
                           </div>
-                          <span class="text-[11px] font-bold font-mono tabular-nums text-slate-700 mt-1.5">{{ m.value | number:'1.0-1' }}<span class="text-[var(--cc-muted)]">/{{ m.weight }}</span></span>
+                          <span class="text-[11px] font-bold font-mono tabular-nums text-ink-secondary mt-1.5">{{ m.value | number:'1.0-1' }}<span class="text-[var(--cc-muted)]">/{{ m.weight }}</span></span>
                         </div>
                       }
                     </div>
 
                     @if (cand.missingSkills.length > 0) {
                       <div class="flex items-center gap-2 flex-wrap mt-4 pt-3 border-t border-[var(--cc-line)]">
-                        <span class="inline-flex items-center gap-1 text-[10px] font-bold tracking-wider uppercase text-rose-700">
+                        <span class="inline-flex items-center gap-1 text-[10px] font-bold tracking-wider uppercase text-critical-text">
                           <mat-icon class="text-[14px] w-[14px] h-[14px]">error_outline</mat-icon> Missing
                         </span>
                         @for (skill of cand.missingSkills; track skill) {
-                          <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-rose-50 text-rose-700 ring-1 ring-rose-200">{{ skill }}</span>
+                          <span class="command-chip is-critical">{{ skill }}</span>
                         }
                       </div>
                     }
@@ -202,17 +202,17 @@ interface DimensionMeter {
             } @else {
               <!-- Plain resource list mode: no request selected. -->
               @for (res of displayedResources(); track res.id) {
-                <div class="p-6 sm:p-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-slate-50 transition-colors group">
+                <div class="p-6 sm:p-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-surface-muted transition-colors group">
                   <div class="flex items-center gap-5">
                     <div class="w-14 h-14 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex items-center justify-center font-display font-bold text-xl text-[var(--cc-ink)] shrink-0">
                       {{ res.name.charAt(0) }}
                     </div>
                     <div>
                       <h3 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ res.name }}</h3>
-                      <p class="text-sm font-medium text-[var(--cc-muted)] mt-0.5">{{ res.role }} <span class="mx-1.5 text-slate-400">•</span> <span class="font-mono tabular-nums" [class.text-red-700]="res.utilization > 100" [class.text-emerald-700]="res.utilization <= 100">{{ res.utilization | number:'1.0-0' }}% Utilized</span></p>
+                      <p class="text-sm font-medium text-[var(--cc-muted)] mt-0.5">{{ res.role }} <span class="mx-1.5 text-ink-muted">•</span> <span class="font-mono tabular-nums" [class.text-critical-text]="res.utilization > 100" [class.text-positive-text]="res.utilization <= 100">{{ res.utilization | number:'1.0-0' }}% Utilized</span></p>
                       <div class="flex gap-1.5 mt-3 flex-wrap">
                         @for (skill of res.skills; track skill.name) {
-                          <span class="text-[10px] font-bold tracking-wider uppercase bg-slate-100 text-slate-700 px-2 py-1 rounded-md border border-slate-200">{{ skill.name }}</span>
+                          <span class="text-[10px] font-bold tracking-wider uppercase bg-surface-muted text-ink-secondary px-2 py-1 rounded-md border border-line">{{ skill.name }}</span>
                         }
                       </div>
                     </div>
@@ -324,16 +324,16 @@ export class StaffingComponent {
 
   /** Tailwind bar colour for the overall score. */
   scoreBarClass(score: number): string {
-    if (score >= 70) return 'bg-emerald-500';
-    if (score >= 40) return 'bg-amber-500';
-    return 'bg-rose-500';
+    if (score >= 70) return 'bg-positive';
+    if (score >= 40) return 'bg-caution';
+    return 'bg-critical';
   }
 
   /** Tailwind text colour for the overall score number (AA contrast on white). */
   scoreTextClass(score: number): string {
-    if (score >= 70) return 'text-emerald-700';
-    if (score >= 40) return 'text-amber-700';
-    return 'text-rose-700';
+    if (score >= 70) return 'text-positive-text';
+    if (score >= 40) return 'text-caution-text';
+    return 'text-critical-text';
   }
 
   /** Human-readable breakdown tooltip for a candidate's overall score. */
