@@ -1,10 +1,10 @@
-import { ChangeDetectionStrategy, Component, inject, signal, computed, DestroyRef } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, signal, computed, DestroyRef, effect } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { CurrencyPipe, DatePipe } from '@angular/common';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators, AbstractControl, ValidationErrors } from '@angular/forms';
 import { rxResource, toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { of } from 'rxjs';
-import { ApiService, Order, Contract, Partner, Project, OrderLine } from '../../services/api.service';
+import { ApiService, BASE_CURRENCY, Order, Contract, Partner, Project, OrderLine, FxRate } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
@@ -163,7 +163,11 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
                 <div>
                   <label for="currency" class="block text-sm font-semibold text-ink-secondary mb-1.5">Currency *</label>
-                  <input id="currency" type="text" formControlName="currency" class="command-input" placeholder="EUR">
+                  <select id="currency" formControlName="currency" class="command-select">
+                    @for (option of currencyOptions(); track option.code) {
+                      <option [value]="option.code" [disabled]="option.orphan">{{ option.label }}</option>
+                    }
+                  </select>
                 </div>
 
                 <div>
@@ -218,6 +222,14 @@ export class Orders {
   });
   private partnersRes = rxResource({ stream: () => this.api.getProjectPartners(), defaultValue: [] as Partner[] });
   private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
+  // REFERENCE-DATA INTEGRITY (Phase B): `currency` is a config-value FK to the
+  // configured currency set (fx-rates). Gated on authReady() with the other
+  // principal-gated reads so it re-runs when the bearer token attaches.
+  private fxRatesRes = rxResource<FxRate[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getFxRates() : of<FxRate[]>([])),
+    defaultValue: [] as FxRate[],
+  });
   private orderLinesRes = rxResource<OrderLine[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getOrderLines() : of<OrderLine[]>([])),
@@ -229,6 +241,7 @@ export class Orders {
   partners = this.partnersRes.value;
   projects = this.projectsRes.value;
   orderLines = this.orderLinesRes.value;
+  fxRates = this.fxRatesRes.value;
 
   showForm = signal(false);
 
@@ -239,7 +252,7 @@ export class Orders {
     amount: new FormControl<number | null>(null, { validators: [Validators.required, Validators.min(0)] }),
     projectId: new FormControl('', { nonNullable: true, validators: Validators.required }),
     lineDescription: new FormControl('', { nonNullable: true }),
-    currency: new FormControl('EUR', { nonNullable: true, validators: Validators.required }),
+    currency: new FormControl(BASE_CURRENCY, { nonNullable: true, validators: Validators.required }),
     status: new FormControl<'Open' | 'Confirmed' | 'Invoiced' | 'Paid'>('Open', { nonNullable: true, validators: Validators.required }),
     orderDate: new FormControl('', { nonNullable: true, validators: Validators.required })
   }, { validators: Orders.partnerTypeValidator });
@@ -270,6 +283,42 @@ export class Orders {
     if (!contractId) return this.projects();
     const linked = this.projects().filter(p => p.contractId === contractId);
     return linked.length ? linked : this.projects();
+  });
+
+  // --- currency (Phase B) ---
+  private contractCurrencyById = computed(() => new Map(this.contracts().map(c => [c.id, c.currency])));
+  private currencyValue = toSignal(this.orderForm.controls.currency.valueChanges, {
+    initialValue: this.orderForm.controls.currency.value,
+  });
+
+  /**
+   * Currency options: configured currency codes from fx-rates (label = value =
+   * code). An orphan value (the control holds a code not in the configured set,
+   * e.g. an existing record's legacy currency) is injected as a disabled
+   * "<code> (not configured)" option so it is never silently dropped.
+   */
+  currencyOptions = computed(() => {
+    const codes = this.fxRates().map(r => r.currency);
+    const options = codes.map(code => ({ code, label: code, orphan: false }));
+    const current = this.currencyValue();
+    if (current && !codes.includes(current)) {
+      options.push({ code: current, label: `${current} (not configured)`, orphan: true });
+    }
+    return options;
+  });
+
+  /**
+   * Default an order's currency to its parent contract's currency when a contract
+   * is selected (an order is a child of a contract), falling back to the base
+   * currency. Only steers the default while the form is untouched by the user, so
+   * a manual currency choice is never overwritten.
+   */
+  private readonly contractCurrencyDefault = effect(() => {
+    const contractId = this.selectedContractId();
+    const ctrl = this.orderForm.controls.currency;
+    if (ctrl.dirty) return;
+    const next = (contractId && this.contractCurrencyById().get(contractId)) || BASE_CURRENCY;
+    if (ctrl.value !== next) ctrl.setValue(next);
   });
 
   contractName(id: string): string {
@@ -328,6 +377,6 @@ export class Orders {
 
   closeForm(): void {
     this.showForm.set(false);
-    this.orderForm.reset({ contractId: '', type: 'Customer', partnerId: '', amount: null, projectId: '', lineDescription: '', currency: 'EUR', status: 'Open', orderDate: '' });
+    this.orderForm.reset({ contractId: '', type: 'Customer', partnerId: '', amount: null, projectId: '', lineDescription: '', currency: BASE_CURRENCY, status: 'Open', orderDate: '' });
   }
 }

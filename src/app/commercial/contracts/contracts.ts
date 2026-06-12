@@ -2,10 +2,10 @@ import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@a
 import { CurrencyPipe, DatePipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { rxResource } from '@angular/core/rxjs-interop';
+import { rxResource, toSignal } from '@angular/core/rxjs-interop';
 import { of } from 'rxjs';
 import { RouterLink } from '@angular/router';
-import { ApiService, Contract, Customer } from '../../services/api.service';
+import { ApiService, BASE_CURRENCY, Contract, Customer, FxRate } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
@@ -134,7 +134,11 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
                 <div>
                   <label for="contractCurrency" class="block text-sm font-semibold text-ink-secondary mb-1.5">Currency *</label>
-                  <input id="contractCurrency" type="text" formControlName="currency" class="command-input" placeholder="EUR">
+                  <select id="contractCurrency" formControlName="currency" class="command-select">
+                    @for (option of currencyOptions(); track option.code) {
+                      <option [value]="option.code" [disabled]="option.orphan">{{ option.label }}</option>
+                    }
+                  </select>
                 </div>
 
                 <div>
@@ -181,10 +185,52 @@ export class Contracts {
     stream: ({ params: ready }) => (ready ? this.api.getCustomers() : of<Customer[]>([])),
     defaultValue: [] as Customer[],
   });
+  // REFERENCE-DATA INTEGRITY (Phase B): `currency` is a config-value FK to the
+  // configured currency set (the fx-rates table). Load the codes for the SELECT.
+  // Gated on authReady() so it re-runs with the other principal-gated reads.
+  private fxRatesRes = rxResource<FxRate[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getFxRates() : of<FxRate[]>([])),
+    defaultValue: [] as FxRate[],
+  });
   contracts = this.contractsRes.value;
   customers = this.customersRes.value;
+  fxRates = this.fxRatesRes.value;
 
   showForm = signal(false);
+
+  contractForm = new FormGroup({
+    customerId: new FormControl('', { nonNullable: true, validators: Validators.required }),
+    name: new FormControl('', { nonNullable: true, validators: Validators.required }),
+    type: new FormControl<Contract['type']>('T&M', { nonNullable: true, validators: Validators.required }),
+    totalValue: new FormControl<number | null>(null, { validators: [Validators.required, Validators.min(0)] }),
+    currency: new FormControl(BASE_CURRENCY, { nonNullable: true, validators: Validators.required }),
+    status: new FormControl<Contract['status']>('Draft', { nonNullable: true, validators: Validators.required }),
+    startDate: new FormControl('', { nonNullable: true, validators: Validators.required }),
+    endDate: new FormControl('', { nonNullable: true, validators: Validators.required })
+  });
+
+  // Mirror the currency control so an orphan value (not in the configured set)
+  // can be surfaced as a disabled option rather than silently dropped on edit.
+  private currencyValue = toSignal(this.contractForm.controls.currency.valueChanges, {
+    initialValue: this.contractForm.controls.currency.value,
+  });
+
+  /**
+   * Currency options for the SELECT: configured currency codes from fx-rates
+   * (label = value = code). If the current control value isn't configured, it is
+   * injected as a disabled "<code> (not configured)" option so editing never
+   * silently wipes a real value (orphan handling, per the plan's UI pattern).
+   */
+  currencyOptions = computed(() => {
+    const codes = this.fxRates().map(r => r.currency);
+    const options = codes.map(code => ({ code, label: code, orphan: false }));
+    const current = this.currencyValue();
+    if (current && !codes.includes(current)) {
+      options.push({ code: current, label: `${current} (not configured)`, orphan: true });
+    }
+    return options;
+  });
 
   private customersById = computed(() => {
     const map = new Map<string, string>();
@@ -192,17 +238,6 @@ export class Contracts {
       map.set(customer.id, customer.name);
     }
     return map;
-  });
-
-  contractForm = new FormGroup({
-    customerId: new FormControl('', { nonNullable: true, validators: Validators.required }),
-    name: new FormControl('', { nonNullable: true, validators: Validators.required }),
-    type: new FormControl<Contract['type']>('T&M', { nonNullable: true, validators: Validators.required }),
-    totalValue: new FormControl<number | null>(null, { validators: [Validators.required, Validators.min(0)] }),
-    currency: new FormControl('EUR', { nonNullable: true, validators: Validators.required }),
-    status: new FormControl<Contract['status']>('Draft', { nonNullable: true, validators: Validators.required }),
-    startDate: new FormControl('', { nonNullable: true, validators: Validators.required }),
-    endDate: new FormControl('', { nonNullable: true, validators: Validators.required })
   });
 
   customerName(id: string): string {
@@ -241,7 +276,7 @@ export class Contracts {
       name: '',
       type: 'T&M',
       totalValue: null,
-      currency: 'EUR',
+      currency: BASE_CURRENCY,
       status: 'Draft',
       startDate: '',
       endDate: ''
