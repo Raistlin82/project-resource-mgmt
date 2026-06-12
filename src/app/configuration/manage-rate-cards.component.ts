@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
-import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { ApiService, RateCard, ProjectRole, ResourceOrganization, FxRate } from '../services/api.service';
@@ -129,9 +129,12 @@ const BASE_CURRENCY = 'EUR';
                   <input id="rc-bill" type="number" min="0" step="1" formControlName="billRate" class="command-input" placeholder="e.g. 140">
                 </div>
               </div>
+              @if (duplicateExists()) {
+                <p role="alert" class="text-xs text-critical-text">A rate card already exists for this role / organization / currency. Edit that card instead of creating a duplicate.</p>
+              }
               <div class="pt-4 flex justify-end gap-3">
                 <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
-                <button type="submit" [disabled]="!form.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save Rate Card</button>
+                <button type="submit" [disabled]="!form.valid || duplicateExists()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save Rate Card</button>
               </div>
             </form>
           </div>
@@ -201,6 +204,21 @@ export class ManageRateCardsComponent {
     billRate: new FormControl<number | null>(null, [Validators.required, Validators.min(0)]),
   });
 
+  // Proactive duplicate guard (mirrors the server's uniqueness rule): at most one
+  // card per role + organization + currency. A null/'' organization is the single
+  // "All organizations" key. The record being edited is excluded.
+  private formRole = toSignal(this.form.controls.role.valueChanges, { initialValue: this.form.controls.role.value });
+  private formOrg = toSignal(this.form.controls.organization.valueChanges, { initialValue: this.form.controls.organization.value });
+  private formCurrency = toSignal(this.form.controls.currency.valueChanges, { initialValue: this.form.controls.currency.value });
+  duplicateExists = computed<boolean>(() => {
+    const role = this.formRole();
+    if (!role) return false;
+    const org = this.formOrg() ?? '';
+    const currency = this.formCurrency() ?? '';
+    const editId = this.editingId();
+    return this.items().some(c => c.id !== editId && c.role === role && (c.organization ?? '') === org && c.currency === currency);
+  });
+
   // ORPHAN VALUES: a stored role/org not in the catalog stays selectable (disabled).
   private editingRole = signal('');
   orphanRole = computed<string | null>(() => {
@@ -254,7 +272,8 @@ export class ManageRateCardsComponent {
     };
     const id = this.editingId();
     const done = () => { this.itemsRes.reload(); this.closeForm(); this.notifications.show('Rate card saved.', 'success'); };
-    const fail = () => this.notifications.show('Could not save the rate card.', 'error');
+    // Surface the server's reason (e.g. the uniqueness conflict) rather than a generic message.
+    const fail = (e: unknown) => this.notifications.show((e as { error?: { error?: string } })?.error?.error || 'Could not save the rate card.', 'error');
     if (id) {
       this.api.updateRateCard(id, payload).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({ next: done, error: fail });
     } else {
