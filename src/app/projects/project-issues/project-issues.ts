@@ -1,8 +1,10 @@
 import { ChangeDetectionStrategy, Component, input, signal, computed, inject, DestroyRef } from '@angular/core';
-import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { rxResource, toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { of } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Project, Issue } from '../../services/api.service';
+import { ApiService, Project, Issue, Resource } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
@@ -152,13 +154,31 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
                 <div>
                   <label for="issueReportedBy" class="block text-sm font-semibold text-ink-secondary mb-1.5">Reported By</label>
-                  <input id="issueReportedBy" type="text" formControlName="reportedBy" class="command-input" placeholder="e.g. Jane Doe">
+                  <!-- A person reference: bound to the resources (people) catalog by name. -->
+                  <select id="issueReportedBy" formControlName="reportedBy" class="command-select">
+                    <option value="">Unassigned</option>
+                    @for (r of resourceOptions(); track r.id) {
+                      <option [value]="r.name">{{ r.name }}</option>
+                    }
+                    @if (orphanReportedBy(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
                 </div>
 
                 <div class="grid grid-cols-2 gap-4">
                   <div>
                     <label for="issueOwner" class="block text-sm font-semibold text-ink-secondary mb-1.5">Owner</label>
-                    <input id="issueOwner" type="text" formControlName="owner" class="command-input" placeholder="e.g. Delivery Lead">
+                    <!-- A person reference: bound to the resources (people) catalog by name. -->
+                    <select id="issueOwner" formControlName="owner" class="command-select">
+                      <option value="">Unassigned</option>
+                      @for (r of resourceOptions(); track r.id) {
+                        <option [value]="r.name">{{ r.name }}</option>
+                      }
+                      @if (orphanOwner(); as orphan) {
+                        <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                      }
+                    </select>
                   </div>
                   <div>
                     <label for="issueDueDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Due Date</label>
@@ -198,6 +218,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 export class ProjectIssues {
   projectId = input<string>();
   private api = inject(ApiService);
+  private auth = inject(AuthService);
   private notificationService = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
@@ -205,19 +226,40 @@ export class ProjectIssues {
   projects = computed(() => this.projectsRes.value());
   selectedProjectId = signal<string>('');
   showForm = signal(false);
-  
+
+  // reportedBy/owner are PERSON references bound to the resources (people) catalog by
+  // name (Phase D). /resources is a principal-gated read, so key the load on authReady
+  // to avoid a 401 race that would latch the option list empty.
+  private resourcesRes = rxResource<Resource[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
+    defaultValue: [] as Resource[],
+  });
+  resourceOptions = this.resourcesRes.value;
+
   issueForm = new FormGroup({
     title: new FormControl('', Validators.required),
     type: new FormControl('Bug', Validators.required),
     severity: new FormControl('Medium', Validators.required),
-    reportedBy: new FormControl('Current User'),
+    reportedBy: new FormControl(''),
     owner: new FormControl(''),
     dueDate: new FormControl(''),
     impact: new FormControl(''),
     actionPlan: new FormControl(''),
     escalated: new FormControl(false)
   });
-  
+
+  // ORPHAN VALUES: a stored reportedBy/owner that isn't a current resource name is
+  // surfaced as a disabled option so editing never silently discards a real value.
+  private reportedByValue = toSignal(this.issueForm.controls.reportedBy.valueChanges, { initialValue: this.issueForm.controls.reportedBy.value });
+  private ownerValue = toSignal(this.issueForm.controls.owner.valueChanges, { initialValue: this.issueForm.controls.owner.value });
+  orphanReportedBy = computed<string | null>(() => this.orphanFor(this.reportedByValue()));
+  orphanOwner = computed<string | null>(() => this.orphanFor(this.ownerValue()));
+  private orphanFor(value: string | null | undefined): string | null {
+    if (!value) return null;
+    return this.resourceOptions().some(r => r.name === value) ? null : value;
+  }
+
   private issuesRes = rxResource({ stream: () => this.api.getProjectIssues(), defaultValue: [] as Issue[] });
   issues = this.issuesRes.value;
 
@@ -244,7 +286,7 @@ export class ProjectIssues {
 
   closeForm() {
     this.showForm.set(false);
-    this.issueForm.reset({ type: 'Bug', severity: 'Medium', reportedBy: 'Current User', escalated: false });
+    this.issueForm.reset({ type: 'Bug', severity: 'Medium', reportedBy: '', owner: '', escalated: false });
   }
 
   saveIssue() {
@@ -259,7 +301,7 @@ export class ProjectIssues {
       type: v.type ?? 'Bug',
       severity: v.severity ?? 'Medium',
       status: 'Open',
-      reportedBy: v.reportedBy ?? 'Current User',
+      reportedBy: v.reportedBy ?? '',
       owner: v.owner ?? '',
       dueDate: v.dueDate ?? '',
       impact: v.impact ?? '',

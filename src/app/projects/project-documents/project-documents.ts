@@ -3,8 +3,21 @@ import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { ApiService, Project, ProjectDocument } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+
+/**
+ * Derive 1-2 uppercase initials from a display name (e.g. "Julie Armstrong" -> "JA",
+ * "admin" -> "A"). Falls back to "?" for an empty/blank name so the avatar chip
+ * always renders something.
+ */
+function initialsOf(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 1).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
 
 @Component({
   selector: 'app-project-documents',
@@ -119,6 +132,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 export class ProjectDocuments {
   projectId = input<string>();
   private api = inject(ApiService);
+  private auth = inject(AuthService);
   private notificationService = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
@@ -173,6 +187,14 @@ export class ProjectDocuments {
     const pId = this.projectId() || this.selectedProjectId();
     if (!pId) return;
 
+    // ACTOR FIELD (Phase D): the document author is the signed-in user, derived from
+    // AuthService (display name + initials) — never free-typed and not a person picker.
+    // Mirrors how change-requests pins createdBy from the verified actor. Falls back to
+    // 'Current User'/'CU' only when anonymous (no display name), preserving prior UX.
+    const displayName = this.auth.displayName();
+    const author = displayName || 'Current User';
+    const authorInitials = displayName ? initialsOf(displayName) : 'CU';
+
     const v = this.docForm.getRawValue();
     const payload: Partial<ProjectDocument> = {
       projectId: pId,
@@ -180,8 +202,8 @@ export class ProjectDocuments {
       type: v.type ?? 'pdf',
       size: '1.0 MB',
       uploadedAt: 'Just now',
-      author: 'Current User',
-      authorInitials: 'CU',
+      author,
+      authorInitials,
     };
 
     this.api.createProjectDocument(payload).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.documentsRes.reload());

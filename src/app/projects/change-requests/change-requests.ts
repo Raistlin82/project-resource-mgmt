@@ -3,7 +3,8 @@ import { CurrencyPipe } from '@angular/common';
 import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { rxResource, toSignal } from '@angular/core/rxjs-interop';
-import { ApiService, ChangeRequest, Project } from '../../services/api.service';
+import { of } from 'rxjs';
+import { ApiService, ChangeRequest, Project, Resource } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
@@ -185,7 +186,17 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                 </div>
                 <div>
                   <label for="crOwner" class="block text-sm font-semibold text-ink-secondary mb-1.5">Owner *</label>
-                  <input id="crOwner" formControlName="owner" class="command-input">
+                  <!-- The CR owner is a PERSON reference: bound to the resources (people)
+                       catalog by name. requestedBy/decidedBy stay auth-derived (server-pinned). -->
+                  <select id="crOwner" formControlName="owner" class="command-select">
+                    <option value="">Select owner...</option>
+                    @for (r of resourceOptions(); track r.id) {
+                      <option [value]="r.name">{{ r.name }}</option>
+                    }
+                    @if (orphanOwner(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
                 </div>
                 <div>
                   <label for="crPriority" class="block text-sm font-semibold text-ink-secondary mb-1.5">Priority *</label>
@@ -231,6 +242,16 @@ export class ChangeRequests {
   projects = this.projectsRes.value;
   changes = this.changesRes.value;
 
+  // The CR owner is a PERSON reference bound to the resources (people) catalog by name
+  // (Phase D). /resources is a principal-gated read, so key the load on authReady to
+  // avoid a 401 race that would latch the option list empty.
+  private resourcesRes = rxResource<Resource[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
+    defaultValue: [] as Resource[],
+  });
+  resourceOptions = this.resourcesRes.value;
+
   projectFilter = new FormControl('');
   projectFilterValue = toSignal(this.projectFilter.valueChanges, { initialValue: '' });
   showForm = signal(false);
@@ -256,6 +277,15 @@ export class ChangeRequests {
     impactBudget: new FormControl(0, { nonNullable: true }),
     impactScheduleDays: new FormControl(0, { nonNullable: true }),
     impactScope: new FormControl('', { nonNullable: true }),
+  });
+
+  // ORPHAN VALUE: a stored owner that isn't a current resource name is surfaced as a
+  // disabled option so editing never silently discards a real value.
+  private ownerValue = toSignal(this.form.controls.owner.valueChanges, { initialValue: this.form.controls.owner.value });
+  orphanOwner = computed<string | null>(() => {
+    const current = this.ownerValue();
+    if (!current) return null;
+    return this.resourceOptions().some(r => r.name === current) ? null : current;
   });
 
   projectName(id: string): string {

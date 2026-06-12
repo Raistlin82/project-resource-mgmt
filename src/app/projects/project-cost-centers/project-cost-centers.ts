@@ -1,9 +1,11 @@
 import { ChangeDetectionStrategy, Component, signal, input, computed, inject, DestroyRef } from '@angular/core';
-import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { rxResource, toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { of } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
 import { CurrencyPipe, DecimalPipe } from '@angular/common';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Project, ProjectCostCenter } from '../../services/api.service';
+import { ApiService, Project, ProjectCostCenter, Resource } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
@@ -128,7 +130,16 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
                   <div>
                     <label for="ccManager" class="block text-sm font-semibold text-ink-secondary mb-1.5">Manager</label>
-                    <input id="ccManager" type="text" formControlName="manager" class="command-input" placeholder="e.g. John Doe">
+                    <!-- A PERSON reference: bound to the resources (people) catalog by name. -->
+                    <select id="ccManager" formControlName="manager" class="command-select">
+                      <option value="">Unassigned</option>
+                      @for (r of resourceOptions(); track r.id) {
+                        <option [value]="r.name">{{ r.name }}</option>
+                      }
+                      @if (orphanManager(); as orphan) {
+                        <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                      }
+                    </select>
                   </div>
                 </div>
               </form>
@@ -149,6 +160,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 export class ProjectCostCenters {
   projectId = input<string>();
   private api = inject(ApiService);
+  private auth = inject(AuthService);
   private notificationService = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
@@ -158,11 +170,30 @@ export class ProjectCostCenters {
   showForm = signal(false);
   editingId = signal<string | null>(null);
 
+  // The cost-center manager is a PERSON reference bound to the resources (people)
+  // catalog by name (Phase D). /resources is a principal-gated read, so key the load
+  // on authReady to avoid a 401 race that would latch the option list empty.
+  private resourcesRes = rxResource<Resource[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
+    defaultValue: [] as Resource[],
+  });
+  resourceOptions = this.resourcesRes.value;
+
   ccForm = new FormGroup({
     id: new FormControl('', Validators.required),
     name: new FormControl('', Validators.required),
     allocatedBudget: new FormControl(0, [Validators.required, Validators.min(0)]),
     manager: new FormControl('')
+  });
+
+  // ORPHAN VALUE: a stored manager that isn't a current resource name is surfaced as a
+  // disabled option so editing never silently discards a real value.
+  private managerValue = toSignal(this.ccForm.controls.manager.valueChanges, { initialValue: this.ccForm.controls.manager.value });
+  orphanManager = computed<string | null>(() => {
+    const current = this.managerValue();
+    if (!current) return null;
+    return this.resourceOptions().some(r => r.name === current) ? null : current;
   });
 
   private costCentersRes = rxResource({ stream: () => this.api.getProjectCostCenters(), defaultValue: [] as ProjectCostCenter[] });

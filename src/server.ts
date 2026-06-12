@@ -531,12 +531,21 @@ function crud<T extends { id: string }>(
   repo: Repository<T>,
   allowed: readonly string[],
   numericFields: readonly string[] = [],
+  // REFERENCE-DATA INTEGRITY hook: an optional async validator run on the picked
+  // body for POST/PUT. Returns a 400-suitable error message (string) to reject, or
+  // null to pass. Used to enforce FK/person-reference rules that the generic numeric
+  // check cannot express (Phase D: person fields must reference the resources catalog).
+  validate?: (data: Record<string, unknown>) => Promise<string | null>,
 ) {
   router.get(`/${path}`, async (_req, res) => { res.json(await repo.list()); });
   router.post(`/${path}`, async (req, res) => {
     const data = pick(req.body, allowed);
     const bad = findInvalidNumericField(data, numericFields);
     if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
+    if (validate) {
+      const err = await validate(data as Record<string, unknown>);
+      if (err) { res.status(400).json({ error: err }); return; }
+    }
     const item = { id: newId(), ...data } as T;
     const created = await repo.create(item);
     res.json(created);
@@ -547,6 +556,10 @@ function crud<T extends { id: string }>(
     const data = pick(req.body, allowed);
     const bad = findInvalidNumericField(data, numericFields);
     if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
+    if (validate) {
+      const err = await validate(data as Record<string, unknown>);
+      if (err) { res.status(400).json({ error: err }); return; }
+    }
     const updated = await repo.update(req.params.id, data as Partial<T>);
     res.json(updated);
   });
@@ -772,6 +785,51 @@ async function validateSkillRefs(
     // Only enforce level membership when the proficiency scale defines levels.
     if (levels.size > 0 && !(typeof level === 'number' && levels.has(level))) {
       return `skill "${name}" level ${String(level)} must be a valid proficiency level (one of ${[...levels].sort((a, b) => a - b).join(', ')})`;
+    }
+  }
+  return null;
+}
+
+/**
+ * REFERENCE-DATA INTEGRITY (Phase D): person reference fields are FKs to the
+ * /resources (people) catalog by NAME (the stored value; back-compatible with the
+ * current display + match logic, and what the seeds use). Loads the current set of
+ * resource names. Mirrors `projectRoleNames` / `skillNames`.
+ */
+async function resourceNames(): Promise<Set<string>> {
+  const rows = await repos.resources.list();
+  return new Set(rows.map(r => r.name));
+}
+
+/** The 'Unassigned' sentinel — the explicit empty state for an optional person field. */
+const UNASSIGNED_PERSON = 'Unassigned';
+
+/**
+ * Validate the person-NAME reference fields on a body against the /resources catalog.
+ * Each named field, when present (non-empty), must be a current resource name — or the
+ * 'Unassigned' sentinel when `allowUnassigned` lists it (the explicit empty state for an
+ * optional person field, e.g. a task assignee). Returns a 400-suitable error message
+ * naming the offending field/value, or null when all supplied fields are valid.
+ *
+ * Omitted/undefined/empty('') fields PASS so partial edits and genuinely-optional
+ * person fields are never blocked. Case-sensitive match to the stored names, matching
+ * the in-app SELECT options. Loads the catalog once and checks every field against it.
+ */
+async function validatePersonRefs(
+  body: Record<string, unknown>,
+  fields: readonly string[],
+  allowUnassigned: readonly string[] = [],
+): Promise<string | null> {
+  // Skip the catalog read entirely when no candidate field is even present.
+  const present = fields.filter(f => body[f] !== undefined && body[f] !== null && body[f] !== '');
+  if (present.length === 0) return null;
+  const names = await resourceNames();
+  const unassignedOk = new Set(allowUnassigned);
+  for (const field of present) {
+    const value = body[field];
+    if (unassignedOk.has(field) && value === UNASSIGNED_PERSON) continue;
+    if (typeof value !== 'string' || !names.has(value)) {
+      return `${field} must reference an existing resource (person catalog name)`;
     }
   }
   return null;
@@ -1211,13 +1269,28 @@ apiRouter.delete('/resource-organizations/:id', async (req, res) => { await repo
 const PROJECT_FIELDS = ['name', 'location', 'startDate', 'endDate', 'status', 'description', 'ownerId', 'contractId'] as const;
 apiRouter.get('/projects', async (_req, res) => { res.json(await repos.projects.list()); });
 apiRouter.post('/projects', async (req, res) => {
-  const item = { id: newId(), ...pick(req.body, PROJECT_FIELDS) } as Project;
+  const body = pick<Project>(req.body, PROJECT_FIELDS);
+  // REFERENCE-DATA INTEGRITY (Phase D): `ownerId` is a person reference to the
+  // resources catalog by ID (the Owner SELECT stores the resource id). It is required
+  // on create and must reference an existing resource.
+  if (!(await existsRepo(repos.resources, body.ownerId))) {
+    res.status(400).json({ error: 'ownerId must reference an existing resource' });
+    return;
+  }
+  const item = { id: newId(), ...body } as Project;
   res.json(await repos.projects.create(item));
 });
 apiRouter.put('/projects/:id', async (req, res) => {
   const existing = await repos.projects.get(req.params.id);
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
-  const updated = await repos.projects.update(req.params.id, pick(req.body, PROJECT_FIELDS));
+  const body = pick<Project>(req.body, PROJECT_FIELDS);
+  // REFERENCE-DATA INTEGRITY (Phase D): validate `ownerId` only when supplied, so a
+  // partial edit that omits it is never blocked; a supplied value must be a resource id.
+  if (body.ownerId !== undefined && body.ownerId !== null && body.ownerId !== '' && !(await existsRepo(repos.resources, body.ownerId))) {
+    res.status(400).json({ error: 'ownerId must reference an existing resource' });
+    return;
+  }
+  const updated = await repos.projects.update(req.params.id, body);
   res.json(updated);
 });
 apiRouter.delete('/projects/:id', async (req, res) => { await repos.projects.remove(req.params.id); res.status(204).send(); });
@@ -1228,7 +1301,9 @@ crud(apiRouter, 'project-partners', repos.projectPartners, ['projectId', 'compan
 
 crud(apiRouter, 'project-documents', repos.projectDocuments, ['projectId', 'name', 'type', 'size', 'uploadedAt', 'author', 'authorInitials']);
 
-crud(apiRouter, 'work-packages', repos.workPackages, ['projectId', 'name', 'startDate', 'endDate', 'status', 'progress', 'assignee']);
+// PHASE D — work-package `assignee` is a person reference ('Unassigned' allowed).
+crud(apiRouter, 'work-packages', repos.workPackages, ['projectId', 'name', 'startDate', 'endDate', 'status', 'progress', 'assignee'], [],
+  data => validatePersonRefs(data, ['assignee'], ['assignee']));
 
 interface MilestoneEntry { id: string; projectId: string; name: string; date: string; status: 'Pending' | 'Achieved'; approvedBy?: string; approvedAt?: string }
 const MILESTONE_FIELDS = ['projectId', 'name', 'date', 'status', 'approvedBy', 'approvedAt'] as const;
@@ -1268,11 +1343,17 @@ apiRouter.delete('/milestones/:id', async (req, res) => {
 
 crud(apiRouter, 'project-financials', repos.projectFinancials, ['projectId', 'category', 'budget', 'actual'], ['budget', 'actual']);
 
-crud(apiRouter, 'project-cost-centers', repos.projectCostCenters, ['projectId', 'name', 'manager', 'allocated', 'actual'], ['allocated', 'actual']);
+// PHASE D — `manager` is a person reference (optional).
+crud(apiRouter, 'project-cost-centers', repos.projectCostCenters, ['projectId', 'name', 'manager', 'allocated', 'actual'], ['allocated', 'actual'],
+  data => validatePersonRefs(data, ['manager']));
 
-crud(apiRouter, 'project-tasks', repos.projectTasks, ['projectId', 'name', 'assignee', 'assigneeType', 'partnerId', 'dueDate', 'status', 'priority']);
+// PHASE D — task `assignee` is a person reference ('Unassigned' allowed).
+crud(apiRouter, 'project-tasks', repos.projectTasks, ['projectId', 'name', 'assignee', 'assigneeType', 'partnerId', 'dueDate', 'status', 'priority'], [],
+  data => validatePersonRefs(data, ['assignee'], ['assignee']));
 
-crud(apiRouter, 'project-issues', repos.projectIssues, ['projectId', 'title', 'type', 'severity', 'status', 'reportedBy', 'owner', 'dueDate', 'impact', 'actionPlan', 'escalated']);
+// PHASE D — issue `reportedBy` and `owner` are person references (optional).
+crud(apiRouter, 'project-issues', repos.projectIssues, ['projectId', 'title', 'type', 'severity', 'status', 'reportedBy', 'owner', 'dueDate', 'impact', 'actionPlan', 'escalated'], [],
+  data => validatePersonRefs(data, ['reportedBy', 'owner']));
 
 interface ChangeRequestEntry {
   id: string;
@@ -1299,10 +1380,15 @@ interface ChangeRequestEntry {
 const CHANGE_REQUEST_FIELDS = ['projectId', 'title', 'description', 'requestedBy', 'owner', 'status', 'impactScope', 'impactBudget', 'impactScheduleDays', 'priority', 'createdAt'] as const;
 apiRouter.get('/change-requests', async (_req, res) => { res.json(await repos.changeRequests.list()); });
 apiRouter.post('/change-requests', async (req, res) => {
+  const body = pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_FIELDS);
+  // REFERENCE-DATA INTEGRITY (Phase D): the CR `owner` is a person reference to the
+  // resources catalog (requestedBy/decidedBy are server-pinned actor ids, not names).
+  const personErr = await validatePersonRefs(body as unknown as Record<string, unknown>, ['owner']);
+  if (personErr) { res.status(400).json({ error: personErr }); return; }
   // `createdBy` is pinned to the verified actor AFTER the spread so the body
   // cannot supply/override it (it is also absent from CHANGE_REQUEST_FIELDS). It
   // is the immutable SoD basis the approval guard below trusts.
-  const item = { id: newId(), createdAt: new Date().toISOString(), ...pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_FIELDS), createdBy: actorId(req) } as ChangeRequestEntry;
+  const item = { id: newId(), createdAt: new Date().toISOString(), ...body, createdBy: actorId(req) } as ChangeRequestEntry;
   res.json(await repos.changeRequests.create(item));
 });
 apiRouter.put('/change-requests/:id', async (req, res) => {
@@ -1313,6 +1399,10 @@ apiRouter.put('/change-requests/:id', async (req, res) => {
   // read it through the richer server-side `ChangeRequestEntry` view.
   const existing = stored as unknown as ChangeRequestEntry;
   const body = pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_FIELDS);
+  // REFERENCE-DATA INTEGRITY (Phase D): validate any supplied `owner` against the
+  // resources catalog. Omitted/empty owner passes (partial edits are not blocked).
+  const personErr = await validatePersonRefs(body as unknown as Record<string, unknown>, ['owner']);
+  if (personErr) { res.status(400).json({ error: personErr }); return; }
   const merged = { ...existing, ...body } as ChangeRequestEntry;
   // CR APPROVAL — SEGREGATION OF DUTIES + AUTHORIZATION. Approved CRs feed
   // effectiveBudgetForProject (finance.util), so unilateral self-approval lets a
@@ -1358,7 +1448,9 @@ apiRouter.delete('/change-requests/:id', async (req, res) => {
 });
 
 // Configuration-level cost centers (B16)
-crud(apiRouter, 'cost-centers', repos.costCenters, ['name', 'manager', 'allocated', 'actual'], ['allocated', 'actual']);
+// PHASE D — `manager` is a person reference (optional).
+crud(apiRouter, 'cost-centers', repos.costCenters, ['name', 'manager', 'allocated', 'actual'], ['allocated', 'actual'],
+  data => validatePersonRefs(data, ['manager']));
 
 // --- Commercial domain (ADR-0001): Customers, Contracts, Orders, OrderLines ---
 

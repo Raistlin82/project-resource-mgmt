@@ -1,9 +1,10 @@
 import { ChangeDetectionStrategy, Component, signal, computed, input, inject, DestroyRef } from '@angular/core';
-import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { rxResource, toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { of } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
 import { DatePipe } from '@angular/common';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Project, WorkPackage, Milestone } from '../../services/api.service';
+import { ApiService, Project, WorkPackage, Milestone, Resource } from '../../services/api.service';
 import { NotificationService } from '../../services/notification.service';
 import { AuthService } from '../../services/auth.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
@@ -273,7 +274,16 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
                 <div>
                   <label for="wpAssignee" class="block text-sm font-semibold text-ink-secondary mb-1.5">Assignee *</label>
-                  <input id="wpAssignee" type="text" formControlName="assignee" class="command-input" placeholder="e.g. John Doe">
+                  <!-- A PERSON reference: bound to the resources (people) catalog by name. -->
+                  <select id="wpAssignee" formControlName="assignee" class="command-select">
+                    <option [value]="unassigned">Unassigned</option>
+                    @for (r of resourceOptions(); track r.id) {
+                      <option [value]="r.name">{{ r.name }}</option>
+                    }
+                    @if (orphanWpAssignee(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
                 </div>
               </form>
             </div>
@@ -320,7 +330,16 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
                 <div>
                   <label for="editWpAssignee" class="block text-sm font-semibold text-ink-secondary mb-1.5">Assignee *</label>
-                  <input id="editWpAssignee" type="text" formControlName="assignee" class="command-input" placeholder="e.g. John Doe">
+                  <!-- A PERSON reference: bound to the resources (people) catalog by name. -->
+                  <select id="editWpAssignee" formControlName="assignee" class="command-select">
+                    <option [value]="unassigned">Unassigned</option>
+                    @for (r of resourceOptions(); track r.id) {
+                      <option [value]="r.name">{{ r.name }}</option>
+                    }
+                    @if (orphanEditWpAssignee(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
                 </div>
 
                 <div class="grid grid-cols-2 gap-4">
@@ -359,9 +378,22 @@ export class ProjectPlans {
   private auth = inject(AuthService);
   private destroyRef = inject(DestroyRef);
 
+  /** Exposed to the template for the explicit "Unassigned" empty option. */
+  protected readonly unassigned = 'Unassigned';
+
   projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
   projects = computed(() => this.projectsRes.value());
   selectedProjectId = signal<string>('');
+
+  // Work-package assignee is a PERSON reference bound to the resources (people) catalog
+  // by name (Phase D). /resources is a principal-gated read, so key the load on authReady
+  // to avoid a 401 race that would latch the option list empty.
+  private resourcesRes = rxResource<Resource[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
+    defaultValue: [] as Resource[],
+  });
+  resourceOptions = this.resourcesRes.value;
 
   showMilestoneForm = signal(false);
   showWpForm = signal(false);
@@ -388,6 +420,17 @@ export class ProjectPlans {
     status: new FormControl<WorkPackage['status']>('Planned', Validators.required),
     progress: new FormControl(0, Validators.required)
   });
+
+  // ORPHAN VALUES: a stored assignee that isn't a current resource name (and isn't the
+  // 'Unassigned' sentinel) is surfaced as a disabled option so editing never drops it.
+  private wpAssigneeValue = toSignal(this.wpForm.controls.assignee.valueChanges, { initialValue: this.wpForm.controls.assignee.value });
+  private editWpAssigneeValue = toSignal(this.editWpForm.controls.assignee.valueChanges, { initialValue: this.editWpForm.controls.assignee.value });
+  orphanWpAssignee = computed<string | null>(() => this.orphanAssignee(this.wpAssigneeValue()));
+  orphanEditWpAssignee = computed<string | null>(() => this.orphanAssignee(this.editWpAssigneeValue()));
+  private orphanAssignee(value: string | null | undefined): string | null {
+    if (!value || value === this.unassigned) return null;
+    return this.resourceOptions().some(r => r.name === value) ? null : value;
+  }
 
   private wpRes = rxResource({ stream: () => this.api.getWorkPackages(), defaultValue: [] as WorkPackage[] });
   workPackages = this.wpRes.value;
