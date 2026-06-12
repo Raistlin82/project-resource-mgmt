@@ -1,13 +1,17 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  DestroyRef,
+  ElementRef,
+  PLATFORM_ID,
   afterNextRender,
   computed,
   inject,
+  linkedSignal,
   signal,
 } from '@angular/core';
-import { rxResource } from '@angular/core/rxjs-interop';
-import { DecimalPipe } from '@angular/common';
+import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { DecimalPipe, isPlatformBrowser } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { forkJoin, of } from 'rxjs';
 import {
@@ -17,6 +21,7 @@ import {
   ResourceRequest,
 } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
+import { NotificationService } from '../services/notification.service';
 import { ListStateComponent } from '../shared/list-state.component';
 import {
   buildSchedule,
@@ -35,6 +40,36 @@ interface ScheduleData {
 const HORIZON_WEEKS = 12;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const MS_PER_WEEK = 7 * MS_PER_DAY;
+/** A booking can never be shorter than one whole week (resize floor). */
+const MIN_DURATION_DAYS = 7;
+
+/**
+ * What kind of drag is in flight.
+ *  - 'move'         : translate the whole booking (both dates shift together).
+ *  - 'resize-start' : drag the left edge; only startDate moves.
+ *  - 'resize-end'   : drag the right edge; only endDate moves.
+ */
+type DragMode = 'move' | 'resize-start' | 'resize-end';
+
+/** Live drag state, browser-only; null when idle. */
+interface DragState {
+  mode: DragMode;
+  assignmentId: string;
+  /** The lane the booking started in (for vertical-reassign detection). */
+  fromResourceId: string;
+  /** pointerId so we only react to the captured pointer's moves. */
+  pointerId: number;
+  /** Client-X where the drag began (px). */
+  originClientX: number;
+  /** Pre-drag snapshot of the dragged assignment (for rollback + no-op check). */
+  before: Assignment;
+  /** Whole-week delta currently previewed (move + resize). */
+  weekDelta: number;
+  /** Resource lane the pointer is currently over (move only); null = unchanged. */
+  hoverResourceId: string | null;
+  /** True once the pointer has moved enough to count as a drag (vs a click). */
+  moved: boolean;
+}
 
 /** A single bar positioned within the visible horizon (grid-column geometry). */
 interface PositionedBar {
@@ -49,6 +84,8 @@ interface PositionedBar {
   label: string;
   /** Whether the booking is over-allocated at some instant (conflict styling). */
   conflict: boolean;
+  /** True while THIS bar is the one being dragged/resized (visual elevation). */
+  dragging: boolean;
 }
 
 /** A resource row resolved to its visible bars + roll-ups for the view. */
@@ -72,19 +109,35 @@ interface WeekColumn {
 }
 
 /**
- * Read-only resource SCHEDULE timeline (Approach B).
+ * Interactive resource SCHEDULE timeline (Approach C).
  *
- * Loads resources + assignments + requests (keyed on auth.authReady, mirroring
- * the other principal-gated screens) and computes a {@link buildSchedule}
- * model. The model is purely date-based; this component layers the pixel/grid
- * geometry on top — each booking is mapped to a CSS-grid column span across a
- * fixed visible horizon of {@link HORIZON_WEEKS} weeks, with prev/next paging.
+ * Builds on the read-only Approach B timeline: loads resources + assignments +
+ * requests (keyed on auth.authReady, mirroring the other principal-gated
+ * screens) and computes a {@link buildSchedule} model. The model is purely
+ * date-based; this component layers the pixel/grid geometry on top — each
+ * booking is mapped to a CSS-grid column span across a fixed visible horizon of
+ * {@link HORIZON_WEEKS} weeks, with prev/next paging.
  *
- * SSR-safe "today": the date math runs in pure UTC, but "this week" cannot be
- * known on the server without `Date.now`. We seed the horizon anchor to `null`
- * (server renders a deterministic empty-but-structured shell) and set the real
- * week start only in the browser via `afterNextRender`. All geometry is derived
- * from data + the anchor signal — no DOM measurement, no getBBox.
+ * Approach C adds DRAG-TO-SCHEDULE on top of that exact geometry:
+ *  - A writable {@link working} copy of the loaded assignments (a `linkedSignal`
+ *    re-seeded on every reload). The schedule model derives from this copy, so
+ *    an optimistic local edit re-renders bars AND re-runs conflict detection
+ *    instantly.
+ *  - Dragging a bar BODY translates the booking by whole weeks (snap to the
+ *    same `--week-col` pixel width the layout uses); dropping over a different
+ *    lane also reassigns (changes resourceId). Dragging the edge handles
+ *    resizes start/end (min 1 week). Keyboard arrows do the same by ±1 week.
+ *  - On release, if anything changed, the optimistic edit is kept AND committed
+ *    via `api.updateAssignment`; on error the working copy reverts to the
+ *    pre-drag snapshot and an error toast is shown.
+ *
+ * SSR safety is unchanged: the horizon anchor is `null` on the server (no
+ * Date.now), geometry is derived from data + the anchor signal (no DOM
+ * measurement), and all pointer/keyboard handlers are template-bound so they
+ * never run during SSR. The single piece of DOM measurement the drag needs (the
+ * px width of one week column) is read browser-only, after first render, and
+ * falls back to the known `--week-col` rem value parsed against the root font
+ * size — so drag math matches rendering without a getBBox during SSR.
  */
 @Component({
   selector: 'app-schedule',
@@ -100,6 +153,12 @@ interface WeekColumn {
             Date-level booking timeline across the team. Each bar is a booking sized by its
             window and labelled with its allocation; bookings that push a resource past 100%
             in an overlapping window are flagged as conflicts.
+          </p>
+          <!-- Drag affordance hint (interactive timeline). -->
+          <p class="mt-2 inline-flex items-center gap-1.5 text-xs text-ink-muted">
+            <mat-icon class="text-[16px] w-[16px] h-[16px]">drag_indicator</mat-icon>
+            Drag a booking to reschedule, drop it on another resource to reassign, or drag its
+            edges to resize. Focus a bar and use arrow keys (Shift+arrows to resize).
           </p>
         </div>
         <div class="flex flex-col items-stretch gap-2 sm:items-end">
@@ -212,6 +271,7 @@ interface WeekColumn {
                 class="command-schedule-grid"
                 role="table"
                 aria-label="Resource schedule timeline"
+                [class.is-dragging]="drag() !== null"
                 [style.--lane-col]="laneColWidth"
                 [style.--week-col]="weekColWidth"
                 [style.grid-template-columns]="gridTemplate()">
@@ -241,10 +301,13 @@ interface WeekColumn {
                     }
                   </div>
 
-                  <!-- Bar track: an inner grid of the visible weeks; bars are placed by column span. -->
+                  <!-- Bar track: an inner grid of the visible weeks; bars are placed by column span.
+                       data-resource-id lets a move-drop detect which lane the pointer is over. -->
                   <div
                     class="command-schedule-track"
                     role="cell"
+                    [class.is-drop-target]="drag()?.hoverResourceId === row.resourceId && drag()?.mode === 'move'"
+                    [attr.data-resource-id]="row.resourceId"
                     [style.grid-template-columns]="'repeat(' + horizonWeeks + ', var(--week-col))'">
                     <!-- Faint week gridlines for readability. -->
                     @for (col of weekColumns(); track col.index) {
@@ -258,11 +321,30 @@ interface WeekColumn {
                     @for (bar of row.bars; track bar.booking.assignmentId) {
                       <div
                         class="command-schedule-bar"
+                        role="button"
+                        tabindex="0"
                         [class.is-conflict]="bar.conflict"
+                        [class.is-dragging]="bar.dragging"
                         [style.grid-column]="bar.colStart + ' / ' + bar.colEnd"
                         [style.--bar-color]="bar.color"
-                        [title]="bar.label + ' · ' + bar.booking.startDate + ' → ' + bar.booking.endDate">
+                        [attr.aria-label]="barAriaLabel(row, bar)"
+                        [title]="bar.label + ' · ' + bar.booking.startDate + ' → ' + bar.booking.endDate"
+                        (pointerdown)="onBarPointerDown($event, row.resourceId, bar)"
+                        (pointermove)="onPointerMove($event)"
+                        (pointerup)="onPointerUp($event)"
+                        (pointercancel)="onPointerCancel($event)"
+                        (keydown)="onBarKeydown($event, bar)">
+                        <!-- Left resize handle. -->
+                        <span
+                          class="command-schedule-handle command-schedule-handle--start"
+                          aria-hidden="true"
+                          (pointerdown)="onHandlePointerDown($event, row.resourceId, bar, 'resize-start')"></span>
                         <span class="truncate">{{ bar.label }}</span>
+                        <!-- Right resize handle. -->
+                        <span
+                          class="command-schedule-handle command-schedule-handle--end"
+                          aria-hidden="true"
+                          (pointerdown)="onHandlePointerDown($event, row.resourceId, bar, 'resize-end')"></span>
                       </div>
                     }
                   </div>
@@ -280,6 +362,12 @@ interface WeekColumn {
         display: grid;
         align-items: stretch;
         min-width: max-content;
+      }
+      /* While a drag is in flight, suppress text selection across the whole grid. */
+      .command-schedule-grid.is-dragging {
+        user-select: none;
+        -webkit-user-select: none;
+        cursor: grabbing;
       }
       .command-schedule-corner {
         position: sticky;
@@ -348,6 +436,12 @@ interface WeekColumn {
         padding: 0.375rem 0;
         border-bottom: 1px solid var(--cc-line);
       }
+      /* Lane the pointer is hovering as a move-reassign drop target. */
+      .command-schedule-track.is-drop-target {
+        background: color-mix(in oklch, var(--color-accent) 10%, transparent);
+        outline: 1px dashed color-mix(in oklch, var(--color-accent) 55%, transparent);
+        outline-offset: -1px;
+      }
       .command-schedule-cell {
         grid-row: 1;
         height: 100%;
@@ -357,6 +451,9 @@ interface WeekColumn {
       .command-schedule-bar {
         grid-row: 1;
         z-index: 1;
+        position: relative;
+        display: flex;
+        align-items: center;
         overflow: hidden;
         margin: 0 2px;
         padding: 4px 8px;
@@ -368,6 +465,21 @@ interface WeekColumn {
         color: #fff;
         background: var(--bar-color, var(--color-accent));
         box-shadow: 0 1px 2px rgb(0 0 0 / 0.18);
+        /* The bar body itself moves the booking. */
+        cursor: grab;
+        touch-action: none; /* let pointermove drive the drag, not a scroll/pan */
+        transition: box-shadow 120ms ease, transform 120ms ease, opacity 120ms ease;
+      }
+      .command-schedule-bar:active {
+        cursor: grabbing;
+      }
+      /* The bar currently being dragged/resized: slight lift + translucency. */
+      .command-schedule-bar.is-dragging {
+        z-index: 3;
+        opacity: 0.92;
+        transform: translateY(-1px);
+        box-shadow: 0 6px 16px rgb(0 0 0 / 0.28);
+        cursor: grabbing;
       }
       .command-schedule-bar.is-conflict {
         color: var(--color-critical-text);
@@ -376,6 +488,31 @@ interface WeekColumn {
         outline-offset: -2px;
         box-shadow: none;
       }
+      /* Edge grab handles: thin hit-targets at each end of the bar. */
+      .command-schedule-handle {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 9px;
+        cursor: col-resize;
+        touch-action: none;
+        /* A faint translucent grip so the affordance is visible without colour tokens. */
+        background: rgb(255 255 255 / 0.28);
+        z-index: 2;
+      }
+      .command-schedule-bar.is-conflict .command-schedule-handle {
+        background: color-mix(in oklch, var(--color-critical) 35%, transparent);
+      }
+      .command-schedule-handle--start {
+        left: 0;
+        border-top-left-radius: 6px;
+        border-bottom-left-radius: 6px;
+      }
+      .command-schedule-handle--end {
+        right: 0;
+        border-top-right-radius: 6px;
+        border-bottom-right-radius: 6px;
+      }
       .command-schedule-offscreen {
         grid-row: 1;
         text-align: center;
@@ -383,12 +520,25 @@ interface WeekColumn {
         font-style: italic;
         color: var(--cc-muted);
       }
+      /* Honour reduced-motion: drop the snap/lift animation entirely. */
+      @media (prefers-reduced-motion: reduce) {
+        .command-schedule-bar {
+          transition: none;
+        }
+        .command-schedule-bar.is-dragging {
+          transform: none;
+        }
+      }
     `,
   ],
 })
 export class ScheduleComponent {
   private api = inject(ApiService);
   private auth = inject(AuthService);
+  private notify = inject(NotificationService);
+  private destroyRef = inject(DestroyRef);
+  private host = inject<ElementRef<HTMLElement>>(ElementRef);
+  private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
 
   // Visible-horizon configuration surfaced to the template.
   protected readonly horizonWeeks = HORIZON_WEEKS;
@@ -407,12 +557,25 @@ export class ScheduleComponent {
   /** How many weeks the visible window is shifted from the anchor (prev/next). */
   protected readonly rangeOffset = signal(0);
 
+  /**
+   * Measured pixel width of one week column. The drag converts a horizontal px
+   * delta into a whole-week delta by dividing by this. It is the SAME width the
+   * layout uses (`--week-col`): we measure a rendered week gridline once after
+   * first paint, and fall back to parsing the rem value against the root font
+   * size. Never measured on the server (drag handlers never fire there).
+   */
+  private weekColPx = 0;
+
+  /** Live drag state (browser-only); null when nothing is being dragged. */
+  protected readonly drag = signal<DragState | null>(null);
+
   constructor() {
     // Browser-only: seed the anchor to the Monday of the current week, computed
     // in UTC so it matches the util's UTC date math. afterNextRender never runs
     // on the server, so the server output is the deterministic placeholder.
     afterNextRender(() => {
       this.anchorMs.set(mondayUtcMs(Date.now()));
+      this.measureWeekColumn();
     });
   }
 
@@ -432,10 +595,28 @@ export class ScheduleComponent {
     defaultValue: { resources: [], assignments: [], requests: [] },
   });
 
-  /** The pure, date-based schedule model (lanes + conflicts). */
+  /**
+   * EDITABLE WORKING COPY of the loaded assignments. `linkedSignal` gives us a
+   * writable signal that RE-SEEDS to a fresh copy whenever the loaded resource
+   * changes (a reload), while letting us mutate it locally in between. The whole
+   * schedule model is derived from this copy, so optimistic edits (drag preview
+   * + commit) re-render bars and re-run conflict detection instantly — and a
+   * reload cleanly discards any uncommitted local state.
+   */
+  private readonly working = linkedSignal({
+    source: (): Assignment[] => this.data.value().assignments,
+    // Shallow-clone each assignment so per-field optimistic writes never mutate
+    // the loaded resource's objects (which would defeat re-seeding/rollback).
+    computation: (assignments: Assignment[]): Assignment[] => assignments.map(a => ({ ...a })),
+  });
+
+  /**
+   * The pure, date-based schedule model (lanes + conflicts), derived from the
+   * WORKING copy of assignments (not the raw load) so local edits flow through.
+   */
   private readonly model = computed(() => {
     const d = this.data.value();
-    return buildSchedule(d.resources, d.assignments, d.requests);
+    return buildSchedule(d.resources, this.working(), d.requests);
   });
 
   /** Stable per-project colour: index requests/projects by first appearance. */
@@ -483,6 +664,7 @@ export class ScheduleComponent {
     if (start === null) return [];
     const end = start + HORIZON_WEEKS * MS_PER_WEEK;
     const colors = this.projectColor();
+    const draggingId = this.drag()?.assignmentId ?? null;
 
     return this.model().lanes.map((lane: ResourceLane) => {
       const bars: PositionedBar[] = [];
@@ -513,6 +695,7 @@ export class ScheduleComponent {
           color: colors.get(b.requestId) ?? 'var(--color-accent)',
           label: `${b.label} · ${Math.round(b.allocationPct)}%`,
           conflict: b.conflict,
+          dragging: b.assignmentId === draggingId,
         });
       }
 
@@ -556,6 +739,378 @@ export class ScheduleComponent {
   protected resetRange(): void {
     this.rangeOffset.set(0);
   }
+
+  // --- accessibility -------------------------------------------------------
+
+  /** Descriptive aria-label for a bar: who/what, dates, allocation, conflict. */
+  protected barAriaLabel(row: TimelineRow, bar: PositionedBar): string {
+    const b = bar.booking;
+    const conflict = bar.conflict ? ', over-allocated' : '';
+    return (
+      `${b.label}, ${Math.round(b.allocationPct)}% allocation, assigned to ${row.resourceName}, ` +
+      `${b.startDate} to ${b.endDate}${conflict}. ` +
+      `Drag to reschedule; arrow keys move by one week, Shift plus arrows resize.`
+    );
+  }
+
+  // =========================================================================
+  // DRAG / RESIZE / REASSIGN
+  //
+  // px↔week snapping: every interaction is quantised to WHOLE weeks. A pointer
+  // drag accumulates a client-X delta; dividing by the measured px width of one
+  // week column ({@link weekColPx}) and rounding gives a whole-week delta. The
+  // booking is then previewed shifted by that many weeks using PURE ISO date
+  // arithmetic (parse YYYY-MM-DD → add delta*7 days → format) — never Date.now.
+  // Because the preview is written into the working copy, buildSchedule() re-runs
+  // and conflict styling updates live. On release we keep the optimistic change
+  // and PUT it; on error we restore the pre-drag snapshot and toast.
+  // =========================================================================
+
+  /** Begin a MOVE drag from the bar body. */
+  protected onBarPointerDown(event: PointerEvent, resourceId: string, bar: PositionedBar): void {
+    // Ignore non-primary buttons (right-click / middle-click).
+    if (event.button !== 0) return;
+    this.beginDrag(event, resourceId, bar, 'move');
+  }
+
+  /** Begin a RESIZE drag from one of the edge handles. */
+  protected onHandlePointerDown(
+    event: PointerEvent,
+    resourceId: string,
+    bar: PositionedBar,
+    mode: 'resize-start' | 'resize-end',
+  ): void {
+    if (event.button !== 0) return;
+    // Stop the bar-body pointerdown from also firing a 'move'.
+    event.stopPropagation();
+    this.beginDrag(event, resourceId, bar, mode);
+  }
+
+  /** Shared drag-initiation: snapshot the assignment and capture the pointer. */
+  private beginDrag(event: PointerEvent, resourceId: string, bar: PositionedBar, mode: DragMode): void {
+    if (!this.isBrowser) return;
+    if (this.drag() !== null) return; // one drag at a time
+
+    const before = this.working().find(a => a.id === bar.booking.assignmentId);
+    if (!before) return;
+
+    // Make sure we have a fresh, accurate week-column width for the math.
+    if (this.weekColPx <= 0) this.measureWeekColumn();
+
+    // Capture the pointer on the BAR element (the one that owns the
+    // pointermove/up listeners) so we keep receiving events even when the
+    // pointer leaves the bar — whether the gesture started on the body or on an
+    // edge handle. Captured events still bubble from the handle up to the bar.
+    const barEl = (event.target as Element | null)?.closest<HTMLElement>('.command-schedule-bar');
+    barEl?.setPointerCapture?.(event.pointerId);
+
+    this.drag.set({
+      mode,
+      assignmentId: before.id,
+      fromResourceId: resourceId,
+      pointerId: event.pointerId,
+      originClientX: event.clientX,
+      before: { ...before },
+      weekDelta: 0,
+      hoverResourceId: resourceId,
+      moved: false,
+    });
+    event.preventDefault();
+  }
+
+  /** Track a drag in flight: recompute the whole-week delta and preview it live. */
+  protected onPointerMove(event: PointerEvent): void {
+    const d = this.drag();
+    if (!d || event.pointerId !== d.pointerId) return;
+
+    // px → whole-week delta using the SAME column width the layout renders with.
+    const px = this.weekColPx > 0 ? this.weekColPx : this.fallbackWeekColPx();
+    const rawWeeks = (event.clientX - d.originClientX) / px;
+    const weekDelta = Math.round(rawWeeks);
+
+    // For a MOVE, also figure out which lane the pointer is currently over so a
+    // drop can reassign. Uses elementFromPoint (browser-only) + the lane's
+    // data-resource-id; no getBBox / layout measurement of the bar itself.
+    let hoverResourceId = d.hoverResourceId;
+    if (d.mode === 'move') {
+      hoverResourceId = this.laneUnderPointer(event) ?? d.fromResourceId;
+    }
+
+    const moved = d.moved || Math.abs(event.clientX - d.originClientX) > 3;
+    if (weekDelta === d.weekDelta && hoverResourceId === d.hoverResourceId && moved === d.moved) {
+      return; // nothing meaningfully changed since the last move
+    }
+
+    this.drag.set({ ...d, weekDelta, hoverResourceId, moved });
+    // Preview the change in the working copy so the model + conflicts re-render.
+    this.applyPreview({ ...d, weekDelta, hoverResourceId, moved });
+  }
+
+  /** Commit (or no-op) on release. */
+  protected onPointerUp(event: PointerEvent): void {
+    const d = this.drag();
+    if (!d || event.pointerId !== d.pointerId) return;
+    this.finishDrag(d);
+  }
+
+  /** Pointer cancelled (e.g. OS gesture): treat as an abort + rollback. */
+  protected onPointerCancel(event: PointerEvent): void {
+    const d = this.drag();
+    if (!d || event.pointerId !== d.pointerId) return;
+    this.rollback(d.before);
+    this.drag.set(null);
+  }
+
+  /** Keyboard scheduling: ←/→ move by ±1 week; Shift+←/→ resize the end by ±1 week. */
+  protected onBarKeydown(event: KeyboardEvent, bar: PositionedBar): void {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+
+    const before = this.working().find(a => a.id === bar.booking.assignmentId);
+    if (!before) return;
+
+    const dir = event.key === 'ArrowRight' ? 1 : -1;
+    const snapshot: Assignment = { ...before };
+
+    let next: Assignment | null;
+    if (event.shiftKey) {
+      // Resize the END by ±1 week (Shift+arrows), enforcing the 1-week floor.
+      next = this.resizedEnd(before, dir);
+    } else {
+      // Move the whole booking by ±1 week.
+      next = this.movedBy(before, dir);
+    }
+    if (!next || !this.changed(snapshot, next)) return;
+
+    // Optimistic write, then commit with rollback on failure.
+    this.writeWorking(next);
+    this.commit(next, snapshot);
+  }
+
+  // --- preview + commit helpers -------------------------------------------
+
+  /** Apply the in-flight drag's previewed change into the working copy. */
+  private applyPreview(d: DragState): void {
+    const base = d.before;
+    let next: Assignment | null = null;
+
+    if (d.mode === 'move') {
+      next = this.movedBy(base, d.weekDelta);
+      // Reassign if dropped over a different lane.
+      if (next && d.hoverResourceId && d.hoverResourceId !== d.fromResourceId) {
+        next = { ...next, resourceId: d.hoverResourceId };
+      }
+    } else if (d.mode === 'resize-start') {
+      next = this.resizedStart(base, d.weekDelta);
+    } else {
+      next = this.resizedEnd(base, d.weekDelta);
+    }
+    if (next) this.writeWorking(next);
+  }
+
+  /** Resolve a drag on release: commit if changed, otherwise quietly reset. */
+  private finishDrag(d: DragState): void {
+    const snapshot = d.before;
+
+    // Recompute the final intended assignment from the snapshot + final delta so
+    // the committed payload matches exactly what's previewed in the working copy.
+    let next: Assignment | null = null;
+    if (d.mode === 'move') {
+      next = this.movedBy(snapshot, d.weekDelta);
+      if (next && d.hoverResourceId && d.hoverResourceId !== d.fromResourceId) {
+        next = { ...next, resourceId: d.hoverResourceId };
+      }
+    } else if (d.mode === 'resize-start') {
+      next = this.resizedStart(snapshot, d.weekDelta);
+    } else {
+      next = this.resizedEnd(snapshot, d.weekDelta);
+    }
+
+    this.drag.set(null);
+
+    // No-op drag (no real change): make sure the working copy holds the snapshot
+    // and DON'T hit the API.
+    if (!next || !this.changed(snapshot, next)) {
+      this.writeWorking(snapshot);
+      return;
+    }
+
+    // Keep the optimistic working-copy change (already applied during preview,
+    // but re-assert from the final computed value to be safe) and commit it.
+    this.writeWorking(next);
+    this.commit(next, snapshot);
+  }
+
+  /**
+   * PUT the changed assignment. The working copy already holds `next`
+   * (optimistic). On success we keep it; on error we restore `snapshot` and
+   * surface an error toast. Subscription is torn down with the component.
+   */
+  private commit(next: Assignment, snapshot: Assignment): void {
+    if (!this.isBrowser) return;
+    const payload: Partial<Assignment> = {
+      startDate: next.startDate,
+      endDate: next.endDate,
+    };
+    // Only include resourceId when it actually moved lanes (a reassign).
+    if (next.resourceId !== snapshot.resourceId) {
+      payload.resourceId = next.resourceId;
+    }
+
+    this.api
+      .updateAssignment(next.id, payload)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: saved => {
+          // The server validates/recomputes; fold its canonical record back into
+          // the working copy so any server-side adjustment (e.g. clamped dates)
+          // is reflected without a full reload.
+          this.writeWorking({ ...next, ...saved });
+        },
+        error: () => {
+          // Optimistic update failed — revert and tell the user.
+          this.rollback(snapshot);
+          this.notify.error(
+            `Couldn't save the booking change for ${this.labelFor(snapshot.id)}. Reverted.`,
+          );
+        },
+      });
+  }
+
+  /** Replace a single assignment in the working copy by id (immutable update). */
+  private writeWorking(next: Assignment): void {
+    this.working.update(list => list.map(a => (a.id === next.id ? next : a)));
+  }
+
+  /** Restore a single assignment to its pre-change snapshot (rollback). */
+  private rollback(snapshot: Assignment): void {
+    this.working.update(list => list.map(a => (a.id === snapshot.id ? { ...snapshot } : a)));
+  }
+
+  // --- pure date math (ISO; never Date.now) --------------------------------
+
+  /**
+   * Shift BOTH dates of a booking by `weeks` whole weeks (preserves duration).
+   * Resolves the booking window first (assignment dates, else nothing to move),
+   * so the move is well-defined even when the assignment had no own dates.
+   */
+  private movedBy(base: Assignment, weeks: number): Assignment | null {
+    if (weeks === 0) return { ...base };
+    const win = this.resolveDates(base);
+    if (!win) return null;
+    const days = weeks * 7;
+    return {
+      ...base,
+      startDate: addDaysIso(win.start, days),
+      endDate: addDaysIso(win.end, days),
+    };
+  }
+
+  /**
+   * Resize by moving the START by `weeks` weeks, clamped so the booking keeps at
+   * least a 1-week duration (start can never reach/pass end - MIN_DURATION).
+   */
+  private resizedStart(base: Assignment, weeks: number): Assignment | null {
+    if (weeks === 0) return { ...base };
+    const win = this.resolveDates(base);
+    if (!win) return null;
+    const endMs = Date.parse(win.end);
+    let startMs = Date.parse(win.start) + weeks * MS_PER_WEEK;
+    // Enforce endDate >= startDate + 1 week (min duration).
+    const maxStart = endMs - MIN_DURATION_DAYS * MS_PER_DAY;
+    if (startMs > maxStart) startMs = maxStart;
+    return { ...base, startDate: isoFromMs(startMs), endDate: win.end };
+  }
+
+  /**
+   * Resize by moving the END by `weeks` weeks, clamped so the booking keeps at
+   * least a 1-week duration (end can never reach/precede start + MIN_DURATION).
+   */
+  private resizedEnd(base: Assignment, weeks: number): Assignment | null {
+    if (weeks === 0) return { ...base };
+    const win = this.resolveDates(base);
+    if (!win) return null;
+    const startMs = Date.parse(win.start);
+    let endMs = Date.parse(win.end) + weeks * MS_PER_WEEK;
+    // Enforce endDate >= startDate + 1 week (min duration).
+    const minEnd = startMs + MIN_DURATION_DAYS * MS_PER_DAY;
+    if (endMs < minEnd) endMs = minEnd;
+    return { ...base, startDate: win.start, endDate: isoFromMs(endMs) };
+  }
+
+  /**
+   * The booking's own ISO dates if usable, else its linked request's dates —
+   * mirroring the util's `resolveWindow`. We need concrete dates to mutate; if
+   * neither pair resolves the booking is not draggable (returns null).
+   */
+  private resolveDates(a: Assignment): { start: string; end: string } | null {
+    const aStart = Date.parse(a.startDate ?? '');
+    const aEnd = Date.parse(a.endDate ?? '');
+    if (Number.isFinite(aStart) && Number.isFinite(aEnd) && aEnd >= aStart) {
+      return { start: a.startDate!, end: a.endDate! };
+    }
+    const req = this.data.value().requests.find(r => r.id === a.requestId);
+    const rStart = Date.parse(req?.startDate ?? '');
+    const rEnd = Date.parse(req?.endDate ?? '');
+    if (Number.isFinite(rStart) && Number.isFinite(rEnd) && rEnd >= rStart) {
+      return { start: isoFromMs(rStart), end: isoFromMs(rEnd) };
+    }
+    return null;
+  }
+
+  /** True iff dates or resource differ between two assignment snapshots. */
+  private changed(a: Assignment, b: Assignment): boolean {
+    return (
+      a.startDate !== b.startDate ||
+      a.endDate !== b.endDate ||
+      a.resourceId !== b.resourceId
+    );
+  }
+
+  /** Human label for an assignment (its request name) for toast copy. */
+  private labelFor(assignmentId: string): string {
+    const a = this.working().find(x => x.id === assignmentId);
+    const req = a ? this.data.value().requests.find(r => r.id === a.requestId) : undefined;
+    return req?.name ?? 'this booking';
+  }
+
+  // --- browser-only geometry helpers --------------------------------------
+
+  /**
+   * Measure the rendered px width of one week column. Reads the width of the
+   * first week header cell (a real grid track) so the drag's px→week conversion
+   * matches the layout exactly. Browser-only; falls back to the rem value.
+   */
+  private measureWeekColumn(): void {
+    if (!this.isBrowser) return;
+    const cell = this.host.nativeElement.querySelector<HTMLElement>(
+      '.command-schedule-weekhead',
+    );
+    const w = cell?.getBoundingClientRect().width ?? 0;
+    this.weekColPx = w > 0 ? w : this.fallbackWeekColPx();
+  }
+
+  /** Parse the `--week-col` rem value against the root font size (browser-only). */
+  private fallbackWeekColPx(): number {
+    const rem = parseFloat(this.weekColWidth); // '5.5rem' -> 5.5
+    const rootPx =
+      typeof getComputedStyle === 'function' && typeof document !== 'undefined'
+        ? parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
+        : 16;
+    return rem * rootPx;
+  }
+
+  /**
+   * Which resource lane is under the pointer right now (move-reassign target).
+   * Walks up from elementFromPoint to the nearest [data-resource-id] track.
+   * Browser-only; returns null when over no lane.
+   */
+  private laneUnderPointer(event: PointerEvent): string | null {
+    if (typeof document === 'undefined' || !document.elementFromPoint) return null;
+    const el = document.elementFromPoint(event.clientX, event.clientY);
+    const lane = el?.closest<HTMLElement>('[data-resource-id]');
+    return lane?.dataset['resourceId'] ?? null;
+  }
 }
 
 /**
@@ -580,4 +1135,19 @@ function shortDate(ms: number): string {
     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
   ][d.getUTCMonth()];
   return `${day} ${month}`;
+}
+
+/** YYYY-MM-DD for a UTC epoch-ms instant; stable across time zones. */
+function isoFromMs(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
+ * Pure ISO date arithmetic: parse a YYYY-MM-DD (or full ISO) string to UTC ms,
+ * add `days` whole days, and re-format as YYYY-MM-DD. No Date.now; the result
+ * depends only on the inputs, so move/resize math is deterministic and SSR-safe.
+ */
+function addDaysIso(iso: string, days: number): string {
+  const ms = Date.parse(iso);
+  return isoFromMs(ms + days * MS_PER_DAY);
 }

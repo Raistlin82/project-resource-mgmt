@@ -42,4 +42,4 @@ Every seeded assignment gets a realistic `startDate`/`endDate` (coherent with it
 `schedule.util.spec.ts` (conflict math) + existing suites stay green; `npx ng build` clean; live verification — screenshot `/schedule` (as demo-admin) showing a real over-allocation conflict before finalising.
 
 ## Out of scope / deferred
-Drag-drop editing (approach C), auto-leveling, sub-weekly granularity, capacity calendars (holidays/PTO beyond existing availability), cross-project booking optimization.
+~~Drag-drop editing (approach C)~~ — **delivered 2026-06-12**: bars are draggable (move/resize) + droppable on another lane (reassign) + keyboard-accessible (arrow keys), with optimistic write to `PUT /assignments/:id` and live conflict recompute. Still deferred: auto-leveling, sub-weekly granularity, capacity calendars (holidays/PTO beyond existing availability), cross-project booking optimization.
