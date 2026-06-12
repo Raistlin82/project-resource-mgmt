@@ -547,7 +547,9 @@ function crud<T extends { id: string }>(
   // body for POST/PUT. Returns a 400-suitable error message (string) to reject, or
   // null to pass. Used to enforce FK/person-reference rules that the generic numeric
   // check cannot express (Phase D: person fields must reference the resources catalog).
-  validate?: (data: Record<string, unknown>) => Promise<string | null>,
+  // `ctx.id` is the record's own id on PUT (undefined on POST) — lets a validator
+  // exclude the record being edited from a uniqueness check (Phase E rate cards).
+  validate?: (data: Record<string, unknown>, ctx?: { id?: string }) => Promise<string | null>,
 ) {
   router.get(`/${path}`, async (_req, res) => { res.json(await repo.list()); });
   router.post(`/${path}`, async (req, res) => {
@@ -569,7 +571,7 @@ function crud<T extends { id: string }>(
     const bad = findInvalidNumericField(data, numericFields);
     if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
     if (validate) {
-      const err = await validate(data as Record<string, unknown>);
+      const err = await validate(data as Record<string, unknown>, { id: req.params.id });
       if (err) { res.status(400).json({ error: err }); return; }
     }
     const updated = await repo.update(req.params.id, data as Partial<T>);
@@ -1516,7 +1518,7 @@ crud(apiRouter, 'vendors', repos.vendors, ['name', 'vatId', 'country'], [], data
 // (required), `costRate`/`billRate` required non-negative numbers. Reads + writes
 // are sensitive (expose rates) and RBAC-gated like /resources (roleGate + READ_RULES).
 crud(apiRouter, 'rate-cards', repos.rateCards, ['role', 'organization', 'currency', 'costRate', 'billRate'], ['costRate', 'billRate'],
-  async data => {
+  async (data, ctx) => {
     if (!data['role']) return 'role is required (project-role catalog name)';
     const roleErr = await validateCatalogValue(data['role'], 'role', projectRoleNames, 'project role (catalog name)');
     if (roleErr) return roleErr;
@@ -1529,6 +1531,19 @@ crud(apiRouter, 'rate-cards', repos.rateCards, ['role', 'organization', 'currenc
     if (curErr) return curErr;
     if (!Number.isFinite(Number(data['costRate'])) || !Number.isFinite(Number(data['billRate']))) {
       return 'costRate and billRate are required numbers';
+    }
+    // UNIQUENESS: at most one card per (role, organization, currency). A null/
+    // undefined/'' organization is the single "All organizations" key, so two
+    // generic cards for the same role+currency also collide. Excludes the record
+    // being edited (ctx.id) so a no-op PUT to an existing card is allowed.
+    const orgKey = (v: unknown) => (typeof v === 'string' ? v : '');
+    const role = data['role'];
+    const org = orgKey(data['organization']);
+    const currency = data['currency'];
+    const existing = await repos.rateCards.list();
+    const dup = existing.find(c => c.id !== ctx?.id && c.role === role && orgKey(c.organization) === org && c.currency === currency);
+    if (dup) {
+      return `A rate card already exists for "${role}" / ${org || 'All organizations'} in ${currency}. Edit that card instead of adding a duplicate.`;
     }
     return null;
   });
