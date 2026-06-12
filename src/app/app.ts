@@ -90,9 +90,11 @@ interface NavState {
       }
 
       <aside
-        class="command-sidebar fixed inset-y-0 left-0 z-50 w-72 flex flex-col transform transition-transform duration-300 ease-in-out lg:relative lg:translate-x-0 overflow-y-auto shadow-2xl lg:shadow-none"
+        class="command-sidebar fixed inset-y-0 left-0 z-50 w-72 flex flex-col transform transition-transform duration-300 ease-in-out lg:translate-x-0 overflow-y-auto shadow-2xl lg:shadow-none"
         [class.-translate-x-full]="!isMobileMenuOpen()"
-        [class.translate-x-0]="isMobileMenuOpen()">
+        [class.translate-x-0]="isMobileMenuOpen()"
+        [class.lg:relative]="desktopSidebarOpen()"
+        [class.lg:hidden]="!desktopSidebarOpen()">
         <div class="hidden lg:block sticky top-0 z-10 border-b border-line bg-surface px-5 py-5">
           <div class="flex items-center gap-3 text-ink">
             <span class="grid size-10 place-items-center rounded-md border border-accent bg-accent-tint text-accent-text ring-1 ring-accent">
@@ -240,6 +242,20 @@ interface NavState {
       </aside>
 
       <main id="main-content" tabindex="-1" class="flex-1 overflow-y-auto lg:h-screen outline-none">
+        <!-- Desktop top bar: hamburger to collapse/expand the left navigation. -->
+        <div class="hidden lg:flex items-center gap-3 sticky top-0 z-30 border-b border-line bg-canvas/85 backdrop-blur px-4 py-2">
+          <button
+            type="button"
+            (click)="toggleDesktopSidebar()"
+            class="grid size-9 place-items-center rounded-md border border-line text-ink-secondary hover:text-ink hover:bg-surface-muted transition-colors"
+            [attr.aria-label]="desktopSidebarOpen() ? 'Collapse navigation' : 'Expand navigation'"
+            [attr.aria-expanded]="desktopSidebarOpen()">
+            <mat-icon>{{ desktopSidebarOpen() ? 'menu_open' : 'menu' }}</mat-icon>
+          </button>
+          @if (!desktopSidebarOpen()) {
+            <span class="command-brand text-sm text-ink">Delivery Control</span>
+          }
+        </div>
         <div class="command-page p-4 sm:p-6 lg:p-7">
           <router-outlet></router-outlet>
         </div>
@@ -464,6 +480,10 @@ export class App {
   readonly role = this.auth.role;
 
   isMobileMenuOpen = signal(false);
+  /** Desktop-only: whether the left nav is expanded (lg+). Toggled by the top-bar
+   *  hamburger; when false the sidebar is removed from the layout and the content
+   *  pane takes the full width. */
+  desktopSidebarOpen = signal(true);
 
   // Live filter for the nav.
   navFilter = signal('');
@@ -524,6 +544,10 @@ export class App {
 
   closeMenu() {
     this.isMobileMenuOpen.set(false);
+  }
+
+  toggleDesktopSidebar() {
+    this.desktopSidebarOpen.update(v => !v);
   }
 
   toggleGroup(label: string): void {
