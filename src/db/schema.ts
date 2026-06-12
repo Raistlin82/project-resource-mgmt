@@ -293,6 +293,57 @@ export const resourceOrganizations = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Customizing catalogs (Phase F1 — additive reference data)
+//
+// Simple keyed catalogs that Phase F2 will bind consumer fields to. Added
+// additively; no existing consumer column is rewired here.
+// ---------------------------------------------------------------------------
+
+// NOTE: `Country` has no `id` in the source interface; its natural key is the
+// ISO-2 `code`. We honor the source of truth and key the table on `code`
+// (mirrors the `languages`/`fxRates` natural-key convention).
+export const countries = pgTable('countries', {
+  code: text('code').primaryKey(),
+  name: text('name').notNull(),
+});
+
+export const cities = pgTable(
+  'cities',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    countryCode: text('country_code')
+      .notNull()
+      .references(() => countries.code),
+  },
+  (t) => [
+    index('cities_country_code_idx').on(t.countryCode),
+  ],
+);
+
+export const industries = pgTable('industries', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+});
+
+export const costCategories = pgTable('cost_categories', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+});
+
+export const partnerRoles = pgTable('partner_roles', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+});
+
+export const vendors = pgTable('vendors', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  vatId: text('vat_id'),
+  country: text('country'),
+});
+
+// ---------------------------------------------------------------------------
 // Projects & project sub-resources
 // ---------------------------------------------------------------------------
 

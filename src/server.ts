@@ -9,7 +9,7 @@ import { db } from './db/client';
 import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
-import type { AuditLog, Resource, ResourceRequest, Assignment, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Project } from './app/services/api.service';
+import type { AuditLog, Resource, ResourceRequest, Assignment, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition } from './app/services/staffing.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate } from './app/services/api.service';
@@ -217,6 +217,8 @@ const auditRepoBySegment = new Map<string, AuditReadable>([
   ['resources', repos.resources], ['requests', repos.requests], ['assignments', repos.assignments],
   ['time-entries', repos.timeEntries], ['skill-catalogs', repos.skillCatalogs], ['proficiency-sets', repos.proficiencySets],
   ['skills', repos.skills], ['project-roles', repos.projectRoles], ['resource-organizations', repos.resourceOrganizations],
+  ['countries', repos.countries], ['cities', repos.cities], ['industries', repos.industries],
+  ['cost-categories', repos.costCategories], ['partner-roles', repos.partnerRoles], ['vendors', repos.vendors],
   ['projects', repos.projects], ['project-partners', repos.projectPartners], ['project-documents', repos.projectDocuments],
   ['work-packages', repos.workPackages], ['milestones', repos.milestones], ['project-financials', repos.projectFinancials],
   ['project-cost-centers', repos.projectCostCenters], ['project-tasks', repos.projectTasks], ['project-issues', repos.projectIssues],
@@ -455,6 +457,10 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
     { test: p => ['/assignments', '/requests'].some(prefix => p.startsWith(prefix)), roles: ['pm', 'resource-manager', 'delivery-executive', 'admin'] },
     { test: p => ['/projects', '/project-partners', '/project-documents', '/work-packages', '/milestones', '/project-tasks', '/project-issues', '/change-requests'].some(prefix => p.startsWith(prefix)), roles: ['pm', 'delivery-executive', 'admin'] },
     { test: p => ['/skill-catalogs', '/proficiency-sets', '/skills', '/project-roles', '/resource-organizations', '/languages'].some(prefix => p.startsWith(prefix)), roles: ['admin', 'delivery-executive'] },
+    // Customizing catalogs (Phase F1): location/industry/cost-category/partner-role/
+    // vendor master data — mutations restricted to admin/delivery-executive (reads
+    // stay open like the other config catalogs).
+    { test: p => ['/countries', '/cities', '/industries', '/cost-categories', '/partner-roles', '/vendors'].some(prefix => p.startsWith(prefix)), roles: ['admin', 'delivery-executive'] },
     { test: p => p.startsWith('/approval-requests'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
     // Integration actions (prepare CRM sync payloads, ...) mirror the read gate.
     { test: p => p.startsWith('/integrations'), roles: ['finance', 'delivery-executive', 'admin'] },
@@ -1265,6 +1271,56 @@ apiRouter.put('/resource-organizations/:id', async (req, res) => {
   res.json(updated);
 });
 apiRouter.delete('/resource-organizations/:id', async (req, res) => { await repos.resourceOrganizations.remove(req.params.id); res.status(204).send(); });
+
+// --- Customizing catalogs (Phase F1 — additive reference data) --------------
+// Reads stay open (like the other config catalogs); mutations are gated to
+// admin/delivery-executive by the RBAC rule above. No existing consumer is
+// rewired here — F2 binds these.
+
+// COUNTRIES — natural-key catalog (the ISO-2 `code` is the PK, supplied by the
+// client, NOT server-assigned), so it cannot use the id-based `crud()` helper.
+// The code is normalized to upper-case and validated as two ASCII letters; create
+// rejects a duplicate code.
+const isIso2Code = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z]{2}$/.test(v);
+apiRouter.get('/countries', async (_req, res) => { res.json(await repos.countries.list()); });
+apiRouter.post('/countries', async (req, res) => {
+  const body = pick<Country>(req.body, ['code', 'name']);
+  if (!isIso2Code(body.code)) { res.status(400).json({ error: 'code must be a 2-letter ISO country code' }); return; }
+  if (typeof body.name !== 'string' || body.name.length === 0) { res.status(400).json({ error: 'name is required' }); return; }
+  const code = body.code.toUpperCase();
+  if (await repos.countries.get(code)) { res.status(400).json({ error: `country ${code} already exists` }); return; }
+  // The natural-key repo mirrors `id` from `code`; pass both for a clean insert.
+  res.json(await repos.countries.create({ id: code, code, name: body.name }));
+});
+apiRouter.put('/countries/:code', async (req, res) => {
+  const existing = await repos.countries.get(req.params.code);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  // Only the name is editable; the code is the immutable natural key.
+  const updated = await repos.countries.update(req.params.code, pick(req.body, ['name']));
+  res.json(updated);
+});
+apiRouter.delete('/countries/:code', async (req, res) => {
+  const removed = await repos.countries.remove(req.params.code);
+  if (!removed) { res.status(404).json({ error: 'Not found' }); return; }
+  res.status(204).send();
+});
+
+// CITIES — id-keyed catalog; `countryCode` is a REQUIRED FK to /countries.
+crud(apiRouter, 'cities', repos.cities, ['name', 'countryCode'], [], async data => {
+  if (data['countryCode'] === undefined) return 'countryCode is required';
+  if (!(await existsRepo(repos.countries, data['countryCode']))) {
+    return 'countryCode must reference an existing country';
+  }
+  return null;
+});
+
+// Simple {id, name} catalogs.
+crud(apiRouter, 'industries', repos.industries, ['name']);
+crud(apiRouter, 'cost-categories', repos.costCategories, ['name']);
+crud(apiRouter, 'partner-roles', repos.partnerRoles, ['name']);
+
+// VENDORS — partner/supplier companies.
+crud(apiRouter, 'vendors', repos.vendors, ['name', 'vatId', 'country']);
 
 const PROJECT_FIELDS = ['name', 'location', 'startDate', 'endDate', 'status', 'description', 'ownerId', 'contractId'] as const;
 apiRouter.get('/projects', async (_req, res) => { res.json(await repos.projects.list()); });
@@ -2353,7 +2409,9 @@ async function seedSequences(): Promise<void> {
   const allRepos: readonly { list(): Promise<Entity[]> }[] = [
     repos.resources, repos.users, repos.requests, repos.assignments, repos.timeEntries,
     repos.languages, repos.skillCatalogs, repos.proficiencySets, repos.skills, repos.projectRoles,
-    repos.resourceOrganizations, repos.projects, repos.projectPartners, repos.projectDocuments,
+    repos.resourceOrganizations, repos.countries, repos.cities, repos.industries,
+    repos.costCategories, repos.partnerRoles, repos.vendors,
+    repos.projects, repos.projectPartners, repos.projectDocuments,
     repos.workPackages, repos.milestones, repos.projectFinancials, repos.projectCostCenters,
     repos.projectTasks, repos.projectIssues, repos.changeRequests, repos.costCenters,
     repos.customers, repos.contracts, repos.orders, repos.orderLines, repos.billingPlanItems,

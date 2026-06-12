@@ -111,6 +111,15 @@ export async function initPersistence(): Promise<void> {
     seed.serviceOrganizations,
   );
 
+  // Customizing catalogs (Phase F1 — additive). Roots, except cities which FK
+  // to countries (countries seeded first).
+  await seedIfEmpty(database, schema.countries, seed.countries);
+  await seedIfEmpty(database, schema.cities, seed.cities); // -> countries
+  await seedIfEmpty(database, schema.industries, seed.industries);
+  await seedIfEmpty(database, schema.costCategories, seed.costCategories);
+  await seedIfEmpty(database, schema.partnerRoles, seed.partnerRoles);
+  await seedIfEmpty(database, schema.vendors, seed.vendors);
+
   // First-level dependents.
   await seedIfEmpty(database, schema.contracts, seed.contracts); // -> customers
   await seedIfEmpty(database, schema.users, seed.users); // -> resources

@@ -46,6 +46,13 @@ export const routes: Routes = [
   { path: 'config/cost-centers', title: 'Cost Centers', loadComponent: () => import('./configuration/manage-cost-centers.component').then(m => m.ManageCostCentersComponent) },
   { path: 'config/service-orgs', title: 'Service Organizations', loadComponent: () => import('./configuration/service-organization-details.component').then(m => m.ServiceOrganizationDetailsComponent) },
   { path: 'config/resource-orgs', title: 'Resource Organizations', loadComponent: () => import('./configuration/manage-resource-organizations.component').then(m => m.ManageResourceOrganizationsComponent) },
+  // Customizing catalogs (Phase F1 — additive reference data). Gated to admin /
+  // delivery-executive, mirroring the server's mutation RBAC for these catalogs.
+  { path: 'config/locations', title: 'Locations', canMatch: [roleGuard(a => a.hasAnyRole(['admin', 'delivery-executive']))], loadComponent: () => import('./configuration/manage-locations.component').then(m => m.ManageLocationsComponent) },
+  { path: 'config/industries', title: 'Industries', canMatch: [roleGuard(a => a.hasAnyRole(['admin', 'delivery-executive']))], loadComponent: () => import('./configuration/manage-industries.component').then(m => m.ManageIndustriesComponent) },
+  { path: 'config/cost-categories', title: 'Cost Categories', canMatch: [roleGuard(a => a.hasAnyRole(['admin', 'delivery-executive']))], loadComponent: () => import('./configuration/manage-cost-categories.component').then(m => m.ManageCostCategoriesComponent) },
+  { path: 'config/partner-roles', title: 'Partner Roles', canMatch: [roleGuard(a => a.hasAnyRole(['admin', 'delivery-executive']))], loadComponent: () => import('./configuration/manage-partner-roles.component').then(m => m.ManagePartnerRolesComponent) },
+  { path: 'config/vendors', title: 'Vendors', canMatch: [roleGuard(a => a.hasAnyRole(['admin', 'delivery-executive']))], loadComponent: () => import('./configuration/manage-vendors.component').then(m => m.ManageVendorsComponent) },
   { path: 'config/availability', title: 'Availability Data', loadComponent: () => import('./configuration/maintain-availability-data.component').then(m => m.MaintainAvailabilityDataComponent) },
   // Integrations expose financial artifacts (GL journal, e-invoices, BI feed):
   // gate on the finance capability, mirroring the server's '/integrations' RBAC.
