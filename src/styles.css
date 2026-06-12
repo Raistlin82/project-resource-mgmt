@@ -661,6 +661,10 @@ textarea:focus-visible,
 .command-kpi {
   position: relative;
   min-width: 0;
+  /* Make each KPI card a query container so its value font scales to the CARD
+     width (not the viewport) — long currency amounts can't overflow a narrow
+     card in dense KPI grids (contracts, billing). */
+  container-type: inline-size;
   border: 1px solid var(--cc-line);
   border-top: 3px solid var(--cc-primary);
   border-radius: var(--radius-md);
@@ -718,9 +722,9 @@ textarea:focus-visible,
   margin-top: var(--space-3xs);
   color: var(--cc-ink);
   font-family: var(--font-mono);
-  /* Smaller, fluid size so long currency amounts (e.g. €310,400) fit inside
-     narrow KPI cards without overflowing. Pairs with min-width:0 on the card. */
-  font-size: clamp(1.2rem, 0.95rem + 1vw, 1.85rem);
+  /* Scales to the CARD width via container query units (cqi) so long currency
+     amounts fit even in tightly-packed KPI grids without overflowing. */
+  font-size: clamp(0.95rem, 13cqi, 1.8rem);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   line-height: 1.05;

@@ -19,7 +19,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
         <div>
           <div class="command-eyebrow">Commercial</div>
           <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Orders</h1>
-          <p class="mt-2 text-sm text-[var(--cc-muted)]">Track customer and purchase orders across your contracts.</p>
+          <p class="mt-2 text-sm text-[var(--cc-muted)]">Customer orders are revenue (incoming, green); purchase orders are cost (outgoing to a partner, shown red and signed &minus;).</p>
         </div>
         <button (click)="showForm.set(true)" class="command-button w-full sm:w-auto">
           <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon> New Order
@@ -63,7 +63,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                       <span class="text-[var(--cc-muted)]">&mdash;</span>
                     }
                   </td>
-                  <td class="num font-semibold">{{ order.amount | currency:order.currency }}</td>
+                  <td class="num font-semibold"
+                      [class.text-positive-text]="order.type === 'Customer'"
+                      [class.text-critical-text]="order.type === 'Purchase'"
+                      [attr.title]="order.type === 'Customer' ? 'Revenue (incoming)' : 'Cost (outgoing to partner)'">
+                    @if (order.type === 'Purchase') {&minus;}{{ order.amount | currency:order.currency }}
+                  </td>
                   <td>
                     <span class="command-status"
                           [class.neutral]="order.status === 'Open'"
