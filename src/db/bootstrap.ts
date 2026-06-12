@@ -119,6 +119,9 @@ export async function initPersistence(): Promise<void> {
   await seedIfEmpty(database, schema.costCategories, seed.costCategories);
   await seedIfEmpty(database, schema.partnerRoles, seed.partnerRoles);
   await seedIfEmpty(database, schema.vendors, seed.vendors);
+  // Rate cards (Phase E): role-based default rates. No DB FK (role/org are name
+  // strings matched at resolve time), so ordering is unconstrained.
+  await seedIfEmpty(database, schema.rateCards, seed.rateCards);
 
   // First-level dependents.
   await seedIfEmpty(database, schema.contracts, seed.contracts); // -> customers

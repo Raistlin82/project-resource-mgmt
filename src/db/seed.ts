@@ -42,6 +42,7 @@ import type {
   CostCategory,
   PartnerRole,
   Vendor,
+  RateCard,
   Project,
   Partner,
   ProjectDocument,
@@ -84,7 +85,7 @@ export const resources: Resource[] = [
     externalExperience: [], profilePicture: '', resume: '', utilization: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London', costRate: 90, billRate: 180, hireDate: '2021-09-13' },
   { id: '3', name: 'Alice Smith', role: 'Designer',
     skills: [{ name: 'Figma', level: 3 }], projectRoles: ['UX Designer'],
-    externalExperience: [], profilePicture: '', resume: '', utilization: 55, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', costRate: 65, billRate: 120, hireDate: '2023-01-16' },
+    externalExperience: [], profilePicture: '', resume: '', utilization: 55, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', hireDate: '2023-01-16' },
 ];
 
 export const users: User[] = [
@@ -302,6 +303,24 @@ export const vendors: Vendor[] = [
   { id: 'V3', name: 'Nordwind Software GmbH', vatId: 'DE-NORD-0003', country: 'DE' },
   { id: 'V4', name: 'Mediolanum Consulting S.r.l.', vatId: 'IT-MEDI-0004', country: 'IT' },
   { id: 'V5', name: 'Albion Cloud Services Ltd', vatId: 'GB-ALBI-0005', country: 'GB' },
+];
+
+// RATE CARDS (Phase E) — DEFAULT cost/bill rates per role (base currency EUR).
+// A resource's effective rate = its per-resource override ?? the card matching
+// its role (and organization, if an org-specific card exists). Generic cards
+// (no organization) cover every org; 'RC_DEV_ENG' demonstrates an org-specific
+// override that beats the generic Developer card for the Engineering org.
+export const rateCards: RateCard[] = [
+  { id: 'RC_DEV', role: 'Developer', currency: 'EUR', costRate: 75, billRate: 140 },
+  { id: 'RC_PM', role: 'Project Manager', currency: 'EUR', costRate: 95, billRate: 190 },
+  { id: 'RC_SR_DEV', role: 'Senior Developer', currency: 'EUR', costRate: 95, billRate: 175 },
+  { id: 'RC_BE_ENG', role: 'Backend Engineer', currency: 'EUR', costRate: 85, billRate: 160 },
+  { id: 'RC_CONS', role: 'Consultant', currency: 'EUR', costRate: 90, billRate: 180 },
+  { id: 'RC_BIZ_CONS', role: 'Business Consultant', currency: 'EUR', costRate: 110, billRate: 210 },
+  { id: 'RC_DESIGN', role: 'Designer', currency: 'EUR', costRate: 65, billRate: 120 },
+  { id: 'RC_UX_DESIGN', role: 'UX Designer', currency: 'EUR', costRate: 70, billRate: 130 },
+  // Org-specific override: Developers in the Engineering org bill higher.
+  { id: 'RC_DEV_ENG', role: 'Developer', organization: 'Engineering', currency: 'EUR', costRate: 80, billRate: 150 },
 ];
 
 // PHASE F2 — `location` is bound to the cities catalog (store = city name).

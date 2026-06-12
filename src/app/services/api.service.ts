@@ -17,8 +17,22 @@ export interface Resource {
   managerId?: string;
   organization?: string;
   location?: string;
+  /**
+   * EFFECTIVE cost rate (override ?? the role's rate-card default), resolved by
+   * the server on read. This is the value all margin math consumes; treat it as
+   * read-only — write `costRateOverride` instead. Phase E (Rate Cards).
+   */
   costRate?: number;
+  /** EFFECTIVE bill rate (override ?? rate-card default), resolved on read. */
   billRate?: number;
+  /**
+   * Per-resource MANUAL OVERRIDE of the role's rate-card cost rate. `null`/
+   * `undefined` = inherit the card default. The form binds the Cost-rate input
+   * here; the server maps it onto the resources.cost_rate column. Phase E.
+   */
+  costRateOverride?: number | null;
+  /** Per-resource manual override of the role's rate-card bill rate (null = inherit). */
+  billRateOverride?: number | null;
   /**
    * Date the resource was hired (data di assunzione), ISO 'YYYY-MM-DD'.
    * REQUIRED at create time (the server rejects a missing/invalid value), but
@@ -178,6 +192,22 @@ export interface Vendor {
   name: string;
   vatId?: string;
   country?: string;
+}
+
+/**
+ * A Rate Card (Phase E): the DEFAULT cost/bill rate for a role, optionally
+ * scoped to an organization. It is the single source of truth for a resource's
+ * rate — a resource's effective rate is its per-resource override (if any) else
+ * the matching card here. Keyed by `role` (project-role NAME) + optional
+ * `organization` (resource-org NAME; empty = all orgs) + `currency` (base/EUR).
+ */
+export interface RateCard {
+  id: string;
+  role: string;
+  organization?: string;
+  currency: string;
+  costRate: number;
+  billRate: number;
 }
 
 export interface Project {
@@ -705,6 +735,13 @@ export class ApiService {
   createVendor(v: Partial<Vendor>): Observable<Vendor> { return this.http.post<Vendor>(`${this.baseUrl}/vendors`, v); }
   updateVendor(id: string, v: Partial<Vendor>): Observable<Vendor> { return this.http.put<Vendor>(`${this.baseUrl}/vendors/${id}`, v); }
   deleteVendor(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/vendors/${id}`); }
+
+  // RATE CARDS (Phase E) — role-based default rates customizing. Reads are
+  // sensitive (expose cost rates) so the server gates them like /resources.
+  getRateCards(): Observable<RateCard[]> { return this.http.get<RateCard[]>(`${this.baseUrl}/rate-cards`); }
+  createRateCard(r: Partial<RateCard>): Observable<RateCard> { return this.http.post<RateCard>(`${this.baseUrl}/rate-cards`, r); }
+  updateRateCard(id: string, r: Partial<RateCard>): Observable<RateCard> { return this.http.put<RateCard>(`${this.baseUrl}/rate-cards/${id}`, r); }
+  deleteRateCard(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/rate-cards/${id}`); }
 
   getProjects(): Observable<Project[]> {
     return this.http.get<Project[]>(`${this.baseUrl}/projects`);

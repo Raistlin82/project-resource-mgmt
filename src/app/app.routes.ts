@@ -53,6 +53,9 @@ export const routes: Routes = [
   { path: 'config/cost-categories', title: 'Cost Categories', canMatch: [roleGuard(a => a.hasAnyRole(['admin', 'delivery-executive']))], loadComponent: () => import('./configuration/manage-cost-categories.component').then(m => m.ManageCostCategoriesComponent) },
   { path: 'config/partner-roles', title: 'Partner Roles', canMatch: [roleGuard(a => a.hasAnyRole(['admin', 'delivery-executive']))], loadComponent: () => import('./configuration/manage-partner-roles.component').then(m => m.ManagePartnerRolesComponent) },
   { path: 'config/vendors', title: 'Vendors', canMatch: [roleGuard(a => a.hasAnyRole(['admin', 'delivery-executive']))], loadComponent: () => import('./configuration/manage-vendors.component').then(m => m.ManageVendorsComponent) },
+  // Rate Cards (Phase E) define cost/bill rates — sensitive financial config,
+  // gated to the finance-grade roles (mirrors the server's /rate-cards RBAC).
+  { path: 'config/rate-cards', title: 'Rate Cards', canMatch: [roleGuard(a => a.hasAnyRole(['admin', 'delivery-executive', 'finance']))], loadComponent: () => import('./configuration/manage-rate-cards.component').then(m => m.ManageRateCardsComponent) },
   { path: 'config/availability', title: 'Availability Data', loadComponent: () => import('./configuration/maintain-availability-data.component').then(m => m.MaintainAvailabilityDataComponent) },
   // Integrations expose financial artifacts (GL journal, e-invoices, BI feed):
   // gate on the finance capability, mirroring the server's '/integrations' RBAC.

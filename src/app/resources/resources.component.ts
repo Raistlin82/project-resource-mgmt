@@ -6,11 +6,11 @@ import {
   inject,
   signal,
 } from '@angular/core';
-import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { of } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Resource, ProjectRole, Country, City, ResourceOrganization } from '../services/api.service';
+import { ApiService, Resource, ProjectRole, Country, City, ResourceOrganization, RateCard } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
@@ -239,16 +239,28 @@ const REMOTE_LOCATION = 'Remote';
                 </div>
               </div>
 
+              <!-- RATE CARDS (Phase E): cost/bill default to the role's rate card.
+                   Leaving an input empty INHERITS the card; a typed value OVERRIDES it. -->
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label for="res-cost" class="block text-sm font-medium text-ink-secondary mb-1">Cost rate</label>
-                  <input id="res-cost" type="number" min="0" step="1" formControlName="costRate" class="command-input" placeholder="e.g. 75">
+                  <input id="res-cost" type="number" min="0" step="1" formControlName="costRateOverride" class="command-input"
+                         [placeholder]="inheritedRate() ? ('Inherited: ' + inheritedRate()!.costRate) : 'e.g. 75'">
                 </div>
                 <div>
                   <label for="res-bill" class="block text-sm font-medium text-ink-secondary mb-1">Bill rate</label>
-                  <input id="res-bill" type="number" min="0" step="1" formControlName="billRate" class="command-input" placeholder="e.g. 140">
+                  <input id="res-bill" type="number" min="0" step="1" formControlName="billRateOverride" class="command-input"
+                         [placeholder]="inheritedRate() ? ('Inherited: ' + inheritedRate()!.billRate) : 'e.g. 140'">
                 </div>
               </div>
+              @if (inheritedRate(); as ir) {
+                <p class="-mt-2 text-xs text-[var(--cc-muted)]">
+                  Leave empty to inherit the <strong class="text-ink-secondary">{{ form.controls.role.value }}</strong>
+                  rate card (cost {{ ir.costRate }} · bill {{ ir.billRate }} {{ ir.currency }}). Enter a value to override.
+                </p>
+              } @else if (form.controls.role.value) {
+                <p class="-mt-2 text-xs text-[var(--cc-muted)]">No rate card for this role — enter cost/bill rates manually, or define one under Configuration → Rate Cards.</p>
+              }
 
               <div class="pt-4 flex justify-end gap-3">
                 <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
@@ -345,6 +357,16 @@ export class ResourcesComponent {
   });
   orgOptions = this.orgsRes.value;
 
+  // RATE CARDS (Phase E): the role's default cost/bill rates. The cost/bill inputs
+  // are per-resource OVERRIDES — empty inherits the matching card. We surface the
+  // inherited value as a placeholder/hint so the default is visible before saving.
+  protected readonly rateCardsRes = rxResource<RateCard[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getRateCards() : of<RateCard[]>([])),
+    defaultValue: [] as RateCard[],
+  });
+  rateCards = this.rateCardsRes.value;
+
   // The selected country in the location picker. '' = none, '__REMOTE__' = the Remote
   // sentinel (stored location 'Remote'); else an ISO-2 country code filtering the city
   // list. A manual override (null = "derive from the stored location") lets the user
@@ -428,9 +450,22 @@ export class ResourcesComponent {
     organization: new FormControl(''),
     location: new FormControl(''),
     capacity: new FormControl<number | null>(40, [Validators.required, Validators.min(1)]),
-    costRate: new FormControl<number | null>(null),
-    billRate: new FormControl<number | null>(null),
+    // Per-resource rate OVERRIDES (Phase E). null/empty = inherit the role's rate card.
+    costRateOverride: new FormControl<number | null>(null),
+    billRateOverride: new FormControl<number | null>(null),
     hireDate: new FormControl('', Validators.required),
+  });
+
+  // Live role/organization values drive the inherited-rate lookup as the user edits.
+  private roleValue = toSignal(this.form.controls.role.valueChanges, { initialValue: this.form.controls.role.value });
+  private orgValue = toSignal(this.form.controls.organization.valueChanges, { initialValue: this.form.controls.organization.value });
+  /** The rate card matching the current role+org (org-specific wins over generic). */
+  inheritedRate = computed<RateCard | null>(() => {
+    const role = this.roleValue();
+    const org = this.orgValue();
+    if (!role) return null;
+    const forRole = this.rateCards().filter(c => c.role === role && (c.currency ?? 'EUR') === 'EUR');
+    return forRole.find(c => c.organization && c.organization === org) ?? forRole.find(c => !c.organization) ?? null;
   });
 
   /** A resource is Terminated when terminationDate is set to a date on/before today. */
@@ -457,8 +492,10 @@ export class ResourcesComponent {
         organization: r.organization ?? '',
         location: r.location ?? '',
         capacity: r.capacity ?? 40,
-        costRate: r.costRate ?? null,
-        billRate: r.billRate ?? null,
+        // Show the stored OVERRIDE only; an inheriting resource leaves these empty
+        // so the rate-card default surfaces as the placeholder hint.
+        costRateOverride: r.costRateOverride ?? null,
+        billRateOverride: r.billRateOverride ?? null,
         hireDate: r.hireDate ?? '',
       });
     } else {
@@ -467,7 +504,7 @@ export class ResourcesComponent {
       this.editingLocation.set('');
       this.editingOrg.set('');
       this.countryOverride.set('');
-      this.form.reset({ name: '', role: '', organization: '', location: '', capacity: 40, costRate: null, billRate: null, hireDate: '' });
+      this.form.reset({ name: '', role: '', organization: '', location: '', capacity: 40, costRateOverride: null, billRateOverride: null, hireDate: '' });
     }
     this.showForm.set(true);
   }
@@ -491,8 +528,10 @@ export class ResourcesComponent {
       organization: raw.organization ?? '',
       location: raw.location ?? '',
       capacity: Number(raw.capacity),
-      costRate: raw.costRate == null ? undefined : Number(raw.costRate),
-      billRate: raw.billRate == null ? undefined : Number(raw.billRate),
+      // Phase E: send the rate OVERRIDES. null = inherit the role's rate card; the
+      // server maps these onto the cost_rate/bill_rate columns.
+      costRateOverride: raw.costRateOverride == null ? null : Number(raw.costRateOverride),
+      billRateOverride: raw.billRateOverride == null ? null : Number(raw.billRateOverride),
       hireDate: raw.hireDate ?? '',
     };
     const id = this.editingId();
