@@ -42,8 +42,8 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
           <div class="command-eyebrow">Configuration</div>
           <h1 class="command-title">Integrations</h1>
           <p class="command-subtitle">
-            Typed adapters for ERP, e-invoicing, CRM and BI. Each one is implemented and testable but deliberately
-            not connected: it builds a local artifact from live data — no credentials, no network calls.
+            Standards-compliant export connectors for ERP, e-invoicing, CRM and BI. Each one turns your live
+            data into a ready-to-use file and runs locally — no external credentials and no network calls.
           </p>
         </div>
       </header>
@@ -61,7 +61,7 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
                 </p>
               </div>
             </div>
-            <span class="command-status amber shrink-0">Implemented — not connected</span>
+            <span class="command-status amber shrink-0">Not connected</span>
           </div>
           <div class="p-4 space-y-3">
             <div class="text-xs font-medium text-[var(--cc-muted)]">
@@ -93,7 +93,7 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
                 </p>
               </div>
             </div>
-            <span class="command-status amber shrink-0">Implemented — not connected</span>
+            <span class="command-status amber shrink-0">Not connected</span>
           </div>
           <div class="p-4 space-y-3">
             <div class="text-xs font-medium text-[var(--cc-muted)]">
@@ -134,7 +134,7 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
                 </p>
               </div>
             </div>
-            <span class="command-status amber shrink-0">Implemented — not connected</span>
+            <span class="command-status amber shrink-0">Not connected</span>
           </div>
           <div class="p-4 space-y-3">
             <div class="text-xs font-medium text-[var(--cc-muted)]">
@@ -188,7 +188,7 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
                 </p>
               </div>
             </div>
-            <span class="command-status amber shrink-0">Implemented — not connected</span>
+            <span class="command-status amber shrink-0">Not connected</span>
           </div>
           <div class="p-4 space-y-3">
             <div class="text-xs font-medium text-[var(--cc-muted)]">

@@ -9,8 +9,10 @@ export interface AppNotification {
   type: NotificationType;
 }
 
-/** How long non-error toasts stay on screen before auto-dismissing (ms). */
+/** How long toasts stay on screen before auto-dismissing (ms). Errors linger a
+ *  little longer so a failure is readable, but nothing stays on screen forever. */
 const AUTO_DISMISS_MS = 5000;
+const ERROR_DISMISS_MS = 8000;
 
 /** Lightweight global toast/notification store backed by a signal. */
 @Injectable({ providedIn: 'root' })
@@ -23,11 +25,10 @@ export class NotificationService {
   show(message: string, type: NotificationType = 'info'): void {
     const id = ++this.seq;
     this._items.update(list => [...list, { id, message, type }]);
-    // Success/info toasts auto-clear so transient confirmations don't pile up;
-    // errors stay sticky until dismissed so a failure can't scroll away unseen.
-    // Browser-only: don't leave timers dangling during SSR.
-    if (this.isBrowser && type !== 'error') {
-      setTimeout(() => this.dismiss(id), AUTO_DISMISS_MS);
+    // All toasts auto-dismiss so nothing lingers on screen; errors get a slightly
+    // longer window so a failure stays readable. Browser-only: no SSR timers.
+    if (this.isBrowser) {
+      setTimeout(() => this.dismiss(id), type === 'error' ? ERROR_DISMISS_MS : AUTO_DISMISS_MS);
     }
   }
 

@@ -175,7 +175,7 @@ export class AuthService {
 
   // --- bootstrap -----------------------------------------------------------
 
-  private init(): void {
+  private async init(): Promise<void> {
     const config: AuthConfig = {
       issuer: ISSUER,
       clientId: CLIENT_ID,
@@ -192,24 +192,65 @@ export class AuthService {
       .pipe(filter(e => e.type === 'token_received' || e.type === 'token_refreshed'))
       .subscribe(() => this.syncClaims());
 
-    // Discovery + login. Swallow failures so the app still boots when Keycloak
-    // is down (demo/loopback fallback) — we simply remain anonymous.
-    this.oauth
-      .loadDiscoveryDocumentAndTryLogin()
-      .then(() => {
-        this.syncClaims();
+    // Does the SERVER run in header-trust (local/dev) mode? Decided by the
+    // backend, never the client, so the dev-only behaviours below cannot be
+    // forced on in production.
+    const demoMode = await this.fetchDemoMode();
+
+    try {
+      await this.oauth.loadDiscoveryDocumentAndTryLogin();
+      this.syncClaims();
+      if (this.isAuthenticated()) {
         this.oauth.setupAutomaticSilentRefresh();
-      })
-      .catch(() => {
-        // Keycloak unreachable / misconfigured: stay anonymous, never throw.
+      } else if (!demoMode) {
+        // PRODUCTION: authentication is mandatory. Never show the app
+        // anonymously — redirect straight to the Keycloak login. The browser
+        // navigates away, so nothing below runs.
+        this.oauth.initCodeFlow();
+        return;
+      }
+      // DEV + not signed in: anonymous browsing is allowed (the Sign in control
+      // stays available). The demo-admin fallback only kicks in when Keycloak is
+      // unreachable (the catch below).
+    } catch {
+      // Keycloak unreachable.
+      if (demoMode) {
+        // DEV: bootstrap a demo ADMIN so the in-memory app is fully usable
+        // without a running IdP.
+        this.applyDemoAdmin();
+      } else {
+        // PRODUCTION: cannot authenticate; remain anonymous (route guards block
+        // protected screens and the Sign in control is shown).
         this._claims.set(null);
-      })
-      .finally(() => {
-        // Token (if any) is now restored into storage and claims are synced.
-        // Releasing authReady here lets principal-gated data loads fire with a
-        // valid Authorization header instead of racing the bootstrap.
-        this._authReady.set(true);
-      });
+      }
+    } finally {
+      // Token (if any) is restored and claims synced; releasing authReady lets
+      // principal-gated data loads fire with a valid Authorization header.
+      this._authReady.set(true);
+    }
+  }
+
+  /** Ask the backend whether it runs in header-trust (local/dev) mode. */
+  private async fetchDemoMode(): Promise<boolean> {
+    try {
+      const res = await fetch('/api/storage-status');
+      if (res.ok) {
+        const meta = (await res.json()) as { demoMode?: boolean };
+        return meta.demoMode === true;
+      }
+    } catch {
+      // ignore — treat as production (no demo access)
+    }
+    return false;
+  }
+
+  /** Local/dev demo identity: full-access admin, no IdP required. */
+  private applyDemoAdmin(): void {
+    this._claims.set({
+      preferred_username: 'admin',
+      name: 'Demo Admin',
+      realm_access: { roles: ['admin'] },
+    });
   }
 
   private syncClaims(): void {
