@@ -34,8 +34,10 @@ Extend the generic `crud()` helper with an optional `fks: {field, repo|domain, r
 - **Dates**: every date input across the app uses a native calendar date-picker (`<input type="date">`); convert any free-text date field. (Phase G — cross-cutting sweep.)
 - New catalogs total: rate-cards, industries, countries, cities, cost-categories, partner-roles, vendors.
 
-## Phase G — Date pickers
+## Phase G — Date pickers ✅ DELIVERED (PR #21)
 Sweep all create/edit forms; ensure every date field is an `<input type="date">` (calendar popup), never free text. Validate ISO + sensible ranges server-side where missing.
+- **UI**: audit found ALL 14 forms already use `<input type="date">` (hire/termination, project & contract start/end, request start/end, milestone date, task/issue due date, order date, billing expected/issued/due/paid, time-entry date, my-profile experience dates). Zero free-text date inputs — nothing to convert.
+- **Server (added)**: reusable `validateDateFields(body, fields, order?)` (ISO via `Date.parse`; optional `to >= from`) wired into every date-bearing write handler — requests, projects, milestones, work-packages, project-tasks, project-issues, contracts, orders, billing-plan-items. Each rejects a malformed date (400) and an inverted range; valid ISO + omitted/'' pass. Verified live across all handlers.
 
 ## Out of scope / later
 Migrating role storage from name→code (coordinated migration); locations/vendors as full master records (start as simple {id,name} catalogs).
