@@ -60,17 +60,21 @@ import type {
 // --- Core resources ---------------------------------------------------------
 
 export const resources: Resource[] = [
+  // utilization is an independent profile value (NOT derived from assignedHours).
+  // It is kept plausible against each resource's booking load below: Julie is the
+  // over-allocated developer (two overlapping Alpha bookings), John is fully
+  // committed on the Beta migration, Alice carries two partial Beta bookings.
   { id: '1', name: 'Julie Armstrong', role: 'Developer',
     skills: [{ name: 'Java', level: 3 }, { name: 'Spring', level: 2 }],
     projectRoles: ['Senior Developer', 'Backend Engineer'],
     externalExperience: [{ projectName: 'E-commerce Migration', company: 'TechCorp', role: 'Java Developer', startDate: '2020-01-01', endDate: '2022-12-31', comment: 'Migrated legacy system to Spring Boot.' }],
-    profilePicture: '', resume: '', utilization: 85, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York, NY', costRate: 75, billRate: 140 },
+    profilePicture: '', resume: '', utilization: 95, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York, NY', costRate: 75, billRate: 140 },
   { id: '2', name: 'John Miller', role: 'Consultant',
     skills: [{ name: 'Project Management', level: 2 }], projectRoles: ['Business Consultant'],
-    externalExperience: [], profilePicture: '', resume: '', utilization: 100, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London, UK', costRate: 90, billRate: 180 },
+    externalExperience: [], profilePicture: '', resume: '', utilization: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London, UK', costRate: 90, billRate: 180 },
   { id: '3', name: 'Alice Smith', role: 'Designer',
     skills: [{ name: 'Figma', level: 3 }], projectRoles: ['UX Designer'],
-    externalExperience: [], profilePicture: '', resume: '', utilization: 50, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', costRate: 65, billRate: 120 },
+    externalExperience: [], profilePicture: '', resume: '', utilization: 55, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', costRate: 65, billRate: 120 },
 ];
 
 export const users: User[] = [
@@ -82,14 +86,38 @@ export const users: User[] = [
   { id: '6', resourceId: '1', name: 'System Admin', role: 'admin' },
 ];
 
-// B9: request '1' is fully staffed (staffedEffort >= requiredEffort) so its status must be 'Fulfilled'.
+// B9: a request is 'Fulfilled' iff staffedEffort >= requiredEffort (server-derived
+// rule; see staffing.util `requestStatusFor`). Each request's staffedEffort below
+// equals the sum of assignedHours across its assignments, keeping the seed coherent.
+// Date windows are anchored across 2026-04 .. 2026-09 so the bookings fall inside
+// the schedule view's default ~12-week horizon from "today" (2026-06-12).
 export const requests: ResourceRequest[] = [
   { id: '1', name: 'Project Alpha - Backend', requiredRole: 'Developer', requiredEffort: 20, staffedEffort: 20, status: 'Fulfilled', skills: ['Java'], description: 'Backend development for Project Alpha', startDate: '2026-04-01', endDate: '2026-06-30', requesterId: '1', projectId: '1' },
-  { id: '2', name: 'Project Beta - UI', requiredRole: 'Designer', requiredEffort: 15, staffedEffort: 0, status: 'Published', skills: ['Figma'], description: 'UI Design for Project Beta', startDate: '2026-05-01', endDate: '2026-07-31', requesterId: '1', projectId: '2' },
+  { id: '2', name: 'Project Beta - UI', requiredRole: 'Designer', requiredEffort: 15, staffedEffort: 8, status: 'Published', skills: ['Figma'], description: 'UI Design for Project Beta', startDate: '2026-05-01', endDate: '2026-07-31', requesterId: '1', projectId: '2' },
+  { id: '3', name: 'Project Alpha - API Hardening', requiredRole: 'Developer', requiredEffort: 24, staffedEffort: 24, status: 'Fulfilled', skills: ['Java'], description: 'API hardening and performance work for Project Alpha', startDate: '2026-06-15', endDate: '2026-08-31', requesterId: '1', projectId: '1' },
+  { id: '4', name: 'Project Beta - Platform Migration', requiredRole: 'Consultant', requiredEffort: 30, staffedEffort: 30, status: 'Fulfilled', skills: ['Project Management'], description: 'Lead the platform migration workstream for Project Beta', startDate: '2026-05-15', endDate: '2026-09-15', requesterId: '1', projectId: '2' },
+  { id: '5', name: 'Project Beta - Design QA', requiredRole: 'Designer', requiredEffort: 10, staffedEffort: 10, status: 'Fulfilled', skills: ['Figma'], description: 'Design quality pass ahead of Project Beta go-live', startDate: '2026-08-01', endDate: '2026-09-30', requesterId: '1', projectId: '2' },
 ];
 
+// Resource Schedule (Approach B): every assignment carries an explicit booking
+// window (startDate/endDate) + an allocationPct of the resource's weekly capacity.
+//
+// DELIBERATE OVER-ALLOCATION (conflict-detection demo): resource '1' Julie
+// Armstrong is double-booked — A1 (Alpha Backend, 60%, 2026-05-01..2026-06-30)
+// overlaps A2 (Alpha API Hardening, 70%, 2026-06-15..2026-08-31). In the overlap
+// window 2026-06-15..2026-06-30 the summed allocation is 60 + 70 = 130% > 100%, so
+// the schedule util flags both bookings and records a peak of 130%.
+//
+// The rest read realistically: a FULL booking (A3 John Miller 100%, no overlap)
+// and two PARTIAL, NON-OVERLAPPING bookings (A4/A5 Alice Smith 50% each — A4 ends
+// 2026-07-31, A5 starts 2026-08-01; the half-open [start,end) interval makes these
+// adjacent, NOT conflicting).
 export const assignments: Assignment[] = [
-  { id: '1', requestId: '1', resourceId: '1', assignedHours: 20, status: 'hard-booked' },
+  { id: '1', requestId: '1', resourceId: '1', assignedHours: 20, status: 'hard-booked', startDate: '2026-05-01', endDate: '2026-06-30', allocationPct: 60 },
+  { id: '2', requestId: '3', resourceId: '1', assignedHours: 24, status: 'hard-booked', startDate: '2026-06-15', endDate: '2026-08-31', allocationPct: 70 },
+  { id: '3', requestId: '4', resourceId: '2', assignedHours: 30, status: 'hard-booked', startDate: '2026-05-15', endDate: '2026-09-15', allocationPct: 100 },
+  { id: '4', requestId: '2', resourceId: '3', assignedHours: 8, status: 'soft-booked', startDate: '2026-05-01', endDate: '2026-07-31', allocationPct: 50 },
+  { id: '5', requestId: '5', resourceId: '3', assignedHours: 10, status: 'hard-booked', startDate: '2026-08-01', endDate: '2026-09-30', allocationPct: 50 },
 ];
 
 export const timeEntries: TimeEntry[] = [

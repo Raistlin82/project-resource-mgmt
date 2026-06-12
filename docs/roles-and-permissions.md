@@ -69,17 +69,27 @@ canApproveDelivery  = ['pm', 'delivery-executive', 'admin']
 
 ## Route access (client guards)
 
-Angular routes in `app.routes.ts`. Only **commercial** and **billing** routes are
-guarded; all other routes are open at the routing layer (data is still protected
-by the server — see [Server endpoint RBAC](#server-endpoint-rbac)). Guards are
-SSR-aware (allow on the server, re-evaluate in the browser after `authReady`).
+Angular routes in `app.routes.ts`. Only **commercial**, **billing**, and the
+**schedule** routes are guarded; all other routes are open at the routing layer
+(data is still protected by the server — see
+[Server endpoint RBAC](#server-endpoint-rbac)). Guards are SSR-aware (allow on the
+server, re-evaluate in the browser after `authReady`).
 
 | Route(s) | Guard(s) | Allowed roles (via capability) |
 | --- | --- | --- |
 | `customers`, `contracts`, `contracts/:id`, `orders` | `commercialGuard` → `canManageCommercial()` | `sales`, `finance`, `delivery-executive`, `admin` |
 | `billing` | `commercialGuard` **and** `financeGuard` | intersection → `finance`, `delivery-executive`, `admin` |
 | `config/integrations` | `financeGuard` → `canApproveFinancials()` | `finance`, `delivery-executive`, `admin` |
+| `schedule` | `roleGuard(a => a.hasAnyRole(['pm','resource-manager','delivery-executive','admin']))` | `pm`, `resource-manager`, `delivery-executive`, `admin` |
 | Everything else (dashboard, profile, assignments, requests, staffing, utilization, forecast, what-if, approvals, all `projects/*`, `reporting`, all other `config/*`) | _none_ | open to any signed-in user (UX layer; API still enforces RBAC) |
+
+> The **`schedule`** route (the read-only Resource Schedule timeline) is the only
+> resourcing route with a client guard. It is gated to the staffing roles
+> (`pm`, `resource-manager`, `delivery-executive`, `admin`) — and its nav item
+> appears in the **Resource Control** group only for those roles. No new endpoint
+> backs it: it reads the already-gated `/assignments` plus `/requests` and
+> `/resources` (see [Server endpoint RBAC](#server-endpoint-rbac)), and writes go
+> through the existing `/assignments` mutation rule.
 
 > The `billing` route stacks `commercialGuard` **and** `financeGuard`, so a user
 > must satisfy *both* — effectively the `canApproveFinancials` set, since it is a
@@ -154,6 +164,7 @@ guards + server RBAC above. Legend: **Full** = create/edit (mutation-allowed),
 | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Resource pool** (`/resources`, `/users` read) | — | Read | Full | — | Read | Full | Full |
 | **Staffing** (`/requests`, `/assignments`) | — | Full | Full | — | — | Full | Full |
+| **Schedule** (`/schedule` view — reads `/assignments`, `/requests`, `/resources`)³ | — | Read | Read | — | — | Read | Read |
 | **Time entries** (`/time-entries`) | Full (own) | Full | Full + Approve | Read | Full + Approve | Full + Approve | Full |
 | **Projects** (`/projects` + sub-resources) | Read | Full | Read | Read | Read | Full | Full |
 | **Commercial** (`/customers`, `/contracts`, `/orders`, `/order-lines`) | — | — | — | Full | Full | Full | Full |
@@ -169,6 +180,13 @@ sensitive financial rollup is gated to it).
 given role may decide a specific step is further constrained by **step-role
 enforcement** (see [Segregation of Duties](#segregation-of-duties)). `admin` may
 decide any step.
+³ **Schedule** is a UX view, not an API boundary — it is a read-only timeline
+over staffing data with date-level conflict detection, gated by the `schedule`
+route guard to `pm`/`resource-manager`/`delivery-executive`/`admin`. It adds no
+new endpoint: it reads the existing (gated) `/assignments` plus `/requests` and
+`/resources`, and any edits flow through the `/assignments` mutation rule. The
+"Read" here is the *view's* read-only nature; the underlying staffing data is
+mutable for the same roles via the **Staffing** row.
 
 > This map reflects the *API* boundary. The client may additionally hide a
 > feature behind a route guard (e.g. the commercial menu), but that is UX only.

@@ -64,6 +64,42 @@ function isNonNegNumber(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0;
 }
 
+/** Resource Schedule: a value is an ISO-parseable date string (Date.parse). */
+function isIsoDateString(v: unknown): v is string {
+  return typeof v === 'string' && Number.isFinite(Date.parse(v));
+}
+
+/**
+ * Resource Schedule: validate the optional booking fields on an assignment body.
+ * Returns an error message when invalid, or null when valid/absent. Light and
+ * backward-compatible — when all three are omitted this passes unchanged:
+ *   - startDate/endDate, if provided, must be ISO-parseable.
+ *   - when BOTH are provided, end must be >= start.
+ *   - allocationPct, if provided, must be a finite number in [0, 100].
+ */
+function validateAssignmentSchedule(body: Partial<Assignment>): string | null {
+  if (body.startDate !== undefined && !isIsoDateString(body.startDate)) {
+    return 'startDate must be an ISO date string';
+  }
+  if (body.endDate !== undefined && !isIsoDateString(body.endDate)) {
+    return 'endDate must be an ISO date string';
+  }
+  if (
+    body.startDate !== undefined &&
+    body.endDate !== undefined &&
+    Date.parse(body.endDate) < Date.parse(body.startDate)
+  ) {
+    return 'endDate must be on or after startDate';
+  }
+  if (
+    body.allocationPct !== undefined &&
+    !(typeof body.allocationPct === 'number' && Number.isFinite(body.allocationPct) && body.allocationPct >= 0 && body.allocationPct <= 100)
+  ) {
+    return 'allocationPct must be a number between 0 and 100';
+  }
+  return null;
+}
+
 /** B10: keep utilization within [0, 100] and avoid float drift. */
 function clampUtil(v: number): number {
   return Math.round(Math.max(0, Math.min(100, v)));
@@ -450,6 +486,11 @@ const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   // mappings — both need-to-know. Mirror the resource WRITE sensitivity, plus pm
   // and finance who legitimately read staffing/margin.
   { test: p => p === '/resources' || p.startsWith('/resources/') || p.startsWith('/users'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
+  // Resource Schedule: staffing demand + bookings feed the read-only timeline and
+  // its date-level conflict detection. Restrict reads to the resourcing roles that
+  // own staffing (mirrors the /assignments + /requests WRITE gate), never served
+  // to an unauthenticated ('unknown') caller.
+  { test: p => ['/assignments', '/requests'].some(prefix => p === prefix || p.startsWith(prefix + '/')), roles: ['pm', 'resource-manager', 'delivery-executive', 'admin'] },
   // Timesheets for the whole org: require an authenticated principal (any role),
   // never served to an unauthenticated ('unknown') caller.
   { test: p => p.startsWith('/time-entries'), roles: ['employee', 'pm', 'resource-manager', 'delivery-executive', 'finance', 'sales', 'admin'] },
@@ -670,10 +711,13 @@ apiRouter.delete('/requests/:id', async (req, res) => {
 
 apiRouter.get('/assignments', async (_req, res) => { res.json(await repos.assignments.list()); });
 apiRouter.post('/assignments', async (req, res) => {
-  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'status']);
+  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'status', 'startDate', 'endDate', 'allocationPct']);
   if (!isNonNegNumber(body.assignedHours)) {
     { res.status(400).json({ error: 'assignedHours must be a non-negative number' }); return; }
   }
+  // Resource Schedule: validate the optional booking window + allocation (no-op when omitted).
+  const scheduleErr = validateAssignmentSchedule(body);
+  if (scheduleErr) { res.status(400).json({ error: scheduleErr }); return; }
   // B-DATA: an assignment must reference an existing request and resource.
   if (!(await existsRepo(repos.requests, body.requestId))) { res.status(400).json({ error: 'requestId must reference an existing request' }); return; }
   if (!(await existsRepo(repos.resources, body.resourceId))) { res.status(400).json({ error: 'resourceId must reference an existing resource' }); return; }
@@ -696,10 +740,18 @@ apiRouter.post('/assignments', async (req, res) => {
 apiRouter.put('/assignments/:id', async (req, res) => {
   const oldAssig = await repos.assignments.get(req.params.id);
   if (oldAssig === undefined) { res.status(404).json({ error: 'Not found' }); return; }
-  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'status']);
+  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'status', 'startDate', 'endDate', 'allocationPct']);
   if (body.assignedHours !== undefined && !isNonNegNumber(body.assignedHours)) {
     { res.status(400).json({ error: 'assignedHours must be a non-negative number' }); return; }
   }
+  // Resource Schedule: validate the booking window + allocation against the MERGED
+  // state, so a partial update (e.g. only endDate) is still checked end >= start.
+  const scheduleErr = validateAssignmentSchedule({
+    startDate: body.startDate ?? oldAssig.startDate,
+    endDate: body.endDate ?? oldAssig.endDate,
+    allocationPct: body.allocationPct ?? oldAssig.allocationPct,
+  });
+  if (scheduleErr) { res.status(400).json({ error: scheduleErr }); return; }
   // B-DATA: when the FK targets change, the new targets must exist.
   if (body.resourceId !== undefined && body.resourceId !== oldAssig.resourceId && !(await existsRepo(repos.resources, body.resourceId))) {
     res.status(400).json({ error: 'resourceId must reference an existing resource' });

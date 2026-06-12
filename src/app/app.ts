@@ -370,6 +370,7 @@ export class App {
         { label: 'My Assignments', icon: 'event_note', route: '/assignments' },
         { label: 'Resource Requests', icon: 'assignment', route: '/requests', badge: 'requests' },
         { label: 'Staffing', icon: 'group_add', route: '/staffing' },
+        { label: 'Schedule', icon: 'calendar_view_week', route: '/schedule' },
         { label: 'Approvals', icon: 'fact_check', route: '/approvals' },
       ],
     },
@@ -427,13 +428,20 @@ export class App {
   // canApproveFinancials(), mirroring commercialGuard/financeGuard so links
   // only appear when they would actually navigate. Integrations (Configuration
   // group) mirrors financeGuard for the same reason — its artifacts expose
-  // financial data (finance/delivery-executive/admin only). An emptied group
-  // is dropped entirely.
+  // financial data (finance/delivery-executive/admin only). Schedule (Resource
+  // Control group) mirrors its roleGuard — visible only to the resourcing roles
+  // that own staffing (pm/resource-manager/delivery-executive/admin). An emptied
+  // group is dropped entirely.
   readonly navGroups = computed<NavGroup[]>(() => {
     const canCommercial = this.auth.canManageCommercial();
     const canFinance = this.auth.canApproveFinancials();
+    const canSchedule = this.auth.hasAnyRole(['pm', 'resource-manager', 'delivery-executive', 'admin']);
     return this.allNavGroups
       .map(group => {
+        if (group.label === 'Resource Control') {
+          const items = group.items.filter(item => item.route !== '/schedule' || canSchedule);
+          return { label: group.label, items };
+        }
         if (group.label === 'Commercial') {
           const items = group.items.filter(item => {
             if (item.route === '/billing') return canCommercial && canFinance;

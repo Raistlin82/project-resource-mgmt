@@ -9,8 +9,8 @@
 > [`../roles-and-permissions.md`](../roles-and-permissions.md).
 
 **Source of truth.** The procedures below are grounded in the Angular components
-under `src/app/{my-profile,my-assignments,resource-requests,staffing,utilization,forecast}/`,
-the pure decision modules `src/app/services/{forecast.util,match.util,staffing.util}.ts`,
+under `src/app/{my-profile,my-assignments,resource-requests,staffing,utilization,forecast,schedule}/`,
+the pure decision modules `src/app/services/{forecast.util,match.util,staffing.util,schedule.util}.ts`,
 and the server handlers + RBAC in `src/server.ts` (`/resources`, `/requests`,
 `/assignments`, `/time-entries`).
 
@@ -32,7 +32,9 @@ flowchart TD
   A[RM assigns resource<br/>utilization recomputed] --> T
   T[Employee logs & submits Time Entry] --> AP
   AP[Manager approves Time Entry<br/>SoD: approver ≠ owner] --> U
+  A --> S[RM / PM reviews Resource Schedule<br/>date-level timeline + conflict detection]
   U[RM monitors Utilization<br/>& rebalances] --> F
+  S --> U
   F[RM / Delivery Exec runs<br/>Capacity Forecast] --> W
   W[RM / Delivery Exec models<br/>What-If scenario]
 ```
@@ -542,6 +544,121 @@ flowchart TD
 
 **Related.** [Capacity Forecast](#capacity-forecast),
 [Match & rank candidates](#match--rank-candidates--assign-a-resource).
+
+---
+
+### Plan the resource Schedule
+
+**Purpose.** Give the resource manager / PM a read-only, date-level timeline of
+who is booked when, with automatic **conflict detection** that flags resources
+double-booked beyond 100% of weekly capacity in any overlapping window — turning
+the portfolio-wide `utilization > 110%` signal into a *time-aware* one the
+existing utilization view cannot show.
+
+**Scope.**
+- *In:* reviewing the read-only Schedule timeline at `/schedule`
+  (`ScheduleComponent`), driven by `schedule.util` (`buildSchedule` → per-resource
+  lanes + a `conflicts` list); reading the over-allocation badges, conflict
+  styling, and the "N resources over-allocated" summary; navigating the visible
+  horizon (prev/next, ~12 weeks).
+- *Out:* editing bookings here (the view is read-only — bookings are created and
+  rebalanced in [Match & rank candidates](#match--rank-candidates--assign-a-resource)
+  and [Monitor Utilization & rebalance](#monitor-utilization--rebalance)),
+  drag-drop, auto-leveling, and sub-weekly granularity (all deferred).
+
+**The model (`src/app/services/schedule.util.ts`).** A pure, SSR-safe sweep-line
+per resource over its booking intervals:
+
+- Each assignment resolves a **window** (`startDate`/`endDate`, falling back to
+  the linked request's dates when absent) and an **`allocationPct`** (% of weekly
+  `capacity` consumed, default `100`).
+- At any instant where the summed `allocationPct` of concurrent active bookings
+  **exceeds 100%**, those bookings are flagged `conflict: true`; the sweep records
+  the **peak over-allocation %** and the offending **window**.
+- Output: `lanes` (per resource → ordered bookings with resolved start/end/
+  allocation, a project/request label, and `conflict`), and `conflicts`
+  (`{ resourceId, peakPct, windowStart, windowEnd, bookingIds }[]`). Adjacent
+  bookings (one's `end` == the next's `start`) do **not** conflict.
+
+**RACI.**
+
+| Step | Responsible | Accountable | Consulted | Informed |
+|------|-------------|-------------|-----------|----------|
+| Open the Schedule | resource-manager / pm | resource-manager | — | delivery-executive |
+| Review conflicts | resource-manager / pm | resource-manager | pm | delivery-executive |
+| Resolve a conflict (rebalance) | resource-manager | resource-manager | pm | employee |
+
+**Process flow.**
+
+```mermaid
+flowchart TD
+  A[RM/PM opens /schedule] --> B[Load resources + assignments + requests<br/>keyed on authReady]
+  B --> C[buildSchedule → lanes + conflicts]
+  C --> D[Grid timeline: rows = resources,<br/>columns = weeks across horizon]
+  D --> E[Bars span booking window<br/>coloured by project, labelled with allocation%]
+  E --> F{Over-allocated?}
+  F -->|yes| G[Bar gets --color-critical outline/tint<br/>row shows peak% badge]
+  F -->|no| H[Bar shown normally]
+  G --> I[Summary strip: N resources over-allocated]
+  I --> J[Rebalance via Utilization / Staffing<br/>then re-read the timeline]
+```
+
+**Detailed steps.**
+
+1. **Open the Schedule.**
+   - **Who:** `resource-manager` or `pm` (route-gated to
+     `pm`/`resource-manager`/`delivery-executive`/`admin`). **When:** to see
+     date-level bookings and spot conflicts.
+   - **How:** navigate to `/schedule` (`ScheduleComponent`); on `authReady` it
+     loads resources, assignments, and requests, then computes
+     `buildSchedule(...)`. `ListStateComponent` covers loading/empty/error.
+   - **Output:** a CSS-grid timeline — one row per resource (name · role ·
+     capacity), one column per week across the visible horizon; each booking
+     rendered as a bar spanning its window, coloured by project and labelled with
+     its `allocation%`.
+2. **Read the conflicts.**
+   - **Who:** `resource-manager` / `pm`. **When:** reviewing capacity health.
+   - **How:** conflicting bars carry a `--color-critical` outline/tint; the
+     resource row shows an over-allocation badge with the peak %; the summary
+     strip reports **"N resources over-allocated"**. The legend explains the
+     conflict styling.
+   - **Output:** an at-a-glance read of who is double-booked, by how much, and in
+     which window.
+3. **Navigate the horizon (optional).**
+   - **Who:** `resource-manager` / `pm`. **How:** the range control pages the
+     visible window prev/next (default ~12 weeks from today).
+   - **Output:** the timeline re-renders for the chosen window (pure geometry from
+     data — no DOM measurement, so it is SSR-safe).
+4. **Resolve a conflict.**
+   - **Who:** `resource-manager`. **When:** a real over-allocation is confirmed.
+   - **How:** the Schedule is read-only, so rebalance the underlying bookings in
+     [Monitor Utilization & rebalance](#monitor-utilization--rebalance) (edit
+     hours/allocation, move, or delete an assignment) or re-staff via
+     [Match & rank candidates](#match--rank-candidates--assign-a-resource); then
+     re-read the timeline to confirm the conflict has cleared.
+
+**Exceptions & edge cases.**
+
+| Situation | System response |
+|-----------|-----------------|
+| Assignment has no own `startDate`/`endDate` | Falls back to the linked request's dates (backward-compatible; never dropped). |
+| Booking with no resolvable dates at all | Excluded from the timeline geometry (cannot be placed on a week column). |
+| Bookings adjacent in time (`end` == next `start`) | **Not** a conflict — the windows do not overlap. |
+| Summed `allocationPct` of overlapping bookings ≤ 100% | No conflict; bars render normally. |
+| Caller role outside `pm`/`resource-manager`/`delivery-executive`/`admin` | Blocked by the `schedule` route guard (re-evaluated in the browser after `authReady`); the API still gates the underlying reads. |
+| Unauthenticated read of `/resources` | `401` (read RBAC); the view keys its load on `authReady`. |
+
+**Metrics.**
+
+| Metric | Definition |
+|--------|------------|
+| Over-allocated resources | Count of resources with ≥1 conflicting window (the summary strip's *N*). |
+| Peak over-allocation | Highest `peakPct` across all conflicts. |
+| Booking coverage | % of assignments with explicit `startDate`/`endDate` (vs request-date fallback). |
+
+**Related.** [Monitor Utilization & rebalance](#monitor-utilization--rebalance),
+[Match & rank candidates](#match--rank-candidates--assign-a-resource),
+[Capacity Forecast](#capacity-forecast).
 
 ---
 
