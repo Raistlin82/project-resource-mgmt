@@ -32,6 +32,8 @@ const RBAC_HEADERS = { 'X-User-Id': '1', 'X-User-Role': 'admin' };
 // The CRUD round-trip targets the configuration-level cost-centers collection
 // (POST/PUT/DELETE all admin-gated, no FK constraints, safe to mutate).
 const CRUD_SEGMENT = 'cost-centers';
+const SMOKE_MANAGER = 'Julie Armstrong';
+const UPDATED_SMOKE_MANAGER = 'John Miller';
 
 let passed = 0;
 let failed = 0;
@@ -77,7 +79,7 @@ async function createOnly() {
   try {
     ({ status, body } = await req('POST', `/${CRUD_SEGMENT}`, {
       headers: RBAC_HEADERS,
-      body: { name: label, manager: 'Smoke Bot', allocated: 1000, actual: 0 },
+      body: { name: label, manager: SMOKE_MANAGER, allocated: 1000, actual: 0 },
     }));
   } catch (err) {
     console.log(`FAIL  create-only POST /api/${CRUD_SEGMENT} — ${err && err.message ? err.message : err}`);
@@ -162,7 +164,7 @@ async function checkCrud() {
   // POST — create.
   const created = await req('POST', `/${seg}`, {
     headers: RBAC_HEADERS,
-    body: { name: label, manager: 'Smoke Bot', allocated: 5000, actual: 100 },
+    body: { name: label, manager: SMOKE_MANAGER, allocated: 5000, actual: 100 },
   });
   // crud() responds with res.json(item) => HTTP 200 (the harness still asserts
   // a created-row shape: a string id is returned). Accept 201 too for safety.
@@ -183,7 +185,7 @@ async function checkCrud() {
   }
 
   // PUT — change a field and assert it persisted.
-  const newManager = 'Updated Manager';
+  const newManager = UPDATED_SMOKE_MANAGER;
   {
     const put = await req('PUT', `/${seg}/${id}`, {
       headers: RBAC_HEADERS,

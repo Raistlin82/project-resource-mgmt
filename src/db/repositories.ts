@@ -235,7 +235,8 @@ class NaturalKeyPgRepository<TRow extends Entity, KCol extends string>
   async list(): Promise<TRow[]> {
     const rows = (await this.database
       .select()
-      .from(this.tbl)) as Record<string, unknown>[];
+      .from(this.tbl)
+      .orderBy(this.table[this.keyColumn])) as Record<string, unknown>[];
     return rows.map((row) => this.withId(row));
   }
 

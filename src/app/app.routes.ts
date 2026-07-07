@@ -13,7 +13,7 @@ export const routes: Routes = [
   { path: 'utilization', title: 'Utilization', loadComponent: () => import('./utilization/utilization.component').then(m => m.UtilizationComponent) },
   { path: 'forecast', title: 'Forecast', loadComponent: () => import('./forecast/forecast').then(m => m.Forecast) },
   { path: 'what-if', title: 'What-if Analysis', loadComponent: () => import('./forecast/what-if').then(m => m.WhatIf) },
-  { path: 'approvals', title: 'Approvals', loadComponent: () => import('./approvals/approvals').then(m => m.Approvals) },
+  { path: 'approvals', title: 'Approvals', canMatch: [roleGuard(a => a.hasAnyRole(['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin']))], loadComponent: () => import('./approvals/approvals').then(m => m.Approvals) },
 
   // Project Management
   { path: 'projects', title: 'Projects', loadComponent: () => import('./projects/projects/projects').then(m => m.ProjectsComponent) },
@@ -21,8 +21,8 @@ export const routes: Routes = [
   { path: 'project-partners', title: 'Project Partners', loadComponent: () => import('./projects/project-partners/project-partners').then(m => m.ProjectPartners) },
   { path: 'project-documents', title: 'Project Documents', loadComponent: () => import('./projects/project-documents/project-documents').then(m => m.ProjectDocuments) },
   { path: 'project-plans', title: 'Project Plans', loadComponent: () => import('./projects/project-plans/project-plans').then(m => m.ProjectPlans) },
-  { path: 'financial-plans', title: 'Financial Plans', loadComponent: () => import('./projects/financial-plans/financial-plans').then(m => m.FinancialPlans) },
-  { path: 'project-cost-centers', title: 'Project Cost Centers', loadComponent: () => import('./projects/project-cost-centers/project-cost-centers').then(m => m.ProjectCostCenters) },
+  { path: 'financial-plans', title: 'Financial Plans', canMatch: [financeGuard], loadComponent: () => import('./projects/financial-plans/financial-plans').then(m => m.FinancialPlans) },
+  { path: 'project-cost-centers', title: 'Project Cost Centers', canMatch: [financeGuard], loadComponent: () => import('./projects/project-cost-centers/project-cost-centers').then(m => m.ProjectCostCenters) },
   { path: 'project-tasks', title: 'Tasks', loadComponent: () => import('./projects/project-tasks/project-tasks').then(m => m.ProjectTasks) },
   { path: 'project-issues', title: 'Issues', loadComponent: () => import('./projects/project-issues/project-issues').then(m => m.ProjectIssues) },
   { path: 'change-requests', title: 'Change Control', loadComponent: () => import('./projects/change-requests/change-requests').then(m => m.ChangeRequests) },
@@ -43,7 +43,7 @@ export const routes: Routes = [
   { path: 'config/proficiency-sets', title: 'Proficiency Sets', loadComponent: () => import('./configuration/manage-proficiency-sets.component').then(m => m.ManageProficiencySetsComponent) },
   { path: 'config/skills', title: 'Manage Skills', loadComponent: () => import('./configuration/manage-skills.component').then(m => m.ManageSkillsComponent) },
   { path: 'config/project-roles', title: 'Project Roles', loadComponent: () => import('./configuration/manage-project-roles.component').then(m => m.ManageProjectRolesComponent) },
-  { path: 'config/cost-centers', title: 'Cost Centers', loadComponent: () => import('./configuration/manage-cost-centers.component').then(m => m.ManageCostCentersComponent) },
+  { path: 'config/cost-centers', title: 'Cost Centers', canMatch: [financeGuard], loadComponent: () => import('./configuration/manage-cost-centers.component').then(m => m.ManageCostCentersComponent) },
   { path: 'config/service-orgs', title: 'Service Organizations', loadComponent: () => import('./configuration/service-organization-details.component').then(m => m.ServiceOrganizationDetailsComponent) },
   { path: 'config/resource-orgs', title: 'Resource Organizations', loadComponent: () => import('./configuration/manage-resource-organizations.component').then(m => m.ManageResourceOrganizationsComponent) },
   // Customizing catalogs (Phase F1 — additive reference data). Gated to admin /

@@ -94,12 +94,16 @@ use, but the authoritative gate is `roleGate` in `src/server.ts`:
 |---|---|
 | `/audit-logs` | `admin`, `delivery-executive` |
 | `/customers`, `/contracts`, `/orders`, `/order-lines`, `/billing-plan-items` | `sales`, `finance`, `delivery-executive`, `admin` |
+| `/project-financials`, `/project-cost-centers`, `/cost-centers` | `finance`, `delivery-executive`, `admin` |
 | `/resources`, `/users` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/assignments`, `/requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/time-entries` | `employee`, `pm`, `resource-manager`, `delivery-executive`, `finance`, `sales`, `admin` |
+| `/approval-requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/integrations/*` | `finance`, `delivery-executive`, `admin` |
 
-All other `GET`s (catalogs, config reference, `/projects` and project sub-resources)
-stay open to any caller, as non-sensitive reference reads.
+All other `GET`s (catalogs, non-financial config reference, `/projects` and
+non-financial project sub-resources) stay open to any caller, as non-sensitive
+reference reads.
 
 ---
 

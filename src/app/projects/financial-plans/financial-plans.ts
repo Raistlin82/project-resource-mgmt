@@ -3,8 +3,10 @@ import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { CurrencyPipe } from '@angular/common';
 import { toSignal } from '@angular/core/rxjs-interop';
+import { of } from 'rxjs';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { ApiService, Project, FinancialItem, CostCategory } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
@@ -155,6 +157,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 export class FinancialPlans {
   projectId = input<string>();
   private api = inject(ApiService);
+  private auth = inject(AuthService);
   private notificationService = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
@@ -186,8 +189,9 @@ export class FinancialPlans {
     return this.categoryOptions().some(c => c.name === current) ? null : current;
   });
 
-  private financialsRes = rxResource({
-    stream: () => this.api.getProjectFinancials(),
+  private financialsRes = rxResource<FinancialItem[], boolean>({
+    params: () => this.auth.authReady() && this.auth.canApproveFinancials(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getProjectFinancials() : of<FinancialItem[]>([])),
     defaultValue: [] as FinancialItem[]
   });
   financials = this.financialsRes.value;

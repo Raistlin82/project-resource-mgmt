@@ -462,7 +462,7 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
   // sensitive data (the integrity/audit trail and the commercial/financial
   // collections). Require a recognised principal for those collections and
   // apply per-collection read RBAC. All other GETs stay open as before
-  // (catalogs, config, projects, etc. — non-sensitive reference reads).
+  // (catalogs, projects, etc. — non-sensitive reference reads).
   if (!['POST', 'PUT', 'DELETE'].includes(req.method)) {
     const readRule = READ_RULES.find(r => r.test(path));
     if (readRule && !canMutate(role, readRule.roles)) {
@@ -513,13 +513,19 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
  * and is rejected with 401.
  *   - /audit-logs            -> the integrity/audit trail: admin/delivery-executive only.
  *   - commercial collections -> contracts/orders/billing/etc.: sales/finance/delivery-executive/admin.
+ *   - financial-plan reads   -> project financials/cost centers: finance/delivery-executive/admin.
  *   - /resources, /users     -> expose confidential margin data (costRate/billRate)
  *                               and the user->role directory: management/finance/pm.
+ *   - /approval-requests     -> governance queue: approver/finance-grade roles only.
  *   - /time-entries          -> the whole org's timesheets: any authenticated role.
  */
 const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   { test: p => p.startsWith('/audit-logs'), roles: ['admin', 'delivery-executive'] },
   { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
+  // Internal budget/cost-center plans expose financial planning data and must
+  // match their finance-grade mutation rule. Commercial users can still read
+  // billing-plan items through the commercial rule above.
+  { test: p => ['/project-financials', '/project-cost-centers', '/cost-centers'].some(prefix => p === prefix || p.startsWith(prefix + '/')), roles: ['finance', 'delivery-executive', 'admin'] },
   // costRate/billRate live on resources and the user directory carries role
   // mappings — both need-to-know. Mirror the resource WRITE sensitivity, plus pm
   // and finance who legitimately read staffing/margin.
@@ -527,14 +533,16 @@ const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   // Rate cards expose cost rates (margin data): gate reads like /resources so the
   // resource form's "inherited default" placeholder can load for the staffing roles.
   { test: p => p === '/rate-cards' || p.startsWith('/rate-cards/'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
-  // Resource Schedule: staffing demand + bookings feed the read-only timeline and
-  // its date-level conflict detection. Restrict reads to the resourcing roles that
-  // own staffing (mirrors the /assignments + /requests WRITE gate), never served
-  // to an unauthenticated ('unknown') caller.
-  { test: p => ['/assignments', '/requests'].some(prefix => p === prefix || p.startsWith(prefix + '/')), roles: ['pm', 'resource-manager', 'delivery-executive', 'admin'] },
+  // Staffing demand + bookings feed both the read-only schedule (resourcing
+  // roles) and portfolio reporting (finance). Keep writes stricter via the
+  // mutation rule; this is read-only access for finance.
+  { test: p => ['/assignments', '/requests'].some(prefix => p === prefix || p.startsWith(prefix + '/')), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
   // Timesheets for the whole org: require an authenticated principal (any role),
   // never served to an unauthenticated ('unknown') caller.
   { test: p => p.startsWith('/time-entries'), roles: ['employee', 'pm', 'resource-manager', 'delivery-executive', 'finance', 'sales', 'admin'] },
+  // Approval requests contain requester, amount, SLA, and routed approver chain;
+  // require the same coarse roles admitted to create/route/decide them.
+  { test: p => p.startsWith('/approval-requests'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
   // Integration artifacts expose commercial/financial rollups (GL journal,
   // e-invoices, CRM payloads, BI financials): finance-grade readers only.
   { test: p => p.startsWith('/integrations'), roles: ['finance', 'delivery-executive', 'admin'] },

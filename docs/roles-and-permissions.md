@@ -79,10 +79,11 @@ server, re-evaluate in the browser after `authReady`).
 | --- | --- | --- |
 | `customers`, `contracts`, `contracts/:id`, `orders` | `commercialGuard` → `canManageCommercial()` | `sales`, `finance`, `delivery-executive`, `admin` |
 | `billing` | `commercialGuard` **and** `financeGuard` | intersection → `finance`, `delivery-executive`, `admin` |
-| `config/integrations` | `financeGuard` → `canApproveFinancials()` | `finance`, `delivery-executive`, `admin` |
+| `financial-plans`, `project-cost-centers`, `config/cost-centers`, `config/integrations` | `financeGuard` → `canApproveFinancials()` | `finance`, `delivery-executive`, `admin` |
+| `approvals` | `roleGuard(a => a.hasAnyRole(['pm','resource-manager','delivery-executive','finance','admin']))` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `schedule` | `roleGuard(a => a.hasAnyRole(['pm','resource-manager','delivery-executive','admin']))` | `pm`, `resource-manager`, `delivery-executive`, `admin` |
 | `resources` | `roleGuard(a => a.hasAnyRole(['resource-manager','delivery-executive','admin']))` | `resource-manager`, `delivery-executive`, `admin` |
-| Everything else (dashboard, profile, assignments, requests, staffing, utilization, forecast, what-if, approvals, all `projects/*`, `reporting`, all other `config/*`) | _none_ | open to any signed-in user (UX layer; API still enforces RBAC) |
+| Everything else (dashboard, profile, assignments, requests, staffing, utilization, forecast, what-if, remaining `projects/*`, `reporting`, remaining `config/*`) | _none_ | open to any signed-in user (UX layer; API still enforces RBAC) |
 
 > The **`schedule`** route (the read-only Resource Schedule timeline) is gated to
 > the staffing roles (`pm`, `resource-manager`, `delivery-executive`, `admin`) —
@@ -122,15 +123,17 @@ and **403** otherwise. Path tests use `startsWith`.
 | --- | --- |
 | `/audit-logs` | `admin`, `delivery-executive` |
 | `/customers`, `/contracts`, `/orders`, `/order-lines`, `/billing-plan-items` | `sales`, `finance`, `delivery-executive`, `admin` |
+| `/project-financials`, `/project-cost-centers`, `/cost-centers` | `finance`, `delivery-executive`, `admin` |
 | `/resources` (incl. `/resources/:id`), `/users` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/assignments`, `/requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/time-entries` | `employee`, `pm`, `resource-manager`, `delivery-executive`, `finance`, `sales`, `admin` |
+| `/approval-requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/integrations` | `finance`, `delivery-executive`, `admin` |
 
 **Open reads (no rule):** all other GETs — catalogs (`/skill-catalogs`,
 `/proficiency-sets`, `/skills`, `/project-roles`), config (`/languages`,
 `/fx-rates`, `/service-organizations`, `/resource-organizations`,
-`/cost-centers`), `/projects` and all project sub-resources, `/requests`,
-`/assignments`, `/approval-requests`, `/storage-status`, etc.
+`/projects` and non-financial project sub-resources, `/storage-status`, etc.
 
 ### (b) Mutation rules — POST / PUT / DELETE
 
@@ -184,8 +187,7 @@ guards + server RBAC above. Legend: **Full** = create/edit (mutation-allowed),
 
 ¹ `sales` may mutate `/billing-plan-items` (it is in the commercial mutation
 rule) but **not** `/project-financials` or `/cost-centers` (finance-grade). It
-has no read access to `/project-financials`/`/cost-centers` (open reads, but no
-sensitive financial rollup is gated to it).
+has no read access to `/project-financials`/`/cost-centers`.
 ² Approval *capability* is via the `/approval-requests` mutation rule; whether a
 given role may decide a specific step is further constrained by **step-role
 enforcement** (see [Segregation of Duties](#segregation-of-duties)). `admin` may

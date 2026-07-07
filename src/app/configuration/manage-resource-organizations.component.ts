@@ -1,8 +1,10 @@
 import { ChangeDetectionStrategy, Component, inject, signal, computed } from '@angular/core';
 import { rxResource } from '@angular/core/rxjs-interop';
+import { of } from 'rxjs';
 import { ReactiveFormsModule, FormBuilder, FormGroup, Validators } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, ResourceOrganization, CostCenter, ServiceOrganization } from '../services/api.service';
+import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 
@@ -134,6 +136,7 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 })
 export class ManageResourceOrganizationsComponent {
   private api = inject(ApiService);
+  private auth = inject(AuthService);
   private fb = inject(FormBuilder);
   private notifications = inject(NotificationService);
 
@@ -143,8 +146,12 @@ export class ManageResourceOrganizationsComponent {
   deletingId = signal<string | null>(null);
 
   // PHASE F2 — costCenters[] -> cost-centers catalog (multi, by id), serviceOrganizationId
-  // -> service-organizations (by id). Both open reads.
-  private costCentersRes = rxResource({ stream: () => this.api.getCostCenters(), defaultValue: [] as CostCenter[] });
+  // -> service-organizations (by id). Cost-center options are finance-grade reads.
+  private costCentersRes = rxResource<CostCenter[], boolean>({
+    params: () => this.auth.authReady() && this.auth.canApproveFinancials(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getCostCenters() : of<CostCenter[]>([])),
+    defaultValue: [] as CostCenter[],
+  });
   private serviceOrgsRes = rxResource({ stream: () => this.api.getServiceOrganizations(), defaultValue: [] as ServiceOrganization[] });
   costCenterOptions = this.costCentersRes.value;
   serviceOrgOptions = this.serviceOrgsRes.value;

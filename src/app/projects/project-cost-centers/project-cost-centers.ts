@@ -201,7 +201,11 @@ export class ProjectCostCenters {
 
   // PHASE F2 — the project cost-center `id` is chosen from the configuration
   // cost-centers catalog (selecting one fills+locks the id and derives the name).
-  private catalogRes = rxResource({ stream: () => this.api.getCostCenters(), defaultValue: [] as CostCenter[] });
+  private catalogRes = rxResource<CostCenter[], boolean>({
+    params: () => this.auth.authReady() && this.auth.canApproveFinancials(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getCostCenters() : of<CostCenter[]>([])),
+    defaultValue: [] as CostCenter[],
+  });
   catalogCostCenters = this.catalogRes.value;
 
   /** Catalog cost centers not already added to the current project (avoid dup ids). */
@@ -226,7 +230,11 @@ export class ProjectCostCenters {
     return this.resourceOptions().some(r => r.name === current) ? null : current;
   });
 
-  private costCentersRes = rxResource({ stream: () => this.api.getProjectCostCenters(), defaultValue: [] as ProjectCostCenter[] });
+  private costCentersRes = rxResource<ProjectCostCenter[], boolean>({
+    params: () => this.auth.authReady() && this.auth.canApproveFinancials(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getProjectCostCenters() : of<ProjectCostCenter[]>([])),
+    defaultValue: [] as ProjectCostCenter[],
+  });
   costCenters = this.costCentersRes.value;
 
   filteredCostCenters = computed(() => {

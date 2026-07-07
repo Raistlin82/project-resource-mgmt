@@ -94,7 +94,7 @@ import { ChangeRequests } from '../change-requests/change-requests';
 
       <!-- Tabs Navigation -->
       <div class="command-card flex overflow-x-auto hide-scrollbar px-2 sm:px-4">
-        @for (tab of tabs; track tab.id) {
+        @for (tab of tabs(); track tab.id) {
           <button (click)="activeTab.set(tab.id)"
                   class="px-4 py-4 text-sm font-semibold whitespace-nowrap border-b-2 transition-colors"
                   [class.project-tab-active]="activeTab() === tab.id"
@@ -255,19 +255,17 @@ export class ProjectDetailsComponent {
   private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
   project = computed(() => this.projectsRes.value().find(p => p.id === this.id()) ?? null);
 
-  // Data for the 360° financial rollup. Reads of principal-gated collections
-  // (resources, orders, order-lines, project-financials, time-entries) 401 until
-  // the OIDC token is restored on reload; key them on auth.authReady() so they
-  // fire only AFTER the OAuth bootstrap settles, returning the empty default in
-  // the meantime instead of latching on the 401.
+  // Data for the 360° financial rollup. Sensitive collections are loaded only
+  // after authReady, and only for capabilities that can read them, so project
+  // delivery users do not hit finance/commercial 403s just by opening details.
   private ordersRes = rxResource<Order[], boolean>({
-    params: () => this.auth.authReady(),
-    stream: ({ params: ready }) => (ready ? this.api.getOrders() : of<Order[]>([])),
+    params: () => this.auth.authReady() && this.auth.canManageCommercial(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getOrders() : of<Order[]>([])),
     defaultValue: [] as Order[],
   });
   private orderLinesRes = rxResource<OrderLine[], boolean>({
-    params: () => this.auth.authReady(),
-    stream: ({ params: ready }) => (ready ? this.api.getOrderLines() : of<OrderLine[]>([])),
+    params: () => this.auth.authReady() && this.auth.canManageCommercial(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getOrderLines() : of<OrderLine[]>([])),
     defaultValue: [] as OrderLine[],
   });
   private requestsRes = rxResource<ResourceRequest[], boolean>({
@@ -286,8 +284,8 @@ export class ProjectDetailsComponent {
     defaultValue: [] as Resource[],
   });
   private financialsRes = rxResource<FinancialItem[], boolean>({
-    params: () => this.auth.authReady(),
-    stream: ({ params: ready }) => (ready ? this.api.getProjectFinancials() : of<FinancialItem[]>([])),
+    params: () => this.auth.authReady() && this.auth.canApproveFinancials(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getProjectFinancials() : of<FinancialItem[]>([])),
     defaultValue: [] as FinancialItem[],
   });
   private timeEntriesRes = rxResource<TimeEntry[], boolean>({
@@ -325,17 +323,21 @@ export class ProjectDetailsComponent {
 
   activeTab = signal('overview');
 
-  tabs = [
+  tabs = computed(() => [
     { id: 'overview', label: 'Overview' },
     { id: 'partners', label: 'Partners' },
     { id: 'documents', label: 'Documents' },
     { id: 'plans', label: 'Plans' },
-    { id: 'financials', label: 'Financials' },
-    { id: 'cost-centers', label: 'Cost Centers' },
+    ...(this.auth.canApproveFinancials()
+      ? [
+          { id: 'financials', label: 'Financials' },
+          { id: 'cost-centers', label: 'Cost Centers' },
+        ]
+      : []),
     { id: 'tasks', label: 'Tasks' },
     { id: 'issues', label: 'Issues' },
-    { id: 'changes', label: 'Changes' }
-  ];
+    { id: 'changes', label: 'Changes' },
+  ]);
 
   deliveryHealthLabel(): string {
     const health = this.deliveryHealth();

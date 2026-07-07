@@ -675,12 +675,12 @@ export class ContractDetails {
   id = input.required<string>();
 
   // Principal-gated reads (contracts, customers, orders, order-lines, resources,
-  // time-entries, billing-plan-items) 401 until the OAuth bootstrap restores the
-  // bearer token. On reload the OIDC token restores async, so firing immediately
-  // 401s and the rxResource latches its error/empty state forever. Keying each on
-  // auth.authReady() defers the request until the token is attached; when
-  // authReady flips false->true the params change re-runs the stream. Open reads
-  // (projects, project-financials, milestones) are left ungated.
+  // project-financials, time-entries, billing-plan-items) 401 until the OAuth
+  // bootstrap restores the bearer token. On reload the OIDC token restores async,
+  // so firing immediately 401s and the rxResource latches its error/empty state
+  // forever. Keying each on auth.authReady() defers the request until the token
+  // is attached; when authReady flips false->true the params change re-runs the
+  // stream. Open reads (projects, milestones) are left ungated.
   private contractsRes = rxResource<Contract[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getContracts() : of<Contract[]>([])),
@@ -717,7 +717,11 @@ export class ContractDetails {
     stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
     defaultValue: [] as Resource[],
   });
-  private financialsRes = rxResource({ stream: () => this.api.getProjectFinancials(), defaultValue: [] as FinancialItem[] });
+  private financialsRes = rxResource<FinancialItem[], boolean>({
+    params: () => this.auth.authReady() && this.auth.canApproveFinancials(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getProjectFinancials() : of<FinancialItem[]>([])),
+    defaultValue: [] as FinancialItem[],
+  });
   private timeEntriesRes = rxResource<TimeEntry[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getTimeEntries() : of<TimeEntry[]>([])),

@@ -797,9 +797,10 @@ export class Reporting {
    */
   protected readonly hoursPerFte = 160;
 
-  // This forkJoin pulls several principal-gated collections (resources, orders,
-  // order-lines, project-financials, time-entries, billing-plan-items, contracts,
-  // customers) that 401 until the OIDC token is restored. On reload the token
+  // This forkJoin pulls several principal-gated collections (resources, requests,
+  // assignments, orders, order-lines, project-financials, time-entries,
+  // billing-plan-items, contracts, customers) that 401 until the OIDC token is
+  // restored. On reload the token
   // restores async, so firing immediately would 401 and forkJoin's fail-fast would
   // latch the whole report to its empty default. Key the load on auth.authReady()
   // so it fires only AFTER the OAuth bootstrap settles (bearer token attached);

@@ -23,9 +23,9 @@ access notice, and the export actions), the pure rollup module
 
 The `reporting` **route is OPEN** (no route guard). But the data it shows comes
 from a fail-fast `forkJoin` over **role-gated collections** — resources, users,
-orders, order-lines, project-financials, time-entries, billing-plan-items,
-contracts, customers — which require an authenticated, sufficiently-privileged
-principal:
+requests, assignments, orders, order-lines, project-financials, time-entries,
+billing-plan-items, contracts, customers — which require an authenticated,
+sufficiently-privileged principal:
 
 - Commercial reads (`/customers`, `/contracts`, `/orders`, `/order-lines`,
   `/billing-plan-items`) → `sales`, `finance`, `delivery-executive`, `admin`.
@@ -33,6 +33,8 @@ principal:
   `delivery-executive`, `admin`.
 - `/resources`, `/users` (carry confidential `costRate`/`billRate` and role
   directory) → `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin`.
+- `/requests`, `/assignments` → `pm`, `resource-manager`, `delivery-executive`,
+  `finance`, `admin` (finance is read-only; mutations stay with staffing roles).
 - `/time-entries` → any authenticated role.
 
 So **primary audience is `delivery-executive` and `finance`** (they see every

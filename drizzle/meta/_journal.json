@@ -50,6 +50,13 @@
       "when": 1781297922727,
       "tag": "0006_eminent_sage",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1783455550955,
+      "tag": "0007_fix_cost_center_managers",
+      "breakpoints": true
     }
   ]
 }

@@ -431,18 +431,13 @@ export class App {
     },
   ];
 
-  // Capability-filtered nav: Customers/Contracts/Orders require
-  // canManageCommercial() and Billing additionally requires
-  // canApproveFinancials(), mirroring commercialGuard/financeGuard so links
-  // only appear when they would actually navigate. Integrations (Configuration
-  // group) mirrors financeGuard for the same reason — its artifacts expose
-  // financial data (finance/delivery-executive/admin only). Schedule (Resource
-  // Control group) mirrors its roleGuard — visible only to the resourcing roles
-  // that own staffing (pm/resource-manager/delivery-executive/admin). An emptied
-  // group is dropped entirely.
+  // Capability-filtered nav mirrors the route guards so links only appear when
+  // they would actually navigate. Finance-grade project/config pages expose
+  // budget/cost data; approvals expose routed workflow items.
   readonly navGroups = computed<NavGroup[]>(() => {
     const canCommercial = this.auth.canManageCommercial();
     const canFinance = this.auth.canApproveFinancials();
+    const canApproveWorkflow = this.auth.hasAnyRole(['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin']);
     const canSchedule = this.auth.hasAnyRole(['pm', 'resource-manager', 'delivery-executive', 'admin']);
     // Resources (people lifecycle) mirrors its roleGuard — visible only to the
     // roles that own resource master data (resource-manager/delivery-executive/admin).
@@ -453,6 +448,14 @@ export class App {
           const items = group.items.filter(item => {
             if (item.route === '/schedule') return canSchedule;
             if (item.route === '/resources') return canManageResources;
+            if (item.route === '/approvals') return canApproveWorkflow;
+            return true;
+          });
+          return { label: group.label, items };
+        }
+        if (group.label === 'Project Control') {
+          const items = group.items.filter(item => {
+            if (item.route === '/financial-plans' || item.route === '/project-cost-centers') return canFinance;
             return true;
           });
           return { label: group.label, items };
@@ -476,6 +479,7 @@ export class App {
           ]);
           const items = group.items.filter(item => {
             if (item.route === '/config/integrations') return canFinance;
+            if (item.route === '/config/cost-centers') return canFinance;
             if (item.route === '/config/rate-cards') return canManageRateCards;
             if (catalogRoutes.has(item.route)) return canManageCatalogs;
             return true;

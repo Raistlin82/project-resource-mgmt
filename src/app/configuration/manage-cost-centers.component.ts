@@ -150,7 +150,11 @@ export class ManageCostCentersComponent {
   private auth = inject(AuthService);
   private destroyRef = inject(DestroyRef);
 
-  private costCentersRes = rxResource({ stream: () => this.api.getCostCenters(), defaultValue: [] as CostCenter[] });
+  private costCentersRes = rxResource<CostCenter[], boolean>({
+    params: () => this.auth.authReady() && this.auth.canApproveFinancials(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getCostCenters() : of<CostCenter[]>([])),
+    defaultValue: [] as CostCenter[],
+  });
   costCenters = this.costCentersRes.value;
 
   // The cost-center manager is a PERSON reference bound to the resources (people)
