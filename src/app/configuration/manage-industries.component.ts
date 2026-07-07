@@ -29,6 +29,7 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
             <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted">search</mat-icon>
             <input type="text" placeholder="Search industries..."
                    [ngModel]="search()" (ngModelChange)="search.set($event)"
+                   aria-label="Search industries"
                    class="w-full pl-10 pr-4 py-2 bg-surface focus:bg-surface border border-line-strong rounded-xl text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:ring-2 focus:ring-accent/25 transition-all outline-none">
           </div>
         </div>

@@ -103,6 +103,7 @@ interface DimensionMeter {
                 [ngModel]="searchQuery()"
                 (ngModelChange)="searchQuery.set($event)"
                 placeholder="Search by name, role, or skills..."
+                aria-label="Search candidate resources"
                 class="command-input pl-12"
               >
             </div>

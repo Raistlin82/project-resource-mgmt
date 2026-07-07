@@ -173,23 +173,23 @@ interface RequestsData {
                     </td>
                     <td class="text-right space-x-1">
                       @if (req.status !== 'Not Published' && req.status !== 'Withdrawn') {
-                        <button (click)="trackRequest(req)" class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-all" title="Track Staffing">
+                        <button (click)="trackRequest(req)" class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-all" [attr.aria-label]="'Track staffing for ' + req.name" [attr.title]="'Track staffing for ' + req.name">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">analytics</mat-icon>
                         </button>
                       }
                       @if (req.status === 'Not Published' || req.status === 'Withdrawn') {
-                        <button (click)="openEditForm(req)" class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-all" title="Edit">
+                        <button (click)="openEditForm(req)" class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-all" [attr.aria-label]="'Edit request ' + req.name" [attr.title]="'Edit request ' + req.name">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                         </button>
-                        <button (click)="publishRequest(req)" class="p-2 text-ink-muted hover:text-positive-text hover:bg-positive-tint rounded-lg transition-all" title="Publish">
+                        <button (click)="publishRequest(req)" class="p-2 text-ink-muted hover:text-positive-text hover:bg-positive-tint rounded-lg transition-all" [attr.aria-label]="'Publish request ' + req.name" [attr.title]="'Publish request ' + req.name">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">publish</mat-icon>
                         </button>
-                        <button (click)="deleteRequest(req)" class="p-2 text-ink-muted hover:text-critical-text hover:bg-critical-tint rounded-lg transition-all" title="Delete">
+                        <button (click)="deleteRequest(req)" class="p-2 text-ink-muted hover:text-critical-text hover:bg-critical-tint rounded-lg transition-all" [attr.aria-label]="'Delete request ' + req.name" [attr.title]="'Delete request ' + req.name">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                         </button>
                       }
                       @if (req.status === 'Published' || req.status === 'Open' || req.status === 'Fulfilled') {
-                        <button (click)="withdrawRequest(req)" class="p-2 text-ink-muted hover:text-caution-text hover:bg-caution-tint rounded-lg transition-all" title="Withdraw">
+                        <button (click)="withdrawRequest(req)" class="p-2 text-ink-muted hover:text-caution-text hover:bg-caution-tint rounded-lg transition-all" [attr.aria-label]="'Withdraw request ' + req.name" [attr.title]="'Withdraw request ' + req.name">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">undo</mat-icon>
                         </button>
                       }
@@ -222,6 +222,7 @@ interface RequestsData {
                 type="text"
                 [formControl]="availabilitySearch"
                 placeholder="Search by name, role, or skills..."
+                aria-label="Search resource availability"
                 class="command-input sm:w-72 pl-10"
               >
             </div>

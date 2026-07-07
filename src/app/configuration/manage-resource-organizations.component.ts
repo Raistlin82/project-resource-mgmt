@@ -99,7 +99,7 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
                     </div>
                   </td>
                   <td class="text-right">
-                    <button (click)="deleteOrg(org.id)" class="w-10 h-10 rounded-full bg-surface-muted border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm" title="Delete">
+                    <button (click)="deleteOrg(org.id)" class="w-10 h-10 rounded-full bg-surface-muted border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm" [attr.aria-label]="'Delete resource organization ' + org.name" [attr.title]="'Delete resource organization ' + org.name">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                     </button>
                   </td>

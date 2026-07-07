@@ -43,8 +43,12 @@ interface UtilizationData {
             @for (res of managedResources(); track res.id) {
               <div class="p-6 hover:bg-surface-muted transition-all cursor-pointer group relative"
                    [class.bg-accent-tint]="selectedResource()?.id === res.id"
+                   role="button"
                    tabindex="0"
+                   [attr.aria-label]="'Select ' + res.name + ' utilization details'"
+                   [attr.aria-pressed]="selectedResource()?.id === res.id"
                    (keydown.enter)="selectResource(res)"
+                   (keydown.space)="selectResource(res); $event.preventDefault()"
                    (click)="selectResource(res)">
                 @if (selectedResource()?.id === res.id) {
                   <div class="absolute left-0 top-0 bottom-0 w-1.5 bg-[var(--cc-primary)] rounded-r-full"></div>
@@ -154,13 +158,13 @@ interface UtilizationData {
                       </div>
                     </div>
                     <div class="flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-                      <button (click)="copyAssignment(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" title="Copy">
+                      <button (click)="copyAssignment(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Copy assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Copy assignment for ' + getRequestName(assignment.requestId)">
                         <mat-icon class="text-[20px] w-[20px] h-[20px]">content_copy</mat-icon>
                       </button>
-                      <button (click)="openEditForm(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" title="Edit">
+                      <button (click)="openEditForm(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Edit assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Edit assignment for ' + getRequestName(assignment.requestId)">
                         <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                       </button>
-                      <button (click)="deleteAssignment(assignment.id)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all flex items-center justify-center shadow-sm" title="Delete">
+                      <button (click)="deleteAssignment(assignment.id)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Delete assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Delete assignment for ' + getRequestName(assignment.requestId)">
                         <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                       </button>
                     </div>
@@ -194,10 +198,10 @@ interface UtilizationData {
                         {{ entry.status }}
                       </span>
                       @if (entry.status === 'Submitted') {
-                        <button (click)="approveTimeEntry(entry)" class="p-2 rounded-md text-positive-text hover:bg-positive-tint" title="Approve">
+                        <button (click)="approveTimeEntry(entry)" class="p-2 rounded-md text-positive-text hover:bg-positive-tint" [attr.aria-label]="'Approve ' + entry.hours + ' hours for ' + getRequestName(entry.requestId) + ' on ' + entry.date" [attr.title]="'Approve ' + entry.hours + 'h time entry'">
                           <mat-icon>check_circle</mat-icon>
                         </button>
-                        <button (click)="rejectTimeEntry(entry)" class="p-2 rounded-md text-critical-text hover:bg-critical-tint" title="Reject">
+                        <button (click)="rejectTimeEntry(entry)" class="p-2 rounded-md text-critical-text hover:bg-critical-tint" [attr.aria-label]="'Reject ' + entry.hours + ' hours for ' + getRequestName(entry.requestId) + ' on ' + entry.date" [attr.title]="'Reject ' + entry.hours + 'h time entry'">
                           <mat-icon>cancel</mat-icon>
                         </button>
                       }

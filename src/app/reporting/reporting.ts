@@ -58,7 +58,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           <p class="command-subtitle">Cross-functional control view across resource demand, utilization, project finance, risks, milestones and change control.</p>
         </div>
         <div class="flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto">
-          <select [value]="period()" (change)="onPeriodChange($event)" class="command-select w-full sm:w-auto">
+          <select [value]="period()" (change)="onPeriodChange($event)" aria-label="Reporting period" class="command-select w-full sm:w-auto">
             <option value="30d">Last 30 Days</option>
             <option value="quarter">This Quarter</option>
             <option value="year">This Year</option>

@@ -123,20 +123,20 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                     <td class="px-6 py-5 text-right">
                       <div class="inline-flex items-center gap-1">
                         @if (change.status === 'Draft') {
-                          <button (click)="setStatus(change, 'Submitted')" class="p-2 rounded-lg text-ink-muted hover:text-caution-text hover:bg-caution-tint" title="Submit">
+                          <button (click)="setStatus(change, 'Submitted')" class="p-2 rounded-lg text-ink-muted hover:text-caution-text hover:bg-caution-tint" [attr.aria-label]="'Submit change request ' + change.title" [attr.title]="'Submit ' + change.title">
                             <mat-icon class="text-[20px] w-[20px] h-[20px]">send</mat-icon>
                           </button>
                         }
                         @if (change.status === 'Submitted') {
-                          <button (click)="setStatus(change, 'Approved')" class="p-2 rounded-lg text-ink-muted hover:text-positive-text hover:bg-positive-tint" title="Approve">
+                          <button (click)="setStatus(change, 'Approved')" class="p-2 rounded-lg text-ink-muted hover:text-positive-text hover:bg-positive-tint" [attr.aria-label]="'Approve change request ' + change.title" [attr.title]="'Approve ' + change.title">
                             <mat-icon class="text-[20px] w-[20px] h-[20px]">check_circle</mat-icon>
                           </button>
-                          <button (click)="setStatus(change, 'Rejected')" class="p-2 rounded-lg text-ink-muted hover:text-critical-text hover:bg-critical-tint" title="Reject">
+                          <button (click)="setStatus(change, 'Rejected')" class="p-2 rounded-lg text-ink-muted hover:text-critical-text hover:bg-critical-tint" [attr.aria-label]="'Reject change request ' + change.title" [attr.title]="'Reject ' + change.title">
                             <mat-icon class="text-[20px] w-[20px] h-[20px]">cancel</mat-icon>
                           </button>
                         }
                         @if (change.status === 'Approved') {
-                          <button (click)="setStatus(change, 'Implemented')" class="p-2 rounded-lg text-ink-muted hover:text-accent-text hover:bg-accent-tint" title="Mark implemented">
+                          <button (click)="setStatus(change, 'Implemented')" class="p-2 rounded-lg text-ink-muted hover:text-accent-text hover:bg-accent-tint" [attr.aria-label]="'Mark change request ' + change.title + ' implemented'" [attr.title]="'Mark ' + change.title + ' implemented'">
                             <mat-icon class="text-[20px] w-[20px] h-[20px]">task_alt</mat-icon>
                           </button>
                         }

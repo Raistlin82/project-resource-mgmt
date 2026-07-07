@@ -34,6 +34,7 @@ const REMOTE_LOCATION = 'Remote';
         <div class="flex-1 relative">
           <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted text-[20px] w-[20px] h-[20px]">search</mat-icon>
           <input [formControl]="searchControl" type="text" placeholder="Search projects by name, ID, or location..."
+                 aria-label="Search projects"
                  class="w-full pl-10 pr-4 py-3 bg-surface border border-line-strong rounded-xl text-sm text-ink placeholder:text-ink-muted focus:bg-surface focus:border-accent focus:ring-2 focus:ring-accent/25 transition-all outline-none">
         </div>
       </div>
@@ -281,7 +282,13 @@ export class ProjectsComponent {
   private destroyRef = inject(DestroyRef);
 
   private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
-  private contractsRes = rxResource({ stream: () => this.api.getContracts(), defaultValue: [] as Contract[] });
+  // /contracts is principal-gated in READ_RULES; wait for the restored bearer
+  // token before loading it so SSR/deep reloads don't latch ResourceValueError.
+  private contractsRes = rxResource<Contract[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getContracts() : of<Contract[]>([])),
+    defaultValue: [] as Contract[],
+  });
   projects = this.projectsRes.value;
   contracts = this.contractsRes.value;
   showForm = signal(false);

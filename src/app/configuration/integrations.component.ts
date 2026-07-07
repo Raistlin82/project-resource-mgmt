@@ -140,7 +140,7 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
             <div class="text-xs font-medium text-[var(--cc-muted)]">
               Active adapter: <span class="font-mono">{{ activeKey('crm') }}</span>
             </div>
-            <button type="button" class="command-button" [disabled]="preparing()" (click)="prepareSync()">
+            <button type="button" class="command-button" [disabled]="preparing()" (click)="prepareSync()" [attr.aria-label]="preparing() ? 'Preparing CRM sync payload' : 'Prepare CRM sync payload'">
               <mat-icon class="text-[20px] w-[20px] h-[20px]">outbox</mat-icon>
               {{ preparing() ? 'Preparing…' : 'Prepare sync payload' }}
             </button>
@@ -194,7 +194,7 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
             <div class="text-xs font-medium text-[var(--cc-muted)]">
               Active adapter: <span class="font-mono">{{ activeKey('bi') }}</span>
             </div>
-            <button type="button" class="command-button" [disabled]="loadingPreview()" (click)="previewFeed()">
+            <button type="button" class="command-button" [disabled]="loadingPreview()" (click)="previewFeed()" [attr.aria-label]="loadingPreview() ? 'Loading BI feed preview' : 'Preview BI feed'">
               <mat-icon class="text-[20px] w-[20px] h-[20px]">preview</mat-icon>
               {{ loadingPreview() ? 'Loading…' : 'Preview feed' }}
             </button>

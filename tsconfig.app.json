@@ -8,6 +8,18 @@
       "node"
     ]
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.spec.ts"]
+  "files": [
+    "src/main.ts",
+    "src/main.server.ts",
+    "src/server.ts",
+    "src/globals.d.ts"
+  ],
+  "include": [
+    "src/db/**/*.ts",
+    "src/server/**/*.ts",
+    "src/app/services/staffing.util.ts"
+  ],
+  "exclude": [
+    "src/**/*.spec.ts"
+  ]
 }

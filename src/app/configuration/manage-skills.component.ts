@@ -27,7 +27,7 @@ import { NotificationService } from '../services/notification.service';
         </div>
       </div>
 
-      <input type="file" id="csvUpload" accept=".csv" class="hidden" (change)="onFileSelected($event)">
+      <input type="file" id="csvUpload" accept=".csv" class="hidden" aria-label="Upload skills CSV" (change)="onFileSelected($event)">
 
       @if (showForm()) {
         <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)]">

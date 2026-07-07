@@ -36,8 +36,8 @@ import { forkJoin, of } from 'rxjs';
                   {{ profile()?.name?.charAt(0) }}
                 }
               </div>
-              <label class="absolute inset-0 bg-ink/40 backdrop-blur-sm rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 text-white cursor-pointer scale-95 group-hover:scale-100">
-                <input type="file" class="hidden" accept="image/*" (change)="onProfilePictureSelected($event)">
+              <label class="absolute inset-0 bg-ink/40 backdrop-blur-sm rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 text-white cursor-pointer scale-95 group-hover:scale-100" aria-label="Upload profile picture">
+                <input type="file" class="hidden" accept="image/*" aria-label="Upload profile picture" (change)="onProfilePictureSelected($event)">
                 <mat-icon class="text-[28px] w-[28px] h-[28px]">photo_camera</mat-icon>
               </label>
             </div>
@@ -112,7 +112,7 @@ import { forkJoin, of } from 'rxjs';
                 <!-- Skill NAME is a catalog value, never free text: select from /skills
                      (stored value = skill name). Skills already on the profile are filtered
                      out so they can't be added twice. -->
-                <select formControlName="name" class="command-select flex-1">
+                <select formControlName="name" class="command-select flex-1" aria-label="Skill to add">
                   <option value="" disabled>Select a skill...</option>
                   @for (skill of addableSkillOptions(); track skill.id) {
                     <option [value]="skill.name">{{ skill.name }}</option>
@@ -121,7 +121,7 @@ import { forkJoin, of } from 'rxjs';
                 <!-- Skill LEVEL is bound to the proficiency-set levels (label = level name
                      e.g. Beginner/Intermediate/Advanced/Expert, value = level number), not a
                      hardcoded 1/2/3 list. -->
-                <select formControlName="level" class="command-select w-auto">
+                <select formControlName="level" class="command-select w-auto" aria-label="Skill proficiency level">
                   <option [ngValue]="null" disabled>Select a level...</option>
                   @for (lvl of levelOptions(); track lvl.level) {
                     <option [ngValue]="lvl.level">{{ lvl.name }} ({{ lvl.level }})</option>
@@ -170,7 +170,7 @@ import { forkJoin, of } from 'rxjs';
                 <!-- Project roles are catalog values: choose-then-add from /project-roles
                      (stored value = role name). Roles already on the profile are filtered
                      out so they can't be added twice. -->
-                <select [formControl]="roleInput" class="command-select flex-1">
+                <select [formControl]="roleInput" class="command-select flex-1" aria-label="Project role to add">
                   <option value="" disabled>Select a role...</option>
                   @for (role of addableRoleOptions(); track role.id) {
                     <option [value]="role.name">{{ role.name }}</option>
@@ -313,7 +313,7 @@ import { forkJoin, of } from 'rxjs';
               </div>
             } @else {
               <label class="block border-2 border-dashed border-line-strong rounded-xl p-8 text-center hover:bg-surface-muted transition-colors cursor-pointer">
-                <input type="file" class="hidden" accept=".pdf,.doc,.docx" (change)="onResumeSelected($event)">
+                <input type="file" class="hidden" accept=".pdf,.doc,.docx" aria-label="Upload resume" (change)="onResumeSelected($event)">
                 <mat-icon class="text-ink-muted mb-2">cloud_upload</mat-icon>
                 <p class="text-sm font-medium text-ink-secondary">Click to upload resume</p>
                 <p class="text-xs text-ink-muted mt-1">PDF or DOCX up to 2MB</p>

@@ -19,7 +19,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
           <div class="flex items-center gap-4">
             @if (!projectId()) {
               <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Financial Plans</h2>
-              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
+              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
                 <option value="" disabled>Select a project...</option>
                 @for (p of projects(); track p.id) {
                   <option [value]="p.id">{{ p.name }}</option>

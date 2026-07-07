@@ -66,6 +66,7 @@ const REMOTE_LOCATION = 'Remote';
           </div>
           <label class="inline-flex items-center gap-2 text-sm font-medium text-ink-secondary select-none">
             <input type="checkbox" [ngModel]="activeOnly()" (ngModelChange)="activeOnly.set($event)"
+                   aria-label="Show active resources only"
                    class="size-4 rounded border-line-strong text-accent focus:ring-2 focus:ring-accent/25">
             Active only
           </label>

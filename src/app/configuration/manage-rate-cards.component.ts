@@ -2,7 +2,9 @@ import { ChangeDetectionStrategy, Component, DestroyRef, computed, effect, injec
 import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
+import { of } from 'rxjs';
 import { ApiService, RateCard, ProjectRole, ResourceOrganization, FxRate } from '../services/api.service';
+import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 
@@ -43,6 +45,7 @@ const BASE_CURRENCY = 'EUR';
             <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted">search</mat-icon>
             <input type="text" placeholder="Search rate cards..."
                    [ngModel]="search()" (ngModelChange)="search.set($event)"
+                   aria-label="Search rate cards"
                    class="w-full pl-10 pr-4 py-2 bg-surface focus:bg-surface border border-line-strong rounded-xl text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:ring-2 focus:ring-accent/25 transition-all outline-none">
           </div>
         </div>
@@ -175,10 +178,15 @@ const BASE_CURRENCY = 'EUR';
 })
 export class ManageRateCardsComponent {
   private api = inject(ApiService);
+  private auth = inject(AuthService);
   private destroyRef = inject(DestroyRef);
   private notifications = inject(NotificationService);
 
-  private itemsRes = rxResource({ stream: () => this.api.getRateCards(), defaultValue: [] as RateCard[] });
+  private itemsRes = rxResource<RateCard[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getRateCards() : of<RateCard[]>([])),
+    defaultValue: [] as RateCard[],
+  });
   items = this.itemsRes.value;
 
   // Reference-data sources for the bound selects (role / organization / currency).

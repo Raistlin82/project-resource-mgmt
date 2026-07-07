@@ -270,10 +270,16 @@ export class ProjectDetailsComponent {
     stream: ({ params: ready }) => (ready ? this.api.getOrderLines() : of<OrderLine[]>([])),
     defaultValue: [] as OrderLine[],
   });
-  // getRequests is an OPEN read (no principal gate) — leave ungated.
-  private requestsRes = rxResource({ stream: () => this.api.getRequests(), defaultValue: [] as ResourceRequest[] });
-  // getAssignments is an OPEN read (no principal gate) — leave ungated.
-  private assignmentsRes = rxResource({ stream: () => this.api.getAssignments(), defaultValue: [] as Assignment[] });
+  private requestsRes = rxResource<ResourceRequest[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getRequests() : of<ResourceRequest[]>([])),
+    defaultValue: [] as ResourceRequest[],
+  });
+  private assignmentsRes = rxResource<Assignment[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getAssignments() : of<Assignment[]>([])),
+    defaultValue: [] as Assignment[],
+  });
   private resourcesRes = rxResource<Resource[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),

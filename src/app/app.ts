@@ -155,6 +155,7 @@ interface NavState {
                 class="command-nav-group-header"
                 [attr.aria-expanded]="isGroupOpen(group.label)"
                 [attr.aria-controls]="'navgroup-' + group.label"
+                [attr.aria-label]="'Toggle ' + group.label + ' navigation group'"
                 (click)="toggleGroup(group.label)">
                 <span class="command-section-label">{{ group.label }}</span>
                 <mat-icon class="command-nav-chevron">chevron_right</mat-icon>

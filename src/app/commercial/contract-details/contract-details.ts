@@ -680,8 +680,7 @@ export class ContractDetails {
   // 401s and the rxResource latches its error/empty state forever. Keying each on
   // auth.authReady() defers the request until the token is attached; when
   // authReady flips false->true the params change re-runs the stream. Open reads
-  // (projects, requests, assignments, project-financials, milestones) are left
-  // ungated.
+  // (projects, project-financials, milestones) are left ungated.
   private contractsRes = rxResource<Contract[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getContracts() : of<Contract[]>([])),
@@ -703,8 +702,16 @@ export class ContractDetails {
     stream: ({ params: ready }) => (ready ? this.api.getOrderLines() : of<OrderLine[]>([])),
     defaultValue: [] as OrderLine[],
   });
-  private requestsRes = rxResource({ stream: () => this.api.getRequests(), defaultValue: [] as ResourceRequest[] });
-  private assignmentsRes = rxResource({ stream: () => this.api.getAssignments(), defaultValue: [] as Assignment[] });
+  private requestsRes = rxResource<ResourceRequest[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getRequests() : of<ResourceRequest[]>([])),
+    defaultValue: [] as ResourceRequest[],
+  });
+  private assignmentsRes = rxResource<Assignment[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getAssignments() : of<Assignment[]>([])),
+    defaultValue: [] as Assignment[],
+  });
   private resourcesRes = rxResource<Resource[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),

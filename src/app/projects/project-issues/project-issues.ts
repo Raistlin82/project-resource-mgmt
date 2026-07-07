@@ -19,7 +19,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
           <div class="flex items-center gap-4">
             @if (!projectId()) {
               <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Issues</h2>
-              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
+              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
                 <option value="" disabled>Select a project...</option>
                 @for (p of projects(); track p.id) {
                   <option [value]="p.id">{{ p.name }}</option>
@@ -75,7 +75,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                             [class.bg-surface-muted]="issue.status === 'Mitigated' || issue.status === 'Closed'" [class.text-ink-secondary]="issue.status === 'Mitigated' || issue.status === 'Closed'" [class.ring-line]="issue.status === 'Mitigated' || issue.status === 'Closed'">
                         {{ issue.status }}
                       </span>
-                      <select [ngModel]="issue.status" (ngModelChange)="updateStatus(issue, $event)" class="rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-1.5 text-xs text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
+                      <select [ngModel]="issue.status" (ngModelChange)="updateStatus(issue, $event)" [attr.aria-label]="'Update status for issue ' + issue.title" class="rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-1.5 text-xs text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
                         <option value="Open">Open</option>
                         <option value="Mitigated">Mitigated</option>
                         <option value="Closed">Closed</option>

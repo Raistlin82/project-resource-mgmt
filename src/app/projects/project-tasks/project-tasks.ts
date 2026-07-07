@@ -22,7 +22,7 @@ const UNASSIGNED = 'Unassigned';
           <div class="flex items-center gap-4">
             @if (!projectId()) {
               <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Tasks</h2>
-              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
+              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
                 <option value="" disabled>Select a project...</option>
                 @for (p of projects(); track p.id) {
                   <option [value]="p.id">{{ p.name }}</option>
@@ -75,6 +75,7 @@ const UNASSIGNED = 'Unassigned';
                   <td class="px-6 py-4 text-[var(--cc-ink)] font-mono tabular-nums">{{ task.dueDate }}</td>
                   <td class="px-6 py-4">
                     <select [ngModel]="task.status" (ngModelChange)="updateStatus(task, $event)"
+                            [attr.aria-label]="'Update status for task ' + task.name"
                             class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border-0 ring-1 focus:ring-2 focus:ring-accent/25 cursor-pointer"
                             [class.bg-positive-tint]="task.status === 'Done'" [class.text-positive-text]="task.status === 'Done'" [class.ring-positive]="task.status === 'Done'"
                             [class.bg-accent-tint]="task.status === 'In Progress'" [class.text-accent-text]="task.status === 'In Progress'" [class.ring-accent]="task.status === 'In Progress'"
@@ -240,8 +241,16 @@ export class ProjectTasks {
   private tasksRes = rxResource({ stream: () => this.api.getProjectTasks(), defaultValue: [] as Task[] });
   tasks = this.tasksRes.value;
   private partnersRes = rxResource({ stream: () => this.api.getProjectPartners(), defaultValue: [] as Partner[] });
-  private ordersRes = rxResource({ stream: () => this.api.getOrders(), defaultValue: [] as Order[] });
-  private orderLinesRes = rxResource({ stream: () => this.api.getOrderLines(), defaultValue: [] as OrderLine[] });
+  private ordersRes = rxResource<Order[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getOrders() : of<Order[]>([])),
+    defaultValue: [] as Order[],
+  });
+  private orderLinesRes = rxResource<OrderLine[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getOrderLines() : of<OrderLine[]>([])),
+    defaultValue: [] as OrderLine[],
+  });
   partners = this.partnersRes.value;
   orders = this.ordersRes.value;
   orderLines = this.orderLinesRes.value;

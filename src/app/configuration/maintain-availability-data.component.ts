@@ -1,8 +1,10 @@
 import { Component, inject, computed, PLATFORM_ID } from '@angular/core';
 import { isPlatformBrowser } from '@angular/common';
 import { rxResource } from '@angular/core/rxjs-interop';
+import { of } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, Resource } from '../services/api.service';
+import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 
 @Component({
@@ -20,7 +22,7 @@ import { NotificationService } from '../services/notification.service';
         </div>
       </div>
 
-      <input type="file" id="csvUploadAvail" accept=".csv" class="hidden" (change)="onFileSelected($event)">
+      <input type="file" id="csvUploadAvail" accept=".csv" class="hidden" aria-label="Upload availability CSV" (change)="onFileSelected($event)">
 
       <div class="p-6 sm:p-8">
         <div class="bg-accent-tint border border-accent rounded-lg p-5 mb-8">
@@ -71,10 +73,15 @@ import { NotificationService } from '../services/notification.service';
 })
 export class MaintainAvailabilityDataComponent {
   private api = inject(ApiService);
+  private auth = inject(AuthService);
   private notificationService = inject(NotificationService);
   private platformId = inject(PLATFORM_ID);
 
-  private resourcesRes = rxResource({ stream: () => this.api.getResources(), defaultValue: [] });
+  private resourcesRes = rxResource<Resource[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
+    defaultValue: [],
+  });
   resources = computed(() => this.resourcesRes.value());
 
   triggerUpload() {

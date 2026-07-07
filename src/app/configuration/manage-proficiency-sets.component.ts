@@ -44,15 +44,15 @@ import { NotificationService } from '../services/notification.service';
                   <div [formGroupName]="i" class="flex flex-col sm:flex-row gap-4 items-start command-card p-4">
                     <div class="w-full sm:w-24">
                       <label [for]="'level' + i" class="block text-[10px] font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-1.5">Level</label>
-                      <input [id]="'level' + i" type="number" formControlName="level" class="command-input text-center">
+                      <input [id]="'level' + i" type="number" formControlName="level" [attr.aria-label]="'Level number for proficiency level ' + (i + 1)" class="command-input text-center">
                     </div>
                     <div class="flex-1 w-full">
                       <label [for]="'levelName' + i" class="block text-[10px] font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-1.5">Name</label>
-                      <input [id]="'levelName' + i" type="text" formControlName="name" class="command-input">
+                      <input [id]="'levelName' + i" type="text" formControlName="name" [attr.aria-label]="'Name for proficiency level ' + (i + 1)" class="command-input">
                     </div>
                     <div class="flex-1 w-full">
                       <label [for]="'levelDesc' + i" class="block text-[10px] font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-1.5">Description</label>
-                      <input [id]="'levelDesc' + i" type="text" formControlName="description" class="command-input">
+                      <input [id]="'levelDesc' + i" type="text" formControlName="description" [attr.aria-label]="'Description for proficiency level ' + (i + 1)" class="command-input">
                     </div>
                     <button type="button" (click)="removeLevel(i)" [attr.aria-label]="'Remove level ' + (i + 1)" [attr.title]="'Remove level ' + (i + 1)" class="mt-0 sm:mt-6 w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm self-end sm:self-auto">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">remove_circle</mat-icon>
@@ -102,7 +102,7 @@ import { NotificationService } from '../services/notification.service';
                       <button (click)="cancelDelete()" class="px-3 py-1.5 text-xs font-bold text-ink-secondary bg-surface border border-line rounded-lg hover:bg-surface-muted transition-all shadow-sm">Cancel</button>
                     </div>
                   } @else {
-                    <button (click)="requestDelete(set.id)" class="w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm" title="Delete">
+                    <button (click)="requestDelete(set.id)" class="w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm" [attr.aria-label]="'Delete proficiency set ' + set.name" [attr.title]="'Delete proficiency set ' + set.name">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                     </button>
                   }
