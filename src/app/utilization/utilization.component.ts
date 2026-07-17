@@ -3,6 +3,7 @@ import { rxResource } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, Resource, Assignment, ResourceRequest, TimeEntry } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
+import { NotificationService } from '../services/notification.service';
 import { DecimalPipe } from '@angular/common';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { forkJoin, of } from 'rxjs';
@@ -230,6 +231,7 @@ interface UtilizationData {
 export class UtilizationComponent {
   private api = inject(ApiService);
   private auth = inject(AuthService);
+  private notifications = inject(NotificationService);
 
   // Current authenticated user (Resource Manager) id used for authorization.
   // Read LIVE, never snapshot at field-init (see auth.service note): a captured
@@ -333,25 +335,37 @@ export class UtilizationComponent {
   saveAssignment() {
     if (this.assignmentForm.valid && this.selectedResource()) {
       const val = this.assignmentForm.value;
-      const data: Partial<Assignment> = {
-        requestId: val.requestId || '',
-        resourceId: this.selectedResource()!.id,
-        assignedHours: val.assignedHours || 0,
-        // TODO(alloc-approval): 'hard-booked' predates the typed Assignment.status
-        // union added in the allocation-approval-workflow feature; cast is
-        // type-only (no runtime change) until this handler is rewritten (Task 7+).
-        status: 'hard-booked' as Assignment['status'] // Default status
-      };
+      const requestId = val.requestId || '';
+      const resourceId = this.selectedResource()!.id;
+      const assignedHours = val.assignedHours || 0;
 
       if (this.editingAssignmentId()) {
-        this.api.updateAssignment(this.editingAssignmentId()!, data).subscribe(() => {
-          this.dataResource.reload();
-          this.closeForm();
+        // Edit path never re-sends `status`: once an assignment is Requested/
+        // Allocated/Rejected, status is server-owned (approval-decision hook or
+        // the auto-approve shortcut) — resending a stale value here could either
+        // 400 (server-controlled statuses aren't client-settable) or clobber a
+        // status the server since transitioned. The server still re-derives
+        // 'Requested' on a material edit to an Allocated assignment on its own.
+        const data: Partial<Assignment> = { requestId, resourceId, assignedHours };
+        this.api.updateAssignment(this.editingAssignmentId()!, data).subscribe({
+          next: () => {
+            this.dataResource.reload();
+            this.closeForm();
+          },
+          error: () => this.notifications.error('Failed to update assignment.')
         });
       } else {
-        this.api.createAssignment(data).subscribe(() => {
-          this.dataResource.reload();
-          this.closeForm();
+        // New assignments from this view default to 'Draft' (conservative) — the
+        // resource manager sends them for approval later from staffing / resource
+        // requests. 'hard-booked' predates the Assignment.status union and is now
+        // rejected (400) by the server's ALLOCATION_CLIENT_SETTABLE guard.
+        const data: Partial<Assignment> = { requestId, resourceId, assignedHours, status: 'Draft' };
+        this.api.createAssignment(data).subscribe({
+          next: () => {
+            this.dataResource.reload();
+            this.closeForm();
+          },
+          error: () => this.notifications.error('Failed to create assignment.')
         });
       }
     }
@@ -361,8 +375,7 @@ export class UtilizationComponent {
   copyAssignment(assignment: Assignment) {
     this.copiedAssignment.set({
       requestId: assignment.requestId,
-      assignedHours: assignment.assignedHours,
-      status: assignment.status
+      assignedHours: assignment.assignedHours
     });
   }
 
@@ -370,14 +383,22 @@ export class UtilizationComponent {
     const copied = this.copiedAssignment();
     const resId = this.selectedResource()?.id;
     if (copied && resId) {
+      // Always paste as a fresh 'Draft' — the source assignment's status (which
+      // may be 'Allocated'/'Rejected') is never carried over: the server only
+      // accepts 'Draft'/'Requested' on create.
       const newAssignment: Partial<Assignment> = {
-        ...copied,
-        resourceId: resId
+        requestId: copied.requestId,
+        assignedHours: copied.assignedHours,
+        resourceId: resId,
+        status: 'Draft'
       };
-      this.api.createAssignment(newAssignment).subscribe(() => {
-        this.dataResource.reload();
-        // Optional: clear copied assignment after paste
-        // this.copiedAssignment.set(null);
+      this.api.createAssignment(newAssignment).subscribe({
+        next: () => {
+          this.dataResource.reload();
+          // Optional: clear copied assignment after paste
+          // this.copiedAssignment.set(null);
+        },
+        error: () => this.notifications.error('Failed to paste assignment.')
       });
     }
   }
