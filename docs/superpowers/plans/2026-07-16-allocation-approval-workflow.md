@@ -464,9 +464,9 @@ UPDATE "assignments" SET "status" = 'Allocated' WHERE "status" IN ('hard-booked'
 
 In `src/db/seed.ts:127-132`: cambiare ogni `status: 'hard-booked'|'soft-booked'` in `status: 'Allocated'`. Aggiornare i request seed (`:107-111`) aggiungendo `staffedEffortPlanned` = `staffedEffort` (tutti gli assignment seed sono Allocated ⇒ confermato = pianificato). Aggiungere `utilizationPlanned` uguale a `utilization` sui resource seed.
 
-- [ ] **Step 5: Ricalcolo al boot**
+- [x] **Step 5: Ricalcolo al boot — OMESSO per decisione (accettato in review).**
 
-In `src/db/bootstrap.ts` (o accanto a `seedSequences()`): dopo il seeding, per ogni resource/request esistente invocare i recompute così i due aggregati sono coerenti anche su DB pre-esistenti. (In-memory: già coerente via seed.)
+**Decisione:** non aggiungiamo un boot-recompute in `bootstrap.ts`. Motivi: (a) le funzioni `recompute*` vivono in `server.ts` e importarle in `bootstrap.ts` accoppierebbe i layer; (b) i planned aggregates sono **self-healing** (ricalcolati alla prima mutazione di un assignment su quella risorsa/request); (c) un **nuovo** deploy Postgres è già coerente perché `initPersistence()` seed le tabelle da `seed.ts`, che ora porta i valori `planned`. Unico caso residuo: un DB Postgres **già popolato** prima di questa migration avrebbe `utilization_planned`/`staffed_effort_planned` = NULL finché non avviene la prima mutazione — degrada con grazia (colonne nullable, `nullsToUndefined` → `undefined`, campi frontend opzionali → barre "pianificato" vuote). Accettabile dato lo stato dev/demo del prodotto; se in futuro servisse un backfill per un prod legacy, sarà un task dedicato.
 
 - [ ] **Step 6: Verifica** — Run: `npm test` (repository.spec) + `npx ng build`. Con Postgres: `docker compose up -d postgres` poi `DATABASE_URL=... npm run serve:ssr:app` e controllare che le migration passino.
 
