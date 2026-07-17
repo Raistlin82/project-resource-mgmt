@@ -90,3 +90,19 @@ export function allocationApproverStep(managerId: string | undefined): ApprovalS
     ? { role: 'resource-manager', status: 'Pending', approverId: managerId }
     : { role: 'resource-manager', status: 'Pending' };
 }
+
+/** Sum assignedHours split by lifecycle: confirmed = Allocated; planned = Requested + Allocated. */
+export function assignmentAggregateHours(rows: Pick<Assignment, 'assignedHours' | 'status'>[]): { confirmed: number; planned: number } {
+  let confirmed = 0, planned = 0;
+  for (const a of rows) {
+    const h = Number.isFinite(a.assignedHours) ? a.assignedHours : 0;
+    if (a.status === 'Allocated') { confirmed += h; planned += h; }
+    else if (a.status === 'Requested') { planned += h; }
+  }
+  return { confirmed, planned };
+}
+
+/** Map an approval decision to the resulting assignment status. */
+export function decisionToAssignmentStatus(decision: 'Approved' | 'Rejected'): AllocationStatus {
+  return decision === 'Approved' ? 'Allocated' : 'Rejected';
+}

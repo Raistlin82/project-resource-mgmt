@@ -6,8 +6,11 @@ import {
   isAllowedAllocationTransition,
   allocationApproverStep,
   ALLOCATION_CLIENT_SETTABLE,
+  assignmentAggregateHours,
+  decisionToAssignmentStatus,
 } from './staffing.util';
 import { ResourceRequest } from './api.service';
+import type { Assignment } from './api.service';
 
 function req(status: ResourceRequest['status'], requiredEffort: number): ResourceRequest {
   return { id: 'R1', name: 'Req', requiredRole: 'Dev', requiredEffort, status, skills: [] };
@@ -176,5 +179,27 @@ describe('allocationApproverStep', () => {
   });
   it('falls back to role only when no manager', () => {
     expect(allocationApproverStep(undefined)).toEqual({ role: 'resource-manager', status: 'Pending' });
+  });
+});
+
+describe('assignmentAggregateHours', () => {
+  const rows = [
+    { assignedHours: 10, status: 'Allocated' },
+    { assignedHours: 5, status: 'Requested' },
+    { assignedHours: 3, status: 'Draft' },
+    { assignedHours: 7, status: 'Rejected' },
+  ] as Assignment[];
+  it('confirmed counts only Allocated', () => {
+    expect(assignmentAggregateHours(rows).confirmed).toBe(10);
+  });
+  it('planned counts Requested + Allocated (not Draft/Rejected)', () => {
+    expect(assignmentAggregateHours(rows).planned).toBe(15);
+  });
+});
+
+describe('decisionToAssignmentStatus', () => {
+  it('maps Approved->Allocated, Rejected->Rejected', () => {
+    expect(decisionToAssignmentStatus('Approved')).toBe('Allocated');
+    expect(decisionToAssignmentStatus('Rejected')).toBe('Rejected');
   });
 });
