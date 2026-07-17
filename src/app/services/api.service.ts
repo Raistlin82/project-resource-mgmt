@@ -38,6 +38,12 @@ export interface Resource {
   /** EFFECTIVE bill rate in **€/DAY** (override ?? card), resolved on read. */
   billRateDay?: number;
   /**
+   * PLANNED utilization for the current period including allocations still
+   * pending approval, as opposed to `utilization` (confirmed/allocated only).
+   * Resolved by the server on read. Allocation approval workflow.
+   */
+  utilizationPlanned?: number;
+  /**
    * Date the resource was hired (data di assunzione), ISO 'YYYY-MM-DD'.
    * REQUIRED at create time (the server rejects a missing/invalid value), but
    * declared optional here for back-compat with pre-existing seeds/rows that
@@ -59,6 +65,12 @@ export interface ResourceRequest {
   requiredRole: string;
   requiredEffort: number;
   staffedEffort?: number;
+  /**
+   * PLANNED staffed effort including allocations still pending approval, as
+   * opposed to `staffedEffort` (confirmed/allocated only). Allocation approval
+   * workflow.
+   */
+  staffedEffortPlanned?: number;
   status: string;
   skills: string[];
   description?: string;
@@ -73,13 +85,15 @@ export interface Assignment {
   requestId: string;
   resourceId: string;
   assignedHours: number;
-  status: string;
+  status: 'Draft' | 'Requested' | 'Allocated' | 'Rejected';
   /** ISO booking start (YYYY-MM-DD). Falls back to the linked request's startDate when absent. */
   startDate?: string;
   /** ISO booking end (YYYY-MM-DD). Falls back to the linked request's endDate when absent. */
   endDate?: string;
   /** Percentage of the resource's weekly capacity this booking consumes. Defaults to 100. */
   allocationPct?: number;
+  /** Id of the ApprovalRequest governing this assignment's Requested -> Allocated transition, if any. */
+  approvalId?: string;
 }
 
 export type UserRole = 'employee' | 'pm' | 'resource-manager' | 'delivery-executive' | 'finance' | 'sales' | 'admin';
@@ -442,7 +456,7 @@ export interface ChangeRequest {
 
 // --- Approval workflow engine ---
 
-export type ApprovalKind = 'TimeEntry' | 'Expense' | 'Milestone' | 'ChangeRequest' | 'Invoice';
+export type ApprovalKind = 'TimeEntry' | 'Expense' | 'Milestone' | 'ChangeRequest' | 'Invoice' | 'Allocation';
 export type ApprovalStatus = 'Pending' | 'Approved' | 'Rejected';
 
 export interface ApprovalStep {
@@ -450,6 +464,10 @@ export interface ApprovalStep {
   status: ApprovalStatus;
   decidedBy?: string;
   decidedAt?: string;
+  /** Resource-id of the specific approver (People Manager) authorised to decide this step, in addition to `role`. */
+  approverId?: string;
+  /** Approver's note recorded on decision (the requester's note lives on `ApprovalRequest.note`). */
+  note?: string;
 }
 
 export interface ApprovalRequest {

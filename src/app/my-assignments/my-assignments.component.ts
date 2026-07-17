@@ -453,7 +453,10 @@ export class MyAssignmentsComponent {
     return days;
   });
 
-  activeAssignmentsCount = computed(() => this.myAssignments().filter(a => a.status !== 'completed').length);
+  // TODO(alloc-approval): 'completed' predates the typed Assignment.status union
+  // added in the allocation-approval-workflow feature; cast is type-only (no
+  // runtime change) until this is revisited (Task 7+).
+  activeAssignmentsCount = computed(() => this.myAssignments().filter(a => (a.status as string) !== 'completed').length);
   totalAssignedHours = computed(() => this.myAssignments().reduce((sum, a) => sum + a.assignedHours, 0));
   currentUtilization = computed(() => {
     const p = this.profile();

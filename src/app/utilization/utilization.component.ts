@@ -337,7 +337,10 @@ export class UtilizationComponent {
         requestId: val.requestId || '',
         resourceId: this.selectedResource()!.id,
         assignedHours: val.assignedHours || 0,
-        status: 'hard-booked' // Default status
+        // TODO(alloc-approval): 'hard-booked' predates the typed Assignment.status
+        // union added in the allocation-approval-workflow feature; cast is
+        // type-only (no runtime change) until this handler is rewritten (Task 7+).
+        status: 'hard-booked' as Assignment['status'] // Default status
       };
 
       if (this.editingAssignmentId()) {

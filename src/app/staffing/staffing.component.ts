@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, inject, signal, computed } from '@angular/core';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
-import { ApiService, ResourceRequest, Resource } from '../services/api.service';
+import { ApiService, ResourceRequest, Resource, Assignment } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { DecimalPipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
@@ -412,7 +412,10 @@ export class StaffingComponent {
         requestId: req.id,
         resourceId: resourceId,
         assignedHours: hours,
-        status: 'hard-booked',
+        // TODO(alloc-approval): 'hard-booked' predates the typed Assignment.status
+        // union added in the allocation-approval-workflow feature; cast is
+        // type-only (no runtime change) until this handler is rewritten (Task 7+).
+        status: 'hard-booked' as Assignment['status'],
         // Carry the booking window + allocation; omit empty dates so the schedule
         // util falls back to the linked request's dates.
         ...(startDate ? { startDate } : {}),

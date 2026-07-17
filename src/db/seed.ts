@@ -124,12 +124,18 @@ export const requests: ResourceRequest[] = [
 // and two PARTIAL, NON-OVERLAPPING bookings (A4/A5 Alice Smith 50% each — A4 ends
 // 2026-07-31, A5 starts 2026-08-01; the half-open [start,end) interval makes these
 // adjacent, NOT conflicting).
+// NOTE(alloc-approval Task 1): status literals were 'hard-booked'/'soft-booked'
+// (free string) prior to this feature; typing Assignment.status as a
+// 'Draft' | 'Requested' | 'Allocated' | 'Rejected' union made those literals
+// incompatible with the type and broke `ng build`. Minimally remapped to
+// 'Allocated' here ONLY to unblock the build — the real hard/soft distinction
+// (and any richer seed migration) is Task 7's job, not this one.
 export const assignments: Assignment[] = [
-  { id: '1', requestId: '1', resourceId: '1', assignedHours: 20, status: 'hard-booked', startDate: '2026-05-01', endDate: '2026-06-30', allocationPct: 60 },
-  { id: '2', requestId: '3', resourceId: '1', assignedHours: 24, status: 'hard-booked', startDate: '2026-06-15', endDate: '2026-08-31', allocationPct: 70 },
-  { id: '3', requestId: '4', resourceId: '2', assignedHours: 30, status: 'hard-booked', startDate: '2026-05-15', endDate: '2026-09-15', allocationPct: 100 },
-  { id: '4', requestId: '2', resourceId: '3', assignedHours: 8, status: 'soft-booked', startDate: '2026-05-01', endDate: '2026-07-31', allocationPct: 50 },
-  { id: '5', requestId: '5', resourceId: '3', assignedHours: 10, status: 'hard-booked', startDate: '2026-08-01', endDate: '2026-09-30', allocationPct: 50 },
+  { id: '1', requestId: '1', resourceId: '1', assignedHours: 20, status: 'Allocated', startDate: '2026-05-01', endDate: '2026-06-30', allocationPct: 60 },
+  { id: '2', requestId: '3', resourceId: '1', assignedHours: 24, status: 'Allocated', startDate: '2026-06-15', endDate: '2026-08-31', allocationPct: 70 },
+  { id: '3', requestId: '4', resourceId: '2', assignedHours: 30, status: 'Allocated', startDate: '2026-05-15', endDate: '2026-09-15', allocationPct: 100 },
+  { id: '4', requestId: '2', resourceId: '3', assignedHours: 8, status: 'Allocated', startDate: '2026-05-01', endDate: '2026-07-31', allocationPct: 50 },
+  { id: '5', requestId: '5', resourceId: '3', assignedHours: 10, status: 'Allocated', startDate: '2026-08-01', endDate: '2026-09-30', allocationPct: 50 },
 ];
 
 export const timeEntries: TimeEntry[] = [

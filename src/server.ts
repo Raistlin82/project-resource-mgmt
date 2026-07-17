@@ -2376,9 +2376,9 @@ apiRouter.put('/fx-rates/:currency', async (req, res) => {
 
 // --- Approval workflow engine -----------------------------------------------
 
-type ApprovalKind = 'TimeEntry' | 'Expense' | 'Milestone' | 'ChangeRequest' | 'Invoice';
+type ApprovalKind = 'TimeEntry' | 'Expense' | 'Milestone' | 'ChangeRequest' | 'Invoice' | 'Allocation';
 type ApprovalStatus = 'Pending' | 'Approved' | 'Rejected';
-interface ApprovalStep { role: string; status: ApprovalStatus; decidedBy?: string; decidedAt?: string }
+interface ApprovalStep { role: string; status: ApprovalStatus; decidedBy?: string; decidedAt?: string; approverId?: string; note?: string }
 interface ApprovalRequestEntry {
   id: string;
   kind: ApprovalKind;
@@ -2394,7 +2394,7 @@ interface ApprovalRequestEntry {
   note?: string;
 }
 
-const APPROVAL_KINDS: readonly ApprovalKind[] = ['TimeEntry', 'Expense', 'Milestone', 'ChangeRequest', 'Invoice'];
+const APPROVAL_KINDS: readonly ApprovalKind[] = ['TimeEntry', 'Expense', 'Milestone', 'ChangeRequest', 'Invoice', 'Allocation'];
 /** Amount above which an approval is escalated to a two-step delivery+finance chain. */
 const APPROVAL_HIGH_VALUE_THRESHOLD = 50000;
 /** SLA target measured in whole days from creation. */

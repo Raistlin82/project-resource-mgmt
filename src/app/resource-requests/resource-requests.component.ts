@@ -364,9 +364,13 @@ interface RequestsData {
                     </div>
                     <div class="text-right flex flex-col items-end gap-1">
                       <div class="font-bold text-[var(--cc-primary-text)] text-lg font-mono tabular-nums">{{ item.assignment.assignedHours }}h</div>
+                      <!-- TODO(alloc-approval): 'confirmed'/'proposed' predate the typed
+                           Assignment.status union added in the allocation-approval-workflow
+                           feature; $any() cast is type-only (no runtime change) until this
+                           is revisited (Task 7+). -->
                       <div class="command-status uppercase"
-                           [class.green]="item.assignment.status === 'confirmed'"
-                           [class.amber]="item.assignment.status === 'proposed'">
+                           [class.green]="$any(item.assignment.status) === 'confirmed'"
+                           [class.amber]="$any(item.assignment.status) === 'proposed'">
                         {{ item.assignment.status }}
                       </div>
                     </div>
