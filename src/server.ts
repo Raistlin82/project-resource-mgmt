@@ -10,7 +10,7 @@ import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
 import type { AuditLog, Resource, ResourceRequest, Assignment, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
-import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition } from './app/services/staffing.util';
+import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours } from './app/services/staffing.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { maxIdSeq } from './server/id-seq.util';
@@ -992,17 +992,20 @@ async function validateResourceOrgRefs(body: { costCenters?: unknown; serviceOrg
  * from reality and saturates irreversibly. We round/clamp only the final derived
  * value here. MUST be called inside `withLock('res:<id>')` so the read of all
  * assignments + the single write are serialized against concurrent changes.
+ *
+ * Writes a dual aggregate: `utilization` (confirmed — Allocated assignments
+ * only) and `utilizationPlanned` (planned — Requested + Allocated), via the
+ * pure `assignmentAggregateHours` split.
  */
 async function recomputeResourceUtilization(resourceId: string): Promise<void> {
   const resource = await repos.resources.get(resourceId);
   if (!resource) return;
-  const assignments = await repos.assignments.list();
-  let totalHours = 0;
-  for (const a of assignments) {
-    if (a.resourceId !== resourceId) continue;
-    totalHours += Number.isFinite(a.assignedHours) ? a.assignedHours : 0;
-  }
-  await repos.resources.update(resourceId, { utilization: clampUtil(utilizationContribution(totalHours, resource.capacity)) });
+  const rows = (await repos.assignments.list()).filter(a => a.resourceId === resourceId);
+  const { confirmed, planned } = assignmentAggregateHours(rows);
+  await repos.resources.update(resourceId, {
+    utilization: clampUtil(utilizationContribution(confirmed, resource.capacity)),
+    utilizationPlanned: clampUtil(utilizationContribution(planned, resource.capacity)),
+  });
 }
 
 // ---------------------------------------------------------------------------
