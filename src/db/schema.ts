@@ -86,6 +86,10 @@ export const resources = pgTable(
     profilePicture: text('profile_picture'),
     resume: text('resume'),
     utilization: doublePrecision('utilization').notNull(),
+    // Allocation approval workflow: utilization counting pending (not yet
+    // approved) allocations too, vs. utilization which counts only
+    // confirmed/Allocated ones. Nullable for migration safety.
+    utilizationPlanned: doublePrecision('utilization_planned'),
     capacity: doublePrecision('capacity').notNull(),
     // self-reference: a resource's manager is another resource.
     managerId: text('manager_id'),
@@ -132,6 +136,10 @@ export const requests = pgTable(
     requiredRole: text('required_role').notNull(),
     requiredEffort: doublePrecision('required_effort').notNull(),
     staffedEffort: doublePrecision('staffed_effort'),
+    // Allocation approval workflow: staffing counting pending (not yet
+    // approved) allocations too, vs. staffedEffort which counts only
+    // confirmed/Allocated ones. Nullable for migration safety.
+    staffedEffortPlanned: doublePrecision('staffed_effort_planned'),
     status: text('status').notNull(),
     skills: jsonb('skills').$type<string[]>().notNull(),
     description: text('description'),
@@ -165,6 +173,10 @@ export const assignments = pgTable(
     startDate: text('start_date'),
     endDate: text('end_date'),
     allocationPct: doublePrecision('allocation_pct'),
+    // Allocation approval workflow: links a pending/decided assignment to its
+    // approvalRequests row (kind 'allocation'). Nullable — most assignments
+    // auto-approve and never carry one; also nullable for migration safety.
+    approvalId: text('approval_id'),
   },
   (t) => [
     index('assignments_request_id_idx').on(t.requestId),

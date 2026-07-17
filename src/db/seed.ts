@@ -76,17 +76,20 @@ export const resources: Resource[] = [
   // (store = city name; 'New York'/'London' are seeded cities, 'Remote' is the
   // seeded sentinel city). `organization` is bound to the resource-organizations
   // catalog (store = org name); the names below are seeded resource-org rows.
+  // ALLOCATION APPROVAL WORKFLOW: utilizationPlanned mirrors utilization for the
+  // seed because every seeded assignment status is 'Allocated' (confirmed) —
+  // there are no pending allocations, so planned == confirmed here.
   { id: '1', name: 'Julie Armstrong', role: 'Developer',
     skills: [{ name: 'Java', level: 3 }, { name: 'Spring', level: 2 }],
     projectRoles: ['Senior Developer', 'Backend Engineer'],
     externalExperience: [{ projectName: 'E-commerce Migration', company: 'TechCorp', role: 'Java Developer', startDate: '2020-01-01', endDate: '2022-12-31', comment: 'Migrated legacy system to Spring Boot.' }],
-    profilePicture: '', resume: '', utilization: 95, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York', costRate: 600, billRate: 1120, hireDate: '2019-03-04' },
+    profilePicture: '', resume: '', utilization: 95, utilizationPlanned: 95, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York', costRate: 600, billRate: 1120, hireDate: '2019-03-04' },
   { id: '2', name: 'John Miller', role: 'Consultant',
     skills: [{ name: 'Project Management', level: 2 }], projectRoles: ['Business Consultant'],
-    externalExperience: [], profilePicture: '', resume: '', utilization: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London', costRate: 720, billRate: 1440, hireDate: '2021-09-13' },
+    externalExperience: [], profilePicture: '', resume: '', utilization: 90, utilizationPlanned: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London', costRate: 720, billRate: 1440, hireDate: '2021-09-13' },
   { id: '3', name: 'Alice Smith', role: 'Designer',
     skills: [{ name: 'Figma', level: 3 }], projectRoles: ['UX Designer'],
-    externalExperience: [], profilePicture: '', resume: '', utilization: 55, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', hireDate: '2023-01-16' },
+    externalExperience: [], profilePicture: '', resume: '', utilization: 55, utilizationPlanned: 55, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', hireDate: '2023-01-16' },
 ];
 
 export const users: User[] = [
@@ -103,12 +106,15 @@ export const users: User[] = [
 // equals the sum of assignedHours across its assignments, keeping the seed coherent.
 // Date windows are anchored across 2026-04 .. 2026-09 so the bookings fall inside
 // the schedule view's default ~12-week horizon from "today" (2026-06-12).
+// ALLOCATION APPROVAL WORKFLOW: staffedEffortPlanned mirrors staffedEffort for the
+// seed because every seeded assignment status is 'Allocated' (confirmed) — there
+// are no pending allocations, so planned == confirmed here.
 export const requests: ResourceRequest[] = [
-  { id: '1', name: 'Project Alpha - Backend', requiredRole: 'Developer', requiredEffort: 20, staffedEffort: 20, status: 'Fulfilled', skills: ['Java'], description: 'Backend development for Project Alpha', startDate: '2026-04-01', endDate: '2026-06-30', requesterId: '1', projectId: '1' },
-  { id: '2', name: 'Project Beta - UI', requiredRole: 'Designer', requiredEffort: 15, staffedEffort: 8, status: 'Published', skills: ['Figma'], description: 'UI Design for Project Beta', startDate: '2026-05-01', endDate: '2026-07-31', requesterId: '1', projectId: '2' },
-  { id: '3', name: 'Project Alpha - API Hardening', requiredRole: 'Developer', requiredEffort: 24, staffedEffort: 24, status: 'Fulfilled', skills: ['Java'], description: 'API hardening and performance work for Project Alpha', startDate: '2026-06-15', endDate: '2026-08-31', requesterId: '1', projectId: '1' },
-  { id: '4', name: 'Project Beta - Platform Migration', requiredRole: 'Consultant', requiredEffort: 30, staffedEffort: 30, status: 'Fulfilled', skills: ['Project Management'], description: 'Lead the platform migration workstream for Project Beta', startDate: '2026-05-15', endDate: '2026-09-15', requesterId: '1', projectId: '2' },
-  { id: '5', name: 'Project Beta - Design QA', requiredRole: 'Designer', requiredEffort: 10, staffedEffort: 10, status: 'Fulfilled', skills: ['Figma'], description: 'Design quality pass ahead of Project Beta go-live', startDate: '2026-08-01', endDate: '2026-09-30', requesterId: '1', projectId: '2' },
+  { id: '1', name: 'Project Alpha - Backend', requiredRole: 'Developer', requiredEffort: 20, staffedEffort: 20, staffedEffortPlanned: 20, status: 'Fulfilled', skills: ['Java'], description: 'Backend development for Project Alpha', startDate: '2026-04-01', endDate: '2026-06-30', requesterId: '1', projectId: '1' },
+  { id: '2', name: 'Project Beta - UI', requiredRole: 'Designer', requiredEffort: 15, staffedEffort: 8, staffedEffortPlanned: 8, status: 'Published', skills: ['Figma'], description: 'UI Design for Project Beta', startDate: '2026-05-01', endDate: '2026-07-31', requesterId: '1', projectId: '2' },
+  { id: '3', name: 'Project Alpha - API Hardening', requiredRole: 'Developer', requiredEffort: 24, staffedEffort: 24, staffedEffortPlanned: 24, status: 'Fulfilled', skills: ['Java'], description: 'API hardening and performance work for Project Alpha', startDate: '2026-06-15', endDate: '2026-08-31', requesterId: '1', projectId: '1' },
+  { id: '4', name: 'Project Beta - Platform Migration', requiredRole: 'Consultant', requiredEffort: 30, staffedEffort: 30, staffedEffortPlanned: 30, status: 'Fulfilled', skills: ['Project Management'], description: 'Lead the platform migration workstream for Project Beta', startDate: '2026-05-15', endDate: '2026-09-15', requesterId: '1', projectId: '2' },
+  { id: '5', name: 'Project Beta - Design QA', requiredRole: 'Designer', requiredEffort: 10, staffedEffort: 10, staffedEffortPlanned: 10, status: 'Fulfilled', skills: ['Figma'], description: 'Design quality pass ahead of Project Beta go-live', startDate: '2026-08-01', endDate: '2026-09-30', requesterId: '1', projectId: '2' },
 ];
 
 // Resource Schedule (Approach B): every assignment carries an explicit booking
