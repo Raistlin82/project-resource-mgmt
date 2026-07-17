@@ -9,7 +9,7 @@
  * Extracting them keeps the rules side-effect-free and unit-testable while the
  * server imports the very same functions it is tested against.
  */
-import type { ResourceRequest, TimeEntry } from './api.service';
+import type { ResourceRequest, TimeEntry, ApprovalStep } from './api.service';
 
 /**
  * Utilization percentage contributed by `hours` of work against a resource's
@@ -61,4 +61,32 @@ export const TIME_ENTRY_TRANSITIONS: Readonly<Record<TimeEntry['status'], readon
 export function isAllowedTimeEntryTransition(from: TimeEntry['status'], to: TimeEntry['status']): boolean {
   if (from === to) return true;
   return TIME_ENTRY_TRANSITIONS[from].includes(to);
+}
+
+export type AllocationStatus = 'Draft' | 'Requested' | 'Allocated' | 'Rejected';
+
+/** Only these statuses may be set by a client via POST/PUT /assignments. */
+export const ALLOCATION_CLIENT_SETTABLE: readonly AllocationStatus[] = ['Draft', 'Requested'];
+
+// CLIENT-SETTABLE transitions only. The system transitions Requested -> Allocated
+// and Requested -> Rejected are applied DIRECTLY by the decision hook (a later task)
+// and never routed through this guard, so they are intentionally absent here. This
+// keeps the table consistent with ALLOCATION_CLIENT_SETTABLE.
+const ALLOCATION_TRANSITIONS: Readonly<Record<AllocationStatus, readonly AllocationStatus[]>> = {
+  Draft: ['Requested'],
+  Requested: ['Draft'],
+  Allocated: ['Requested'],
+  Rejected: ['Requested'],
+};
+
+export function isAllowedAllocationTransition(from: AllocationStatus, to: AllocationStatus): boolean {
+  if (from === to) return true;
+  return ALLOCATION_TRANSITIONS[from].includes(to);
+}
+
+/** Build the single approval step for an allocation: the resource's manager (resource-id), fallback role only. */
+export function allocationApproverStep(managerId: string | undefined): ApprovalStep {
+  return managerId
+    ? { role: 'resource-manager', status: 'Pending', approverId: managerId }
+    : { role: 'resource-manager', status: 'Pending' };
 }
