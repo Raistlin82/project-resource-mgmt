@@ -984,18 +984,28 @@ async function validateResourceOrgRefs(body: { costCenters?: unknown; serviceOrg
 
 /**
  * B-UTILIZATION: recompute a resource's utilization FROM THE SOURCE OF TRUTH
- * (the sum of its assigned hours across all assignments) rather than mutating a
- * stored counter by deltas. Incremental ±contribution with a per-step
- * round+clamp[0,100] is lossy: a 100%→add→remove cycle permanently loses the
- * over-100 magnitude, an over-removal clamped at 0 destroys magnitude, and
- * Math.round on every step accumulates drift — so the stored number diverges
- * from reality and saturates irreversibly. We round/clamp only the final derived
- * value here. MUST be called inside `withLock('res:<id>')` so the read of all
- * assignments + the single write are serialized against concurrent changes.
+ * (the status-filtered sum of its assigned hours across all assignments) rather
+ * than mutating a stored counter by deltas. `utilization` is the confirmed
+ * aggregate (Allocated assignments only); `utilizationPlanned` is the planned
+ * aggregate (Requested + Allocated) — the two use different status subsets via
+ * `assignmentAggregateHours`, not one shared total. Incremental ±contribution
+ * with a per-step round+clamp[0,100] is lossy: a 100%→add→remove cycle
+ * permanently loses the over-100 magnitude, an over-removal clamped at 0
+ * destroys magnitude, and Math.round on every step accumulates drift — so the
+ * stored number diverges from reality and saturates irreversibly. We
+ * round/clamp only the final derived value here. MUST be called inside
+ * `withLock('res:<id>')` so the read of all assignments + the single write are
+ * serialized against concurrent changes.
  *
  * Writes a dual aggregate: `utilization` (confirmed — Allocated assignments
  * only) and `utilizationPlanned` (planned — Requested + Allocated), via the
  * pure `assignmentAggregateHours` split.
+ *
+ * Pg column ordering caveat: the `utilization_planned` column does not exist
+ * yet (added in Task 7). Under Postgres, `utilizationPlanned` passed to
+ * `.update()` is silently dropped by Drizzle until that column lands, whereas
+ * the in-memory adapter persists it today — a latent, self-closing divergence
+ * (Task 7 adds the column before any reader in Task 8 depends on it).
  */
 async function recomputeResourceUtilization(resourceId: string): Promise<void> {
   const resource = await repos.resources.get(resourceId);
