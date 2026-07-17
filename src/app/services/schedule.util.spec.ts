@@ -35,10 +35,7 @@ function assignment(id: string, overrides: Partial<Assignment> = {}): Assignment
     requestId: 'REQ1',
     resourceId: 'R1',
     assignedHours: 40,
-    // TODO(alloc-approval): 'Active' predates the typed Assignment.status union
-    // added in the allocation-approval-workflow feature; cast is type-only (no
-    // runtime/behavioral change) — these fixtures don't assert on status value.
-    status: 'Active' as Assignment['status'],
+    status: 'Allocated',
     ...overrides,
   };
 }

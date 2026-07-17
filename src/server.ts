@@ -1012,11 +1012,9 @@ async function validateResourceOrgRefs(body: { costCenters?: unknown; serviceOrg
  * only) and `utilizationPlanned` (planned — Requested + Allocated), via the
  * pure `assignmentAggregateHours` split.
  *
- * Pg column ordering caveat: the `utilization_planned` column does not exist
- * yet (added in Task 7). Under Postgres, `utilizationPlanned` passed to
- * `.update()` is silently dropped by Drizzle until that column lands, whereas
- * the in-memory adapter persists it today — a latent, self-closing divergence
- * (Task 7 adds the column before any reader in Task 8 depends on it).
+ * The `utilization_planned` column exists in Pg (migration `0008_big_speed.sql`),
+ * so `utilizationPlanned` is persisted identically by both the in-memory and Pg
+ * adapters.
  */
 async function recomputeResourceUtilization(resourceId: string): Promise<void> {
   const resource = await repos.resources.get(resourceId);
@@ -1041,11 +1039,9 @@ async function recomputeResourceUtilization(resourceId: string): Promise<void> {
  * `staffedEffortPlanned` (planned — Requested + Allocated), via the pure
  * `assignmentAggregateHours` split.
  *
- * Pg column ordering caveat: `staffed_effort_planned` does not exist yet
- * (added in Task 7). Under Postgres, `staffedEffortPlanned` passed to
- * `.update()` is silently dropped by Drizzle until that column lands, whereas
- * the in-memory adapter persists it today — a latent, self-closing divergence
- * (same shape as the `utilizationPlanned` caveat above).
+ * The `staffed_effort_planned` column exists in Pg (migration `0008_big_speed.sql`),
+ * so `staffedEffortPlanned` is persisted identically by both the in-memory and Pg
+ * adapters — same shape as the `utilizationPlanned` note above.
  */
 async function recomputeRequestStaffing(requestId: string): Promise<void> {
   const request = await repos.requests.get(requestId);

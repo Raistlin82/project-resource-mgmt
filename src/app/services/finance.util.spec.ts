@@ -51,10 +51,7 @@ function req(id: string, projectId: string): ResourceRequest {
   return { id, name: `Req${id}`, requiredRole: 'Dev', requiredEffort: 0, status: 'Open', skills: [], projectId };
 }
 function assign(id: string, requestId: string, resourceId: string, hours: number): Assignment {
-  // TODO(alloc-approval): 'hard-booked' predates the typed Assignment.status
-  // union added in the allocation-approval-workflow feature; cast is type-only
-  // (no runtime/behavioral change) — these fixtures don't assert on status value.
-  return { id, requestId, resourceId, assignedHours: hours, status: 'hard-booked' as Assignment['status'] };
+  return { id, requestId, resourceId, assignedHours: hours, status: 'Allocated' };
 }
 function order(id: string, type: Order['type'], status: Order['status']): Order {
   return { id, contractId: 'CT', type, amount: 0, currency: 'EUR', status, orderDate: '2026-01-01' };
