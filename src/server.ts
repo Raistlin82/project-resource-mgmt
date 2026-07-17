@@ -373,6 +373,19 @@ const actorRole = (req: Request): UserRole | 'unknown' =>
   req.verifiedRole ?? (String(req.header('X-User-Role') || 'unknown') as UserRole | 'unknown');
 
 /**
+ * TRUSTED actor id for the append-only audit trail — shared by the audit
+ * middleware and any handler that writes its own explicit audit entry (e.g.
+ * the allocation-decision hook). Same trust gate as `trustedRole`: a verified
+ * JWT id always wins; the demo `X-User-Id` header is honored only when header
+ * trust is explicitly opted in (`AUTH_TRUST_HEADERS=true`); otherwise 'unknown'.
+ * Deliberately NOT the same as `actorId(req)` (which falls back to the raw
+ * header regardless of `trustHeaders`, and to 'system' rather than 'unknown') —
+ * see "AUDIT ATTRIBUTION INTEGRITY" on the audit middleware below.
+ */
+const auditActorId = (req: Request): string =>
+  req.verifiedUserId ?? (trustHeaders ? (req.header('X-User-Id') || undefined) : undefined) ?? 'unknown';
+
+/**
  * Resolve the request's actor to a RESOURCE id (the namespace time entries /
  * assignments key on), or undefined when it can't be mapped.
  *
@@ -651,13 +664,11 @@ apiRouter.use((req, res, next) => {
         // never the raw spoofable X-User-* headers — otherwise an unauthenticated
         // caller could forge the recorded actor (e.g. role 'admin') in the
         // append-only forensics log even when header trust is disabled.
-        const auditActorRole = trustedRole(req);
-        const auditActorId = req.verifiedUserId ?? (trustHeaders ? req.header('X-User-Id') : undefined) ?? 'unknown';
         const entry: AuditEntry = {
           id: `AL${newId()}`,
           at: new Date().toISOString(),
-          actorId: auditActorId,
-          actorRole: auditActorRole,
+          actorId: auditActorId(req),
+          actorRole: trustedRole(req),
           method: req.method,
           path: req.originalUrl,
           statusCode: res.statusCode,
@@ -2527,8 +2538,8 @@ apiRouter.post('/approval-requests', async (req, res) => {
  * explicit entry that transition would be invisible in the append-only trail.
  * Mirrors the middleware's shape (`AuditEntry`, same id prefix, same
  * before/after/changedKeys convention) and its TRUSTED-actor attribution
- * (`trustedRole`, never the raw spoofable `X-User-Role` header) — see the
- * "AUDIT ATTRIBUTION INTEGRITY" note on the middleware above.
+ * (`auditActorId`/`trustedRole`, never the raw spoofable `X-User-*` headers)
+ * — see the "AUDIT ATTRIBUTION INTEGRITY" note on the middleware above.
  */
 function allocationTransitionAudit(req: Request, assig: Assignment, newStatus: Assignment['status']): AuditLog {
   const afterAssig: Assignment = { ...assig, status: newStatus };
@@ -2537,7 +2548,7 @@ function allocationTransitionAudit(req: Request, assig: Assignment, newStatus: A
   const entry: AuditEntry = {
     id: `AL${newId()}`,
     at: new Date().toISOString(),
-    actorId: actorId(req),
+    actorId: auditActorId(req),
     actorRole: trustedRole(req),
     method: 'PUT',
     path: `/assignments/${assig.id}`,
@@ -2649,10 +2660,22 @@ apiRouter.put('/approval-requests/:id/decision', async (req, res) => {
     const assig = await repos.assignments.get(refId);
     if (assig) {
       const newStatus = decisionToAssignmentStatus(decided);
+      // The assignment's status transition MUST succeed (or surface as a 500):
+      // an approval that reports Approved/Rejected while the governed
+      // assignment silently stays Requested is the exact divergence this hook
+      // exists to prevent, so this write is left OUTSIDE the best-effort catch.
       await repos.assignments.update(assig.id, { status: newStatus });
-      await withLock(`res:${assig.resourceId}`, () => recomputeResourceUtilization(assig.resourceId));
-      await withLock(`req:${assig.requestId}`, () => recomputeRequestStaffing(assig.requestId));
-      await repos.auditLogs.create(allocationTransitionAudit(req, assig, newStatus));
+      try {
+        // Aggregate recompute + the explicit audit entry are best-effort, same
+        // discipline as the audit middleware ("audit is best-effort... failures
+        // here never affect the already-sent response"): the decision AND the
+        // assignment transition have already committed by this point, so a
+        // recompute/audit failure must not turn an otherwise-successful
+        // decision into a 500 for the caller.
+        await withLock(`res:${assig.resourceId}`, () => recomputeResourceUtilization(assig.resourceId));
+        await withLock(`req:${assig.requestId}`, () => recomputeRequestStaffing(assig.requestId));
+        await repos.auditLogs.create(allocationTransitionAudit(req, assig, newStatus));
+      } catch { /* recompute/audit are best-effort; the decision + transition already committed */ }
     }
   }
   res.status(result.status).json(result.body);
