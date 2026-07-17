@@ -10,7 +10,7 @@ import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
 import type { AuditLog, Resource, ResourceRequest, Assignment, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
-import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours } from './app/services/staffing.util';
+import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours, decisionToAssignmentStatus } from './app/services/staffing.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { maxIdSeq } from './server/id-seq.util';
@@ -1015,6 +1015,36 @@ async function recomputeResourceUtilization(resourceId: string): Promise<void> {
   await repos.resources.update(resourceId, {
     utilization: clampUtil(utilizationContribution(confirmed, resource.capacity)),
     utilizationPlanned: clampUtil(utilizationContribution(planned, resource.capacity)),
+  });
+}
+
+/**
+ * Recompute a request's staffed-effort aggregates (+derived status) from the
+ * FULL set of its assignments — the same "recompute from source of truth,
+ * never a lossy running delta" discipline as `recomputeResourceUtilization`.
+ * MUST be called inside `withLock('req:<id>')` so the read-all + single write
+ * is serialized against concurrent assignment changes.
+ *
+ * Writes a dual aggregate: `staffedEffort` (confirmed — Allocated assignments
+ * only, the basis `requestStatusFor` uses to derive Fulfilled/Open) and
+ * `staffedEffortPlanned` (planned — Requested + Allocated), via the pure
+ * `assignmentAggregateHours` split.
+ *
+ * Pg column ordering caveat: `staffed_effort_planned` does not exist yet
+ * (added in Task 7). Under Postgres, `staffedEffortPlanned` passed to
+ * `.update()` is silently dropped by Drizzle until that column lands, whereas
+ * the in-memory adapter persists it today — a latent, self-closing divergence
+ * (same shape as the `utilizationPlanned` caveat above).
+ */
+async function recomputeRequestStaffing(requestId: string): Promise<void> {
+  const request = await repos.requests.get(requestId);
+  if (!request) return;
+  const rows = (await repos.assignments.list()).filter(a => a.requestId === requestId);
+  const { confirmed, planned } = assignmentAggregateHours(rows);
+  await repos.requests.update(request.id, {
+    staffedEffort: confirmed,
+    staffedEffortPlanned: planned,
+    status: requestStatusFor(request, confirmed),
   });
 }
 
@@ -2488,9 +2518,40 @@ apiRouter.post('/approval-requests', async (req, res) => {
   const created = await repos.approvalRequests.create(item as ApprovalRequest);
   res.json(created);
 });
+/**
+ * Build the explicit audit entry for the SYSTEM-DRIVEN assignment status
+ * transition the allocation-decision hook applies. The decision endpoint's own
+ * audit-middleware entry targets `/approval-requests/:id/decision` — it never
+ * observes the assignment mutation this hook performs directly through the
+ * repository (bypassing the `PUT /assignments/:id` route), so without an
+ * explicit entry that transition would be invisible in the append-only trail.
+ * Mirrors the middleware's shape (`AuditEntry`, same id prefix, same
+ * before/after/changedKeys convention) and its TRUSTED-actor attribution
+ * (`trustedRole`, never the raw spoofable `X-User-Role` header) — see the
+ * "AUDIT ATTRIBUTION INTEGRITY" note on the middleware above.
+ */
+function allocationTransitionAudit(req: Request, assig: Assignment, newStatus: Assignment['status']): AuditLog {
+  const afterAssig: Assignment = { ...assig, status: newStatus };
+  const before = cloneEntity(assig);
+  const after = cloneEntity(afterAssig);
+  const entry: AuditEntry = {
+    id: `AL${newId()}`,
+    at: new Date().toISOString(),
+    actorId: actorId(req),
+    actorRole: trustedRole(req),
+    method: 'PUT',
+    path: `/assignments/${assig.id}`,
+    statusCode: 200,
+    before,
+    after,
+    changedKeys: diffChangedKeys(before, after),
+  };
+  return entry as unknown as AuditLog;
+}
+
 apiRouter.put('/approval-requests/:id/decision', async (req, res) => {
   // Validate the decision up front (cheap, no shared state).
-  const body = pick<{ decision: string }>(req.body, ['decision']);
+  const body = pick<{ decision: string; note?: string }>(req.body, ['decision', 'note']);
   if (body.decision !== 'Approved' && body.decision !== 'Rejected') {
     res.status(400).json({ error: "decision must be 'Approved' or 'Rejected'" });
     return;
@@ -2508,13 +2569,21 @@ apiRouter.put('/approval-requests/:id/decision', async (req, res) => {
   }
   const by = actorId(req);
   const decision = body.decision;
+  // MANAGER DECISION PATH: a step may carry an explicit `approverId` (a
+  // resource-manager identified by RESOURCE id — see `allocationApproverStep`).
+  // Resolve the deciding actor's own resource-id so it can be compared against
+  // `step.approverId` below. Computed OUTSIDE withLock — it's an async read
+  // through the users directory and touches no shared mutable state, so it
+  // needn't be serialized with the critical section (mirrors `by`/`decidingRole`
+  // above, also computed before the lock).
+  const deciderResourceId = await actorResourceId(req);
 
   // B-CONCURRENCY: serialize the read-decide-write so two concurrent decisions
   // on the same multi-step request can't both read the same currentStep and
   // double-advance / clobber each other's decision. Re-read INSIDE the lock so
   // the decision is applied to the freshest state (mirrors the invoice-seq
   // critical section).
-  const result = await withLock(`approval:${req.params.id}`, async (): Promise<{ status: number; body: unknown }> => {
+  const result = await withLock(`approval:${req.params.id}`, async (): Promise<{ status: number; body: unknown; allocation?: { refId: string; decided: 'Approved' | 'Rejected' } }> => {
     const ar = await repos.approvalRequests.get(req.params.id) as ApprovalRequestEntry | undefined;
     if (ar === undefined) return { status: 404, body: { error: 'Not found' } };
     if (ar.status !== 'Pending') return { status: 400, body: { error: `approval request already ${ar.status}` } };
@@ -2525,16 +2594,23 @@ apiRouter.put('/approval-requests/:id/decision', async (req, res) => {
     }
     const step = ar.steps[ar.currentStep];
     if (!step) return { status: 400, body: { error: 'No pending step to decide' } };
-    // STEP-ROLE ENFORCEMENT: only an actor holding the role the routing assigned
-    // to the CURRENT step may decide it (admin may decide any step). Without this
-    // the coarse roleGate lets e.g. a pm decide a step routed to finance/
-    // delivery-executive, defeating the built (incl. high-value 2-step) chain.
-    if (decidingRole !== step.role && decidingRole !== 'admin') {
-      return { status: 403, body: { error: `Role ${decidingRole} cannot decide a step assigned to ${step.role}` } };
+    // STEP ENFORCEMENT: either the actor holds the ROLE the routing assigned to
+    // the CURRENT step (admin may decide any step), OR the step carries an
+    // explicit approverId (a manager, by resource-id — allocation requests) and
+    // the deciding actor IS that resource. Without this the coarse roleGate lets
+    // e.g. any resource-manager decide ANY manager's allocation, defeating the
+    // per-manager routing `allocationApproverStep` builds.
+    const roleMatch = decidingRole === step.role || decidingRole === 'admin';
+    const managerMatch = step.approverId !== undefined && deciderResourceId === step.approverId;
+    if (!roleMatch && !managerMatch) {
+      return { status: 403, body: { error: `Actor cannot decide a step assigned to ${step.approverId ?? step.role}` } };
     }
     const decidedAt = new Date().toISOString();
     step.decidedBy = by;
     step.decidedAt = decidedAt;
+    // Record the APPROVER's note on the decided step — never overwrite `ar.note`,
+    // which is the requester's note captured at creation.
+    if (typeof body.note === 'string') step.note = body.note;
     if (decision === 'Rejected') {
       // A rejection at any step fails the whole chain and steps back currentStep.
       step.status = 'Rejected';
@@ -2547,8 +2623,38 @@ apiRouter.put('/approval-requests/:id/decision', async (req, res) => {
       if (ar.currentStep >= ar.steps.length) ar.status = 'Approved';
     }
     const updated = await repos.approvalRequests.update(ar.id, ar as ApprovalRequest);
-    return { status: 200, body: updated ?? ar };
+    return {
+      status: 200,
+      body: updated ?? ar,
+      // ALLOCATION HOOK: Allocation requests are single-step, so a terminal
+      // Approved/Rejected decision here is the FINAL outcome for the whole
+      // request — surface it so the caller can translate it into the governed
+      // assignment's status once this lock has been released (see below).
+      allocation: ar.kind === 'Allocation' && (ar.status === 'Approved' || ar.status === 'Rejected')
+        ? { refId: ar.refId, decided: ar.status as 'Approved' | 'Rejected' }
+        : undefined,
+    };
   });
+
+  // POST-DECISION EFFECT (Allocation): applied AFTER the `approval:<id>` lock
+  // has been released — never nested inside it. Runs under the FIXED
+  // res -> req lock order the rest of the assignment-mutating code already
+  // uses (never both held at once), so this can never deadlock against a
+  // concurrent POST/PUT/DELETE on /assignments. Executes at most once per
+  // decision: `ar.status` starts 'Pending' and the block above only ever sets
+  // it to 'Approved'/'Rejected' once (a retried decision 400s on the
+  // `ar.status !== 'Pending'` guard, so `result.allocation` is undefined then).
+  if (result.status === 200 && result.allocation) {
+    const { refId, decided } = result.allocation;
+    const assig = await repos.assignments.get(refId);
+    if (assig) {
+      const newStatus = decisionToAssignmentStatus(decided);
+      await repos.assignments.update(assig.id, { status: newStatus });
+      await withLock(`res:${assig.resourceId}`, () => recomputeResourceUtilization(assig.resourceId));
+      await withLock(`req:${assig.requestId}`, () => recomputeRequestStaffing(assig.requestId));
+      await repos.auditLogs.create(allocationTransitionAudit(req, assig, newStatus));
+    }
+  }
   res.status(result.status).json(result.body);
 });
 
