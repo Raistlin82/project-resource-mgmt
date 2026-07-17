@@ -877,8 +877,11 @@ export class ApiService {
 
   getApprovalRequests(): Observable<ApprovalRequest[]> { return this.http.get<ApprovalRequest[]>(`${this.baseUrl}/approval-requests`); }
   createApprovalRequest(a: Partial<ApprovalRequest>): Observable<ApprovalRequest> { return this.http.post<ApprovalRequest>(`${this.baseUrl}/approval-requests`, a); }
-  decideApprovalRequest(id: string, decision: 'Approved' | 'Rejected', by: string): Observable<ApprovalRequest> {
-    return this.http.put<ApprovalRequest>(`${this.baseUrl}/approval-requests/${id}/decision`, { decision, by });
+  decideApprovalRequest(id: string, decision: 'Approved' | 'Rejected', note?: string): Observable<ApprovalRequest> {
+    // The deciding principal is derived server-side from the trusted actor (never a
+    // client-supplied `by`), so the body is just { decision, note }. `note` is the
+    // approver's note, recorded on the decided step (omitted when empty).
+    return this.http.put<ApprovalRequest>(`${this.baseUrl}/approval-requests/${id}/decision`, { decision, ...(note ? { note } : {}) });
   }
 
   getAuditLogs(): Observable<AuditLog[]> { return this.http.get<AuditLog[]>(`${this.baseUrl}/audit-logs`); }

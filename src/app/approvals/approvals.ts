@@ -28,6 +28,8 @@ interface ApprovalRow {
   request: ApprovalRequest;
   kind: ApprovalKind;
   reference: string;
+  /** Human, kind-aware description (used for Allocation, which has an opaque refId). */
+  label: string;
   projectLabel: string;
   amount?: number;
   requestedByLabel: string;
@@ -111,7 +113,14 @@ interface ApprovalRow {
                       {{ row.kind }}
                     </span>
                   </td>
-                  <td class="font-mono tabular-nums">{{ row.reference }}</td>
+                  <td>
+                    @if (row.kind === 'Allocation') {
+                      <div class="font-semibold text-[var(--cc-ink)]">{{ row.label }}</div>
+                      <div class="text-xs font-mono tabular-nums text-[var(--cc-muted)] mt-0.5">{{ row.reference }}</div>
+                    } @else {
+                      <span class="font-mono tabular-nums">{{ row.reference }}</span>
+                    }
+                  </td>
                   <td><span class="text-[var(--cc-muted)]">{{ row.projectLabel }}</span></td>
                   <td class="text-right font-semibold">
                     @if (row.amount !== undefined) {
@@ -151,7 +160,18 @@ interface ApprovalRow {
                   </td>
                   <td class="text-right">
                     @if (row.request.status === 'Pending') {
-                      <div class="inline-flex items-center gap-1">
+                      <div class="inline-flex items-center gap-2 justify-end">
+                        @if (row.canDecide) {
+                          <span class="inline-block w-40">
+                            <input #noteInput type="text"
+                                   [value]="noteFor(row.request.id)"
+                                   (input)="setNote(row.request.id, noteInput.value)"
+                                   [disabled]="pendingId() === row.request.id"
+                                   placeholder="Nota (opzionale)"
+                                   [attr.aria-label]="'Approval note for ' + row.reference"
+                                   class="command-input">
+                          </span>
+                        }
                         <button type="button"
                                 (click)="decide(row, 'Approved')"
                                 [disabled]="!row.canDecide || pendingId() === row.request.id"
@@ -226,6 +246,14 @@ export class Approvals {
   filter = signal<'mine' | 'all'>('mine');
   /** Id of the request whose decision is in flight, to guard against double-submit. */
   pendingId = signal<string | null>(null);
+  /** Optional approver note per request id, captured before an approve/reject. */
+  private notes = signal<Record<string, string>>({});
+  noteFor(id: string): string {
+    return this.notes()[id] ?? '';
+  }
+  setNote(id: string, value: string): void {
+    this.notes.update(m => ({ ...m, [id]: value }));
+  }
 
   private projectsById = computed(() => new Map(this.res.value().projects.map(p => [p.id, p.name])));
   private resourcesById = computed(() => new Map(this.res.value().resources.map(r => [r.id, r.name])));
@@ -248,14 +276,24 @@ export class Approvals {
         const currentRole = step?.role;
         const selfRequested = request.requestedBy === userId;
         const roleMatches = !!currentRole && (role === 'admin' || role === currentRole);
-        const approvable = !selfRequested && roleMatches;
+        // MANAGER PATH (allocation approvals): a step may pin a specific approver by
+        // RESOURCE-id (the resource's People Manager). In this app's demo identity,
+        // auth.userId() maps to the resource-id, which is what approverId holds, so
+        // allow the assigned manager to decide too. UX-only — the server re-checks.
+        // (In prod userId() is the JWT sub, not a resource-id, so this may not match;
+        // accepted gap — the role-based path still surfaces the action, server allows.)
+        const managerMatches = !!step?.approverId && step.approverId === userId;
+        const authorized = roleMatches || managerMatches;
+        const approvable = !selfRequested && authorized;
         const overdue = !!request.slaDueAt && new Date(request.slaDueAt).getTime() < now;
+        const projectLabel = request.projectId ? (projects.get(request.projectId) ?? request.projectId) : 'No project';
 
         return {
           request,
           kind: request.kind,
           reference: request.refId,
-          projectLabel: request.projectId ? (projects.get(request.projectId) ?? request.projectId) : 'No project',
+          label: this.rowLabel(request, projectLabel),
+          projectLabel,
           amount: request.amount,
           requestedByLabel: users.get(request.requestedBy) ?? resources.get(request.requestedBy) ?? request.requestedBy,
           stepLabel: `Step ${Math.min(request.currentStep + 1, request.steps.length)} of ${request.steps.length}`,
@@ -265,7 +303,7 @@ export class Approvals {
           overdue,
           approvable,
           selfRequested,
-          canDecide: roleMatches && !selfRequested,
+          canDecide: authorized && !selfRequested,
         } satisfies ApprovalRow;
       });
   });
@@ -280,8 +318,10 @@ export class Approvals {
   decide(row: ApprovalRow, decision: 'Approved' | 'Rejected'): void {
     if (!row.canDecide || this.pendingId() === row.request.id) return;
     this.pendingId.set(row.request.id);
+    // Optional approver note; the deciding principal is derived server-side.
+    const note = this.noteFor(row.request.id).trim() || undefined;
     this.api
-      .decideApprovalRequest(row.request.id, decision, this.auth.userId())
+      .decideApprovalRequest(row.request.id, decision, note)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: () => {
@@ -323,6 +363,19 @@ export class Approvals {
       default:
         return 'task_alt';
     }
+  }
+
+  /**
+   * Human, kind-aware description. Allocation approvals carry an opaque assignment
+   * refId, so surface a readable label built from the fields on hand (the project;
+   * the allocated resource isn't joinable here without loading assignments — an
+   * accepted limitation). Other kinds fall back to the raw reference.
+   */
+  private rowLabel(request: ApprovalRequest, projectLabel: string): string {
+    if (request.kind === 'Allocation') {
+      return request.projectId ? `Allocazione su ${projectLabel}` : 'Allocazione risorsa';
+    }
+    return request.refId;
   }
 
   private roleLabel(role: string | undefined): string {

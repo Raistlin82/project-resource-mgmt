@@ -221,6 +221,21 @@ const REMOTE_LOCATION = 'Remote';
                 </div>
               }
 
+              <div>
+                <label for="res-manager" class="block text-sm font-medium text-ink-secondary mb-1">People Manager</label>
+                <!-- The People Manager (managerId) is another resource. Only ACTIVE
+                     resources are eligible, and never this resource itself. Optional. -->
+                <select id="res-manager" formControlName="managerId" class="command-select">
+                  <option value="">Unassigned</option>
+                  @for (m of managerOptions(); track m.id) {
+                    <option [value]="m.id">{{ m.name }}</option>
+                  }
+                  @if (orphanManager(); as orphan) {
+                    <option [value]="orphan.id" disabled>{{ orphan.name }} (not selectable)</option>
+                  }
+                </select>
+              </div>
+
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label for="res-capacity" class="block text-sm font-medium text-ink-secondary mb-1">Capacity (h/wk) *</label>
@@ -403,6 +418,26 @@ export class ResourcesComponent {
     return this.orgOptions().some(o => o.name === current) ? null : current;
   });
 
+  // PEOPLE MANAGER (allocation-approval workflow): managerId points at another
+  // resource. The dropdown offers only ACTIVE resources (terminated excluded) and
+  // never the resource being edited (nobody manages themselves). Sorted by name.
+  managerOptions = computed<Resource[]>(() => {
+    const editingId = this.editingId();
+    return this.resources()
+      .filter(r => !this.isTerminated(r) && r.id !== editingId)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  });
+  // ORPHAN VALUE: when editing, a stored managerId that isn't in the active option
+  // list (e.g. the manager has since been terminated) stays selectable as a disabled
+  // option so saving never silently drops it.
+  private editingManagerId = signal<string>('');
+  orphanManager = computed<Resource | null>(() => {
+    const current = this.editingManagerId();
+    if (!current) return null;
+    if (this.managerOptions().some(r => r.id === current)) return null;
+    return this.resources().find(r => r.id === current) ?? null;
+  });
+
   /** Derive the country/Remote selection from a stored city/sentinel location value. */
   private countryForLocation(location: string): string {
     if (!location) return '';
@@ -448,6 +483,7 @@ export class ResourcesComponent {
   form = new FormGroup({
     name: new FormControl('', Validators.required),
     role: new FormControl('', Validators.required),
+    managerId: new FormControl(''),
     organization: new FormControl(''),
     location: new FormControl(''),
     capacity: new FormControl<number | null>(40, [Validators.required, Validators.min(1)]),
@@ -486,10 +522,12 @@ export class ResourcesComponent {
       this.editingRole.set(r.role ?? '');
       this.editingLocation.set(r.location ?? '');
       this.editingOrg.set(r.organization ?? '');
+      this.editingManagerId.set(r.managerId ?? '');
       this.countryOverride.set(null); // derive country from the stored location
       this.form.reset({
         name: r.name,
         role: r.role,
+        managerId: r.managerId ?? '',
         organization: r.organization ?? '',
         location: r.location ?? '',
         capacity: r.capacity ?? 40,
@@ -504,8 +542,9 @@ export class ResourcesComponent {
       this.editingRole.set('');
       this.editingLocation.set('');
       this.editingOrg.set('');
+      this.editingManagerId.set('');
       this.countryOverride.set('');
-      this.form.reset({ name: '', role: '', organization: '', location: '', capacity: 40, costRateOverride: null, billRateOverride: null, hireDate: '' });
+      this.form.reset({ name: '', role: '', managerId: '', organization: '', location: '', capacity: 40, costRateOverride: null, billRateOverride: null, hireDate: '' });
     }
     this.showForm.set(true);
   }
@@ -526,6 +565,8 @@ export class ResourcesComponent {
     const payload: Partial<Resource> = {
       name: raw.name ?? '',
       role: raw.role ?? '',
+      // '' = unassigned (clears any previously-set People Manager).
+      managerId: raw.managerId ?? '',
       organization: raw.organization ?? '',
       location: raw.location ?? '',
       capacity: Number(raw.capacity),

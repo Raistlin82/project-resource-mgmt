@@ -3,6 +3,7 @@ import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, ResourceRequest, Resource, Assignment } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
+import { NotificationService } from '../services/notification.service';
 import { DecimalPipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { forkJoin, of } from 'rxjs';
@@ -169,7 +170,8 @@ interface DimensionMeter {
                             </label>
                           </div>
                           <div class="flex items-center gap-2">
-                            <button (click)="confirmAssign(cand.resourceId)" [disabled]="assigning()" class="command-button flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">Confirm</button>
+                            <button (click)="confirmAssign(cand.resourceId, 'Draft')" [disabled]="assigning()" class="command-button secondary flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">Salva in bozza</button>
+                            <button (click)="confirmAssign(cand.resourceId, 'Requested')" [disabled]="assigning()" class="command-button flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">Manda in approvazione</button>
                             <button type="button" (click)="cancelAssign()" aria-label="Cancel assignment" title="Cancel assignment" class="command-button secondary"><mat-icon class="text-[20px] w-[20px] h-[20px]">close</mat-icon></button>
                           </div>
                         </div>
@@ -253,6 +255,7 @@ export class StaffingComponent {
   private api = inject(ApiService);
   private destroyRef = inject(DestroyRef);
   private auth = inject(AuthService);
+  private notifications = inject(NotificationService);
 
   // resources is principal-gated server-side (401 until the Keycloak JWT is
   // restored). On reload the OIDC token restores async, so firing the forkJoin
@@ -399,7 +402,15 @@ export class StaffingComponent {
     this.assignAllocationPct.set(100);
   }
 
-  confirmAssign(resourceId: string) {
+  /**
+   * Propose an assignment. `status` is what the client is allowed to set:
+   *  - 'Draft'     — save a draft (no approval opened);
+   *  - 'Requested' — send for approval. The server auto-approves it straight to
+   *    'Allocated' when the proposer IS the resource's manager, else opens an
+   *    Allocation approval and keeps it 'Requested'.
+   * The resulting (server-resolved) status is surfaced in a notification.
+   */
+  confirmAssign(resourceId: string, status: 'Draft' | 'Requested') {
     if (this.assigning()) return;
     const req = this.selectedRequest();
     const hours = this.assignHours();
@@ -412,26 +423,37 @@ export class StaffingComponent {
         requestId: req.id,
         resourceId: resourceId,
         assignedHours: hours,
-        // TODO(alloc-approval): 'hard-booked' predates the typed Assignment.status
-        // union added in the allocation-approval-workflow feature; cast is
-        // type-only (no runtime change) until this handler is rewritten (Task 7+).
-        status: 'hard-booked' as Assignment['status'],
+        status,
         // Carry the booking window + allocation; omit empty dates so the schedule
         // util falls back to the linked request's dates.
         ...(startDate ? { startDate } : {}),
         ...(endDate ? { endDate } : {}),
         ...(Number.isFinite(allocationPct) ? { allocationPct } : {})
       }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
-        next: () => {
+        next: (created) => {
           this.assigning.set(false);
           this.cancelAssign();
           this.selectedRequest.set(null);
           this.res.reload();
+          this.notifications.show(this.assignmentResultMessage(created), 'success');
         },
         error: () => {
           this.assigning.set(false);
+          this.notifications.show('Impossibile creare l’allocazione', 'error');
         }
       });
     }
+  }
+
+  /** Human, status-aware confirmation for the created assignment (server-resolved status). */
+  private assignmentResultMessage(a: Assignment): string {
+    const name = this.allResources().find(r => r.id === a.resourceId)?.name ?? 'Risorsa';
+    const label: Record<Assignment['status'], string> = {
+      Draft: 'salvata in bozza',
+      Requested: 'inviata in approvazione',
+      Allocated: 'allocata',
+      Rejected: 'rifiutata',
+    };
+    return `${name}: allocazione ${label[a.status]}`;
   }
 }

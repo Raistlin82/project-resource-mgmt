@@ -157,13 +157,29 @@ interface RequestsData {
                             {{ getStaffingPercentage(req) | number:'1.0-0' }}%
                           </span>
                         </div>
-                        <div class="w-full bg-surface-muted rounded-full h-2 overflow-hidden">
-                          <div class="h-2 rounded-full transition-all duration-1000 ease-out"
+                        <!-- Two-value staffing bar: CONFIRMED (staffedEffort, solid) with a
+                             lighter hatched PLANNED overlay (staffedEffortPlanned = requested +
+                             allocated). Planned falls back to confirmed when absent, so the
+                             overlay simply vanishes. The confirmed layer paints last (on top). -->
+                        <div class="relative w-full bg-surface-muted rounded-full h-2 overflow-hidden"
+                             role="img" [attr.aria-label]="staffingBarLabel(req)" [title]="staffingBarLabel(req)">
+                          @if (getPlannedStaffingPercentage(req) > getStaffingPercentage(req)) {
+                            <div class="absolute inset-y-0 left-0 rounded-full transition-all duration-1000 ease-out"
+                                 [style.width.%]="getPlannedStaffingPercentage(req)"
+                                 [style.background]="plannedStripe"></div>
+                          }
+                          <div class="absolute inset-y-0 left-0 rounded-full transition-all duration-1000 ease-out"
                                [class.bg-positive]="getStaffingPercentage(req) >= 100"
                                [class.bg-caution]="getStaffingPercentage(req) > 0 && getStaffingPercentage(req) < 100"
                                [class.bg-line-strong]="getStaffingPercentage(req) === 0"
                                [style.width.%]="getStaffingPercentage(req)"></div>
                         </div>
+                        @if (getPlannedStaffingPercentage(req) > getStaffingPercentage(req)) {
+                          <span class="text-[10px] font-medium text-caution-text flex items-center gap-1">
+                            <mat-icon class="text-[12px] w-[12px] h-[12px]">hourglass_empty</mat-icon>
+                            {{ req.staffedEffortPlanned }}h pianificati (in approvazione)
+                          </span>
+                        }
                       </div>
                     </td>
                     <td>
@@ -364,13 +380,10 @@ interface RequestsData {
                     </div>
                     <div class="text-right flex flex-col items-end gap-1">
                       <div class="font-bold text-[var(--cc-primary-text)] text-lg font-mono tabular-nums">{{ item.assignment.assignedHours }}h</div>
-                      <!-- TODO(alloc-approval): 'confirmed'/'proposed' predate the typed
-                           Assignment.status union added in the allocation-approval-workflow
-                           feature; $any() cast is type-only (no runtime change) until this
-                           is revisited (Task 7+). -->
-                      <div class="command-status uppercase"
-                           [class.green]="$any(item.assignment.status) === 'confirmed'"
-                           [class.amber]="$any(item.assignment.status) === 'proposed'">
+                      <!-- Allocation status: Draft (neutral) · Requested (amber) ·
+                           Allocated (green) · Rejected (red). command-status tones
+                           carry the -text accent colour (WCAG AA). -->
+                      <div class="command-status uppercase" [class]="assignmentStatusClass(item.assignment.status)">
                         {{ item.assignment.status }}
                       </div>
                     </div>
@@ -622,6 +635,44 @@ export class ResourceRequestsComponent {
     if (!req.requiredEffort) return 0;
     const staffed = req.staffedEffort || 0;
     return Math.min(100, Math.round((staffed / req.requiredEffort) * 100));
+  }
+
+  /**
+   * PLANNED staffing % (staffedEffortPlanned = requested + allocated), capped at
+   * 100. Falls back to the confirmed effort when staffedEffortPlanned is absent,
+   * so the planned overlay then equals confirmed and simply doesn't render.
+   */
+  getPlannedStaffingPercentage(req: ResourceRequest): number {
+    if (!req.requiredEffort) return 0;
+    const planned = req.staffedEffortPlanned ?? req.staffedEffort ?? 0;
+    return Math.min(100, Math.round((planned / req.requiredEffort) * 100));
+  }
+
+  /** Accessible description of the two-value (confirmed + planned) staffing bar. */
+  staffingBarLabel(req: ResourceRequest): string {
+    const confirmed = req.staffedEffort ?? 0;
+    const planned = req.staffedEffortPlanned ?? confirmed;
+    const base = `${confirmed}h confermati su ${req.requiredEffort}h`;
+    return planned > confirmed ? `${base}; ${planned}h pianificati (in approvazione)` : base;
+  }
+
+  /** Diagonal hatch marking the planned-but-not-yet-confirmed portion of the bar. */
+  protected readonly plannedStripe =
+    'repeating-linear-gradient(45deg, var(--color-caution) 0 3px, transparent 3px 6px)';
+
+  /** command-status tone modifier for an assignment's allocation status. */
+  assignmentStatusClass(status: Assignment['status']): string {
+    switch (status) {
+      case 'Allocated':
+        return 'green';
+      case 'Requested':
+        return 'amber';
+      case 'Rejected':
+        return 'red';
+      case 'Draft':
+      default:
+        return 'neutral';
+    }
   }
 
   /** command-chip tone modifier for a request's lifecycle status. */
