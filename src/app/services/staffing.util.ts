@@ -9,7 +9,7 @@
  * Extracting them keeps the rules side-effect-free and unit-testable while the
  * server imports the very same functions it is tested against.
  */
-import type { ResourceRequest, TimeEntry, ApprovalStep } from './api.service';
+import type { ResourceRequest, TimeEntry, ApprovalStep, Assignment } from './api.service';
 
 /**
  * Utilization percentage contributed by `hours` of work against a resource's
@@ -63,7 +63,7 @@ export function isAllowedTimeEntryTransition(from: TimeEntry['status'], to: Time
   return TIME_ENTRY_TRANSITIONS[from].includes(to);
 }
 
-export type AllocationStatus = 'Draft' | 'Requested' | 'Allocated' | 'Rejected';
+export type AllocationStatus = Assignment['status'];
 
 /** Only these statuses may be set by a client via POST/PUT /assignments. */
 export const ALLOCATION_CLIENT_SETTABLE: readonly AllocationStatus[] = ['Draft', 'Requested'];
