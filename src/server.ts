@@ -10,7 +10,7 @@ import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
 import type { AuditLog, Resource, ResourceRequest, Assignment, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
-import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours, decisionToAssignmentStatus } from './app/services/staffing.util';
+import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours, decisionToAssignmentStatus, allocationApproverStep, isAllowedAllocationTransition, ALLOCATION_CLIENT_SETTABLE, type AllocationStatus } from './app/services/staffing.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { maxIdSeq } from './server/id-seq.util';
@@ -1060,6 +1060,39 @@ async function recomputeRequestStaffing(requestId: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// ALLOCATION APPROVAL side-effects — open / withdraw the single-step approval
+// that governs an assignment's Requested -> Allocated transition.
+//
+// CONCURRENCY: both are async reads/writes through the approvalRequests repo and
+// touch NO res:/req: aggregate, so callers invoke them OUTSIDE any res:/req:
+// lock (never nested inside a recompute critical section).
+// ---------------------------------------------------------------------------
+
+/** Open a single-step (resource-manager) approval for `assig` and return its id. */
+async function createAllocationApproval(req: Request, assig: Assignment): Promise<string> {
+  const createdAt = new Date().toISOString();
+  const request = await repos.requests.get(assig.requestId);
+  const resource = await repos.resources.get(assig.resourceId);
+  const ar: ApprovalRequestEntry = {
+    id: `AR${newId()}`, kind: 'Allocation', refId: assig.id, projectId: request?.projectId,
+    requestedBy: actorId(req), status: 'Pending',
+    steps: [allocationApproverStep(resource?.managerId)], currentStep: 0,
+    createdAt, slaDueAt: slaDueFrom(createdAt),
+  };
+  const created = await repos.approvalRequests.create(ar as ApprovalRequest);
+  return created.id;
+}
+
+/** Withdraw a still-Pending allocation approval (no-op when absent or already decided). */
+async function withdrawAllocationApproval(approvalId: string | undefined, reason: string): Promise<void> {
+  if (!approvalId) return;
+  const ar = await repos.approvalRequests.get(approvalId);
+  if (ar && ar.status === 'Pending') {
+    await repos.approvalRequests.update(ar.id, { status: 'Rejected', note: reason } as Partial<ApprovalRequest>);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // RATE CARDS (Phase E) — effective-rate resolution.
 //
 // A resource's stored cost_rate/bill_rate column is the OPTIONAL per-resource
@@ -1310,21 +1343,40 @@ apiRouter.post('/assignments', async (req, res) => {
   // B-DATA: an assignment must reference an existing request and resource.
   if (!(await existsRepo(repos.requests, body.requestId))) { res.status(400).json({ error: 'requestId must reference an existing request' }); return; }
   if (!(await existsRepo(repos.resources, body.resourceId))) { res.status(400).json({ error: 'resourceId must reference an existing resource' }); return; }
-  const newAssig = { id: newId(), ...body } as Assignment;
-  const created = await repos.assignments.create(newAssig);
 
-  // B-CONCURRENCY + B-UTILIZATION: serialize per-resource and recompute
-  // utilization from the full set of assignments (never a lossy running delta).
+  // ALLOCATION LIFECYCLE: a client may only PROPOSE an assignment as 'Draft' or
+  // 'Requested' (ALLOCATION_CLIENT_SETTABLE). 'Allocated'/'Rejected' are reached
+  // only through the approval-decision hook (or the self-managed shortcut below),
+  // never forged on create.
+  const requestedStatus = (body.status ?? 'Draft') as AllocationStatus;
+  if (!ALLOCATION_CLIENT_SETTABLE.includes(requestedStatus)) {
+    res.status(400).json({ error: "status must be 'Draft' or 'Requested'" });
+    return;
+  }
+  // SELF-MANAGED SHORTCUT: when the proposer IS the resource's own manager, a
+  // 'Requested' proposal auto-approves straight to 'Allocated' with NO approval
+  // request (approver and requester would be the same principal — SoD would block
+  // the decision anyway). Any other actor's 'Requested' opens a manager approval.
+  const resource = await repos.resources.get(body.resourceId ?? '');
+  const proposerResourceId = await actorResourceId(req);
+  const selfManaged = requestedStatus === 'Requested' && resource?.managerId !== undefined && resource.managerId === proposerResourceId;
+  const effectiveStatus: AllocationStatus = selfManaged ? 'Allocated' : requestedStatus;
+
+  const created = await repos.assignments.create({ id: newId(), ...body, status: effectiveStatus } as Assignment);
+
+  // Open the manager approval only for a non-self-managed 'Requested' proposal,
+  // and link it back onto the assignment so a later edit/delete can withdraw it.
+  // Done OUTSIDE the res:/req: locks below.
+  if (requestedStatus === 'Requested' && !selfManaged) {
+    const approvalId = await createAllocationApproval(req, created);
+    await repos.assignments.update(created.id, { approvalId });
+  }
+
+  // B-CONCURRENCY + B-UTILIZATION: recompute BOTH aggregates from the full set of
+  // assignments (never a lossy running delta). Sequential per-key locks.
   await withLock(`res:${created.resourceId}`, () => recomputeResourceUtilization(created.resourceId));
-
-  await withLock(`req:${created.requestId}`, async () => {
-    const request = await repos.requests.get(created.requestId);
-    if (request) {
-      const staffedEffort = (request.staffedEffort ?? 0) + created.assignedHours;
-      await repos.requests.update(request.id, { staffedEffort, status: requestStatusFor(request, staffedEffort) });
-    }
-  });
-  res.json(created);
+  await withLock(`req:${created.requestId}`, () => recomputeRequestStaffing(created.requestId));
+  res.json(await repos.assignments.get(created.id));
 });
 apiRouter.put('/assignments/:id', async (req, res) => {
   const oldAssig = await repos.assignments.get(req.params.id);
@@ -1350,69 +1402,113 @@ apiRouter.put('/assignments/:id', async (req, res) => {
     res.status(400).json({ error: 'requestId must reference an existing request' });
     return;
   }
-  const newAssig = { ...oldAssig, ...body };
-  await repos.assignments.update(req.params.id, body);
+  const oldStatus = oldAssig.status;
+  // ALLOCATION LIFECYCLE: a client-supplied status must be client-settable
+  // ('Draft'|'Requested') AND a legal transition from the current status. The
+  // system transitions into 'Allocated'/'Rejected' are applied only by the
+  // approval-decision hook (or the self-managed shortcut below), never here.
+  if (body.status !== undefined) {
+    if (!ALLOCATION_CLIENT_SETTABLE.includes(body.status)) {
+      res.status(400).json({ error: "status must be 'Draft' or 'Requested'" });
+      return;
+    }
+    if (!isAllowedAllocationTransition(oldStatus, body.status)) {
+      res.status(400).json({ error: `illegal status transition ${oldStatus} -> ${body.status}` });
+      return;
+    }
+  }
 
-  const resourceChanged = newAssig.resourceId !== oldAssig.resourceId;
-  const requestChanged = newAssig.requestId !== oldAssig.requestId;
+  // A "material" edit to an already-Allocated assignment invalidates its prior
+  // approval, so it is forced back to 'Requested' for re-approval.
+  const MATERIAL_KEYS = ['assignedHours', 'startDate', 'endDate', 'resourceId', 'allocationPct'] as const;
+  const materialChange = MATERIAL_KEYS.some(k => body[k] !== undefined && body[k] !== oldAssig[k]);
 
-  // B-UTILIZATION: recompute utilization from the full set of assignments for
-  // every affected resource (the source of truth), so FK retargeting and hours
-  // changes are reflected exactly with no lossy running delta. When the resource
-  // changes, BOTH the old and new resource are recomputed. Each recompute is
-  // serialized per resource key (B-CONCURRENCY).
+  // Target status: an explicit client status wins; else an Allocated assignment
+  // with a material change is forced to 'Requested' (re-approval); else unchanged.
+  const targetStatus: AllocationStatus =
+    body.status !== undefined ? body.status
+    : (oldStatus === 'Allocated' && materialChange) ? 'Requested'
+    : oldStatus;
+
+  // SELF-MANAGED SHORTCUT (parity with POST): when the target is 'Requested' and
+  // the effective resource's manager IS the proposer, auto-approve to 'Allocated'
+  // with NO approval request.
+  let finalStatus: AllocationStatus = targetStatus;
+  let autoApproved = false;
+  if (targetStatus === 'Requested') {
+    const effectiveResourceId = body.resourceId ?? oldAssig.resourceId;
+    const resource = await repos.resources.get(effectiveResourceId);
+    const proposerResourceId = await actorResourceId(req);
+    if (resource?.managerId !== undefined && resource.managerId === proposerResourceId) {
+      finalStatus = 'Allocated';
+      autoApproved = true;
+    }
+  }
+
+  // APPROVAL SIDE-EFFECTS (outside any res:/req: lock, never nested). We touch the
+  // approval only on a status change into/out of the approvable state:
+  //  - ENTERING 'Requested' (from a non-Requested status): supersede any prior
+  //    approval and open a fresh one on the merged assignment.
+  //  - back to 'Draft': supersede the pending approval; the assignment carries none.
+  //  - auto-approved to 'Allocated': supersede the pending approval; none remains.
+  //  - otherwise (incl. a still-'Requested' assignment whose material fields
+  //    change): leave the pending approval untouched — the approver reads the
+  //    fresh assignment via refId.
+  let approvalId = oldAssig.approvalId;
+  let approvalChanged = false;
+  if (finalStatus === 'Requested' && !autoApproved && oldStatus !== 'Requested') {
+    await withdrawAllocationApproval(oldAssig.approvalId, 'superseded');
+    approvalId = await createAllocationApproval(req, { ...oldAssig, ...body, id: oldAssig.id });
+    approvalChanged = true;
+  } else if (finalStatus === 'Draft') {
+    await withdrawAllocationApproval(oldAssig.approvalId, 'returned to draft');
+    approvalId = undefined;
+    approvalChanged = true;
+  } else if (finalStatus === 'Allocated' && autoApproved) {
+    await withdrawAllocationApproval(oldAssig.approvalId, 'superseded');
+    approvalId = undefined;
+    approvalChanged = true;
+  }
+
+  const patch: Partial<Assignment> = { ...body, status: finalStatus };
+  if (approvalChanged) patch.approvalId = approvalId;
+  await repos.assignments.update(req.params.id, patch);
+
+  const newResourceId = body.resourceId ?? oldAssig.resourceId;
+  const newRequestId = body.requestId ?? oldAssig.requestId;
+  const resourceChanged = newResourceId !== oldAssig.resourceId;
+  const requestChanged = newRequestId !== oldAssig.requestId;
+
+  // B-UTILIZATION + B-STAFFING: recompute BOTH aggregates from the full set of
+  // assignments (the source of truth) for every affected resource/request — no
+  // lossy running delta. On an FK retarget BOTH old and new are recomputed.
+  // Sequential per-key locks, never nested; res: before req: (fixed lock order).
   if (resourceChanged) {
     await withLock(`res:${oldAssig.resourceId}`, () => recomputeResourceUtilization(oldAssig.resourceId));
-    await withLock(`res:${newAssig.resourceId}`, () => recomputeResourceUtilization(newAssig.resourceId));
+    await withLock(`res:${newResourceId}`, () => recomputeResourceUtilization(newResourceId));
   } else {
-    await withLock(`res:${newAssig.resourceId}`, () => recomputeResourceUtilization(newAssig.resourceId));
+    await withLock(`res:${newResourceId}`, () => recomputeResourceUtilization(newResourceId));
   }
-
   if (requestChanged) {
-    // Fully back out the assignment's old hours from the OLD request...
-    await withLock(`req:${oldAssig.requestId}`, async () => {
-      const oldReq = await repos.requests.get(oldAssig.requestId);
-      if (oldReq) {
-        const staffedEffort = (oldReq.staffedEffort ?? 0) - oldAssig.assignedHours;
-        await repos.requests.update(oldReq.id, { staffedEffort, status: requestStatusFor(oldReq, staffedEffort) });
-      }
-    });
-    // ...and add the assignment's full hours to the NEW request.
-    await withLock(`req:${newAssig.requestId}`, async () => {
-      const newReq = await repos.requests.get(newAssig.requestId);
-      if (newReq) {
-        const staffedEffort = (newReq.staffedEffort ?? 0) + newAssig.assignedHours;
-        await repos.requests.update(newReq.id, { staffedEffort, status: requestStatusFor(newReq, staffedEffort) });
-      }
-    });
+    await withLock(`req:${oldAssig.requestId}`, () => recomputeRequestStaffing(oldAssig.requestId));
+    await withLock(`req:${newRequestId}`, () => recomputeRequestStaffing(newRequestId));
   } else {
-    await withLock(`req:${newAssig.requestId}`, async () => {
-      const request = await repos.requests.get(newAssig.requestId);
-      if (request) {
-        const staffedEffort = (request.staffedEffort ?? 0) + (newAssig.assignedHours - oldAssig.assignedHours);
-        await repos.requests.update(request.id, { staffedEffort, status: requestStatusFor(request, staffedEffort) });
-      }
-    });
+    await withLock(`req:${newRequestId}`, () => recomputeRequestStaffing(newRequestId));
   }
-  res.json(newAssig);
+  res.json(await repos.assignments.get(req.params.id));
 });
 apiRouter.delete('/assignments/:id', async (req, res) => {
   const oldAssig = await repos.assignments.get(req.params.id);
   if (oldAssig === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  // Supersede any pending approval BEFORE removing the assignment (outside the
+  // res:/req: locks) so a deleted assignment never leaves an orphaned approval.
+  await withdrawAllocationApproval(oldAssig.approvalId, 'assignment deleted');
   await repos.assignments.remove(req.params.id);
 
-  // B-CONCURRENCY + B-UTILIZATION: serialize per-resource and recompute
-  // utilization from the remaining assignments (an over-removal can no longer
-  // clamp the stored counter to 0 and destroy magnitude).
+  // B-CONCURRENCY + B-UTILIZATION + B-STAFFING: recompute BOTH aggregates from the
+  // remaining assignments (never a lossy running delta). Sequential per-key locks.
   await withLock(`res:${oldAssig.resourceId}`, () => recomputeResourceUtilization(oldAssig.resourceId));
-
-  await withLock(`req:${oldAssig.requestId}`, async () => {
-    const request = await repos.requests.get(oldAssig.requestId);
-    if (request) {
-      const staffedEffort = (request.staffedEffort ?? 0) - oldAssig.assignedHours;
-      await repos.requests.update(request.id, { staffedEffort, status: requestStatusFor(request, staffedEffort) });
-    }
-  });
+  await withLock(`req:${oldAssig.requestId}`, () => recomputeRequestStaffing(oldAssig.requestId));
   res.status(204).send();
 });
 
