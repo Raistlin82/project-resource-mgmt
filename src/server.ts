@@ -1092,6 +1092,18 @@ async function withdrawAllocationApproval(approvalId: string | undefined, reason
   }
 }
 
+/**
+ * True iff the actor proposing an allocation IS the resource's own manager — the
+ * self-managed AUTO-APPROVAL shortcut. Compared in resource-id space
+ * (`resource.managerId` vs the actor's `actorResourceId`), mirroring the decision
+ * endpoint's per-manager enforcement. Shared by the POST and PUT handlers.
+ */
+async function autoApprovesAllocation(req: Request, resourceId: string): Promise<boolean> {
+  const resource = await repos.resources.get(resourceId);
+  const proposerResourceId = await actorResourceId(req);
+  return resource?.managerId !== undefined && resource.managerId === proposerResourceId;
+}
+
 // ---------------------------------------------------------------------------
 // RATE CARDS (Phase E) — effective-rate resolution.
 //
@@ -1357,9 +1369,7 @@ apiRouter.post('/assignments', async (req, res) => {
   // 'Requested' proposal auto-approves straight to 'Allocated' with NO approval
   // request (approver and requester would be the same principal — SoD would block
   // the decision anyway). Any other actor's 'Requested' opens a manager approval.
-  const resource = await repos.resources.get(body.resourceId ?? '');
-  const proposerResourceId = await actorResourceId(req);
-  const selfManaged = requestedStatus === 'Requested' && resource?.managerId !== undefined && resource.managerId === proposerResourceId;
+  const selfManaged = requestedStatus === 'Requested' && await autoApprovesAllocation(req, body.resourceId ?? '');
   const effectiveStatus: AllocationStatus = selfManaged ? 'Allocated' : requestedStatus;
 
   const created = await repos.assignments.create({ id: newId(), ...body, status: effectiveStatus } as Assignment);
@@ -1435,28 +1445,27 @@ apiRouter.put('/assignments/:id', async (req, res) => {
   // with NO approval request.
   let finalStatus: AllocationStatus = targetStatus;
   let autoApproved = false;
-  if (targetStatus === 'Requested') {
-    const effectiveResourceId = body.resourceId ?? oldAssig.resourceId;
-    const resource = await repos.resources.get(effectiveResourceId);
-    const proposerResourceId = await actorResourceId(req);
-    if (resource?.managerId !== undefined && resource.managerId === proposerResourceId) {
-      finalStatus = 'Allocated';
-      autoApproved = true;
-    }
+  if (targetStatus === 'Requested' && await autoApprovesAllocation(req, body.resourceId ?? oldAssig.resourceId)) {
+    finalStatus = 'Allocated';
+    autoApproved = true;
   }
 
   // APPROVAL SIDE-EFFECTS (outside any res:/req: lock, never nested). We touch the
   // approval only on a status change into/out of the approvable state:
   //  - ENTERING 'Requested' (from a non-Requested status): supersede any prior
   //    approval and open a fresh one on the merged assignment.
+  //  - a still-'Requested' assignment RETARGETED to a different resource: re-route
+  //    the pending approval to the NEW resource's manager (supersede + reopen), so
+  //    the empowered approver is never left as the previous resource's manager.
   //  - back to 'Draft': supersede the pending approval; the assignment carries none.
   //  - auto-approved to 'Allocated': supersede the pending approval; none remains.
-  //  - otherwise (incl. a still-'Requested' assignment whose material fields
-  //    change): leave the pending approval untouched — the approver reads the
-  //    fresh assignment via refId.
+  //  - otherwise (a still-'Requested' assignment whose non-resource material fields
+  //    change): leave the pending approval untouched — the approver reads the fresh
+  //    assignment via refId (same manager, same routing).
+  const resourceRetargeted = body.resourceId !== undefined && body.resourceId !== oldAssig.resourceId;
   let approvalId = oldAssig.approvalId;
   let approvalChanged = false;
-  if (finalStatus === 'Requested' && !autoApproved && oldStatus !== 'Requested') {
+  if (finalStatus === 'Requested' && (oldStatus !== 'Requested' || resourceRetargeted)) {
     await withdrawAllocationApproval(oldAssig.approvalId, 'superseded');
     approvalId = await createAllocationApproval(req, { ...oldAssig, ...body, id: oldAssig.id });
     approvalChanged = true;
