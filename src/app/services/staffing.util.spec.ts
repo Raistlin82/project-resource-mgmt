@@ -195,6 +195,13 @@ describe('assignmentAggregateHours', () => {
   it('planned counts Requested + Allocated (not Draft/Rejected)', () => {
     expect(assignmentAggregateHours(rows).planned).toBe(15);
   });
+  it('treats non-finite assignedHours as 0', () => {
+    const withNaN = [
+      { assignedHours: NaN, status: 'Allocated' },
+      { assignedHours: 10, status: 'Allocated' },
+    ] as Assignment[];
+    expect(assignmentAggregateHours(withNaN)).toEqual({ confirmed: 10, planned: 10 });
+  });
 });
 
 describe('decisionToAssignmentStatus', () => {
