@@ -294,31 +294,15 @@ async function recomputeResourceUtilization(resourceId: string): Promise<void> {
 ```
 Importare `assignmentAggregateHours` da `./app/services/staffing.util`.
 
-- [ ] **Step 2: Nuova `recomputeRequestStaffing`**
+> **Nota di ordinamento (deviazione dal piano originale):** `recomputeRequestStaffing` è **spostata al Task 6**, dove viene sia definita sia cablata negli handler. Definirla qui, senza chiamarla, romperebbe il gate `no-unused-vars`. `recomputeResourceUtilization` invece è già chiamata dagli handler esistenti, quindi estenderla qui è sicuro e usato.
 
-Aggiungere accanto:
-```ts
-async function recomputeRequestStaffing(requestId: string): Promise<void> {
-  const request = await repos.requests.get(requestId);
-  if (!request) return;
-  const rows = (await repos.assignments.list()).filter(a => a.requestId === requestId);
-  const { confirmed, planned } = assignmentAggregateHours(rows);
-  await repos.requests.update(request.id, {
-    staffedEffort: confirmed,
-    staffedEffortPlanned: planned,
-    status: requestStatusFor(request, confirmed),
-  });
-}
-```
-Nota: `requestStatusFor` usa il **confermato** (una request è `Fulfilled` solo con ore allocate approvate).
+- [ ] **Step 2: Verifica build/test/lint** — Run: `./node_modules/.bin/ng build` poi `./node_modules/.bin/ng test app --watch=false` e `./node_modules/.bin/ng lint` → OK. (I test unit girano in-memory: la colonna `utilization_planned` non esiste ancora nel DB — arriva col Task 7 — ma il tipo `Resource.utilizationPlanned` esiste già dal Task 1 e l'in-memory repo accetta il campo.)
 
-- [ ] **Step 3: Verifica build/test** — Run: `npx ng build` poi `npm test` → OK.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add src/server.ts
-git commit -m "feat(alloc): recompute confirmed/planned aggregates by status"
+git commit -m "feat(alloc): recompute confirmed/planned utilization by status"
 ```
 
 ---
@@ -390,6 +374,24 @@ git commit -m "feat(alloc): decision enforcement via approverId + post-decision 
 
 **Files:**
 - Modify: `src/server.ts:1248-1363`
+
+- [ ] **Step 0: Definire `recomputeRequestStaffing`** (spostata qui dal Task 4 per non lasciarla unused)
+
+Aggiungere accanto a `recomputeResourceUtilization`:
+```ts
+async function recomputeRequestStaffing(requestId: string): Promise<void> {
+  const request = await repos.requests.get(requestId);
+  if (!request) return;
+  const rows = (await repos.assignments.list()).filter(a => a.requestId === requestId);
+  const { confirmed, planned } = assignmentAggregateHours(rows);
+  await repos.requests.update(request.id, {
+    staffedEffort: confirmed,
+    staffedEffortPlanned: planned,
+    status: requestStatusFor(request, confirmed),
+  });
+}
+```
+Nota: `requestStatusFor` usa il **confermato** (una request è `Fulfilled` solo con ore allocate approvate). Viene poi chiamata negli Step 1-3 sotto, sostituendo la logica incrementale su `staffedEffort`.
 
 - [ ] **Step 1: `POST /assignments` — stato e proposta**
 
