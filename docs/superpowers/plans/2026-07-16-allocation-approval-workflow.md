@@ -310,7 +310,25 @@ git commit -m "feat(alloc): recompute confirmed/planned utilization by status"
 ## Task 5: Enforcement decisione + hook post-decisione (server)
 
 **Files:**
-- Modify: `src/server.ts:2478-2540` (decision handler)
+- Modify: `src/server.ts` — nuova `recomputeRequestStaffing` (accanto a `recomputeResourceUtilization`) + decision handler (`:2478-2540`)
+
+- [ ] **Step 0: Definire `recomputeRequestStaffing`** (definita qui, dove è prima usata — dall'hook dello Step 2)
+
+Aggiungere accanto a `recomputeResourceUtilization`:
+```ts
+async function recomputeRequestStaffing(requestId: string): Promise<void> {
+  const request = await repos.requests.get(requestId);
+  if (!request) return;
+  const rows = (await repos.assignments.list()).filter(a => a.requestId === requestId);
+  const { confirmed, planned } = assignmentAggregateHours(rows);
+  await repos.requests.update(request.id, {
+    staffedEffort: confirmed,
+    staffedEffortPlanned: planned,
+    status: requestStatusFor(request, confirmed),
+  });
+}
+```
+Nota: `requestStatusFor` usa il **confermato** (una request è `Fulfilled` solo con ore allocate approvate). `staffed_effort_planned` è una colonna pending (Task 7): in Pg il campo viene ignorato finché la colonna non esiste, in memoria è persistito — divergenza latente e auto-chiudente.
 
 - [ ] **Step 1: Accettare `note` e consentire l'approvatore specifico**
 
@@ -375,23 +393,7 @@ git commit -m "feat(alloc): decision enforcement via approverId + post-decision 
 **Files:**
 - Modify: `src/server.ts:1248-1363`
 
-- [ ] **Step 0: Definire `recomputeRequestStaffing`** (spostata qui dal Task 4 per non lasciarla unused)
-
-Aggiungere accanto a `recomputeResourceUtilization`:
-```ts
-async function recomputeRequestStaffing(requestId: string): Promise<void> {
-  const request = await repos.requests.get(requestId);
-  if (!request) return;
-  const rows = (await repos.assignments.list()).filter(a => a.requestId === requestId);
-  const { confirmed, planned } = assignmentAggregateHours(rows);
-  await repos.requests.update(request.id, {
-    staffedEffort: confirmed,
-    staffedEffortPlanned: planned,
-    status: requestStatusFor(request, confirmed),
-  });
-}
-```
-Nota: `requestStatusFor` usa il **confermato** (una request è `Fulfilled` solo con ore allocate approvate). Viene poi chiamata negli Step 1-3 sotto, sostituendo la logica incrementale su `staffedEffort`.
+> **Nota:** `recomputeRequestStaffing` è già definita nel Task 5 (dove è prima usata, dall'hook post-decisione). Qui la si **chiama** negli handler, sostituendo la logica incrementale su `staffedEffort`.
 
 - [ ] **Step 1: `POST /assignments` — stato e proposta**
 
