@@ -217,7 +217,8 @@ for the rationale.
 | --- | --- | --- | --- |
 | **Time entry** (`PUT /time-entries/:id` → `Approved`) | any role in the time-entries mutation rule | the entry's **owner** (its `resourceId`, resolved from the actor's user→resource mapping) | `resourceId` (not reassignable on PUT); `status` forced to `Draft` on create |
 | **Change request** (`PUT /change-requests/:id` → `Approved`) | only `delivery-executive` or `admin` | the CR **creator** (`createdBy`); legacy rows fall back to `requestedBy`/`owner` | `createdBy` (pinned on POST) |
-| **Approval request** (`PUT /approval-requests/:id/decision`) | the role assigned to the **current step** (`admin` may decide any step); an `'unknown'` actor is rejected 401 | the **requester** (`requestedBy`) | `requestedBy` (pinned on POST) |
+| **Approval request** (`PUT /approval-requests/:id/decision`) | the role assigned to the **current step**, **or** (Allocation steps only) the specific resource identified by `step.approverId` (resource-id match); `admin` may decide any step; an `'unknown'` actor is rejected 401 | the **requester** (`requestedBy`) | `requestedBy` (pinned on POST); `step.approverId` (Allocation only, see below) |
+| **Allocation** (`PUT /approval-requests/:id/decision`, kind `Allocation`) | the resource's **People Manager** (`step.approverId`, matched in resource-id space via `actorResourceId`) — or any `resource-manager`-role holder as fallback when the resource has no `managerId`; `admin` may decide any step | the **proposer** (`requestedBy`, the actor who called `POST`/`PUT /assignments` with `status: 'Requested'`) | `requestedBy` (pinned at open); `step.approverId` = the resource's `managerId` at approval-creation time |
 
 **Approval routing** (`buildApprovalSteps`): an item whose `amount` exceeds the
 high-value threshold (**50 000**) routes through a two-step chain
@@ -228,6 +229,44 @@ high-value threshold (**50 000**) routes through a two-step chain
 | `TimeEntry`, `Expense` | `resource-manager` |
 | `Milestone`, `ChangeRequest` | `delivery-executive` |
 | `Invoice` | `finance` |
+| `Allocation` | the resource's manager (`managerId`, resource-id match), fallback role `resource-manager` — **always single-step, no €-threshold escalation** (routed directly by `createAllocationApproval`/`allocationApproverStep`, not `buildApprovalSteps`) |
+
+### Allocation approval (resource staffing)
+
+An `Assignment` (`/assignments`) carries its own lifecycle, independent of the
+approval-request `status` enum: **`Draft` → `Requested` → `Allocated` /
+`Rejected`**. Only `Draft` and `Requested` are client-settable on
+`POST`/`PUT /assignments`; `Allocated`/`Rejected` are reached exclusively
+through the approval-decision hook below (or the self-managed shortcut) — a
+client attempt to set either directly is rejected with **400**.
+
+- A `POST`/`PUT /assignments` proposing `status: 'Requested'` opens an
+  `Allocation` approval request (`kind: 'Allocation'`, `refId` = the
+  assignment id) with a **single step** routed to the resource's **People
+  Manager** — the assignment's `resource.managerId`, addressed in
+  **resource-id space** (`step.approverId = managerId`, `step.role =
+  'resource-manager'`). When the resource has no `managerId` set, the step
+  still carries `role: 'resource-manager'` but no `approverId`, so it falls
+  back to **any** actor holding the `resource-manager` role (or `admin`).
+- **Self-managed auto-approval shortcut**: when the proposer *is* the target
+  resource's own manager (`resource.managerId` equals the proposer's own
+  resource-id, resolved via the users directory), the proposal auto-completes
+  straight to `Allocated` with **no** approval request opened at all —
+  approver and requester would be the same principal, so SoD would block the
+  decision anyway.
+- **Decision-endpoint step enforcement**: a step is decided by an actor who
+  either (a) holds the step's `role` (or is `admin`), **or** (b) is the
+  specific resource identified by `step.approverId`. This resource-id match is
+  what lets the correct manager — and only that manager — decide their own
+  reports' allocations, rather than letting any `resource-manager`-role holder
+  decide anyone's.
+- On decision, the approver's `note` (if supplied) is recorded on the
+  **decided step** (`step.note`), never on the approval request's top-level
+  `note` (which remains the *requester's* note captured at creation).
+- On a terminal `Approved`/`Rejected` decision the governed assignment's
+  `status` is transitioned server-side to `Allocated`/`Rejected` respectively
+  (never client-settable), and the resource/request staffing aggregates are
+  recomputed.
 
 ---
 

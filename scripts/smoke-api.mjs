@@ -213,6 +213,114 @@ async function checkCrud() {
   }
 }
 
+/**
+ * Step 3: ALLOCATION APPROVAL flow (src/server.ts POST /assignments + the
+ * 'Allocation' approval kind + PUT /approval-requests/:id/decision).
+ *
+ * IDENTITIES — chosen from src/db/seed.ts so this reads deterministically
+ * against the demo dataset, and kept separate from RBAC_HEADERS/CRUD_SEGMENT
+ * above so this section never shares state with the existing CRUD round-trip:
+ *
+ *   PROPOSER_HEADERS  X-User-Id '3' / X-User-Role 'pm'
+ *     -> seed user '3' (Alice Smith, role 'pm'), which the server's
+ *        actorResourceId() maps (via the users directory, matched by id) to
+ *        resource-id '3'.
+ *
+ *   TARGET_RESOURCE_ID '2' (John Miller). His seeded `managerId` is '1'
+ *     (Julie Armstrong) — NOT '3' (the proposer's own resource-id) — so
+ *     `autoApprovesAllocation()` is false: the proposal does NOT auto-approve
+ *     and a real 'Allocation' approval step is opened, routed to approverId
+ *     '1' (role 'resource-manager', per allocationApproverStep()).
+ *
+ *   TARGET_REQUEST_ID '4' (Project Beta - Platform Migration, Consultant) —
+ *     matches resource '2's role and is the request it is already partly
+ *     staffed against, so an incremental 'Requested' assignment is realistic.
+ *
+ *   DECIDER_HEADERS  X-User-Id '1' / X-User-Role 'admin'
+ *     -> 'admin' may decide ANY step regardless of its role/approverId (so
+ *        this also happens to satisfy the manager-match on approverId '1'),
+ *        and actor '1' != the proposer's actor id '3', so the "requester
+ *        cannot decide their own approval request" SoD guard (403 otherwise)
+ *        does not trip.
+ *
+ * Kept in its OWN try/catch in main() so an unexpected failure here never
+ * masks or blocks the pre-existing checkReads()/checkCrud() results.
+ */
+async function checkAllocationApproval() {
+  const PROPOSER_HEADERS = { 'X-User-Id': '3', 'X-User-Role': 'pm' };
+  const DECIDER_HEADERS = { 'X-User-Id': '1', 'X-User-Role': 'admin' };
+  const TARGET_RESOURCE_ID = '2'; // John Miller — managerId '1' (Julie Armstrong), != proposer resource-id '3'
+  const TARGET_REQUEST_ID = '4'; // Project Beta - Platform Migration (Consultant)
+
+  // 1) PROPOSE — POST /assignments as the proposer, status 'Requested'. Must
+  // NOT auto-approve (proposer resource-id '3' != target's managerId '1'), so
+  // the response should carry status 'Requested' + a non-empty approvalId.
+  const proposed = await req('POST', '/assignments', {
+    headers: PROPOSER_HEADERS,
+    body: { requestId: TARGET_REQUEST_ID, resourceId: TARGET_RESOURCE_ID, assignedHours: 5, status: 'Requested' },
+  });
+  const proposeOk = check(
+    "POST /api/assignments (Requested) -> 200, status 'Requested' + approvalId",
+    proposed.status === 200 && Boolean(proposed.body) && proposed.body.status === 'Requested' && typeof proposed.body.approvalId === 'string' && proposed.body.approvalId.length > 0,
+    `status=${proposed.status}, assignmentStatus=${proposed.body && proposed.body.status}, approvalId=${proposed.body && proposed.body.approvalId}`,
+  );
+  if (!proposeOk) return; // nothing more to verify without an assignment id + approvalId
+  const assignmentId = proposed.body.id;
+  const approvalId = proposed.body.approvalId;
+
+  // 2) GET /approval-requests — a Pending 'Allocation' entry must exist whose
+  // refId is the new assignment.
+  {
+    const { status, body } = await req('GET', '/approval-requests', { headers: DECIDER_HEADERS });
+    const ar = Array.isArray(body) ? body.find((a) => a.id === approvalId) : undefined;
+    check(
+      "GET /api/approval-requests includes the new 'Allocation' request (Pending, refId matches)",
+      status === 200 && Boolean(ar) && ar.kind === 'Allocation' && ar.refId === assignmentId && ar.status === 'Pending',
+      ar ? `kind=${ar.kind}, refId=${ar.refId}, status=${ar.status}` : `status=${status}, missing id=${approvalId}`,
+    );
+  }
+
+  // 3) DECIDE — PUT /approval-requests/:id/decision as a DIFFERENT identity
+  // than the proposer (SoD): admin '1' != pm '3'.
+  {
+    const decided = await req('PUT', `/approval-requests/${approvalId}/decision`, {
+      headers: DECIDER_HEADERS,
+      body: { decision: 'Approved', note: 'Smoke: approved by admin (SoD-compliant decider)' },
+    });
+    check(
+      `PUT /api/approval-requests/${approvalId}/decision (Approved) -> 200`,
+      decided.status === 200 && Boolean(decided.body) && decided.body.status === 'Approved',
+      `status=${decided.status}, arStatus=${decided.body && decided.body.status}`,
+    );
+  }
+
+  // 4) The governed assignment must now be 'Allocated' (system transition
+  // applied by the decision hook, never client-forged).
+  {
+    const { status, body } = await req('GET', '/assignments', { headers: DECIDER_HEADERS });
+    const assig = Array.isArray(body) ? body.find((a) => a.id === assignmentId) : undefined;
+    check(
+      `GET /api/assignments reflects assignment ${assignmentId} -> 'Allocated'`,
+      status === 200 && Boolean(assig) && assig.status === 'Allocated',
+      assig ? `status=${assig.status}` : `status=${status}, missing`,
+    );
+  }
+
+  // 5) NEGATIVE — a client can never forge 'Allocated' (or 'Rejected') on
+  // create; only 'Draft'/'Requested' are client-settable.
+  {
+    const forged = await req('POST', '/assignments', {
+      headers: PROPOSER_HEADERS,
+      body: { requestId: TARGET_REQUEST_ID, resourceId: TARGET_RESOURCE_ID, assignedHours: 5, status: 'Allocated' },
+    });
+    check(
+      "POST /api/assignments with status 'Allocated' is rejected (400, not client-settable)",
+      forged.status === 400,
+      `status=${forged.status}, body=${JSON.stringify(forged.body)}`,
+    );
+  }
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -229,6 +337,15 @@ async function main() {
     console.log(`FAIL  unexpected error — ${err && err.message ? err.message : err}`);
     console.log('---------------------------------------------------------------');
     console.log(`HINT  is the server running at ${BASE}? Start it with: node dist/app/server/server.mjs (or npm run serve:ssr:app)`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the allocation-approval
+  // flow never interferes with (or is masked by) the CRUD checks above.
+  try {
+    await checkAllocationApproval();
+  } catch (err) {
+    console.log(`FAIL  allocation-approval flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 
