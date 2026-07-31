@@ -134,6 +134,10 @@ and **403** otherwise. Path tests use `startsWith`.
 `/proficiency-sets`, `/skills`, `/project-roles`), config (`/languages`,
 `/fx-rates`, `/service-organizations`, `/resource-organizations`,
 `/projects` and non-financial project sub-resources, `/storage-status`, etc.
+Time-phased allocation (B1) adds `/holidays` and `/planning-periods` to this
+open-read set, deliberately: both are config catalogs read by the Task-8
+calendar (used by `pm`/`resource-manager`) to render holidays and open/closed
+months, so neither carries a `READ_RULE` despite being mutation-gated below.
 
 ### (b) Mutation rules — POST / PUT / DELETE
 
@@ -149,6 +153,8 @@ A role not in the matched rule's list gets **403**. Path tests use `startsWith`
 | `/assignments`, `/requests` | `pm`, `resource-manager`, `delivery-executive`, `admin` |
 | `/projects`, `/project-partners`, `/project-documents`, `/work-packages`, `/milestones`, `/project-tasks`, `/project-issues`, `/change-requests` | `pm`, `delivery-executive`, `admin` |
 | `/skill-catalogs`, `/proficiency-sets`, `/skills`, `/project-roles`, `/resource-organizations`, `/languages` | `admin`, `delivery-executive` |
+| `/holidays` | `admin`, `delivery-executive` |
+| `/planning-periods` | `admin` only |
 | `/approval-requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/integrations` | `finance`, `delivery-executive`, `admin` |
 

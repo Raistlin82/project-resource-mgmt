@@ -511,8 +511,13 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
     { test: p => ['/skill-catalogs', '/proficiency-sets', '/skills', '/project-roles', '/resource-organizations', '/languages'].some(prefix => p.startsWith(prefix)), roles: ['admin', 'delivery-executive'] },
     // Customizing catalogs (Phase F1): location/industry/cost-category/partner-role/
     // vendor master data — mutations restricted to admin/delivery-executive (reads
-    // stay open like the other config catalogs).
-    { test: p => ['/countries', '/cities', '/industries', '/cost-categories', '/partner-roles', '/vendors'].some(prefix => p.startsWith(prefix)), roles: ['admin', 'delivery-executive'] },
+    // stay open like the other config catalogs). Holidays (B1) joins this group.
+    { test: p => ['/countries', '/cities', '/industries', '/cost-categories', '/partner-roles', '/vendors', '/holidays'].some(prefix => p.startsWith(prefix)), roles: ['admin', 'delivery-executive'] },
+    // Planning periods (B1) open/close a calendar month for time-phased booking —
+    // admin-only mutation (stricter than the config-catalog rule above). Reads
+    // stay open like the other config catalogs (no READ_RULE below), so the
+    // Task-8 calendar (pm/resource-manager) can render open/closed months.
+    { test: p => p.startsWith('/planning-periods'), roles: ['admin'] },
     { test: p => p.startsWith('/approval-requests'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
     // Integration actions (prepare CRM sync payloads, ...) mirror the read gate.
     { test: p => p.startsWith('/integrations'), roles: ['finance', 'delivery-executive', 'admin'] },
@@ -1962,6 +1967,50 @@ apiRouter.put('/settings/hours-per-day', async (req, res) => {
   if (existing) await repos.settings.update('hoursPerDay', { value: String(n) });
   else await repos.settings.create({ id: 'hoursPerDay', value: String(n) });
   res.json({ value: n });
+});
+
+// HOLIDAYS — natural-key catalog (id IS the ISO date, e.g. '2026-12-25'); the
+// working-day gate (assignment day-replace, above) reads this. Not a `crud()`
+// collection because crud() hard-assigns `id: newId()`, which would clobber the
+// natural key. Upsert via get -> update-or-create, mirroring /settings above.
+// Reads stay open (like the other config catalogs); writes are gated to
+// admin/delivery-executive by the RBAC rule below.
+apiRouter.get('/holidays', async (_req, res) => { res.json(await repos.holidays.list()); });
+apiRouter.put('/holidays/:id', async (req, res) => {
+  const id = req.params.id;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(id)) { res.status(400).json({ error: 'id must be an ISO date (YYYY-MM-DD)' }); return; }
+  const body = pick<{ name: string }>(req.body, ['name']);
+  if (typeof body.name !== 'string' || body.name.length === 0) { res.status(400).json({ error: 'name is required' }); return; }
+  const existing = await repos.holidays.get(id);
+  const updated = existing
+    ? await repos.holidays.update(id, { name: body.name })
+    : await repos.holidays.create({ id, name: body.name });
+  res.json(updated);
+});
+apiRouter.delete('/holidays/:id', async (req, res) => {
+  const removed = await repos.holidays.remove(req.params.id);
+  if (!removed) { res.status(404).json({ error: 'Not found' }); return; }
+  res.status(204).send();
+});
+
+// PLANNING PERIODS — natural-key catalog (id IS the 'YYYY-MM' month); a Closed
+// period rejects new/edited daily bookings (working-day gate above). No DELETE
+// — a month is opened/closed, never deleted. Reads stay open (the Task-8
+// calendar, used by pm/resource-manager, must read this to render open/closed
+// months); writes are admin-only (a NEW mutation rule below, distinct from the
+// broader config-catalog rule).
+const isPlanningPeriodStatus = (v: unknown): v is 'Open' | 'Closed' => v === 'Open' || v === 'Closed';
+apiRouter.get('/planning-periods', async (_req, res) => { res.json(await repos.planningPeriods.list()); });
+apiRouter.put('/planning-periods/:id', async (req, res) => {
+  const id = req.params.id;
+  if (!/^\d{4}-\d{2}$/.test(id)) { res.status(400).json({ error: 'id must be a month (YYYY-MM)' }); return; }
+  const body = pick<{ status: string }>(req.body, ['status']);
+  if (!isPlanningPeriodStatus(body.status)) { res.status(400).json({ error: "status must be 'Open' or 'Closed'" }); return; }
+  const existing = await repos.planningPeriods.get(id);
+  const updated = existing
+    ? await repos.planningPeriods.update(id, { status: body.status })
+    : await repos.planningPeriods.create({ id, status: body.status });
+  res.json(updated);
 });
 
 const PROJECT_FIELDS = ['name', 'location', 'startDate', 'endDate', 'status', 'description', 'ownerId', 'contractId'] as const;
