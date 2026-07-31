@@ -57,6 +57,12 @@ export interface Resource {
    * resources are never hard-deleted; clearing this (null/empty) reactivates.
    */
   terminationDate?: string;
+  /**
+   * Contracted hours/day for this resource, used to derive daily targets from
+   * the weekly/period capacity. `undefined` falls back to the org-wide
+   * `Setting` keyed `hoursPerDay`. Time-phased allocation (B1).
+   */
+  contractHoursPerDay?: number;
 }
 
 export interface ResourceRequest {
@@ -94,6 +100,19 @@ export interface Assignment {
   allocationPct?: number;
   /** Id of the ApprovalRequest governing this assignment's Requested -> Allocated transition, if any. */
   approvalId?: string;
+}
+
+/**
+ * Time-phased allocation (B1): the per-day breakdown of an assignment's
+ * assignedHours, letting effort be distributed unevenly across the booking
+ * window (e.g. around holidays/part-time days) instead of a flat daily rate.
+ */
+export interface AssignmentDay {
+  id: string;
+  assignmentId: string;
+  /** ISO date 'YYYY-MM-DD'. */
+  date: string;
+  hours: number;
 }
 
 export type UserRole = 'employee' | 'pm' | 'resource-manager' | 'delivery-executive' | 'finance' | 'sales' | 'admin';
@@ -234,6 +253,24 @@ export interface RateCard {
 export interface Setting {
   id: string;
   value: string;
+}
+
+/**
+ * A non-working day (id IS the ISO date, e.g. '2026-12-25'). Time-phased
+ * allocation (B1) — excluded from working-day calculations.
+ */
+export interface Holiday {
+  id: string;
+  name: string;
+}
+
+/**
+ * Open/closed state of a calendar month (id IS the 'YYYY-MM' month). Time-
+ * phased allocation (B1) — a Closed period rejects new/edited daily bookings.
+ */
+export interface PlanningPeriod {
+  id: string;
+  status: 'Open' | 'Closed';
 }
 
 export interface Project {
