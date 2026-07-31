@@ -1,14 +1,24 @@
 /** Pure, SSR-safe calendar helpers for time-phased allocation. Dates are ISO
- *  'YYYY-MM-DD' strings; no Date.now()/argless new Date() (parity with schedule.util). */
+ *  'YYYY-MM-DD' strings; no Date.now()/argless new Date() (parity with schedule.util).
+ *  Callers must pass valid ISO strings ('YYYY-MM' / 'YYYY-MM-DD'); malformed input
+ *  degrades to `[]`/`{}` rather than throwing — validation is the caller's
+ *  responsibility (e.g. the server endpoint). */
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /** 'YYYY-MM-DD' → 'YYYY-MM'. */
 export function monthOf(date: string): string {
   return date.slice(0, 7);
 }
 
-/** UTC day-of-week 0=Sun..6=Sat via Date.parse (deterministic). */
+/** UTC day-of-week 0=Sun..6=Sat via `new Date(...Z)` (deterministic UTC). */
 function dow(date: string): number {
   return new Date(date + 'T00:00:00Z').getUTCDay();
+}
+
+/** YYYY-MM-DD for a UTC epoch-ms instant; stable across time zones. */
+function toIsoDate(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
 }
 
 /** True iff `date` is a weekday and not in `holidays`. */
@@ -43,10 +53,12 @@ export function distributeHoursOverWindow(
   holidays: ReadonlySet<string>,
 ): Record<string, number> {
   const days: string[] = [];
-  for (let t = Date.parse(start + 'T00:00:00Z'); t <= Date.parse(end + 'T00:00:00Z'); t += 86_400_000) {
-    const iso = new Date(t).toISOString().slice(0, 10);
+  const endMs = Date.parse(end + 'T00:00:00Z');
+  for (let t = Date.parse(start + 'T00:00:00Z'); t <= endMs; t += MS_PER_DAY) {
+    const iso = toIsoDate(t);
     if (isWorkingDay(iso, holidays)) days.push(iso);
   }
+  // Guard rejects 0 / negative / NaN totals — nothing to distribute.
   if (days.length === 0 || !(total > 0)) return {};
   const per = Math.round((total / days.length) * 100) / 100;
   const map: Record<string, number> = {};

@@ -38,4 +38,7 @@ describe('distributeHoursOverWindow', () => {
   it('no working days → empty map', () => {
     expect(distributeHoursOverWindow(40, '2026-03-14', '2026-03-15', new Set())).toEqual({}); // Sat+Sun
   });
+  it('total ≤ 0 → empty map even with working days present', () => {
+    expect(distributeHoursOverWindow(0, '2026-03-02', '2026-03-02', new Set())).toEqual({}); // Mon
+  });
 });
