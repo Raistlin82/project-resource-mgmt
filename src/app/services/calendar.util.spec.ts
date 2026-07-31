@@ -60,10 +60,14 @@ describe('sumHoursByDate', () => {
   it('empty input → empty map', () => {
     expect(sumHoursByDate([])).toEqual({});
   });
+  it('treats non-finite hours as 0', () => {
+    expect(sumHoursByDate([{ date: 'D', hours: NaN }, { date: 'D', hours: 3 }])['D']).toBe(3);
+  });
 });
 
 describe('exceedsDailyCapacity', () => {
   it('total over cap → true', () => expect(exceedsDailyCapacity(9, 8)).toBe(true));
   it('total equal cap → false (epsilon tolerance)', () => expect(exceedsDailyCapacity(8, 8)).toBe(false));
   it('float noise at cap → false', () => expect(exceedsDailyCapacity(8 + 1e-12, 8)).toBe(false));
+  it('overage just above epsilon → true', () => expect(exceedsDailyCapacity(8 + 1e-6, 8)).toBe(true));
 });
