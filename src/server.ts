@@ -1612,21 +1612,30 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
 
   // Daily-capacity gate. assignmentDays carry assignmentId (not resourceId), so
   // gather this resource's OTHER assignment ids, sum their day-hours on the
-  // affected dates, and check other+new against the effective per-day cap.
-  const cap = resource.contractHoursPerDay ?? await getHoursPerDay();
+  // affected dates, and check other+new against the effective per-day cap. Guard
+  // the cap exactly like getHoursPerDay does: a stored contractHoursPerDay of
+  // 0 / NaN / negative is NOT a usable cap (0 would reject every booking with
+  // hours; NaN would silently disable the check — `total > NaN + 1e-9` is always
+  // false), so fall back to the configured hours/day.
+  const rawCap = resource.contractHoursPerDay;
+  const cap = (typeof rawCap === 'number' && Number.isFinite(rawCap) && rawCap > 0) ? rawCap : await getHoursPerDay();
   const requestedDates = new Set(Object.keys(daily));
+  const capExceeded = (day: string): string => `daily capacity exceeded on ${day}`;
   const capacityOffender = async (): Promise<string | undefined> => {
     const otherIds = new Set(
       (await repos.assignments.list()).filter(a => a.resourceId === resource.id && a.id !== assig.id).map(a => a.id));
     const otherByDate = sumHoursByDate(
       (await repos.assignmentDays.list()).filter(d => otherIds.has(d.assignmentId) && requestedDates.has(d.date)));
     for (const day of requestedDates) {
+      // Booking 0 hours can never over-allocate — skip it, so a pre-existing
+      // over-allocation by OTHER assignments on that day doesn't 400 a no-op entry.
+      if (!(daily[day] > 0)) continue;
       if (exceedsDailyCapacity((otherByDate[day] ?? 0) + daily[day], cap)) return day;
     }
     return undefined;
   };
   const preOffender = await capacityOffender();
-  if (preOffender !== undefined) { res.status(400).json({ error: `daily capacity exceeded on ${preOffender}` }); return; }
+  if (preOffender !== undefined) { res.status(400).json({ error: capExceeded(preOffender) }); return; }
 
   const oldStatus = assig.status;
   // STEP 1 — inside res: lock: TOCTOU re-check, then replace the month's day rows
@@ -1646,12 +1655,15 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
         await repos.assignmentDays.create({ id: `${assig.id}:${day}`, assignmentId: assig.id, date: day, hours } as AssignmentDay);
       }
     }
+    // The per-day breakdown is now the source of truth for assignedHours: a legacy
+    // assignment carrying an assignedHours total but no day rows is (intentionally)
+    // reduced to the sum of its days once any month is edited here — not a bug.
     const remaining = (await repos.assignmentDays.list()).filter(d => d.assignmentId === assig.id);
     const total = remaining.reduce((s, d) => s + (Number.isFinite(d.hours) ? d.hours : 0), 0);
     await repos.assignments.update(assig.id, { assignedHours: Math.round(total * 100) / 100 });
     return {};
   });
-  if (replaced.offender !== undefined) { res.status(400).json({ error: `daily capacity exceeded on ${replaced.offender}` }); return; }
+  if (replaced.offender !== undefined) { res.status(400).json({ error: capExceeded(replaced.offender) }); return; }
 
   // STEP 2 — OUTSIDE any res:/req: lock: forced re-approval. Trigger is the PRIOR
   // status 'Allocated' (days changed), not an assignedHours delta. Self-managed →
@@ -1669,9 +1681,15 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   }
 
   // STEP 3 — FINAL (after the status change): recompute the status-aware aggregates
-  // so confirmed/planned utilization + staffed-effort reflect the new status.
-  await withLock(`res:${resource.id}`, () => recomputeResourceUtilization(resource.id));
-  await withLock(`req:${assig.requestId}`, () => recomputeRequestStaffing(assig.requestId));
+  // so confirmed/planned utilization + staffed-effort reflect the new status. Best-
+  // effort, mirroring the gap-A decision hook: the day replacement + status write are
+  // already committed above, so a recompute failure must not 500 an otherwise-
+  // successful allocation — the aggregates self-heal on the next mutation of this
+  // resource/request.
+  try {
+    await withLock(`res:${resource.id}`, () => recomputeResourceUtilization(resource.id));
+    await withLock(`req:${assig.requestId}`, () => recomputeRequestStaffing(assig.requestId));
+  } catch { /* recompute is best-effort; the allocation + status already committed */ }
 
   const fresh = await repos.assignments.get(assig.id);
   const days = (await repos.assignmentDays.list())
