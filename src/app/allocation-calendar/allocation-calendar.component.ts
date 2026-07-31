@@ -48,18 +48,18 @@ interface DayCell {
   holidayName: string;
 }
 
+/** Fallback daily cap when the envelope reports a non-positive value (shouldn't happen). */
+const DEFAULT_CAP = 8;
+
 const EMPTY_DATA: CalendarData = {
-  allocation: { assignmentId: '', contractHoursPerDay: 8, days: [] },
+  allocation: { assignmentId: '', contractHoursPerDay: DEFAULT_CAP, days: [] },
   periods: [],
   holidays: [],
 };
 
-/** Fallback daily cap when the envelope reports a non-positive value (shouldn't happen). */
-const DEFAULT_CAP = 8;
-
 /**
- * Daily allocation calendar (B1, Task 8). Given an assignment id (+ resource id for
- * context), it renders a grid of months × days for the assignment's spanned months
+ * Daily allocation calendar (B1, Task 8). Given an assignment id (+ an optional
+ * resource name for the header), it renders a grid of months × days for the spanned months
  * unioned with the open planning-period months. Open months are editable per-day
  * (working days only); Closed months are visible but read-only. A per-day hint marks
  * days that exceed the daily contract cap — the server enforces the true
@@ -84,6 +84,12 @@ const DEFAULT_CAP = 8;
             {{ resourceName() || 'Risorsa' }}
             <span class="text-ink-muted">•</span>
             <span class="font-mono tabular-nums">{{ contractHoursPerDay() }}h / giorno</span>
+          </p>
+          <!-- The per-day capacity hint is a CLIENT check on THIS assignment only; the
+               true cross-assignment total per day is validated server-side at save. -->
+          <p class="text-xs text-[var(--cc-muted)] mt-2 flex items-start gap-1.5 max-w-2xl">
+            <mat-icon class="text-[14px] w-[14px] h-[14px] mt-0.5 shrink-0">info</mat-icon>
+            <span>L'indicatore di capacità considera solo questo incarico. Il totale giornaliero su tutti gli incarichi della risorsa è verificato dal server al salvataggio: il verde non ne garantisce l'esito.</span>
           </p>
         </div>
         <button type="button" (click)="closed.emit()" aria-label="Chiudi" title="Chiudi" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
@@ -115,9 +121,9 @@ const DEFAULT_CAP = 8;
                   </span>
                   @if (isOpen(month)) {
                     <div class="flex items-center gap-1.5">
-                      <button type="button" (click)="fill(month, 1)" class="command-button secondary text-xs px-3 py-1.5">Allocazione 100%</button>
-                      <button type="button" (click)="fill(month, 0.5)" class="command-button secondary text-xs px-3 py-1.5">50%</button>
-                      <button type="button" (click)="clear(month)" class="command-button secondary text-xs px-3 py-1.5">Azzera</button>
+                      <button type="button" (click)="fill(month, 1)" [attr.aria-label]="'Allocazione 100% — ' + monthLabel(month)" class="command-button secondary text-xs px-3 py-1.5">Allocazione 100%</button>
+                      <button type="button" (click)="fill(month, 0.5)" [attr.aria-label]="'Allocazione 50% — ' + monthLabel(month)" class="command-button secondary text-xs px-3 py-1.5">50%</button>
+                      <button type="button" (click)="clear(month)" [attr.aria-label]="'Azzera — ' + monthLabel(month)" class="command-button secondary text-xs px-3 py-1.5">Azzera</button>
                     </div>
                   }
                 </div>
@@ -142,13 +148,22 @@ const DEFAULT_CAP = 8;
                         <input type="number" min="0" step="0.5"
                                [ngModel]="hoursFor(month, cell.date)"
                                (ngModelChange)="setHours(month, cell.date, $event)"
-                               [attr.aria-label]="'Ore ' + cell.date"
+                               [attr.aria-label]="'Ore del ' + dayLabel(cell.date)"
+                               [attr.aria-invalid]="over(month, cell.date)"
                                [class.text-critical-text]="over(month, cell.date)"
                                class="command-input w-full text-center px-1 py-0.5 text-sm font-mono tabular-nums mt-1">
                       } @else {
                         <div class="text-sm font-mono tabular-nums mt-1 py-0.5"
                              [class.text-critical-text]="over(month, cell.date)"
                              [class.text-ink]="!over(month, cell.date)">{{ hoursFor(month, cell.date) }}</div>
+                      }
+                      <!-- Non-colour over-capacity signal (WCAG 1.4.1): a text+icon marker so
+                           the state is perceivable without relying on the red highlight alone. -->
+                      @if (over(month, cell.date)) {
+                        <div class="text-[9px] font-bold text-critical-text uppercase tracking-wide flex items-center justify-center gap-0.5 mt-0.5"
+                             title="Oltre la capacità giornaliera">
+                          <mat-icon class="text-[11px] w-[11px] h-[11px]">warning</mat-icon> oltre
+                        </div>
                       }
                     </div>
                   } @else {
@@ -166,6 +181,7 @@ const DEFAULT_CAP = 8;
               @if (isOpen(month)) {
                 <div class="flex justify-end mt-4 pt-4 border-t border-[var(--cc-line)]">
                   <button type="button" (click)="saveMonth(month)" [disabled]="savingMonth() === month"
+                          [attr.aria-label]="'Salva mese — ' + monthLabel(month)"
                           class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
                     <mat-icon class="text-[18px] w-[18px] h-[18px]">save</mat-icon>
                     {{ savingMonth() === month ? 'Salvataggio…' : 'Salva mese' }}
@@ -191,8 +207,6 @@ export class AllocationCalendarComponent {
 
   /** The assignment whose per-day allocation is edited. */
   readonly assignmentId = input.required<string>();
-  /** Owning resource id (context only; the server enforces cross-assignment capacity). */
-  readonly resourceId = input<string>('');
   /** Resource display name for the header (optional). */
   readonly resourceName = input<string>('');
   /** Emitted when the user dismisses the calendar. */
@@ -319,10 +333,14 @@ export class AllocationCalendarComponent {
 
   /**
    * Persist one month. Sends every working day's hours (0 removes the row server-side).
-   * On success reloads and surfaces the resulting status (an edit to an Allocated
-   * assignment demotes it to Requested for re-approval unless self-managed). On error
-   * the global error interceptor already toasts the server message (which names the
-   * offending date on a capacity 400), so we only clear the in-flight flag here.
+   * On success it patches ONLY the saved month in `edited` from the response's
+   * day rows (server-truth) — deliberately NOT a global `data.reload()`, which would
+   * reset the `edited` linkedSignal for EVERY month and wipe unsaved edits in other
+   * open months (and flash the "Caricamento…" placeholder, losing scroll). The
+   * resulting status is surfaced (an edit to an Allocated assignment demotes it to
+   * Requested for re-approval unless self-managed). On error the global error
+   * interceptor already toasts the server message (which names the offending date on
+   * a capacity 400), so we only clear the in-flight flag here.
    */
   protected saveMonth(month: string): void {
     if (this.savingMonth() !== null) return;
@@ -337,8 +355,12 @@ export class AllocationCalendarComponent {
       .subscribe({
         next: (result) => {
           this.savingMonth.set(null);
+          // Server-truth for THIS month only (0-hour days are dropped server-side).
+          // Replace just this month's slice; sibling months keep their local edits.
+          const persisted: Record<string, number> = {};
+          for (const d of result.days) persisted[d.date] = d.hours;
+          this.edited.update(map => ({ ...map, [month]: persisted }));
           this.notifications.show(this.saveMessage(month, result.status), 'success');
-          this.data.reload();
         },
         error: () => this.savingMonth.set(null),
       });
@@ -359,6 +381,12 @@ export class AllocationCalendarComponent {
   private static readonly MONTH_FMT = new Intl.DateTimeFormat('it-IT', { month: 'long', year: 'numeric', timeZone: 'UTC' });
   protected monthLabel(month: string): string {
     return AllocationCalendarComponent.MONTH_FMT.format(new Date(month + '-01T00:00:00Z'));
+  }
+
+  private static readonly DAY_FMT = new Intl.DateTimeFormat('it-IT', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+  /** Human-readable Italian date for aria-labels, e.g. '15 luglio 2026'. */
+  protected dayLabel(date: string): string {
+    return AllocationCalendarComponent.DAY_FMT.format(new Date(date + 'T00:00:00Z'));
   }
 
   /** All ISO dates of a 'YYYY-MM' month, ascending. Layout enumeration only —

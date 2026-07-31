@@ -392,7 +392,7 @@ interface RequestsData {
                            single focus trap is active; closing returns to tracking. -->
                       <button type="button" (click)="openCalendar(item)"
                               class="inline-flex items-center gap-1 text-xs font-semibold text-accent-text hover:bg-accent-tint px-2 py-1 rounded-md transition-colors"
-                              [attr.aria-label]="'Open allocation calendar for ' + (item.resource?.name || 'resource')">
+                              [attr.aria-label]="'Apri il calendario di allocazione di ' + (item.resource?.name || 'risorsa')">
                         <mat-icon class="text-[16px] w-[16px] h-[16px]">calendar_month</mat-icon> Calendario
                       </button>
                     </div>
@@ -425,7 +425,6 @@ interface RequestsData {
              appModal ariaLabelledby="allocCalTitle" (dismiss)="closeCalendar()">
           <app-allocation-calendar
             [assignmentId]="target.assignmentId"
-            [resourceId]="target.resourceId"
             [resourceName]="target.resourceName"
             (closed)="closeCalendar()" />
         </div>
@@ -574,16 +573,15 @@ export class ResourceRequestsComponent {
     this.trackingRequestId.set(null);
   }
 
-  // Time-phased allocation calendar (B1): the assignment + resource whose per-day
-  // calendar is open, or null when closed. Set from a tracking-modal row (both ids
-  // are already in hand there, satisfying the calendar's assignmentId + resourceId
-  // inputs). Closing returns to the still-open tracking modal.
-  calendarTarget = signal<{ assignmentId: string; resourceId: string; resourceName: string } | null>(null);
+  // Time-phased allocation calendar (B1): the assignment whose per-day calendar is
+  // open, or null when closed. Set from a tracking-modal row (the assignment id +
+  // resource name are already in hand there). Closing returns to the still-open
+  // tracking modal.
+  calendarTarget = signal<{ assignmentId: string; resourceName: string } | null>(null);
 
   openCalendar(item: { assignment: Assignment; resource?: Resource }) {
     this.calendarTarget.set({
       assignmentId: item.assignment.id,
-      resourceId: item.assignment.resourceId,
       resourceName: item.resource?.name ?? '',
     });
   }
