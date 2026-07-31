@@ -21,10 +21,13 @@ function toIsoDate(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
-/** True iff `date` is a weekday and not in `holidays`. */
+/** True iff `date` is a weekday and not in `holidays`. A calendar-invalid string
+ *  yields an Invalid Date (`getUTCDay()` → NaN); guard it explicitly so a NaN
+ *  day-of-week is never (mis)classified as working (`NaN !== 0 && NaN !== 6` is
+ *  vacuously true). */
 export function isWorkingDay(date: string, holidays: ReadonlySet<string>): boolean {
   const d = dow(date);
-  return d !== 0 && d !== 6 && !holidays.has(date);
+  return !Number.isNaN(d) && d !== 0 && d !== 6 && !holidays.has(date);
 }
 
 /** All working-day dates of `month` ('YYYY-MM'), ascending. */

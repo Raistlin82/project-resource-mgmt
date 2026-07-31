@@ -17,6 +17,11 @@ describe('isWorkingDay', () => {
   it('weekday not holiday → true', () => expect(isWorkingDay('2026-03-16', hol)).toBe(true)); // Mon
   it('weekend → false', () => expect(isWorkingDay('2026-03-14', hol)).toBe(false)); // Sat
   it('holiday → false', () => expect(isWorkingDay('2026-03-17', hol)).toBe(false));
+  // Calendar-invalid keys produce an Invalid Date (getUTCDay() === NaN); a NaN
+  // day-of-week must NEVER be classified as a working day, or the server's
+  // working-day gate would admit phantom rows (day 32, day 00, ...).
+  it('calendar-invalid date (day out of range) → false', () => expect(isWorkingDay('2026-05-32', new Set())).toBe(false));
+  it('calendar-invalid date (day zero) → false', () => expect(isWorkingDay('2026-05-00', new Set())).toBe(false));
 });
 
 describe('workingDaysInMonth', () => {

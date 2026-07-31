@@ -1585,7 +1585,8 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
 
   const body = pick<{ month: string; dailyHours: Record<string, number> }>(req.body, ['month', 'dailyHours']);
   const month = body.month;
-  if (typeof month !== 'string' || !/^\d{4}-\d{2}$/.test(month)) {
+  // Range-checked YYYY-MM (month 01–12): a bare \d{2} would admit '2026-13'/'2026-00'.
+  if (typeof month !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
     res.status(400).json({ error: 'month must match YYYY-MM' }); return;
   }
   const daily = body.dailyHours;
@@ -1596,6 +1597,15 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   // equal `month` (a cross-month key would silently escape the per-month replace).
   for (const [day, value] of Object.entries(daily as Record<string, unknown>)) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) { res.status(400).json({ error: `invalid date key ${day}` }); return; }
+    // Syntax alone is not enough: '2026-05-32'/'2026-05-00' are Invalid Dates
+    // (would slip past the working-day gate as NaN), and '2026-04-31' silently
+    // ROLLS OVER to May 1 (aliasing the real row → daily-capacity bypass). A
+    // round-trip through Date rejects both: reconstruct the ISO day and require
+    // it to equal the key verbatim.
+    const dt = new Date(day + 'T00:00:00Z');
+    if (Number.isNaN(dt.getTime()) || dt.toISOString().slice(0, 10) !== day) {
+      res.status(400).json({ error: `invalid calendar date ${day}` }); return;
+    }
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
       res.status(400).json({ error: `hours for ${day} must be a finite number >= 0` }); return;
     }
@@ -2003,7 +2013,8 @@ const isPlanningPeriodStatus = (v: unknown): v is 'Open' | 'Closed' => v === 'Op
 apiRouter.get('/planning-periods', async (_req, res) => { res.json(await repos.planningPeriods.list()); });
 apiRouter.put('/planning-periods/:id', async (req, res) => {
   const id = req.params.id;
-  if (!/^\d{4}-\d{2}$/.test(id)) { res.status(400).json({ error: 'id must be a month (YYYY-MM)' }); return; }
+  // Range-checked YYYY-MM (month 01–12): a bare \d{2} would admit '2026-13'/'2026-00'.
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(id)) { res.status(400).json({ error: 'id must be a month (YYYY-MM)' }); return; }
   const body = pick<{ status: string }>(req.body, ['status']);
   if (!isPlanningPeriodStatus(body.status)) { res.status(400).json({ error: "status must be 'Open' or 'Closed'" }); return; }
   const existing = await repos.planningPeriods.get(id);

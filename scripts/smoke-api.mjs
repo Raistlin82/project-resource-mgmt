@@ -391,6 +391,27 @@ async function checkTimePhasedAllocation() {
     otherMonthsHoursBefore = sumHours(body && body.days, MONTH);
   }
 
+  // Snapshot assignment 4's governance state BEFORE the edit. The allocation GET
+  // above omits status/approvalId, so read the assignment row itself. The B1
+  // FORCED RE-APPROVAL contract (src/server.ts STEP 2) demotes an 'Allocated'
+  // assignment to 'Requested' on ANY day-row edit by a non-self-managing actor
+  // (resource 3's manager is '2'; the smoke admin maps to resourceId '1'),
+  // opening a fresh approval. Pinning status+approvalId here defends that trigger
+  // against a future refactor to a (wrong) assignedHours-delta condition.
+  let preEditStatus;
+  let preEditApprovalId;
+  {
+    const { status, body } = await req('GET', '/assignments');
+    const assig = Array.isArray(body) ? body.find((a) => a.id === ASSIGNMENT_ID) : undefined;
+    preEditStatus = assig && assig.status;
+    preEditApprovalId = assig && assig.approvalId;
+    check(
+      `GET /api/assignments — assignment ${ASSIGNMENT_ID} is 'Allocated' before the edit (re-approval precondition)`,
+      status === 200 && Boolean(assig) && preEditStatus === 'Allocated',
+      assig ? `status=${preEditStatus}` : `status=${status}, missing`,
+    );
+  }
+
   // 2) HAPPY PATH — replace May's days with 3 working days at exactly the
   // resource's daily cap (4h). Expect 200, the echoed `days` to match what was
   // sent, and `assignedHours` to equal (unchanged other-month hours) + (new
@@ -422,6 +443,21 @@ async function checkTimePhasedAllocation() {
         `PUT response 'assignedHours' == other-months hours + new ${MONTH} hours`,
         Math.abs(put.body.assignedHours - expectedTotal) < 1e-6,
         `assignedHours=${put.body.assignedHours}, expected=${expectedTotal}`,
+      );
+
+      // FORCED RE-APPROVAL (B1 STEP 2): editing an 'Allocated' assignment's days
+      // must demote it to 'Requested' and open a FRESH approval — driven by the
+      // prior status being 'Allocated', not by any assignedHours delta. Assert
+      // both, and that the new approvalId differs from the pre-edit one.
+      check(
+        `PUT response demotes 'Allocated' -> 'Requested' (forced re-approval)`,
+        put.body.status === 'Requested',
+        `preEditStatus=${preEditStatus}, status=${put.body.status}`,
+      );
+      check(
+        `PUT response carries a fresh approvalId (!= pre-edit)`,
+        typeof put.body.approvalId === 'string' && put.body.approvalId.length > 0 && put.body.approvalId !== preEditApprovalId,
+        `preEditApprovalId=${preEditApprovalId}, approvalId=${put.body && put.body.approvalId}`,
       );
 
       // Independent verification via GET: assignedHours must equal the sum of
@@ -479,6 +515,44 @@ async function checkTimePhasedAllocation() {
       `PUT .../allocation over daily capacity on ${OVER_CAPACITY_DAY} -> 400 'daily capacity exceeded'`,
       overCap.status === 400 && String((overCap.body && overCap.body.error) || '').includes('daily capacity exceeded'),
       `status=${overCap.status}, body=${JSON.stringify(overCap.body)}`,
+    );
+  }
+
+  // 5b) NEGATIVE — calendar-date integrity (I-1). Syntax-valid but calendar-
+  // INVALID day keys must 400 BEFORE any mutation (they precede the open-month
+  // gate, so no planning period is needed for the rollover month). All three
+  // are no-ops against assignment 4's state.
+  {
+    // Impossible day (May has 31 days) → Invalid Date, must not slip past as a
+    // phantom working day.
+    const badDay = await req('PUT', `/assignments/${ASSIGNMENT_ID}/allocation`, {
+      body: { month: MONTH, dailyHours: { '2026-05-32': 4 } },
+    });
+    check(
+      `PUT .../allocation with calendar-invalid day key 2026-05-32 -> 400`,
+      badDay.status === 400 && String((badDay.body && badDay.body.error) || '').toLowerCase().includes('invalid calendar date'),
+      `status=${badDay.status}, body=${JSON.stringify(badDay.body)}`,
+    );
+
+    // Rollover: '2026-04-31' under month '2026-04' resolves to May 1 — must be
+    // rejected so it can never alias the real 2026-05-01 row (capacity bypass).
+    const rollover = await req('PUT', `/assignments/${ASSIGNMENT_ID}/allocation`, {
+      body: { month: '2026-04', dailyHours: { '2026-04-31': 4 } },
+    });
+    check(
+      `PUT .../allocation with rollover day key 2026-04-31 (month 2026-04) -> 400`,
+      rollover.status === 400 && String((rollover.body && rollover.body.error) || '').toLowerCase().includes('invalid calendar date'),
+      `status=${rollover.status}, body=${JSON.stringify(rollover.body)}`,
+    );
+
+    // Out-of-range month (13) must fail the range-checked YYYY-MM guard.
+    const badMonth = await req('PUT', `/assignments/${ASSIGNMENT_ID}/allocation`, {
+      body: { month: '2026-13', dailyHours: {} },
+    });
+    check(
+      `PUT .../allocation with out-of-range month 2026-13 -> 400`,
+      badMonth.status === 400,
+      `status=${badMonth.status}, body=${JSON.stringify(badMonth.body)}`,
     );
   }
 
