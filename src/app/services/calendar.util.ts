@@ -70,3 +70,18 @@ export function distributeHoursOverWindow(
   });
   return map;
 }
+
+/** Total hours per date from a list of {date, hours} rows (e.g. a resource's assignmentDays). */
+export function sumHoursByDate(rows: readonly { date: string; hours: number }[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const r of rows) {
+    const h = Number.isFinite(r.hours) ? r.hours : 0;
+    out[r.date] = (out[r.date] ?? 0) + h;
+  }
+  return out;
+}
+
+/** True iff `total` hours exceed the daily capacity `cap` (epsilon tolerance for float noise). */
+export function exceedsDailyCapacity(total: number, cap: number): boolean {
+  return total > cap + 1e-9;
+}

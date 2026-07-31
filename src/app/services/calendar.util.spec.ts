@@ -1,4 +1,12 @@
-import { monthOf, isWorkingDay, workingDaysInMonth, monthlyTargetHours, distributeHoursOverWindow } from './calendar.util';
+import {
+  monthOf,
+  isWorkingDay,
+  workingDaysInMonth,
+  monthlyTargetHours,
+  distributeHoursOverWindow,
+  sumHoursByDate,
+  exceedsDailyCapacity,
+} from './calendar.util';
 
 describe('monthOf', () => {
   it('extracts YYYY-MM', () => expect(monthOf('2026-03-14')).toBe('2026-03'));
@@ -41,4 +49,21 @@ describe('distributeHoursOverWindow', () => {
   it('total ≤ 0 → empty map even with working days present', () => {
     expect(distributeHoursOverWindow(0, '2026-03-02', '2026-03-02', new Set())).toEqual({}); // Mon
   });
+});
+
+describe('sumHoursByDate', () => {
+  it('sums hours per date', () => {
+    const m = sumHoursByDate([{ date: 'D', hours: 4 }, { date: 'D', hours: 5 }, { date: 'E', hours: 2 }]);
+    expect(m['D']).toBe(9);
+    expect(m['E']).toBe(2);
+  });
+  it('empty input → empty map', () => {
+    expect(sumHoursByDate([])).toEqual({});
+  });
+});
+
+describe('exceedsDailyCapacity', () => {
+  it('total over cap → true', () => expect(exceedsDailyCapacity(9, 8)).toBe(true));
+  it('total equal cap → false (epsilon tolerance)', () => expect(exceedsDailyCapacity(8, 8)).toBe(false));
+  it('float noise at cap → false', () => expect(exceedsDailyCapacity(8 + 1e-12, 8)).toBe(false));
 });
