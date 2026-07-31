@@ -252,6 +252,12 @@ const auditRepoBySegment = new Map<string, AuditReadable>([
   ['change-requests', repos.changeRequests], ['cost-centers', repos.costCenters], ['customers', repos.customers],
   ['contracts', repos.contracts], ['orders', repos.orders], ['order-lines', repos.orderLines],
   ['billing-plan-items', repos.billingPlanItems], ['approval-requests', repos.approvalRequests],
+  // Time-phased allocation (B1). `assignment-days` has no REST path of its own
+  // (mutated only via the /allocation endpoint, Task 6) — registering it here is
+  // harmless (findAuditEntity is only ever consulted for paths the router
+  // actually mounts) but keeps the map exhaustive over the Repositories surface.
+  ['holidays', repos.holidays], ['planning-periods', repos.planningPeriods],
+  ['assignment-days', repos.assignmentDays],
 ]);
 
 /** Find the current entity targeted by a `/collection/:id` request path. */
