@@ -1,5 +1,5 @@
 import { Injectable, inject } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { API_BASE_URL } from './api-config';
 
@@ -57,6 +57,12 @@ export interface Resource {
    * resources are never hard-deleted; clearing this (null/empty) reactivates.
    */
   terminationDate?: string;
+  /**
+   * Contracted hours/day for this resource, used to derive daily targets from
+   * the weekly/period capacity. `undefined` falls back to the org-wide
+   * `Setting` keyed `hoursPerDay`. Time-phased allocation (B1).
+   */
+  contractHoursPerDay?: number;
 }
 
 export interface ResourceRequest {
@@ -94,6 +100,44 @@ export interface Assignment {
   allocationPct?: number;
   /** Id of the ApprovalRequest governing this assignment's Requested -> Allocated transition, if any. */
   approvalId?: string;
+}
+
+/**
+ * Time-phased allocation (B1): the per-day breakdown of an assignment's
+ * assignedHours, letting effort be distributed unevenly across the booking
+ * window (e.g. around holidays/part-time days) instead of a flat daily rate.
+ */
+export interface AssignmentDay {
+  id: string;
+  assignmentId: string;
+  /** ISO date 'YYYY-MM-DD'. */
+  date: string;
+  hours: number;
+}
+
+/**
+ * Envelope returned by `GET /assignments/:id/allocation` (B1): the assignment's
+ * per-day rows within [from,to] plus the effective daily contract cap. `from`/`to`
+ * default server-side to the assignment's spanned months and are omitted when the
+ * assignment has no day rows yet.
+ */
+export interface AssignmentAllocation {
+  assignmentId: string;
+  from?: string;
+  to?: string;
+  contractHoursPerDay: number;
+  days: AssignmentDay[];
+}
+
+/**
+ * Response of `PUT /assignments/:id/allocation` (B1): the fresh assignment (whose
+ * `status` may have been demoted to 'Requested' by the edit, triggering re-approval)
+ * plus the just-replaced month and its persisted day rows.
+ */
+export interface AssignmentAllocationResult extends Assignment {
+  month: string;
+  contractHoursPerDay: number;
+  days: AssignmentDay[];
 }
 
 export type UserRole = 'employee' | 'pm' | 'resource-manager' | 'delivery-executive' | 'finance' | 'sales' | 'admin';
@@ -234,6 +278,24 @@ export interface RateCard {
 export interface Setting {
   id: string;
   value: string;
+}
+
+/**
+ * A non-working day (id IS the ISO date, e.g. '2026-12-25'). Time-phased
+ * allocation (B1) — excluded from working-day calculations.
+ */
+export interface Holiday {
+  id: string;
+  name: string;
+}
+
+/**
+ * Open/closed state of a calendar month (id IS the 'YYYY-MM' month). Time-
+ * phased allocation (B1) — a Closed period rejects new/edited daily bookings.
+ */
+export interface PlanningPeriod {
+  id: string;
+  status: 'Open' | 'Closed';
 }
 
 export interface Project {
@@ -647,6 +709,35 @@ export class ApiService {
   deleteAssignment(id: string): Observable<void> {
     return this.http.delete<void>(`${this.baseUrl}/assignments/${id}`);
   }
+
+  // --- Time-phased allocation (B1) ---
+
+  /**
+   * Read an assignment's per-day allocation. `from`/`to` ('YYYY-MM') bound the
+   * returned months; omit them to let the server default to the assignment's
+   * spanned months.
+   */
+  getAssignmentAllocation(id: string, from?: string, to?: string): Observable<AssignmentAllocation> {
+    let params = new HttpParams();
+    if (from) params = params.set('from', from);
+    if (to) params = params.set('to', to);
+    return this.http.get<AssignmentAllocation>(`${this.baseUrl}/assignments/${id}/allocation`, { params });
+  }
+
+  /**
+   * Replace ONE month's per-day hours (keys are 'YYYY-MM-DD' -> hours). The server
+   * enforces open-month, working-day and per-day capacity, and may demote the
+   * assignment to 'Requested' for re-approval — reflected in the returned status.
+   */
+  saveAssignmentAllocation(id: string, month: string, dailyHours: Record<string, number>): Observable<AssignmentAllocationResult> {
+    return this.http.put<AssignmentAllocationResult>(`${this.baseUrl}/assignments/${id}/allocation`, { month, dailyHours });
+  }
+
+  /** Open/Closed state of each calendar month (B1). */
+  getPlanningPeriods(): Observable<PlanningPeriod[]> { return this.http.get<PlanningPeriod[]>(`${this.baseUrl}/planning-periods`); }
+
+  /** Non-working days excluded from working-day math (B1). */
+  getHolidays(): Observable<Holiday[]> { return this.http.get<Holiday[]>(`${this.baseUrl}/holidays`); }
 
   // --- Configuration APIs ---
 

@@ -63,10 +63,17 @@ import type {
   ApprovalRequest,
   AuditLog,
   FxRate,
+  AssignmentDay,
+  Holiday,
+  PlanningPeriod,
 } from '../app/services/api.service';
+import { distributeHoursOverWindow } from '../app/services/calendar.util';
 
 // --- Core resources ---------------------------------------------------------
 
+// Time-phased allocation (B1): contractHoursPerDay drives distributeHoursOverWindow
+// below. Julie and John are full-time (8h/day); Alice is the seeded part-time
+// resource (4h/day) so the demo data exercises both branches.
 export const resources: Resource[] = [
   // utilization is an independent profile value (NOT derived from assignedHours).
   // It is kept plausible against each resource's booking load below: Julie is the
@@ -83,13 +90,13 @@ export const resources: Resource[] = [
     skills: [{ name: 'Java', level: 3 }, { name: 'Spring', level: 2 }],
     projectRoles: ['Senior Developer', 'Backend Engineer'],
     externalExperience: [{ projectName: 'E-commerce Migration', company: 'TechCorp', role: 'Java Developer', startDate: '2020-01-01', endDate: '2022-12-31', comment: 'Migrated legacy system to Spring Boot.' }],
-    profilePicture: '', resume: '', utilization: 95, utilizationPlanned: 95, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York', costRate: 600, billRate: 1120, hireDate: '2019-03-04' },
+    profilePicture: '', resume: '', utilization: 95, utilizationPlanned: 95, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York', costRate: 600, billRate: 1120, hireDate: '2019-03-04', contractHoursPerDay: 8 },
   { id: '2', name: 'John Miller', role: 'Consultant',
     skills: [{ name: 'Project Management', level: 2 }], projectRoles: ['Business Consultant'],
-    externalExperience: [], profilePicture: '', resume: '', utilization: 90, utilizationPlanned: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London', costRate: 720, billRate: 1440, hireDate: '2021-09-13' },
+    externalExperience: [], profilePicture: '', resume: '', utilization: 90, utilizationPlanned: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London', costRate: 720, billRate: 1440, hireDate: '2021-09-13', contractHoursPerDay: 8 },
   { id: '3', name: 'Alice Smith', role: 'Designer',
     skills: [{ name: 'Figma', level: 3 }], projectRoles: ['UX Designer'],
-    externalExperience: [], profilePicture: '', resume: '', utilization: 55, utilizationPlanned: 55, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', hireDate: '2023-01-16' },
+    externalExperience: [], profilePicture: '', resume: '', utilization: 55, utilizationPlanned: 55, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', hireDate: '2023-01-16', contractHoursPerDay: 4 },
 ];
 
 export const users: User[] = [
@@ -143,6 +150,62 @@ export const assignments: Assignment[] = [
   { id: '4', requestId: '2', resourceId: '3', assignedHours: 8, status: 'Allocated', startDate: '2026-05-01', endDate: '2026-07-31', allocationPct: 50 },
   { id: '5', requestId: '5', resourceId: '3', assignedHours: 10, status: 'Allocated', startDate: '2026-08-01', endDate: '2026-09-30', allocationPct: 50 },
 ];
+
+// --- Time-phased allocation (B1) config --------------------------------------
+
+// Non-working days (id IS the ISO date). Neither falls inside any seeded
+// assignment window (2026-05..2026-09 above), so they don't perturb the
+// assignmentDays distribution below — they exist to exercise the holiday-aware
+// calendar helpers (isWorkingDay/workingDaysInMonth) for OTHER months.
+export const holidays: Holiday[] = [
+  { id: '2026-12-25', name: 'Christmas' },
+  { id: '2026-01-01', name: "New Year's Day" },
+];
+
+// Open/closed state per calendar month (id IS 'YYYY-MM'). Opens the demo
+// period's full span (2026-04..2026-12) so every seeded assignment window
+// (May..September) falls inside an Open period.
+export const planningPeriods: PlanningPeriod[] = [
+  { id: '2026-04', status: 'Open' },
+  { id: '2026-05', status: 'Open' },
+  { id: '2026-06', status: 'Open' },
+  { id: '2026-07', status: 'Open' },
+  { id: '2026-08', status: 'Open' },
+  { id: '2026-09', status: 'Open' },
+  { id: '2026-10', status: 'Open' },
+  { id: '2026-11', status: 'Open' },
+  { id: '2026-12', status: 'Open' },
+];
+
+/**
+ * Per-day breakdown of every seeded assignment's `assignedHours`, computed
+ * (not hand-typed) via the same pure `distributeHoursOverWindow` helper the
+ * runtime allocation endpoints use. This guarantees Σ assignmentDays.hours per
+ * assignment === that assignment's assignedHours by construction (the helper
+ * preserves the total, absorbing the rounding remainder on the last working
+ * day) instead of relying on two hand-maintained numbers staying in sync.
+ * Assignments without a booking window (no startDate/endDate) contribute no
+ * days — none of the seeded rows above hit that case.
+ */
+function buildAssignmentDays(
+  rows: readonly Assignment[],
+  holidayRows: readonly Holiday[],
+): AssignmentDay[] {
+  const holidaySet = new Set(holidayRows.map((h) => h.id));
+  const out: AssignmentDay[] = [];
+  for (const a of rows) {
+    if (!a.startDate || !a.endDate) continue;
+    const perDay = distributeHoursOverWindow(a.assignedHours, a.startDate, a.endDate, holidaySet);
+    for (const [date, hours] of Object.entries(perDay)) {
+      if (hours > 0) {
+        out.push({ id: `${a.id}:${date}`, assignmentId: a.id, date, hours });
+      }
+    }
+  }
+  return out;
+}
+
+export const assignmentDays: AssignmentDay[] = buildAssignmentDays(assignments, holidays);
 
 export const timeEntries: TimeEntry[] = [
   { id: 'TE1', assignmentId: '1', requestId: '1', resourceId: '1', projectId: '1', date: '2026-04-06', hours: 8, status: 'Approved', notes: 'Backend integration', approvedBy: '1', approvedAt: '2026-04-07T09:00:00.000Z' },

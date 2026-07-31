@@ -7,6 +7,7 @@ import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angula
 import { DecimalPipe } from '@angular/common';
 import { forkJoin, of } from 'rxjs';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
+import { AllocationCalendarComponent } from '../allocation-calendar/allocation-calendar.component';
 
 interface RequestsData {
   requests: ResourceRequest[];
@@ -17,7 +18,7 @@ interface RequestsData {
 @Component({
   selector: 'app-resource-requests',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, ReactiveFormsModule, DecimalPipe, ModalDialogDirective],
+  imports: [MatIconModule, ReactiveFormsModule, DecimalPipe, ModalDialogDirective, AllocationCalendarComponent],
   template: `
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -321,7 +322,7 @@ interface RequestsData {
         </div>
       }
 
-      @if (trackingDetails()) {
+      @if (trackingDetails() && !calendarTarget()) {
         <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 sm:p-6"
              appModal ariaLabelledby="trackingModalTitle" (dismiss)="closeTracking()">
           <div class="command-card w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
@@ -378,7 +379,7 @@ interface RequestsData {
                         <p class="text-xs font-medium text-[var(--cc-muted)] mt-0.5 flex items-center gap-1"><mat-icon class="text-[14px] w-[14px] h-[14px]">badge</mat-icon> {{ item.resource?.role }}</p>
                       </div>
                     </div>
-                    <div class="text-right flex flex-col items-end gap-1">
+                    <div class="text-right flex flex-col items-end gap-1.5">
                       <div class="font-bold text-[var(--cc-primary-text)] text-lg font-mono tabular-nums">{{ item.assignment.assignedHours }}h</div>
                       <!-- Allocation status: Draft (neutral) · Requested (amber) ·
                            Allocated (green) · Rejected (red). command-status tones
@@ -386,6 +387,14 @@ interface RequestsData {
                       <div class="command-status uppercase" [class]="assignmentStatusClass(item.assignment.status)">
                         {{ item.assignment.status }}
                       </div>
+                      <!-- Time-phased allocation (B1): open the per-day calendar for this
+                           assignment. Swaps overlays (tracking hidden while open) so a
+                           single focus trap is active; closing returns to tracking. -->
+                      <button type="button" (click)="openCalendar(item)"
+                              class="inline-flex items-center gap-1 text-xs font-semibold text-accent-text hover:bg-accent-tint px-2 py-1 rounded-md transition-colors"
+                              [attr.aria-label]="'Apri il calendario di allocazione di ' + (item.resource?.name || 'risorsa')">
+                        <mat-icon class="text-[16px] w-[16px] h-[16px]">calendar_month</mat-icon> Calendario
+                      </button>
                     </div>
                   </div>
                 }
@@ -405,6 +414,19 @@ interface RequestsData {
               <button (click)="closeTracking()" class="command-button secondary">Close</button>
             </div>
           </div>
+        </div>
+      }
+
+      <!-- Time-phased allocation calendar (B1). Rendered as its own modal overlay;
+           while it is open the tracking modal above is hidden so only one focus trap
+           is active. The panel content lives in AllocationCalendarComponent. -->
+      @if (calendarTarget(); as target) {
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 sm:p-6"
+             appModal ariaLabelledby="allocCalTitle" (dismiss)="closeCalendar()">
+          <app-allocation-calendar
+            [assignmentId]="target.assignmentId"
+            [resourceName]="target.resourceName"
+            (closed)="closeCalendar()" />
         </div>
       }
     </div>
@@ -549,6 +571,23 @@ export class ResourceRequestsComponent {
 
   closeTracking() {
     this.trackingRequestId.set(null);
+  }
+
+  // Time-phased allocation calendar (B1): the assignment whose per-day calendar is
+  // open, or null when closed. Set from a tracking-modal row (the assignment id +
+  // resource name are already in hand there). Closing returns to the still-open
+  // tracking modal.
+  calendarTarget = signal<{ assignmentId: string; resourceName: string } | null>(null);
+
+  openCalendar(item: { assignment: Assignment; resource?: Resource }) {
+    this.calendarTarget.set({
+      assignmentId: item.assignment.id,
+      resourceName: item.resource?.name ?? '',
+    });
+  }
+
+  closeCalendar() {
+    this.calendarTarget.set(null);
   }
 
   openCreateForm() {

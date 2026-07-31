@@ -91,6 +91,10 @@ export const resources = pgTable(
     // confirmed/Allocated ones. Nullable for migration safety.
     utilizationPlanned: doublePrecision('utilization_planned'),
     capacity: doublePrecision('capacity').notNull(),
+    // Time-phased allocation (B1): resource's contracted hours/day, used to
+    // derive daily targets from the weekly/period capacity. Nullable — most
+    // rows predate this and fall back to the org-wide `settings.hoursPerDay`.
+    contractHoursPerDay: doublePrecision('contract_hours_per_day'),
     // self-reference: a resource's manager is another resource.
     managerId: text('manager_id'),
     organization: text('organization'),
@@ -181,6 +185,25 @@ export const assignments = pgTable(
   (t) => [
     index('assignments_request_id_idx').on(t.requestId),
     index('assignments_resource_id_idx').on(t.resourceId),
+  ],
+);
+
+// Time-phased allocation (B1): the per-day breakdown of an assignment's
+// assignedHours, so a booking's effort can be distributed unevenly across its
+// window (e.g. around holidays/part-time days) instead of a flat daily rate.
+export const assignmentDays = pgTable(
+  'assignment_days',
+  {
+    id: text('id').primaryKey(),
+    assignmentId: text('assignment_id')
+      .notNull()
+      .references(() => assignments.id),
+    date: text('date').notNull(), // 'YYYY-MM-DD'
+    hours: doublePrecision('hours').notNull(),
+  },
+  (t) => [
+    index('assignment_days_assignment_id_idx').on(t.assignmentId),
+    index('assignment_days_date_idx').on(t.date),
   ],
 );
 
@@ -375,6 +398,22 @@ export const rateCards = pgTable(
     index('rate_cards_role_idx').on(t.role),
   ],
 );
+
+// Time-phased allocation (B1) config catalogs. Both are settings-style
+// natural-key entities (`id` IS the key, no synthetic adapter needed) — see
+// `settings` below for the same pattern.
+
+// NOTE: `Holiday` has no synthetic `id`; its natural key is the ISO date itself.
+export const holidays = pgTable('holidays', {
+  id: text('id').primaryKey(), // ISO date 'YYYY-MM-DD'
+  name: text('name').notNull(),
+});
+
+// NOTE: `PlanningPeriod` has no synthetic `id`; its natural key is the 'YYYY-MM' month.
+export const planningPeriods = pgTable('planning_periods', {
+  id: text('id').primaryKey(), // 'YYYY-MM'
+  status: text('status').$type<'Open' | 'Closed'>().notNull(),
+});
 
 // ---------------------------------------------------------------------------
 // Projects & project sub-resources

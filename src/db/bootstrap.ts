@@ -157,8 +157,13 @@ export async function initPersistence(): Promise<void> {
   await seedIfEmpty(database, schema.projectIssues, seed.projectIssues); // -> projects
   await seedIfEmpty(database, schema.changeRequests, seed.changeRequests); // -> projects
 
+  // Time-phased allocation (B1) config catalogs. Roots (no outgoing FKs).
+  await seedIfEmpty(database, schema.holidays, seed.holidays);
+  await seedIfEmpty(database, schema.planningPeriods, seed.planningPeriods);
+
   // Demand/staffing fulfilment.
   await seedIfEmpty(database, schema.assignments, seed.assignments); // -> requests, resources
+  await seedIfEmpty(database, schema.assignmentDays, seed.assignmentDays); // -> assignments
 
   // Commercial chain.
   await seedIfEmpty(database, schema.orders, seed.orders); // -> contracts, projectPartners

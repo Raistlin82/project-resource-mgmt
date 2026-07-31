@@ -321,6 +321,280 @@ async function checkAllocationApproval() {
   }
 }
 
+/**
+ * Step 4: TIME-PHASED ALLOCATION flow (src/server.ts PUT /planning-periods/:id,
+ * GET/PUT /assignments/:id/allocation — B1, Tasks 5-6).
+ *
+ * IDENTITY — reuses the top-level RBAC_HEADERS (admin). Admin is permitted by
+ * both the '/planning-periods' mutation rule (admin-only) and the
+ * '/assignments' mutation + READ rules, so no new identity is needed here.
+ *
+ * ASSIGNMENT/RESOURCE/DAY CHOICES — from src/db/seed.ts, chosen so every gate
+ * is exercised deterministically against the demo dataset:
+ *
+ *   ASSIGNMENT_ID '4' -> resourceId '3' (Alice Smith, contractHoursPerDay 4 —
+ *     the seeded PART-TIME resource, so a 4h/day happy-path value sits exactly
+ *     AT the cap, and something as small as 5h/day already exceeds it).
+ *     Its booking window is 2026-05-01..2026-07-31, so MONTH '2026-05' falls
+ *     fully inside it. Resource 3's OTHER assignment (id '5') books
+ *     2026-08-01..2026-09-30 — no overlap with May — so the capacity gate
+ *     below sees no contribution from any other assignment on the chosen days.
+ *
+ *   MONTH '2026-05' — 2026-05-01 is a Friday (task doc), so:
+ *     WORKING_DAYS_HOURS '2026-05-05'/'06'/'07' = Tue/Wed/Thu (working days,
+ *       verified via UTC getUTCDay()), hours=4 each == the resource's cap
+ *       exactly (boundary case: 4 > 4+epsilon is false, so it must PASS).
+ *     WEEKEND_DAY '2026-05-09' = Saturday -> working-day gate must reject it.
+ *     OVER_CAPACITY_DAY '2026-05-11' = Monday (a working day, untouched by the
+ *       happy-path days above) with hours=6 > cap 4 -> capacity gate must
+ *       reject it.
+ *
+ * Every negative case (closed-month / weekend / over-capacity) 400s/403s
+ * BEFORE the handler mutates any assignmentDays row (confirmed by reading
+ * src/server.ts: all three gates return before the withLock() day-replace
+ * step), so none of them perturb assignment 4's state for later checks.
+ *
+ * Kept in its OWN try/catch in main() so an unexpected failure here never
+ * masks or blocks the pre-existing checkReads()/checkCrud()/
+ * checkAllocationApproval() results.
+ */
+async function checkTimePhasedAllocation() {
+  const ASSIGNMENT_ID = '4';
+  const MONTH = '2026-05';
+  const WORKING_DAYS_HOURS = { '2026-05-05': 4, '2026-05-06': 4, '2026-05-07': 4 };
+  const WEEKEND_DAY = '2026-05-09';
+  const OVER_CAPACITY_DAY = '2026-05-11';
+
+  /** Sum the `hours` of a list of {date, hours} rows, optionally filtered by month. */
+  const sumHours = (days, monthPrefix) =>
+    (Array.isArray(days) ? days : [])
+      .filter((d) => monthPrefix === undefined || !d.date.startsWith(monthPrefix))
+      .reduce((s, d) => s + (typeof d.hours === 'number' ? d.hours : 0), 0);
+
+  // 1) Open the month. PUT /planning-periods/:id upserts (no prior row needed).
+  {
+    const opened = await req('PUT', `/planning-periods/${MONTH}`, { body: { status: 'Open' } });
+    check(
+      `PUT /api/planning-periods/${MONTH} {status:'Open'} -> 200`,
+      opened.status === 200 && Boolean(opened.body) && opened.body.status === 'Open',
+      `status=${opened.status}, body.status=${opened.body && opened.body.status}`,
+    );
+  }
+
+  // Snapshot ALL of assignment 4's day rows BEFORE the edit (GET with no
+  // from/to defaults to the assignment's full spanned range), so the expected
+  // post-edit assignedHours can be computed from live data, never hard-coded.
+  let otherMonthsHoursBefore = 0;
+  {
+    const { status, body } = await req('GET', `/assignments/${ASSIGNMENT_ID}/allocation`);
+    check(`GET /api/assignments/${ASSIGNMENT_ID}/allocation (pre-edit) -> 200`, status === 200, `status=${status}`);
+    otherMonthsHoursBefore = sumHours(body && body.days, MONTH);
+  }
+
+  // Snapshot assignment 4's governance state BEFORE the edit. The allocation GET
+  // above omits status/approvalId, so read the assignment row itself. The B1
+  // FORCED RE-APPROVAL contract (src/server.ts STEP 2) demotes an 'Allocated'
+  // assignment to 'Requested' on ANY day-row edit by a non-self-managing actor
+  // (resource 3's manager is '2'; the smoke admin maps to resourceId '1'),
+  // opening a fresh approval. Pinning status+approvalId here defends that trigger
+  // against a future refactor to a (wrong) assignedHours-delta condition.
+  let preEditStatus;
+  let preEditApprovalId;
+  {
+    const { status, body } = await req('GET', '/assignments');
+    const assig = Array.isArray(body) ? body.find((a) => a.id === ASSIGNMENT_ID) : undefined;
+    preEditStatus = assig && assig.status;
+    preEditApprovalId = assig && assig.approvalId;
+    check(
+      `GET /api/assignments — assignment ${ASSIGNMENT_ID} is 'Allocated' before the edit (re-approval precondition)`,
+      status === 200 && Boolean(assig) && preEditStatus === 'Allocated',
+      assig ? `status=${preEditStatus}` : `status=${status}, missing`,
+    );
+  }
+
+  // 2) HAPPY PATH — replace May's days with 3 working days at exactly the
+  // resource's daily cap (4h). Expect 200, the echoed `days` to match what was
+  // sent, and `assignedHours` to equal (unchanged other-month hours) + (new
+  // May hours) — the endpoint's documented "days are the source of truth" rule.
+  const newMonthHours = Object.values(WORKING_DAYS_HOURS).reduce((s, h) => s + h, 0);
+  {
+    const put = await req('PUT', `/assignments/${ASSIGNMENT_ID}/allocation`, {
+      body: { month: MONTH, dailyHours: WORKING_DAYS_HOURS },
+    });
+    const putOk = check(
+      `PUT /api/assignments/${ASSIGNMENT_ID}/allocation (happy path, 3 working days @ cap) -> 200`,
+      put.status === 200,
+      `status=${put.status}, body=${JSON.stringify(put.body)}`,
+    );
+    if (putOk) {
+      const days = Array.isArray(put.body.days) ? put.body.days.slice().sort((a, b) => a.date.localeCompare(b.date)) : [];
+      const expectedDays = Object.entries(WORKING_DAYS_HOURS).sort(([a], [b]) => a.localeCompare(b));
+      const daysMatch =
+        days.length === expectedDays.length &&
+        expectedDays.every(([date, hours], i) => days[i] && days[i].date === date && days[i].hours === hours);
+      check(
+        `PUT response 'days' for ${MONTH} match the sent dailyHours`,
+        daysMatch,
+        `days=${JSON.stringify(days)}`,
+      );
+
+      const expectedTotal = otherMonthsHoursBefore + newMonthHours;
+      check(
+        `PUT response 'assignedHours' == other-months hours + new ${MONTH} hours`,
+        Math.abs(put.body.assignedHours - expectedTotal) < 1e-6,
+        `assignedHours=${put.body.assignedHours}, expected=${expectedTotal}`,
+      );
+
+      // FORCED RE-APPROVAL (B1 STEP 2): editing an 'Allocated' assignment's days
+      // must demote it to 'Requested' and open a FRESH approval — driven by the
+      // prior status being 'Allocated', not by any assignedHours delta. Assert
+      // both, and that the new approvalId differs from the pre-edit one.
+      check(
+        `PUT response demotes 'Allocated' -> 'Requested' (forced re-approval)`,
+        put.body.status === 'Requested',
+        `preEditStatus=${preEditStatus}, status=${put.body.status}`,
+      );
+      check(
+        `PUT response carries a fresh approvalId (!= pre-edit)`,
+        typeof put.body.approvalId === 'string' && put.body.approvalId.length > 0 && put.body.approvalId !== preEditApprovalId,
+        `preEditApprovalId=${preEditApprovalId}, approvalId=${put.body && put.body.approvalId}`,
+      );
+
+      // Independent verification via GET: assignedHours must equal the sum of
+      // ALL the assignment's day rows (every month), not just the edited one.
+      const after = await req('GET', `/assignments/${ASSIGNMENT_ID}/allocation`);
+      const totalFromDays = sumHours(after.body && after.body.days);
+      check(
+        `GET /api/assignments/${ASSIGNMENT_ID}/allocation sum(days.hours) == assignedHours`,
+        after.status === 200 && Math.abs(totalFromDays - put.body.assignedHours) < 1e-6,
+        `status=${after.status}, sum(days)=${totalFromDays}, assignedHours=${put.body.assignedHours}`,
+      );
+    }
+  }
+
+  // 3) NEGATIVE — open-month gate. Close the month, attempt an edit -> 403.
+  // Re-open immediately after so steps 4-6 (which need MONTH Open) aren't blocked.
+  {
+    const closed = await req('PUT', `/planning-periods/${MONTH}`, { body: { status: 'Closed' } });
+    check(`PUT /api/planning-periods/${MONTH} {status:'Closed'} -> 200`, closed.status === 200, `status=${closed.status}`);
+
+    const blocked = await req('PUT', `/assignments/${ASSIGNMENT_ID}/allocation`, {
+      body: { month: MONTH, dailyHours: { '2026-05-06': 4 } },
+    });
+    check(
+      `PUT .../allocation on a Closed month -> 403`,
+      blocked.status === 403 && String((blocked.body && blocked.body.error) || '').toLowerCase().includes('not open'),
+      `status=${blocked.status}, body=${JSON.stringify(blocked.body)}`,
+    );
+
+    const reopened = await req('PUT', `/planning-periods/${MONTH}`, { body: { status: 'Open' } });
+    check(`PUT /api/planning-periods/${MONTH} {status:'Open'} (re-open) -> 200`, reopened.status === 200, `status=${reopened.status}`);
+  }
+
+  // 4) NEGATIVE — working-day gate. WEEKEND_DAY (Saturday) carries hours > 0
+  // in an Open month -> 400.
+  {
+    const weekend = await req('PUT', `/assignments/${ASSIGNMENT_ID}/allocation`, {
+      body: { month: MONTH, dailyHours: { [WEEKEND_DAY]: 4 } },
+    });
+    check(
+      `PUT .../allocation with hours on weekend day ${WEEKEND_DAY} -> 400`,
+      weekend.status === 400,
+      `status=${weekend.status}, body=${JSON.stringify(weekend.body)}`,
+    );
+  }
+
+  // 5) NEGATIVE — daily-capacity gate. OVER_CAPACITY_DAY is a working day but
+  // hours (6) exceed resource 3's contractHoursPerDay (4) -> 400 with the
+  // "daily capacity exceeded" message.
+  {
+    const overCap = await req('PUT', `/assignments/${ASSIGNMENT_ID}/allocation`, {
+      body: { month: MONTH, dailyHours: { [OVER_CAPACITY_DAY]: 6 } },
+    });
+    check(
+      `PUT .../allocation over daily capacity on ${OVER_CAPACITY_DAY} -> 400 'daily capacity exceeded'`,
+      overCap.status === 400 && String((overCap.body && overCap.body.error) || '').includes('daily capacity exceeded'),
+      `status=${overCap.status}, body=${JSON.stringify(overCap.body)}`,
+    );
+  }
+
+  // 5b) NEGATIVE — calendar-date integrity (I-1). Syntax-valid but calendar-
+  // INVALID day keys must 400 BEFORE any mutation (they precede the open-month
+  // gate, so no planning period is needed for the rollover month). All three
+  // are no-ops against assignment 4's state.
+  {
+    // Impossible day (May has 31 days) → Invalid Date, must not slip past as a
+    // phantom working day.
+    const badDay = await req('PUT', `/assignments/${ASSIGNMENT_ID}/allocation`, {
+      body: { month: MONTH, dailyHours: { '2026-05-32': 4 } },
+    });
+    check(
+      `PUT .../allocation with calendar-invalid day key 2026-05-32 -> 400`,
+      badDay.status === 400 && String((badDay.body && badDay.body.error) || '').toLowerCase().includes('invalid calendar date'),
+      `status=${badDay.status}, body=${JSON.stringify(badDay.body)}`,
+    );
+
+    // Rollover: '2026-04-31' under month '2026-04' resolves to May 1 — must be
+    // rejected so it can never alias the real 2026-05-01 row (capacity bypass).
+    const rollover = await req('PUT', `/assignments/${ASSIGNMENT_ID}/allocation`, {
+      body: { month: '2026-04', dailyHours: { '2026-04-31': 4 } },
+    });
+    check(
+      `PUT .../allocation with rollover day key 2026-04-31 (month 2026-04) -> 400`,
+      rollover.status === 400 && String((rollover.body && rollover.body.error) || '').toLowerCase().includes('invalid calendar date'),
+      `status=${rollover.status}, body=${JSON.stringify(rollover.body)}`,
+    );
+
+    // Out-of-range month (13) must fail the range-checked YYYY-MM guard.
+    const badMonth = await req('PUT', `/assignments/${ASSIGNMENT_ID}/allocation`, {
+      body: { month: '2026-13', dailyHours: {} },
+    });
+    check(
+      `PUT .../allocation with out-of-range month 2026-13 -> 400`,
+      badMonth.status === 400,
+      `status=${badMonth.status}, body=${JSON.stringify(badMonth.body)}`,
+    );
+  }
+
+  // 6) DELETE CLEANUP — create a throwaway 'Draft' assignment (never touches
+  // seed data), allocate one day on it, then delete it and confirm 204 (never
+  // 409 — assignmentDays must be removed before the parent row) with no orphan
+  // left behind (a follow-up allocation GET 404s because the assignment itself
+  // is gone).
+  {
+    const created = await req('POST', '/assignments', {
+      body: { requestId: '1', resourceId: '1', assignedHours: 0, status: 'Draft' },
+    });
+    const createOk = check(
+      'POST /api/assignments (throwaway Draft, for delete-cleanup) -> 200',
+      created.status === 200 && Boolean(created.body) && typeof created.body.id === 'string',
+      `status=${created.status}, id=${created.body && created.body.id}`,
+    );
+    if (createOk) {
+      const throwawayId = created.body.id;
+
+      const alloc = await req('PUT', `/assignments/${throwawayId}/allocation`, {
+        body: { month: MONTH, dailyHours: { '2026-05-12': 1 } },
+      });
+      check(
+        `PUT /api/assignments/${throwawayId}/allocation (allocate 1 day) -> 200`,
+        alloc.status === 200 && Array.isArray(alloc.body.days) && alloc.body.days.length === 1,
+        `status=${alloc.status}, days=${JSON.stringify(alloc.body && alloc.body.days)}`,
+      );
+
+      const del = await req('DELETE', `/assignments/${throwawayId}`);
+      check(`DELETE /api/assignments/${throwawayId} (has day rows) -> 204, not 409`, del.status === 204, `status=${del.status}`);
+
+      const { status: goneStatus } = await req('GET', `/assignments/${throwawayId}/allocation`);
+      check(`GET /api/assignments/${throwawayId}/allocation after delete -> 404 (no orphan)`, goneStatus === 404, `status=${goneStatus}`);
+
+      const { body: assigList } = await req('GET', '/assignments');
+      const stillThere = Array.isArray(assigList) ? assigList.some((a) => a.id === throwawayId) : true;
+      check(`GET /api/assignments after delete no longer includes id ${throwawayId}`, !stillThere, stillThere ? 'row still present' : 'removed');
+    }
+  }
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -346,6 +620,15 @@ async function main() {
     await checkAllocationApproval();
   } catch (err) {
     console.log(`FAIL  allocation-approval flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the time-phased
+  // allocation flow never masks or blocks any of the prior section results.
+  try {
+    await checkTimePhasedAllocation();
+  } catch (err) {
+    console.log(`FAIL  time-phased allocation flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

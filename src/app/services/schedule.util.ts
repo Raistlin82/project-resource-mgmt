@@ -1,3 +1,6 @@
+// LEGACY (B1): the weekly allocation-pct sweep here is superseded by the time-phased
+// per-day allocation model (assignmentDays + calendar.util). Retained for the existing
+// read-only Schedule timeline; prefer the per-day model for new allocation work.
 /**
  * Pure, SSR-safe resource-schedule model + conflict detection.
  *
