@@ -9,8 +9,9 @@ import { db } from './db/client';
 import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
-import type { AuditLog, Resource, ResourceRequest, Assignment, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
+import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours, decisionToAssignmentStatus, allocationApproverStep, isAllowedAllocationTransition, ALLOCATION_CLIENT_SETTABLE, type AllocationStatus } from './app/services/staffing.util';
+import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity } from './app/services/calendar.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { maxIdSeq } from './server/id-seq.util';
@@ -1514,6 +1515,13 @@ apiRouter.delete('/assignments/:id', async (req, res) => {
   // Supersede any pending approval BEFORE removing the assignment (outside the
   // res:/req: locks) so a deleted assignment never leaves an orphaned approval.
   await withdrawAllocationApproval(oldAssig.approvalId, 'assignment deleted');
+  // B1 (dev↔prod parity): assignment_days → assignments is ON DELETE no action,
+  // so drop THIS assignment's per-day rows FIRST — otherwise Postgres rejects the
+  // parent delete with an FK violation (→ 409) and the in-memory adapter would
+  // orphan the rows. Cleaned up in the handler (not via a DB cascade) so both
+  // adapters behave identically.
+  const daysToRemove = (await repos.assignmentDays.list()).filter(d => d.assignmentId === req.params.id);
+  for (const d of daysToRemove) await repos.assignmentDays.remove(d.id);
   await repos.assignments.remove(req.params.id);
 
   // B-CONCURRENCY + B-UTILIZATION + B-STAFFING: recompute BOTH aggregates from the
@@ -1521,6 +1529,155 @@ apiRouter.delete('/assignments/:id', async (req, res) => {
   await withLock(`res:${oldAssig.resourceId}`, () => recomputeResourceUtilization(oldAssig.resourceId));
   await withLock(`req:${oldAssig.requestId}`, () => recomputeRequestStaffing(oldAssig.requestId));
   res.status(204).send();
+});
+
+// ---------------------------------------------------------------------------
+// TIME-PHASED ALLOCATION (B1, Task 5) — bulk per-month day editing for a single
+// assignment. RBAC is already covered by the existing '/assignments' mutation
+// rule + READ_RULE (roleGate matches on the '/assignments/' prefix), so no new
+// rule is needed. The path pattern '/assignments/:id/allocation' does not
+// collide with '/assignments/:id' ( :id never matches across a '/' ).
+// ---------------------------------------------------------------------------
+
+// READ: the assignment's per-day rows whose month is in [from,to], plus the
+// effective contract hours/day. Range defaults to the assignment's spanned months.
+apiRouter.get('/assignments/:id/allocation', async (req, res) => {
+  const assig = await repos.assignments.get(req.params.id);
+  if (assig === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+
+  const allDays = (await repos.assignmentDays.list()).filter(d => d.assignmentId === assig.id);
+  const spanned = allDays.map(d => monthOf(d.date)).sort();
+
+  const monthParam = (name: string): string | undefined => {
+    const v = req.query[name];
+    return typeof v === 'string' && /^\d{4}-\d{2}$/.test(v) ? v : undefined;
+  };
+  const from = monthParam('from') ?? spanned[0];
+  const to = monthParam('to') ?? spanned[spanned.length - 1];
+
+  const days = (from !== undefined && to !== undefined)
+    ? allDays.filter(d => { const m = monthOf(d.date); return m >= from && m <= to; })
+             .sort((a, b) => a.date.localeCompare(b.date))
+    : [];
+
+  const resource = await repos.resources.get(assig.resourceId);
+  const contractHoursPerDay = resource?.contractHoursPerDay ?? await getHoursPerDay();
+  res.json({ assignmentId: assig.id, from, to, contractHoursPerDay, days });
+});
+
+// WRITE: replace ONE month's per-day hours in a single call. Gates: open-month,
+// working-day, daily-capacity. Then (ordering is load-bearing, gap-A discipline):
+//   1. withLock('res:<id>'): TOCTOU capacity re-check → replace the month's day
+//      rows → write assignedHours = Σ of ALL remaining day rows.
+//   2. OUTSIDE any res:/req: lock: forced re-approval (approval-repo I/O + the
+//      status write) — never nested in an aggregate lock. Trigger = the prior
+//      status was 'Allocated' (the days changed by definition), NOT a delta.
+//   3. FINAL: recompute the status-aware resource/request aggregates AFTER the
+//      status change, so confirmed/planned totals reflect the new status.
+apiRouter.put('/assignments/:id/allocation', async (req, res) => {
+  const assig = await repos.assignments.get(req.params.id);
+  if (assig === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+
+  const body = pick<{ month: string; dailyHours: Record<string, number> }>(req.body, ['month', 'dailyHours']);
+  const month = body.month;
+  if (typeof month !== 'string' || !/^\d{4}-\d{2}$/.test(month)) {
+    res.status(400).json({ error: 'month must match YYYY-MM' }); return;
+  }
+  const daily = body.dailyHours;
+  if (daily === undefined || typeof daily !== 'object' || daily === null || Array.isArray(daily)) {
+    res.status(400).json({ error: 'dailyHours must be an object of YYYY-MM-DD -> hours' }); return;
+  }
+  // Every entry: an ISO day key, a finite hours value >= 0, and its month MUST
+  // equal `month` (a cross-month key would silently escape the per-month replace).
+  for (const [day, value] of Object.entries(daily as Record<string, unknown>)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) { res.status(400).json({ error: `invalid date key ${day}` }); return; }
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      res.status(400).json({ error: `hours for ${day} must be a finite number >= 0` }); return;
+    }
+    if (monthOf(day) !== month) { res.status(400).json({ error: `date ${day} is not in month ${month}` }); return; }
+  }
+
+  // Open-month gate: only a planning period explicitly 'Open' accepts edits.
+  const period = await repos.planningPeriods.get(month);
+  if (period?.status !== 'Open') { res.status(403).json({ error: 'month is not open for planning' }); return; }
+
+  const resource = await repos.resources.get(assig.resourceId);
+  if (resource === undefined) { res.status(400).json({ error: 'assignment references a missing resource' }); return; }
+
+  // Working-day gate: any day carrying hours must be a weekday and not a holiday.
+  const holidaysSet = new Set((await repos.holidays.list()).map(h => h.id));
+  for (const [day, value] of Object.entries(daily)) {
+    if (value > 0 && !isWorkingDay(day, holidaysSet)) { res.status(400).json({ error: `${day} is not a working day` }); return; }
+  }
+
+  // Daily-capacity gate. assignmentDays carry assignmentId (not resourceId), so
+  // gather this resource's OTHER assignment ids, sum their day-hours on the
+  // affected dates, and check other+new against the effective per-day cap.
+  const cap = resource.contractHoursPerDay ?? await getHoursPerDay();
+  const requestedDates = new Set(Object.keys(daily));
+  const capacityOffender = async (): Promise<string | undefined> => {
+    const otherIds = new Set(
+      (await repos.assignments.list()).filter(a => a.resourceId === resource.id && a.id !== assig.id).map(a => a.id));
+    const otherByDate = sumHoursByDate(
+      (await repos.assignmentDays.list()).filter(d => otherIds.has(d.assignmentId) && requestedDates.has(d.date)));
+    for (const day of requestedDates) {
+      if (exceedsDailyCapacity((otherByDate[day] ?? 0) + daily[day], cap)) return day;
+    }
+    return undefined;
+  };
+  const preOffender = await capacityOffender();
+  if (preOffender !== undefined) { res.status(400).json({ error: `daily capacity exceeded on ${preOffender}` }); return; }
+
+  const oldStatus = assig.status;
+  // STEP 1 — inside res: lock: TOCTOU re-check, then replace the month's day rows
+  // and rewrite assignedHours from the full remaining day set (source of truth).
+  const replaced = await withLock(`res:${resource.id}`, async (): Promise<{ offender?: string }> => {
+    const offender = await capacityOffender();
+    if (offender !== undefined) return { offender };
+
+    const existing = (await repos.assignmentDays.list())
+      .filter(d => d.assignmentId === assig.id && monthOf(d.date) === month);
+    for (const d of existing) await repos.assignmentDays.remove(d.id);
+    // Composite id `${assignmentId}:${date}` (same scheme as the seed —
+    // assignmentDays is intentionally excluded from seedSequences, so NEVER newId()).
+    for (const day of requestedDates) {
+      const hours = daily[day];
+      if (hours > 0) {
+        await repos.assignmentDays.create({ id: `${assig.id}:${day}`, assignmentId: assig.id, date: day, hours } as AssignmentDay);
+      }
+    }
+    const remaining = (await repos.assignmentDays.list()).filter(d => d.assignmentId === assig.id);
+    const total = remaining.reduce((s, d) => s + (Number.isFinite(d.hours) ? d.hours : 0), 0);
+    await repos.assignments.update(assig.id, { assignedHours: Math.round(total * 100) / 100 });
+    return {};
+  });
+  if (replaced.offender !== undefined) { res.status(400).json({ error: `daily capacity exceeded on ${replaced.offender}` }); return; }
+
+  // STEP 2 — OUTSIDE any res:/req: lock: forced re-approval. Trigger is the PRIOR
+  // status 'Allocated' (days changed), not an assignedHours delta. Self-managed →
+  // stays Allocated with no approval; otherwise supersede the old approval and open
+  // a fresh one, moving to 'Requested'. A still-'Requested' assignment keeps its
+  // pending approval (the approver re-reads the days via refId); Draft/Rejected
+  // have no approval effect.
+  if (oldStatus === 'Allocated' && !(await autoApprovesAllocation(req, resource.id))) {
+    await withdrawAllocationApproval(assig.approvalId, 'superseded');
+    const updatedAssig = await repos.assignments.get(assig.id);
+    if (updatedAssig) {
+      const approvalId = await createAllocationApproval(req, updatedAssig);
+      await repos.assignments.update(assig.id, { status: 'Requested', approvalId });
+    }
+  }
+
+  // STEP 3 — FINAL (after the status change): recompute the status-aware aggregates
+  // so confirmed/planned utilization + staffed-effort reflect the new status.
+  await withLock(`res:${resource.id}`, () => recomputeResourceUtilization(resource.id));
+  await withLock(`req:${assig.requestId}`, () => recomputeRequestStaffing(assig.requestId));
+
+  const fresh = await repos.assignments.get(assig.id);
+  const days = (await repos.assignmentDays.list())
+    .filter(d => d.assignmentId === assig.id && monthOf(d.date) === month)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  res.json({ ...fresh, month, contractHoursPerDay: cap, days });
 });
 
 apiRouter.get('/time-entries', async (_req, res) => { res.json(await repos.timeEntries.list()); });
