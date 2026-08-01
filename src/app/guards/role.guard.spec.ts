@@ -2,8 +2,9 @@ import { Injector, PLATFORM_ID, runInInjectionContext, signal } from '@angular/c
 import { TestBed } from '@angular/core/testing';
 import { provideRouter, Router, UrlTree, GuardResult } from '@angular/router';
 import { isObservable, firstValueFrom, Observable } from 'rxjs';
-import { roleGuard } from './role.guard';
+import { roleGuard, capacityGuard, CAPACITY_ROLES } from './role.guard';
 import { AuthService } from '../services/auth.service';
+import { UserRole } from '../services/api.service';
 
 /**
  * Minimal AuthService stand-in: a settable `authReady` signal plus a settable
@@ -17,6 +18,20 @@ class FakeAuth {
   allowed = false;
   capability(): boolean {
     return this.allowed;
+  }
+}
+
+/**
+ * AuthService stand-in with a real {@link hasAnyRole} over a fixed role, so a
+ * concrete guard (e.g. {@link capacityGuard}) can be evaluated per-role exactly
+ * as it would against the live service.
+ */
+class RoleAuth {
+  readonly _ready = signal(false);
+  readonly authReady = this._ready.asReadonly();
+  constructor(private readonly role: UserRole) {}
+  hasAnyRole(roles: UserRole[]): boolean {
+    return roles.includes(this.role);
   }
 }
 
@@ -91,4 +106,37 @@ describe('roleGuard', () => {
     // Proves the check ran against the post-hydration state, not the initial one.
     expect(value).toBe(true);
   });
+});
+
+describe('capacityGuard role parity', () => {
+  // The staffing-grade roles the /capacity dashboard is restricted to. The nav
+  // entry in app.ts gates on this SAME exported CAPACITY_ROLES const, so pinning
+  // it here catches a drift on EITHER side (guard or nav).
+  const ALLOWED: UserRole[] = ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'];
+  const DENIED: UserRole[] = ['employee', 'sales'];
+
+  it('CAPACITY_ROLES is exactly the staffing-grade set (shared by capacityGuard AND the /capacity nav gate)', () => {
+    expect([...CAPACITY_ROLES].sort()).toEqual([...ALLOWED].sort());
+  });
+
+  /** Evaluate capacityGuard in the browser for a single role, after authReady settles. */
+  async function decide(role: UserRole): Promise<GuardResult> {
+    const auth = new RoleAuth(role);
+    const injector = configure('browser', auth as unknown as FakeAuth);
+    const result = runInInjectionContext(injector, () => capacityGuard({} as never, []));
+    auth._ready.set(true);
+    return firstValueFrom(result as Observable<GuardResult>);
+  }
+
+  for (const role of ALLOWED) {
+    it(`allows ${role}`, async () => {
+      expect(await decide(role)).toBe(true);
+    });
+  }
+
+  for (const role of DENIED) {
+    it(`denies ${role} (redirects home)`, async () => {
+      expect(await decide(role)).toBeInstanceOf(UrlTree);
+    });
+  }
 });

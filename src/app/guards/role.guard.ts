@@ -5,6 +5,7 @@ import { CanMatchFn, GuardResult, Router } from '@angular/router';
 import { Observable } from 'rxjs';
 import { filter, map, take } from 'rxjs/operators';
 import { AuthService } from '../services/auth.service';
+import { UserRole } from '../services/api.service';
 
 /**
  * Functional `CanMatchFn` factory that gates a route on a role/capability check.
@@ -56,9 +57,15 @@ export const commercialGuard: CanMatchFn = roleGuard(auth => auth.canManageComme
 export const financeGuard: CanMatchFn = roleGuard(auth => auth.canApproveFinancials());
 
 /**
- * Allows matching only for the staffing-grade roles that may read the monthly
- * FTE capacity dashboard (B2). Mirrors the server's `/capacity/monthly` RBAC.
+ * Staffing-grade roles allowed to read the monthly FTE capacity dashboard (B2),
+ * mirroring the server's `/capacity/monthly` RBAC. Exported as the SINGLE source
+ * of truth so both {@link capacityGuard} (route gate) and the `/capacity` nav
+ * entry's visibility (in `app.ts`) reference the same set and can never drift.
  */
-export const capacityGuard: CanMatchFn = roleGuard(auth =>
-  auth.hasAnyRole(['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin']),
-);
+export const CAPACITY_ROLES: readonly UserRole[] = ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'];
+
+/**
+ * Allows matching only for the {@link CAPACITY_ROLES} staffing-grade roles that
+ * may read the monthly FTE capacity dashboard (B2).
+ */
+export const capacityGuard: CanMatchFn = roleGuard(auth => auth.hasAnyRole([...CAPACITY_ROLES]));
