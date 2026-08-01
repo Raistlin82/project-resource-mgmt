@@ -19,7 +19,7 @@
 - **Riuso B1 / gap A (NON duplicare):** `monthlyTargetHours(hoursPerDay, month, holidays)` e `monthOf(date)` sono in `src/app/services/calendar.util.ts`. Lo split confermato/pianificato riusa la semantica di `staffing.util`: **confermato = status `Allocated`**, **pianificato = `Requested` + `Allocated`**. `getHoursPerDay()` (server.ts, default 8) fornisce `settings.hoursPerDay`. Le `holidays` sono un catalogo con `id` = data ISO.
 - **Sola lettura:** nessuna mutazione, nessun `withLock`, nessun impatto su gap A / B1. L'FTE è **calcolato, mai persistito**; **non** dipende dallo scalare `resource.utilization` (clampato 0–100).
 - **Moduli puri SSR-safe:** `capacity.util.ts` NON usa `Date.now()`/`new Date()` argless (deterministico, come `calendar.util`). L'unica data "corrente" è il **fallback** del default-range, che vive **nell'handler server** (non nel modulo puro).
-- **RBAC bespoke:** l'handler `GET /capacity/monthly` **deve** invocare `roleGate` sulla chiave collection `capacity` (i bespoke handler sono l'unico punto in cui il gating si può bypassare per errore). La prova è il test smoke 403 (Task 5).
+- **RBAC:** `roleGate` è **middleware globale** (`apiRouter.use(roleGate)`, server.ts:660) — gira PRIMA di ogni route, quindi l'handler `/capacity/monthly` è già coperto e NON deve invocarlo. Il requisito reale è **aggiungere una regola a `READ_RULES`** (un **array** di predicati `{ test, roles }`, server.ts:547 — non una mappa per-chiave): `{ test: p => p.startsWith('/capacity'), roles: ['pm','resource-manager','delivery-executive','finance','admin'] }`. La prova è il test smoke 403 (Task 5).
 - **Modelli consigliati (subagent-driven):** Task 1 → standard (logica di rollup non banale); Task 2 → cheap (tipi + 1 metodo); Task 3 → **opus** (confine di sicurezza + default-range); Task 4 → **opus** (component signal-first + WCAG); Task 5 → standard.
 - **Gotcha smoke live (da B1):** la porta **3000 è occupata da grafana su IPv6**; avviare il server su una porta libera diversa (es. 4173). Su questo Mac `localhost` risolve a `::1` e il server Node binda `::1`: puntare `localhost`, **non** `127.0.0.1`. Avvio: `env -u DATABASE_URL AUTH_TRUST_HEADERS=true PORT=4173 HOST=localhost node dist/app/server/server.mjs`; poi `SMOKE_BASE=http://localhost:4173 node scripts/smoke-api.mjs`.
 - **Edge-case (dati incoerenti):** una riga `assignmentDays` datata in un mese in cui la risorsa è inattiva (es. dopo `terminationDate`) NON genera una cella e non conta nei totali di quel mese. Per dati ben formati (allocazioni entro il rapporto) non accade mai. Comportamento accettato.
@@ -39,7 +39,7 @@
 - `src/server.ts` — handler bespoke `GET /capacity/monthly` (validazione, default-range, predicato per-mese, `rollupMonthly`), `roleGate('capacity')`, `READ_RULES['capacity']`.
 - `src/app/app.routes.ts` — rotta lazy `/capacity` con `capacityGuard`.
 - `src/app/guards/role.guard.ts` — `capacityGuard` (ruoli staffing) se non già coperto da `roleGuard(...)`.
-- (navigazione) il componente che rende il menu principale — nuova voce "Capacità".
+- `src/app/app.ts` — nuova voce "Capacità" in `allNavGroups` (gruppo "Analytics", vicino a Reporting/Utilization, ~app.ts:365-408; icona `calendar_view_month` — `insights` è già usata da Reporting).
 - `scripts/smoke-api.mjs` — flusso `/capacity/monthly` (happy-path + validazione + RBAC 403).
 - `docs/roles-and-permissions.md` — nuova collection sola-lettura `/capacity`.
 
@@ -55,12 +55,18 @@
 import {
   standardMonthlyHours, fteOf, semaphoreBand, monthsInRange, isActiveInMonth, rollupMonthly,
 } from './capacity.util';
+import { workingDaysInMonth } from './calendar.util';
 
 const NO_HOL = new Set<string>();
 
 describe('fteOf', () => {
   it('divides by standard hours', () => expect(fteOf(88, 176)).toBeCloseTo(0.5));
   it('guards zero denominator', () => expect(fteOf(10, 0)).toBe(0));
+});
+
+describe('standardMonthlyHours', () => {
+  it('aliases monthlyTargetHours = working days × hoursPerDay', () =>
+    expect(standardMonthlyHours('2026-05', 8, NO_HOL)).toBe(workingDaysInMonth('2026-05', NO_HOL).length * 8));
 });
 
 describe('semaphoreBand (lower-bound-inclusive: [0,50) idle, [50,85) under, [85,105] healthy, (105,∞) over)', () => {
@@ -268,10 +274,10 @@ getCapacityMonthly(from?: string, to?: string): Observable<CapacityMonthly> {
   let params = new HttpParams();
   if (from) params = params.set('from', from);
   if (to) params = params.set('to', to);
-  return this.http.get<CapacityMonthly>(`${this.base}/capacity/monthly`, { params });
+  return this.http.get<CapacityMonthly>(`${this.baseUrl}/capacity/monthly`, { params });
 }
 ```
-(Adeguare `this.base`/nome dell'`HttpClient` a quelli reali del file.)
+(Template esatto: `getAssignmentAllocation` in `api.service.ts:720`; il service usa `this.baseUrl` e `this.http`, api.service.ts:653-654.)
 
 - [ ] **Step 3:** build + lint verdi.
 
@@ -296,7 +302,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 1: leggere il contesto** in `src/server.ts`: come un GET bespoke esistente applica `roleGate` e come è strutturata la tabella `READ_RULES` (es. la regola di `/resources`/`/assignments`), il pattern del GET computato `GET /assignments/:id/allocation`, `getHoursPerDay()`, e come si ottiene il set `holidays` (i cui `id` sono date ISO). Replicare quei pattern; non inventarne di nuovi.
 
-- [ ] **Step 2: RBAC** — aggiungere a `READ_RULES` la chiave `capacity` con i ruoli staffing `['pm','resource-manager','delivery-executive','finance','admin']`, e registrare l'handler in modo che `roleGate` giri sulla chiave collection `capacity` (come per le altre collection). Aggiornare `docs/roles-and-permissions.md` (nuova collection sola-lettura `/capacity`, chi la vede).
+- [ ] **Step 2: RBAC** — `roleGate` è middleware globale (server.ts:660), quindi basta **aggiungere una regola a `READ_RULES`** (array di predicati `{ test, roles }`, server.ts:547): `{ test: p => p.startsWith('/capacity'), roles: ['pm','resource-manager','delivery-executive','finance','admin'] }`. Nessuna invocazione per-handler. Aggiornare `docs/roles-and-permissions.md` (nuova collection sola-lettura `/capacity`, chi la vede).
 
 - [ ] **Step 3: handler** `GET /capacity/monthly` (async, bespoke). Logica:
   - `from`/`to` da query. Validazione: se presenti, regex `/^\d{4}-(0[1-9]|1[0-2])$/`, `from ≤ to` (confronto stringa), span ≤ 24 mesi → altrimenti `400 {error}`.
@@ -334,7 +340,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Files:** Create `src/app/capacity/capacity.component.ts` (+ `.spec.ts`); Modify `src/app/app.routes.ts`, `src/app/guards/role.guard.ts`, il componente di navigazione.
 
-- [ ] **Step 1: guard + rotta** — aggiungere `capacityGuard` (ruoli staffing `['pm','resource-manager','delivery-executive','finance','admin']`) riusando `roleGuard(...)` esistente se già parametrico (vedi `commercialGuard`/`financeGuard`). Registrare in `app.routes.ts` una rotta lazy `loadComponent` `/capacity` con `canMatch: [capacityGuard]`. Aggiungere la voce di menu "Capacità" nel componente di navigazione (allo stesso posto delle altre voci principali, con l'icona Material coerente, es. `insights`/`calendar_view_month`).
+- [ ] **Step 1: guard + rotta** — aggiungere `capacityGuard` (ruoli staffing `['pm','resource-manager','delivery-executive','finance','admin']`) riusando `roleGuard(...)` esistente (parametrico, role.guard.ts:36; vedi `commercialGuard`/`financeGuard`). Registrare in `app.routes.ts` una rotta lazy `loadComponent` `/capacity` con `canMatch: [capacityGuard]`. Aggiungere la voce di menu "Capacità" in **`src/app/app.ts` → `allNavGroups`** (gruppo "Analytics", ~app.ts:365-408), icona `calendar_view_month` (`insights` è già usata da Reporting).
 
 - [ ] **Step 2: test component che fallisce** (`capacity.component.spec.ts`): stub di `ApiService.getCapacityMonthly` che ritorna un envelope noto (2 risorse × 2 mesi con bande diverse); montare il component con `auth.authReady()` = `true`; assert che la griglia rende una cella con la classe/label di banda attesa (es. `over`) e la percentuale; e che con `authReady()` = `false` non parte la fetch (rimane empty-state). Seguire il pattern di test di `reporting`/allocation-calendar per lo stub di `ApiService` e `AuthService`.
 
@@ -358,7 +364,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - [ ] **Step 5: commit**
 
 ```bash
-git add src/app/capacity src/app/app.routes.ts src/app/guards/role.guard.ts src/app/<nav-component>
+git add src/app/capacity src/app/app.routes.ts src/app/guards/role.guard.ts src/app/app.ts
 git commit -m "feat(b2): /capacity dashboard — resource×month grid, semaphore bands, KPIs, totals
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
