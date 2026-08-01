@@ -228,7 +228,7 @@ function shiftMonth(month: string, delta: number): string {
                     <td class="px-4 sm:px-6 py-4 sticky left-0 bg-surface-muted z-10">Demand / Capacity <span class="ml-1 text-xs font-semibold text-ink-muted normal-case tracking-normal">FTE</span></td>
                     @for (t of totalsRow(); track t.month) {
                       <td class="px-3 py-4 text-center" [attr.data-test]="'totals-' + t.month">
-                        <div class="font-mono tabular-nums text-sm" [class.text-critical-text]="t.planned > t.capacity">
+                        <div class="font-mono tabular-nums text-sm" [class.text-critical-text]="t.planned > t.capacity + 1e-9">
                           {{ t.planned | number:'1.1-1' }} <span class="text-ink-muted font-normal">/ {{ t.capacity | number:'1.1-1' }}</span>
                         </div>
                         <div class="text-[10px] font-mono tabular-nums text-ink-muted font-normal">conf {{ t.confirmed | number:'1.1-1' }}</div>

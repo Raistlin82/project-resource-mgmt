@@ -59,6 +59,9 @@ export function rollupMonthly(input: RollupInput): CapacityRollup {
   const byResMonth = new Map<string, Map<string, { confirmed: number; planned: number }>>();
   for (const d of assignmentDays) {
     const a = asgById.get(d.assignmentId); if (!a) continue;
+    // Defensive: a non-finite hours value would poison the running sums with NaN,
+    // and semaphoreBand(NaN) falls through to 'over' — skip the row (cf. sumHoursByDate).
+    if (!Number.isFinite(d.hours)) continue;
     const m = monthOf(d.date);
     let rm = byResMonth.get(a.resourceId); if (!rm) { rm = new Map(); byResMonth.set(a.resourceId, rm); }
     let c = rm.get(m); if (!c) { c = { confirmed: 0, planned: 0 }; rm.set(m, c); }

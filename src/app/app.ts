@@ -406,7 +406,7 @@ export class App {
         { label: 'Forecast', icon: 'query_stats', route: '/forecast' },
         { label: 'What-if', icon: 'tune', route: '/what-if' },
         { label: 'Utilization', icon: 'bar_chart', route: '/utilization', badge: 'overbooked' },
-        { label: 'Capacità', icon: 'calendar_view_month', route: '/capacity' },
+        { label: 'Capacity', icon: 'calendar_view_month', route: '/capacity' },
         { label: 'Reporting', icon: 'insights', route: '/reporting', badge: 'risks' },
       ],
     },

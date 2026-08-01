@@ -82,4 +82,17 @@ describe('rollupMonthly', () => {
       assignments: [], assignmentDays: [], months, hoursPerDay, holidays: NO_HOL });
     expect(out2.rows[0].monthly['2026-05'].band).toBe('idle');
   });
+  it('ignores non-finite hours rows (NaN would poison the sum and mis-band the cell as over)', () => {
+    const out3 = rollupMonthly({
+      resources: [{ id: 'r9', name: 'Poisoned', contractHoursPerDay: 8 }],
+      assignments: [{ id: 'aX', resourceId: 'r9', status: 'Requested' }],
+      assignmentDays: [{ assignmentId: 'aX', date: '2026-05-04', hours: Number.NaN }],
+      months, hoursPerDay, holidays: NO_HOL,
+    });
+    const cell = out3.rows[0].monthly['2026-05'];
+    expect(cell.plannedHours).toBe(0);
+    expect(Number.isFinite(cell.ftePlanned)).toBe(true);
+    expect(cell.band).toBe('idle');
+    expect(cell.band).not.toBe('over');
+  });
 });
