@@ -19,7 +19,7 @@ RPT offre una **vista di capacità mensile** cross-risorsa con FTE equivalente e
 2. **Mese standard = giorni lavorativi × `settings.hoursPerDay` (festività-aware).** Cioè `monthlyTargetHours(settings.hoursPerDay, mese, holidays)` di B1. Varia per mese; niente valore fisso.
 3. **Doppio aggregato confermato + pianificato.** Ogni cella espone sia il confermato (assignment `Allocated`) sia il pianificato (`Requested` + `Allocated`), stesso split di gap A (`staffing.util`). Il **semaforo si basa sul pianificato** (vista forward-looking del carico).
 4. **Collocazione: pagina dedicata `/capacity`** (nuova voce di menu), sola lettura.
-5. **Semaforo bilaterale (idle + over)** sull'FTE% pianificato, base standard. Bande **configurabili**: `< 50% idle` · `50–85% sotto` · `85–105% sano` · `> 105% over`.
+5. **Semaforo bilaterale (idle + over)** sull'FTE% pianificato, base standard. Bande **lower-bound-inclusive**, senza sovrapposizioni ai confini: `[0,50)` **idle** · `[50,85)` **sotto** · `[85,105]` **sano** · `(105,∞)` **over** (quindi esattamente 50→sotto, 85→sano, 105→sano). Soglie **configurabili come costante di codice** `SEMAPHORE_THRESHOLDS` (tarabili senza settings a runtime; non è richiesta configurabilità utente).
 6. **Calcolo su endpoint server dedicato** `GET /capacity/monthly` (aggregazione server-side, RBAC-gated, testabile), non lato client.
 
 ### Fuori scope (follow-up)
@@ -37,7 +37,7 @@ RPT offre una **vista di capacità mensile** cross-risorsa con FTE equivalente e
 B2 **non aggiunge tabelle né colonne**. Tutto deriva da dati esistenti:
 - **`assignmentDays`** `{assignmentId, date, hours}` — sorgente delle ore allocate.
 - **`assignments`** `{resourceId, status}` — per collegare le righe-giorno a una risorsa e allo split confermato/pianificato.
-- **`resources`** `{contractHoursPerDay, terminationDate/hireDate}` — per la capacità (supply) e il filtro risorse attive.
+- **`resources`** `{contractHoursPerDay, hireDate, terminationDate}` — per la capacità (supply) e il filtro **risorse attive nel mese** (predicato per-mese definito in §4).
 - **`holidays`** + **`settings.hoursPerDay`** — denominatore del mese standard.
 
 **FTE e bande sono calcolate, non memorizzate.** Coerente con la filosofia esistente ("utilization è derivata a ogni scrittura") e **aggira il problema del `clampUtil` che satura a 100**: il ricalcolo fresco può rappresentare l'over-allocazione (> 100%) senza perdita.
@@ -50,14 +50,14 @@ Funzioni **pure, SSR-safe, deterministiche (UTC)**, unit-testate, riusate sia da
 
 - `standardMonthlyHours(month, hoursPerDay, holidays)` → ore del mese standard; alias di `monthlyTargetHours(hoursPerDay, month, holidays)` di B1 (nessuna duplicazione: la richiama).
 - `fteOf(hours, standardHours)` → `standardHours > 0 ? hours / standardHours : 0`.
-- `SEMAPHORE_THRESHOLDS = { idle: 50, under: 85, healthy: 105 }` (costante configurabile) e `semaphoreBand(pct)` → `'idle' | 'under' | 'healthy' | 'over'` (confini gestiti in modo esplicito e tollerante all'epsilon).
+- `SEMAPHORE_THRESHOLDS = { idle: 50, under: 85, healthy: 105 }` (costante di codice) e `semaphoreBand(pct)` → `'idle' | 'under' | 'healthy' | 'over'` con confini **lower-bound-inclusive**: `pct < 50 → idle`, `pct < 85 → under`, `pct <= 105 → healthy`, altrimenti `over` (tolleranza epsilon sui confronti). Così 50→`under`, 85→`healthy`, 105→`healthy`.
 - `rollupMonthly({ assignments, assignmentDays, months, hoursPerDay, holidays, resources })` → per ogni `(resourceId, month)`: `{ confirmedHours, plannedHours, targetHours, fteConfirmed, ftePlanned, band }`, più i **totali per mese** `{ demandFteConfirmed, demandFtePlanned, capacityFte, resourceCount }`. È il **cuore testabile**.
 
 **Semantica del rollup:**
 - `plannedHours(r, m)` = Σ `hours` delle righe-giorno con `monthOf(date) === m`, sugli assignment di `r` con status ∈ {`Requested`, `Allocated`}. `confirmedHours` = idem con status = `Allocated`.
 - `targetHours(m)` = `standardMonthlyHours(m, settings.hoursPerDay, holidays)` — **uguale per tutte le risorse** nel mese.
 - `ftePlanned = fteOf(plannedHours, targetHours)`; `band = semaphoreBand(ftePlanned * 100)`.
-- **Capacità (supply)** per risorsa/mese = `monthlyTargetHours(r.contractHoursPerDay, m, holidays) / targetHours(m)` → Julie (8h/g) = 1.0, Alice (4h/g) = 0.5. `capacityFte(m)` = Σ sulle risorse attive nel mese. Quando una risorsa è piena al suo contratto, `demanda == capacità` per quella risorsa (coerente).
+- **Capacità (supply)** per risorsa/mese = `fteOf(monthlyTargetHours(r.contractHoursPerDay, m, holidays), targetHours(m))` (stesso guard zero-denominatore della domanda) → Julie (8h/g) = 1.0, Alice (4h/g) = 0.5. `capacityFte(m)` = Σ sulle **risorse attive nel mese** (predicato §4). Quando una risorsa è piena al suo contratto, `domanda == capacità` per quella risorsa (coerente).
 
 ---
 
@@ -65,9 +65,9 @@ Funzioni **pure, SSR-safe, deterministiche (UTC)**, unit-testate, riusate sia da
 
 Handler **bespoke async** in `src/server.ts` (pattern dei GET computati già presenti, es. `/assignments/:id/allocation`).
 
-- **Query:** `?from=YYYY-MM&to=YYYY-MM`. Default (assenti) → intervallo derivato dai `planningPeriods` (primo mese ordinato → +5), o fallback al mese corrente + 5.
+- **Query:** `?from=YYYY-MM&to=YYYY-MM`. Default (assenti) → dal **primo `planningPeriod` con status `Open`** (in ordine crescente) per 6 mesi (`+5`); se non esiste alcun periodo `Open`, fallback al **mese corrente** `+5`.
 - **Validazione:** `from`/`to` regex `^\d{4}-(0[1-9]|1[0-2])$`, `from ≤ to`, ampiezza massima ~24 mesi → altrimenti **400**.
-- **Corpo:** carica `assignments` + `assignmentDays` + `holidays` + `settings.hoursPerDay` + `resources` (non terminate), costruisce la lista mesi `[from..to]`, chiama `rollupMonthly`, e restituisce:
+- **Corpo:** carica (via repo, già normalizzati) `assignments` + `assignmentDays` + `holidays` + `settings.hoursPerDay` + `resources`, costruisce la lista mesi `[from..to]`, chiama `rollupMonthly`, e restituisce:
   ```
   { months: string[],
     rows: [ { resourceId, resourceName,
@@ -75,8 +75,8 @@ Handler **bespoke async** in `src/server.ts` (pattern dei GET computati già pre
                                       fteConfirmed, ftePlanned, band } } } ],
     totals: { 'YYYY-MM': { demandFteConfirmed, demandFtePlanned, capacityFte, resourceCount } } }
   ```
-- **Risorse:** incluse solo le **attive** (non terminate all'inizio del mese). `nullsToUndefined` su ogni ritorno (parità dev↔prod).
-- **RBAC:** nuova `READ_RULE` per `/capacity` = ruoli staffing `['pm','resource-manager','delivery-executive','finance','admin']`. Nessuna mutazione (endpoint sola lettura).
+- **Risorsa attiva nel mese `m` (predicato per-mese univoco):** `hireDate ≤ inizioMese(m) AND (terminationDate assente OR terminationDate ≥ inizioMese(m))`, valutato **per ciascun mese** dell'intervallo (una risorsa può entrare/uscire a metà range → compare/scompare dalle colonne e dai totali di conseguenza). `resourceCount(m)`, `capacityFte(m)` e la presenza di una riga in un dato mese seguono questo predicato. Le date-input `resources`/`assignmentDays` arrivano già normalizzate dal repo (`nullsToUndefined`); l'aggregato numerico calcolato non emette `null`.
+- **RBAC:** l'handler bespoke invoca **`roleGate`** sulla chiave collection `capacity`, per cui la nuova `READ_RULE` `/capacity` = ruoli staffing `['pm','resource-manager','delivery-executive','finance','admin']` si applica davvero (i bespoke handler sono l'unico punto in cui il gating può essere bypassato per errore). Nessuna mutazione (endpoint sola lettura).
 
 ---
 
@@ -112,14 +112,14 @@ Handler **bespoke async** in `src/server.ts` (pattern dei GET computati già pre
 
 ## 8. RBAC & docs
 
-- Aggiunta di `/capacity` a `READ_RULES` in `src/server.ts` (ruoli staffing). La rotta frontend è "ungated" a livello router ma protetta da guard per UX; **i dati sono protetti dall'endpoint** a prescindere.
+- Aggiunta di `/capacity` a `READ_RULES` in `src/server.ts` (ruoli staffing) **e** invocazione esplicita di `roleGate` nell'handler bespoke (vedi §4). La rotta frontend è "ungated" a livello router ma protetta da guard per UX; **i dati sono protetti dall'endpoint** a prescindere.
 - Aggiornamento di `docs/roles-and-permissions.md` (nuova collection di sola lettura `/capacity` e chi la vede), mantenendo il doc in sync col codice.
 
 ---
 
 ## 9. Note e invarianti da rispettare
 
-- **Parità dev↔prod:** l'endpoint gira identico su in-memory e Postgres; `nullsToUndefined` sui ritorni.
+- **Parità dev↔prod:** l'endpoint gira identico su in-memory e Postgres; i dati caricati dai repo sono già normalizzati (`nullsToUndefined`), l'aggregato numerico calcolato non emette `null`.
 - **Riuso, non duplicazione:** `standardMonthlyHours` richiama `monthlyTargetHours` di B1; lo split confermato/pianificato riusa la semantica di `staffing.util` (`Allocated` = confermato; `Requested`+`Allocated` = pianificato).
 - **Nessuna dipendenza dallo scalare `resource.utilization`** (clampato 0–100, capacità settimanale): B2 aggrega `assignmentDays` per mese, indipendente da quel campo.
 - **Soglie semaforo configurabili:** i part-time in base standard cadono strutturalmente nella fascia bassa; le soglie sono costanti così si possono tarare senza toccare la logica.
