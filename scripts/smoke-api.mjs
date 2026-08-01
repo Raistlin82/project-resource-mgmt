@@ -595,6 +595,132 @@ async function checkTimePhasedAllocation() {
   }
 }
 
+/**
+ * Step 5: MONTHLY FTE CAPACITY rollup (src/server.ts GET /capacity/monthly —
+ * B2, computed read over resources/assignments/assignmentDays).
+ *
+ * IDENTITY — reuses the top-level RBAC_HEADERS (admin) for every request
+ * except the RBAC-negative case below, which swaps in an 'employee' role
+ * (not in the '/capacity' READ_RULE's allowed roles, so it must 403).
+ *
+ * SEED FACTS (cross-checked by manual curl against the running demo data):
+ *   - from=2026-05&to=2026-07 -> months includes 2026-05/06/07, and there is
+ *     at least one row for resourceId '1' (Julie Armstrong).
+ *   - the default range (no from/to) -> months.length >= 1 (2026-04..2026-09
+ *     today, but that window shifts over time with the Open-planning-period
+ *     default, so only the structural fact is asserted).
+ *
+ * The band/ftePlanned assertion is CONCORDANCE-based, not a hard-coded band:
+ * it recomputes the expected band from the response's own ftePlanned using
+ * the same lower-bound-inclusive thresholds as src/app/services/capacity.util.ts
+ * (semaphoreBand: pct<50 idle, pct<85 under, pct<=105 healthy, else over), so
+ * this check can never go stale if seed hours change.
+ *
+ * Kept in its OWN try/catch in main() so an unexpected failure here never
+ * masks or blocks any of the prior section results.
+ */
+async function checkCapacityMonthly() {
+  const EMPLOYEE_HEADERS = { 'X-User-Id': '2', 'X-User-Role': 'employee' };
+  const HAPPY_PATH = '/capacity/monthly?from=2026-05&to=2026-07';
+  const SEED_MONTH = '2026-05';
+  const SEED_RESOURCE_ID = '1';
+
+  /** Same lower-bound-inclusive thresholds as capacity.util.ts semaphoreBand(). */
+  const expectedBand = (pct) => {
+    if (pct < 50) return 'idle';
+    if (pct < 85) return 'under';
+    if (pct <= 105 + 1e-9) return 'healthy';
+    return 'over';
+  };
+
+  // 1) HAPPY PATH.
+  {
+    const { status, body } = await req('GET', HAPPY_PATH);
+    const okStatus = check(`GET /api${HAPPY_PATH} (admin) -> 200`, status === 200, `status=${status}`);
+    if (!okStatus) return; // nothing more to verify without a body
+
+    const months = Array.isArray(body.months) ? body.months : [];
+    check(
+      "response 'months' includes 2026-05, 2026-06, 2026-07",
+      ['2026-05', '2026-06', '2026-07'].every((m) => months.includes(m)),
+      `months=${JSON.stringify(months)}`,
+    );
+
+    const rows = Array.isArray(body.rows) ? body.rows : [];
+    const row1 = rows.find((r) => r.resourceId === SEED_RESOURCE_ID);
+    check(
+      `response 'rows' includes resourceId '${SEED_RESOURCE_ID}'`,
+      Boolean(row1),
+      row1 ? `resourceName="${row1.resourceName}"` : `rows=${JSON.stringify(rows.map((r) => r.resourceId))}`,
+    );
+
+    const cell = row1 && row1.monthly ? row1.monthly[SEED_MONTH] : undefined;
+    if (cell) {
+      const wantBand = expectedBand(cell.ftePlanned * 100);
+      check(
+        `row ${SEED_RESOURCE_ID} ${SEED_MONTH} band matches ftePlanned*100 (concordance)`,
+        cell.band === wantBand,
+        `ftePlanned=${cell.ftePlanned}, pct=${cell.ftePlanned * 100}, band=${cell.band}, expected=${wantBand}`,
+      );
+    } else {
+      check(
+        `row ${SEED_RESOURCE_ID} has a ${SEED_MONTH} cell (band concordance, skipped)`,
+        true,
+        'resource inactive that month — no cell to check, not a failure',
+      );
+    }
+
+    const totals = body.totals || {};
+    const t = totals[SEED_MONTH];
+    check(
+      `response 'totals[${SEED_MONTH}]' exists with numeric capacityFte and resourceCount >= 1`,
+      Boolean(t) && typeof t.capacityFte === 'number' && Number.isFinite(t.capacityFte) && typeof t.resourceCount === 'number' && t.resourceCount >= 1,
+      t ? `capacityFte=${t.capacityFte}, resourceCount=${t.resourceCount}` : `missing totals[${SEED_MONTH}]`,
+    );
+  }
+
+  // 2) VALIDATION — out-of-range month values -> 400.
+  {
+    const { status, body } = await req('GET', '/capacity/monthly?from=2026-13&to=2026-14');
+    check(
+      'GET /api/capacity/monthly?from=2026-13&to=2026-14 -> 400',
+      status === 400,
+      `status=${status}, body=${JSON.stringify(body)}`,
+    );
+  }
+
+  // 2b) VALIDATION — from > to -> 400.
+  {
+    const { status, body } = await req('GET', '/capacity/monthly?from=2026-08&to=2026-05');
+    check(
+      'GET /api/capacity/monthly?from=2026-08&to=2026-05 (from>to) -> 400',
+      status === 400,
+      `status=${status}, body=${JSON.stringify(body)}`,
+    );
+  }
+
+  // 3) RBAC — 'employee' is not in the '/capacity' READ_RULE roles -> 403.
+  {
+    const { status, body } = await req('GET', HAPPY_PATH, { headers: EMPLOYEE_HEADERS });
+    check(
+      `GET /api${HAPPY_PATH} as 'employee' -> 403`,
+      status === 403,
+      `status=${status}, body=${JSON.stringify(body)}`,
+    );
+  }
+
+  // 4) DEFAULT RANGE — no from/to -> 200 and at least one month.
+  {
+    const { status, body } = await req('GET', '/capacity/monthly');
+    const months = body && Array.isArray(body.months) ? body.months : [];
+    check(
+      'GET /api/capacity/monthly (no params, admin) -> 200, months.length >= 1',
+      status === 200 && months.length >= 1,
+      `status=${status}, months=${JSON.stringify(months)}`,
+    );
+  }
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -629,6 +755,15 @@ async function main() {
     await checkTimePhasedAllocation();
   } catch (err) {
     console.log(`FAIL  time-phased allocation flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the capacity-rollup flow
+  // never masks or blocks any of the prior section results.
+  try {
+    await checkCapacityMonthly();
+  } catch (err) {
+    console.log(`FAIL  capacity-monthly flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 
