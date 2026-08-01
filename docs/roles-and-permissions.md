@@ -126,6 +126,7 @@ and **403** otherwise. Path tests use `startsWith`.
 | `/project-financials`, `/project-cost-centers`, `/cost-centers` | `finance`, `delivery-executive`, `admin` |
 | `/resources` (incl. `/resources/:id`), `/users` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/assignments`, `/requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/capacity` (read-only computed rollup, e.g. `GET /capacity/monthly`) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/time-entries` | `employee`, `pm`, `resource-manager`, `delivery-executive`, `finance`, `sales`, `admin` |
 | `/approval-requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/integrations` | `finance`, `delivery-executive`, `admin` |
@@ -164,11 +165,12 @@ verified actor, e.g. `/service-organizations` (read-only in practice). Note
 **inline** in the handler: only `admin` may `PUT /fx-rates/:currency` (and the
 base currency `EUR` is fixed at rate 1).
 
-> Two collections appear in the *read* rules but have **no mutation rule**:
+> Three collections appear in the *read* rules but have **no mutation rule**:
 > `/audit-logs` (append-only; written only by the audit middleware, never via a
-> client mutation) and `/users` (read-only directory). The mutation `/resources`
-> rule is *narrower* than its read rule — `pm`/`finance` may *read* resources
-> (margin/staffing need-to-know) but not rewrite cost/bill rates.
+> client mutation), `/users` (read-only directory), and `/capacity` (a GET-only
+> computed rollup — `GET /capacity/monthly` — with no write endpoint at all). The
+> mutation `/resources` rule is *narrower* than its read rule — `pm`/`finance` may
+> *read* resources (margin/staffing need-to-know) but not rewrite cost/bill rates.
 
 ---
 

@@ -24,6 +24,7 @@ import {
 import { AuthService } from './services/auth.service';
 import { NotificationService } from './services/notification.service';
 import { ThemeService } from './services/theme.service';
+import { CAPACITY_ROLES } from './guards/role.guard';
 
 type NavBadge = 'requests' | 'risks' | 'changes' | 'overbooked';
 
@@ -405,6 +406,7 @@ export class App {
         { label: 'Forecast', icon: 'query_stats', route: '/forecast' },
         { label: 'What-if', icon: 'tune', route: '/what-if' },
         { label: 'Utilization', icon: 'bar_chart', route: '/utilization', badge: 'overbooked' },
+        { label: 'Capacity', icon: 'calendar_view_month', route: '/capacity' },
         { label: 'Reporting', icon: 'insights', route: '/reporting', badge: 'risks' },
       ],
     },
@@ -439,6 +441,10 @@ export class App {
     const canFinance = this.auth.canApproveFinancials();
     const canApproveWorkflow = this.auth.hasAnyRole(['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin']);
     const canSchedule = this.auth.hasAnyRole(['pm', 'resource-manager', 'delivery-executive', 'admin']);
+    // Capacity nav visibility uses the SAME role set as capacityGuard (imported
+    // CAPACITY_ROLES) — a dedicated local so it can never desync from the route
+    // gate, and stays independent of the (semantically different) approvals gate.
+    const canViewCapacity = this.auth.hasAnyRole([...CAPACITY_ROLES]);
     // Resources (people lifecycle) mirrors its roleGuard — visible only to the
     // roles that own resource master data (resource-manager/delivery-executive/admin).
     const canManageResources = this.auth.hasAnyRole(['resource-manager', 'delivery-executive', 'admin']);
@@ -464,6 +470,15 @@ export class App {
           const items = group.items.filter(item => {
             if (item.route === '/billing') return canCommercial && canFinance;
             return canCommercial;
+          });
+          return { label: group.label, items };
+        }
+        if (group.label === 'Analytics') {
+          // Capacity mirrors its capacityGuard (staffing-grade roles); the other
+          // Analytics links stay open to any verified actor.
+          const items = group.items.filter(item => {
+            if (item.route === '/capacity') return canViewCapacity;
+            return true;
           });
           return { label: group.label, items };
         }

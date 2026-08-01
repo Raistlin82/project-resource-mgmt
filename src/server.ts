@@ -12,6 +12,7 @@ import type { Entity, Repository } from './db/repository';
 import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours, decisionToAssignmentStatus, allocationApproverStep, isAllowedAllocationTransition, ALLOCATION_CLIENT_SETTABLE, type AllocationStatus } from './app/services/staffing.util';
 import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity } from './app/services/calendar.util';
+import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { maxIdSeq } from './server/id-seq.util';
@@ -562,6 +563,9 @@ const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   // roles) and portfolio reporting (finance). Keep writes stricter via the
   // mutation rule; this is read-only access for finance.
   { test: p => ['/assignments', '/requests'].some(prefix => p === prefix || p.startsWith(prefix + '/')), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
+  // Monthly FTE capacity/demand rollup (B2): a read-only computed view derived
+  // from assignments/resources — same need-to-know as the staffing reads above.
+  { test: p => p.startsWith('/capacity'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
   // Timesheets for the whole org: require an authenticated principal (any role),
   // never served to an unauthenticated ('unknown') caller.
   { test: p => p.startsWith('/time-entries'), roles: ['employee', 'pm', 'resource-manager', 'delivery-executive', 'finance', 'sales', 'admin'] },
@@ -1711,6 +1715,53 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
     .filter(d => d.assignmentId === assig.id && monthOf(d.date) === month)
     .sort((a, b) => a.date.localeCompare(b.date));
   res.json({ ...fresh, month, contractHoursPerDay: cap, days });
+});
+
+// ---------------------------------------------------------------------------
+// COMPUTED READ (B2): monthly FTE capacity vs. demand rollup across resources.
+// Gated to staffing roles by the '/capacity' READ_RULE — roleGate is GLOBAL
+// middleware, so this handler is already authorized; do NOT re-gate per-handler.
+// Read-only: no mutation, no withLock. This handler owns the ONE permitted
+// "current date" default (the pure util in capacity.util never reads a clock).
+// ---------------------------------------------------------------------------
+apiRouter.get('/capacity/monthly', async (req, res) => {
+  const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+  const qParam = (name: string): string | undefined => {
+    const v = req.query[name];
+    return typeof v === 'string' ? v : undefined;
+  };
+  // month <-> absolute-index helpers so span math is correct across year bounds.
+  const monthToIdx = (mo: string): number => { const [y, m] = mo.split('-').map(Number); return y * 12 + (m - 1); };
+  const idxToMonth = (i: number): string => `${Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, '0')}`;
+
+  const fromRaw = qParam('from');
+  const toRaw = qParam('to');
+  if (fromRaw !== undefined && !MONTH_RE.test(fromRaw)) { res.status(400).json({ error: 'from must be a YYYY-MM month' }); return; }
+  if (toRaw !== undefined && !MONTH_RE.test(toRaw)) { res.status(400).json({ error: 'to must be a YYYY-MM month' }); return; }
+
+  // Each side defaults independently: absent `from` -> first Open planning period
+  // (asc), else the current month; absent `to` -> from + 5 months (6-month window).
+  let from = fromRaw;
+  if (from === undefined) {
+    const openIds = (await repos.planningPeriods.list()).filter(p => p.status === 'Open').map(p => p.id).sort();
+    from = openIds[0] ?? new Date().toISOString().slice(0, 7);
+  }
+  const to = toRaw ?? idxToMonth(monthToIdx(from) + 5);
+
+  if (from > to) { res.status(400).json({ error: 'from must be <= to' }); return; }
+  if (monthToIdx(to) - monthToIdx(from) + 1 > 24) { res.status(400).json({ error: 'range must span at most 24 months' }); return; }
+  const months = monthsInRange(from, to);
+
+  const [resources, assignments, assignmentDays, holidays, hoursPerDay] = await Promise.all([
+    repos.resources.list(),
+    repos.assignments.list(),
+    repos.assignmentDays.list(),
+    repos.holidays.list(),
+    getHoursPerDay(),
+  ]);
+  const holSet = new Set(holidays.map(h => h.id));
+
+  res.json(rollupMonthly({ resources, assignments, assignmentDays, months, hoursPerDay, holidays: holSet }));
 });
 
 apiRouter.get('/time-entries', async (_req, res) => { res.json(await repos.timeEntries.list()); });

@@ -2,6 +2,9 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { API_BASE_URL } from './api-config';
+import type { CapacityCell, CapacityRow, CapacityTotals } from './capacity.util';
+
+export type { CapacityCell, CapacityRow, CapacityTotals };
 
 export interface Resource {
   id: string;
@@ -138,6 +141,18 @@ export interface AssignmentAllocationResult extends Assignment {
   month: string;
   contractHoursPerDay: number;
   days: AssignmentDay[];
+}
+
+/**
+ * Envelope returned by `GET /capacity/monthly` (B2): a monthly FTE
+ * capacity/demand rollup across resources. `months` are the requested
+ * ('YYYY-MM') buckets; `rows` carry each resource's per-month cells; `totals`
+ * aggregates confirmed/planned demand and capacity FTE per month.
+ */
+export interface CapacityMonthly {
+  months: string[];
+  rows: CapacityRow[];
+  totals: Record<string, CapacityTotals>;
 }
 
 export type UserRole = 'employee' | 'pm' | 'resource-manager' | 'delivery-executive' | 'finance' | 'sales' | 'admin';
@@ -738,6 +753,20 @@ export class ApiService {
 
   /** Non-working days excluded from working-day math (B1). */
   getHolidays(): Observable<Holiday[]> { return this.http.get<Holiday[]>(`${this.baseUrl}/holidays`); }
+
+  // --- Monthly FTE capacity (B2) ---
+
+  /**
+   * Monthly FTE capacity/demand rollup across resources. `from`/`to`
+   * ('YYYY-MM') bound the returned months; omit them to let the server pick
+   * its default window.
+   */
+  getCapacityMonthly(from?: string, to?: string): Observable<CapacityMonthly> {
+    let params = new HttpParams();
+    if (from) params = params.set('from', from);
+    if (to) params = params.set('to', to);
+    return this.http.get<CapacityMonthly>(`${this.baseUrl}/capacity/monthly`, { params });
+  }
 
   // --- Configuration APIs ---
 
