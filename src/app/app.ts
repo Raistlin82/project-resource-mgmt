@@ -405,6 +405,7 @@ export class App {
         { label: 'Forecast', icon: 'query_stats', route: '/forecast' },
         { label: 'What-if', icon: 'tune', route: '/what-if' },
         { label: 'Utilization', icon: 'bar_chart', route: '/utilization', badge: 'overbooked' },
+        { label: 'Capacità', icon: 'calendar_view_month', route: '/capacity' },
         { label: 'Reporting', icon: 'insights', route: '/reporting', badge: 'risks' },
       ],
     },
@@ -464,6 +465,16 @@ export class App {
           const items = group.items.filter(item => {
             if (item.route === '/billing') return canCommercial && canFinance;
             return canCommercial;
+          });
+          return { label: group.label, items };
+        }
+        if (group.label === 'Analytics') {
+          // Capacity mirrors its capacityGuard (staffing-grade roles); the other
+          // Analytics links stay open to any verified actor.
+          const items = group.items.filter(item => {
+            // canApproveWorkflow's role set equals the capacityGuard's exactly.
+            if (item.route === '/capacity') return canApproveWorkflow;
+            return true;
           });
           return { label: group.label, items };
         }

@@ -54,3 +54,11 @@ export const commercialGuard: CanMatchFn = roleGuard(auth => auth.canManageComme
 
 /** Allows matching only for identities that can approve financials. */
 export const financeGuard: CanMatchFn = roleGuard(auth => auth.canApproveFinancials());
+
+/**
+ * Allows matching only for the staffing-grade roles that may read the monthly
+ * FTE capacity dashboard (B2). Mirrors the server's `/capacity/monthly` RBAC.
+ */
+export const capacityGuard: CanMatchFn = roleGuard(auth =>
+  auth.hasAnyRole(['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin']),
+);
