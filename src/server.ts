@@ -9,8 +9,14 @@ import { db } from './db/client';
 import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
-import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
+import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours, decisionToAssignmentStatus, allocationApproverStep, isAllowedAllocationTransition, ALLOCATION_CLIENT_SETTABLE, type AllocationStatus } from './app/services/staffing.util';
+// `parseMonthRowId`/`monthlyAggregateHours` are unused until later B3 tasks (4-6, 8)
+// wire the decision hook and status-weighted aggregates onto month rows; imported
+// here so the whole B3 import surface lands in one place instead of churning this
+// line across several tasks.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { deriveAssignmentStatus, monthRowId, parseMonthRowId, monthlyAggregateHours, type MonthStatus } from './app/services/allocation-month.util';
 import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity } from './app/services/calendar.util';
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
@@ -259,7 +265,7 @@ const auditRepoBySegment = new Map<string, AuditReadable>([
   // harmless (findAuditEntity is only ever consulted for paths the router
   // actually mounts) but keeps the map exhaustive over the Repositories surface.
   ['holidays', repos.holidays], ['planning-periods', repos.planningPeriods],
-  ['assignment-days', repos.assignmentDays],
+  ['assignment-days', repos.assignmentDays], ['assignment-months', repos.assignmentMonths],
 ]);
 
 /** Find the current entity targeted by a `/collection/:id` request path. */
@@ -1080,13 +1086,46 @@ async function recomputeRequestStaffing(requestId: string): Promise<void> {
 // lock (never nested inside a recompute critical section).
 // ---------------------------------------------------------------------------
 
-/** Open a single-step (resource-manager) approval for `assig` and return its id. */
-async function createAllocationApproval(req: Request, assig: Assignment): Promise<string> {
+/** Snapshot of every month row's status, keyed by composite row id. Consumed by
+ *  the decision hook and the status-weighted aggregates (later B3 tasks). */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function monthStatusByRowId(): Promise<Map<string, MonthStatus>> {
+  const rows = await repos.assignmentMonths.list();
+  return new Map(rows.map(r => [r.id, r.status as MonthStatus]));
+}
+
+/**
+ * Get (or lazily create as 'Draft') the month row for an assignment. The row is
+ * created on the FIRST allocation write to that month, so a month with hours
+ * always has a lifecycle state to carry.
+ */
+async function ensureAssignmentMonth(assignmentId: string, month: string): Promise<AssignmentMonth> {
+  const id = monthRowId(assignmentId, month);
+  const existing = await repos.assignmentMonths.get(id);
+  if (existing) return existing;
+  return repos.assignmentMonths.create({ id, assignmentId, month, status: 'Draft' } as AssignmentMonth);
+}
+
+/**
+ * Recompute and persist `assignments.status` from its month rows. The column is
+ * DERIVED (B3): no handler may write it from a client body — see the rollup rule
+ * in allocation-month.util.
+ */
+async function refreshDerivedAssignmentStatus(assignmentId: string): Promise<void> {
+  const rows = (await repos.assignmentMonths.list()).filter(r => r.assignmentId === assignmentId);
+  const derived = deriveAssignmentStatus(rows.map(r => r.status as MonthStatus));
+  await repos.assignments.update(assignmentId, { status: derived });
+}
+
+/** Open a single-step (resource-manager) approval for `assig` and return its id.
+ *  `refId` defaults to the assignment id (legacy gap-A shape); B3 passes the
+ *  month-row id so the decision governs ONE month. */
+async function createAllocationApproval(req: Request, assig: Assignment, refId: string = assig.id): Promise<string> {
   const createdAt = new Date().toISOString();
   const request = await repos.requests.get(assig.requestId);
   const resource = await repos.resources.get(assig.resourceId);
   const ar: ApprovalRequestEntry = {
-    id: `AR${newId()}`, kind: 'Allocation', refId: assig.id, projectId: request?.projectId,
+    id: `AR${newId()}`, kind: 'Allocation', refId, projectId: request?.projectId,
     requestedBy: actorId(req), status: 'Pending',
     steps: [allocationApproverStep(resource?.managerId)], currentStep: 0,
     createdAt, slaDueAt: slaDueFrom(createdAt),
@@ -1571,7 +1610,11 @@ apiRouter.get('/assignments/:id/allocation', async (req, res) => {
 
   const resource = await repos.resources.get(assig.resourceId);
   const contractHoursPerDay = resource?.contractHoursPerDay ?? await getHoursPerDay();
-  res.json({ assignmentId: assig.id, from, to, contractHoursPerDay, days });
+
+  const months = (await repos.assignmentMonths.list())
+    .filter(m => m.assignmentId === assig.id && (from === undefined || m.month >= from) && (to === undefined || m.month <= to))
+    .sort((a, b) => a.month.localeCompare(b.month));
+  res.json({ assignmentId: assig.id, from, to, contractHoursPerDay, months, days });
 });
 
 // WRITE: replace ONE month's per-day hours in a single call. Gates: open-month,
@@ -1656,7 +1699,9 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   const preOffender = await capacityOffender();
   if (preOffender !== undefined) { res.status(400).json({ error: capExceeded(preOffender) }); return; }
 
-  const oldStatus = assig.status;
+  // The lifecycle state of the month being written, read BEFORE the replace.
+  const monthRow = await ensureAssignmentMonth(assig.id, month);
+  const priorMonthStatus = monthRow.status as MonthStatus;
   // STEP 1 — inside res: lock: TOCTOU re-check, then replace the month's day rows
   // and rewrite assignedHours from the full remaining day set (source of truth).
   const replaced = await withLock(`res:${resource.id}`, async (): Promise<{ offender?: string }> => {
@@ -1684,20 +1729,20 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   });
   if (replaced.offender !== undefined) { res.status(400).json({ error: capExceeded(replaced.offender) }); return; }
 
-  // STEP 2 — OUTSIDE any res:/req: lock: forced re-approval. Trigger is the PRIOR
-  // status 'Allocated' (days changed), not an assignedHours delta. Self-managed →
-  // stays Allocated with no approval; otherwise supersede the old approval and open
-  // a fresh one, moving to 'Requested'. A still-'Requested' assignment keeps its
-  // pending approval (the approver re-reads the days via refId); Draft/Rejected
-  // have no approval effect.
-  if (oldStatus === 'Allocated' && !(await autoApprovesAllocation(req, resource.id))) {
-    await withdrawAllocationApproval(assig.approvalId, 'superseded');
-    const updatedAssig = await repos.assignments.get(assig.id);
-    if (updatedAssig) {
-      const approvalId = await createAllocationApproval(req, updatedAssig);
-      await repos.assignments.update(assig.id, { status: 'Requested', approvalId });
-    }
+  // STEP 2 — OUTSIDE any res:/req: lock: forced re-approval, scoped to THIS month.
+  // Trigger is the month's PRIOR status 'Allocated' (its days changed by
+  // definition), not an assignedHours delta. Self-managed → stays Allocated with
+  // no approval; otherwise supersede this month's approval and open a fresh one.
+  // A still-'Requested' month keeps its pending approval (the approver re-reads
+  // the days); Draft/Rejected have no approval effect. Months OTHER than the one
+  // written are untouched — that is the whole point of B3.
+  if (priorMonthStatus === 'Allocated' && !(await autoApprovesAllocation(req, resource.id))) {
+    await withdrawAllocationApproval(monthRow.approvalId, 'superseded');
+    const approvalId = await createAllocationApproval(req, assig, monthRow.id);
+    await repos.assignmentMonths.update(monthRow.id, { status: 'Requested', approvalId });
   }
+  // The assignment's own status is a rollup of its months — recompute it last.
+  await refreshDerivedAssignmentStatus(assig.id);
 
   // STEP 3 — FINAL (after the status change): recompute the status-aware aggregates
   // so confirmed/planned utilization + staffed-effort reflect the new status. Best-

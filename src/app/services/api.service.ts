@@ -152,6 +152,8 @@ export interface AssignmentAllocation {
   from?: string;
   to?: string;
   contractHoursPerDay: number;
+  /** Per-month lifecycle rows for the requested span (B3). */
+  months?: AssignmentMonth[];
   days: AssignmentDay[];
 }
 

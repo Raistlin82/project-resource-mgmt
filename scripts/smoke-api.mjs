@@ -384,27 +384,34 @@ async function checkTimePhasedAllocation() {
   // Snapshot ALL of assignment 4's day rows BEFORE the edit (GET with no
   // from/to defaults to the assignment's full spanned range), so the expected
   // post-edit assignedHours can be computed from live data, never hard-coded.
+  // The envelope's `months` (B3) also lets us pin the MONTH row's pre-edit
+  // approvalId — the governing approval now lives there, not on the assignment
+  // (see the B3 note below).
   let otherMonthsHoursBefore = 0;
+  let preEditMonthApprovalId;
   {
     const { status, body } = await req('GET', `/assignments/${ASSIGNMENT_ID}/allocation`);
     check(`GET /api/assignments/${ASSIGNMENT_ID}/allocation (pre-edit) -> 200`, status === 200, `status=${status}`);
     otherMonthsHoursBefore = sumHours(body && body.days, MONTH);
+    const monthRow = Array.isArray(body && body.months) ? body.months.find((m) => m.month === MONTH) : undefined;
+    preEditMonthApprovalId = monthRow && monthRow.approvalId;
   }
 
   // Snapshot assignment 4's governance state BEFORE the edit. The allocation GET
-  // above omits status/approvalId, so read the assignment row itself. The B1
-  // FORCED RE-APPROVAL contract (src/server.ts STEP 2) demotes an 'Allocated'
-  // assignment to 'Requested' on ANY day-row edit by a non-self-managing actor
-  // (resource 3's manager is '2'; the smoke admin maps to resourceId '1'),
-  // opening a fresh approval. Pinning status+approvalId here defends that trigger
-  // against a future refactor to a (wrong) assignedHours-delta condition.
+  // above omits status (it's an assignment field), so read the assignment row
+  // itself. The FORCED RE-APPROVAL contract (src/server.ts STEP 2) demotes an
+  // 'Allocated' assignment to 'Requested' on ANY day-row edit by a
+  // non-self-managing actor (resource 3's manager is '2'; the smoke admin maps
+  // to resourceId '1'), opening a fresh approval. Pinning status here defends
+  // that trigger against a future refactor to a (wrong) assignedHours-delta
+  // condition. B3: the fresh approval itself is opened on the MONTH row (see
+  // preEditMonthApprovalId above) — `assig.approvalId` is no longer written by
+  // this endpoint, so it is not pinned here.
   let preEditStatus;
-  let preEditApprovalId;
   {
     const { status, body } = await req('GET', '/assignments');
     const assig = Array.isArray(body) ? body.find((a) => a.id === ASSIGNMENT_ID) : undefined;
     preEditStatus = assig && assig.status;
-    preEditApprovalId = assig && assig.approvalId;
     check(
       `GET /api/assignments — assignment ${ASSIGNMENT_ID} is 'Allocated' before the edit (re-approval precondition)`,
       status === 200 && Boolean(assig) && preEditStatus === 'Allocated',
@@ -445,19 +452,14 @@ async function checkTimePhasedAllocation() {
         `assignedHours=${put.body.assignedHours}, expected=${expectedTotal}`,
       );
 
-      // FORCED RE-APPROVAL (B1 STEP 2): editing an 'Allocated' assignment's days
-      // must demote it to 'Requested' and open a FRESH approval — driven by the
-      // prior status being 'Allocated', not by any assignedHours delta. Assert
-      // both, and that the new approvalId differs from the pre-edit one.
+      // FORCED RE-APPROVAL: editing an 'Allocated' assignment's days must demote
+      // it to 'Requested' (the derived rollup of its months, B3) — driven by the
+      // edited MONTH's prior status being 'Allocated', not by any assignedHours
+      // delta.
       check(
         `PUT response demotes 'Allocated' -> 'Requested' (forced re-approval)`,
         put.body.status === 'Requested',
         `preEditStatus=${preEditStatus}, status=${put.body.status}`,
-      );
-      check(
-        `PUT response carries a fresh approvalId (!= pre-edit)`,
-        typeof put.body.approvalId === 'string' && put.body.approvalId.length > 0 && put.body.approvalId !== preEditApprovalId,
-        `preEditApprovalId=${preEditApprovalId}, approvalId=${put.body && put.body.approvalId}`,
       );
 
       // Independent verification via GET: assignedHours must equal the sum of
@@ -468,6 +470,20 @@ async function checkTimePhasedAllocation() {
         `GET /api/assignments/${ASSIGNMENT_ID}/allocation sum(days.hours) == assignedHours`,
         after.status === 200 && Math.abs(totalFromDays - put.body.assignedHours) < 1e-6,
         `status=${after.status}, sum(days)=${totalFromDays}, assignedHours=${put.body.assignedHours}`,
+      );
+
+      // FORCED RE-APPROVAL, continued (B3): the fresh approval is opened on the
+      // edited MONTH row, not the assignment — assert the month's approvalId is
+      // a non-empty string that differs from its pre-edit value (undefined here;
+      // assignment 4's May row carries no approval in the seed).
+      const editedMonthRow = Array.isArray(after.body && after.body.months)
+        ? after.body.months.find((m) => m.month === MONTH)
+        : undefined;
+      check(
+        `GET .../allocation month row for ${MONTH} carries a fresh approvalId (!= pre-edit)`,
+        Boolean(editedMonthRow) && typeof editedMonthRow.approvalId === 'string' && editedMonthRow.approvalId.length > 0
+          && editedMonthRow.approvalId !== preEditMonthApprovalId,
+        `preEditMonthApprovalId=${preEditMonthApprovalId}, monthRow=${JSON.stringify(editedMonthRow)}`,
       );
     }
   }
@@ -721,6 +737,41 @@ async function checkCapacityMonthly() {
   }
 }
 
+/**
+ * B3 — the per-month approval lifecycle. Editing ONE month of an approved
+ * assignment must demote only that month; its siblings stay Allocated.
+ */
+async function checkMonthlyApproval() {
+  // Assignment '3' spans 2026-05..2026-09 in the seed, all months Allocated.
+  const before = await req('GET', '/assignments/3/allocation?from=2026-05&to=2026-09');
+  check('B3 allocation envelope exposes month rows', Array.isArray(before.body?.months) && before.body.months.length > 1,
+    `months=${before.body?.months?.length}`);
+
+  const target = '2026-06';
+  const sibling = before.body.months.find(m => m.month !== target);
+  const day = (before.body.days || []).find(d => d.date.startsWith(target));
+  if (!day) { check('B3 seed has a day in the edited month', false, `no day in ${target}`); return; }
+
+  // Non-self-managing proposer: assignment 3's resource is '2' (John Miller),
+  // whose managerId is '1' — the default RBAC_HEADERS admin. Editing as that
+  // same actor would hit the self-managed auto-approval shortcut (no forced
+  // re-approval, per design), defeating this check's purpose. 'pm' resource-id
+  // '3' (Alice Smith) is neither resource 2 nor its manager, so the edit goes
+  // through the normal forced-re-approval path.
+  const PROPOSER_HEADERS = { 'X-User-Id': '3', 'X-User-Role': 'pm' };
+  const edit = await req('PUT', '/assignments/3/allocation', {
+    headers: PROPOSER_HEADERS,
+    body: { month: target, dailyHours: { [day.date]: 2 } },
+  });
+  check('B3 month edit accepted', edit.status === 200, `status=${edit.status}`);
+
+  const after = await req('GET', '/assignments/3/allocation?from=2026-05&to=2026-09');
+  const editedRow = after.body.months.find(m => m.month === target);
+  const siblingRow = after.body.months.find(m => m.month === sibling.month);
+  check('B3 edited month demoted to Requested', editedRow?.status === 'Requested', `status=${editedRow?.status}`);
+  check('B3 sibling month stays Allocated', siblingRow?.status === 'Allocated', `status=${siblingRow?.status}`);
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -764,6 +815,15 @@ async function main() {
     await checkCapacityMonthly();
   } catch (err) {
     console.log(`FAIL  capacity-monthly flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the monthly-approval flow
+  // never masks or blocks any of the prior section results.
+  try {
+    await checkMonthlyApproval();
+  } catch (err) {
+    console.log(`FAIL  monthly-approval flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 
