@@ -291,6 +291,7 @@ erDiagram
     resources   ||--o{ assignments : "staffed on"
     requests    ||--o{ assignments : "fulfilled by"
     resources   ||--o{ resources : "manages (managerId, soft)"
+    vendors     ||--o{ resources : "subco vendor (FK, C1)"
     assignments ||--o{ assignmentDays : "booked per day (B1)"
     assignments ||--o{ assignmentMonths : "governed per month (B3)"
 
@@ -302,6 +303,8 @@ erDiagram
         double capacity
         double utilization
         text managerId "soft self-ref"
+        text kind "internal | dummy | subco, default internal (C1)"
+        text vendorId FK "subco's vendor, else null (C1)"
     }
     users {
         text id PK
@@ -474,7 +477,7 @@ foreign keys; *(soft)* marks columns that carry a reference without a hard FK.
 
 | Entity (table) | Purpose | Key fields & FKs | Domain |
 | --- | --- | --- | --- |
-| `resources` | People with skills, capacity, rates | `id`, `capacity`, `utilization`, `costRate`, `billRate`; `managerId` *(soft self-ref)* | Resourcing |
+| `resources` | People with skills, capacity, rates | `id`, `capacity`, `utilization`, `costRate`, `billRate`, `kind` (`internal`\|`dummy`\|`subco`, default `internal`, C1); `managerId` *(soft self-ref)*; **FK** `vendorId→vendors` (subco only, C1) | Resourcing |
 | `users` | Identity → resource + RBAC role mapping | `id`, `role`; **FK** `resourceId→resources` | Resourcing |
 | `requests` | Demand (resource requests) | `id`, `requiredEffort`, `staffedEffort`, `status`; **FK** `projectId→projects`; `requesterId` *(soft)* | Resourcing |
 | `assignments` | Staffing of a resource onto a request | `id`, `assignedHours`; **FK** `requestId→requests`, `resourceId→resources` | Resourcing |

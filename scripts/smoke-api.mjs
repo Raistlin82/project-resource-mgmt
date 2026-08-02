@@ -1893,8 +1893,13 @@ async function checkResourceKinds() {
   // (created earlier in this section, kind still 'internal' — none of the
   // PUTs above that touched it ever succeeded in changing its kind). Neither
   // resource has any other booking, so both allocations land on a clean slate.
-  const dummyReq = await req('POST', '/requests', { body: { name: 'C1 dummy capacity request', requiredEffort: 1 } });
-  const internalReq = await req('POST', '/requests', { body: { name: 'C1 internal capacity request', requiredEffort: 1 } });
+  // requiredRole and skills are both NOT NULL columns with no DB default
+  // (schema.ts); the in-memory adapter tolerates them absent, but Postgres
+  // rejects the insert — found via this task's fresh-Postgres run (a 500 on
+  // this exact POST). The real UI form always sends both (skills defaults to
+  // `[]` there too), so this is a smoke-fixture gap, not a product defect.
+  const dummyReq = await req('POST', '/requests', { body: { name: 'C1 dummy capacity request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+  const internalReq = await req('POST', '/requests', { body: { name: 'C1 internal capacity request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
   const reqsOk = check('C1 setup: requests created for the dummy/internal assignments',
     dummyReq.status === 200 && typeof dummyReq.body?.id === 'string' &&
     internalReq.status === 200 && typeof internalReq.body?.id === 'string',

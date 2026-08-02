@@ -15,6 +15,7 @@ import {
   type MatchDimension,
 } from '../services/match.util';
 import { ListStateComponent } from '../shared/list-state.component';
+import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
 
 interface DimensionMeter {
   key: MatchDimension;
@@ -28,7 +29,7 @@ interface DimensionMeter {
 @Component({
   selector: 'app-staffing',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DecimalPipe, FormsModule, ListStateComponent],
+  imports: [MatIconModule, DecimalPipe, FormsModule, ListStateComponent, ResourceKindBadgeComponent],
   template: `
     <div class="command-page space-y-6">
       <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Staff Resource Requests</h1>
@@ -139,7 +140,10 @@ interface DimensionMeter {
                               [title]="scoreTooltip(cand)">{{ cand.score | number:'1.0-0' }}</span>
                       </div>
                       <div class="min-w-0">
-                        <h3 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ cand.resource.name }}</h3>
+                        <h3 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors flex items-center gap-2">
+                          {{ cand.resource.name }}
+                          <app-resource-kind-badge [kind]="cand.resource.kind" />
+                        </h3>
                         <p class="text-sm font-medium text-[var(--cc-muted)] mt-0.5">{{ cand.resource.role }} <span class="mx-1.5 text-ink-muted">•</span> <span class="font-mono tabular-nums" [class.text-critical-text]="cand.resource.utilization > 100" [class.text-positive-text]="cand.resource.utilization <= 100">{{ cand.resource.utilization | number:'1.0-0' }}% Utilized</span></p>
                         <div class="flex gap-1.5 mt-3 flex-wrap">
                           @for (skill of cand.resource.skills; track skill.name) {
@@ -229,7 +233,10 @@ interface DimensionMeter {
                       {{ res.name.charAt(0) }}
                     </div>
                     <div>
-                      <h3 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ res.name }}</h3>
+                      <h3 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors flex items-center gap-2">
+                        {{ res.name }}
+                        <app-resource-kind-badge [kind]="res.kind" />
+                      </h3>
                       <p class="text-sm font-medium text-[var(--cc-muted)] mt-0.5">{{ res.role }} <span class="mx-1.5 text-ink-muted">•</span> <span class="font-mono tabular-nums" [class.text-critical-text]="res.utilization > 100" [class.text-positive-text]="res.utilization <= 100">{{ res.utilization | number:'1.0-0' }}% Utilized</span></p>
                       <div class="flex gap-1.5 mt-3 flex-wrap">
                         @for (skill of res.skills; track skill.name) {
