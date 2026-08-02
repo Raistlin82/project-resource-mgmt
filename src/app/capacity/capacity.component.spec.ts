@@ -104,6 +104,28 @@ describe('CapacityComponent', () => {
     expect(host.textContent).toContain('Bob');
   });
 
+  it('seeds the From/To selects to the loaded window in the actual DOM, not just the signal', async () => {
+    // Regression for the reported bug: the <select>'s live DOM `.value` must
+    // match the seeded fromSel/toSel signal (the loaded window), not just the
+    // signal itself — a mismatch here means the browser silently fell back to
+    // the first padded option because [value] was applied before the @for's
+    // <option> elements existed.
+    const { fixture } = setup(true);
+    await flush(fixture);
+
+    const host = fixture.nativeElement as HTMLElement;
+    const fromEl = host.querySelector('select[aria-label="Range start month"]') as HTMLSelectElement;
+    const toEl = host.querySelector('select[aria-label="Range end month"]') as HTMLSelectElement;
+    expect(fromEl).not.toBeNull();
+    expect(toEl).not.toBeNull();
+
+    expect(fixture.componentInstance['fromSel']()).toBe('2026-07');
+    expect(fixture.componentInstance['toSel']()).toBe('2026-08');
+    // The assertion that actually catches the bug: the live DOM value.
+    expect(fromEl.value).toBe('2026-07');
+    expect(toEl.value).toBe('2026-08');
+  });
+
   it('does not fetch and shows no rows until auth settles', async () => {
     const { fixture, getCapacityMonthly } = setup(false);
     await flush(fixture);

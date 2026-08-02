@@ -2,6 +2,8 @@ import {
   ChangeDetectionStrategy,
   Component,
   DestroyRef,
+  ElementRef,
+  afterRenderEffect,
   computed,
   inject,
   input,
@@ -19,6 +21,7 @@ import {
   Holiday,
   PlanningPeriod,
   type AssignmentDay,
+  type AssignmentMonth,
 } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
@@ -78,41 +81,53 @@ const EMPTY_DATA: CalendarData = {
     <div class="command-card w-full max-w-5xl max-h-[92vh] overflow-hidden flex flex-col">
       <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] flex items-start justify-between bg-gradient-to-br from-surface-muted to-transparent">
         <div>
-          <h2 id="allocCalTitle" class="font-display text-2xl font-bold text-[var(--cc-ink)] tracking-tight">Calendario allocazione</h2>
+          <h2 id="allocCalTitle" class="font-display text-2xl font-bold text-[var(--cc-ink)] tracking-tight">Allocation calendar</h2>
           <p class="text-sm font-medium text-[var(--cc-muted)] mt-1.5 flex items-center gap-1.5">
             <mat-icon class="text-[16px] w-[16px] h-[16px]">calendar_month</mat-icon>
-            {{ resourceName() || 'Risorsa' }}
+            {{ resourceName() || 'Resource' }}
             <span class="text-ink-muted">•</span>
-            <span class="font-mono tabular-nums">{{ contractHoursPerDay() }}h / giorno</span>
+            <span class="font-mono tabular-nums">{{ contractHoursPerDay() }}h / day</span>
           </p>
           <!-- The per-day capacity hint is a CLIENT check on THIS assignment only; the
                true cross-assignment total per day is validated server-side at save. -->
           <p class="text-xs text-[var(--cc-muted)] mt-2 flex items-start gap-1.5 max-w-2xl">
             <mat-icon class="text-[14px] w-[14px] h-[14px] mt-0.5 shrink-0">info</mat-icon>
-            <span>L'indicatore di capacità considera solo questo incarico. Il totale giornaliero su tutti gli incarichi della risorsa è verificato dal server al salvataggio: il verde non ne garantisce l'esito.</span>
+            <span>The capacity indicator only considers this assignment. The resource's daily total across all assignments is verified by the server on save: green does not guarantee the outcome.</span>
           </p>
         </div>
-        <button type="button" (click)="closed.emit()" aria-label="Chiudi" title="Chiudi" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
+        <button type="button" (click)="closed.emit()" aria-label="Close" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
           <mat-icon>close</mat-icon>
         </button>
       </div>
 
       <div class="p-6 sm:p-8 overflow-y-auto flex-1 space-y-8">
         @if (data.isLoading()) {
-          <div class="p-12 text-center text-sm text-[var(--cc-muted)]">Caricamento del calendario…</div>
+          <div class="p-12 text-center text-sm text-[var(--cc-muted)]">Loading calendar…</div>
         } @else if (months().length === 0) {
           <div class="p-12 text-center text-sm text-[var(--cc-muted)]">
-            Nessun mese disponibile: apri un periodo di pianificazione o assegna un intervallo all'incarico.
+            No months available: open a planning period or assign a date range to the assignment.
           </div>
         } @else {
           @for (month of months(); track month) {
-            <section class="command-card-muted p-5">
+            <section class="command-card-muted p-5" [attr.data-month]="month"
+                     [class.ring-2]="month === focusMonth()" [class.ring-accent]="month === focusMonth()">
               <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
                 <div class="flex items-center gap-3">
                   <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] capitalize">{{ monthLabel(month) }}</h3>
                   <span class="command-status uppercase" [class]="isOpen(month) ? 'green' : 'neutral'">
-                    {{ isOpen(month) ? 'Aperto' : 'Chiuso' }}
+                    {{ isOpen(month) ? 'Open' : 'Closed' }}
                   </span>
+                  @if (monthStatus(month); as status) {
+                    <span class="command-status uppercase" [class]="monthStatusClass(status)">
+                      {{ status }}
+                    </span>
+                  }
+                  <!-- The caller's focus month (a deep link from the approvals
+                       modal). Labelled, not just ringed — the ring alone would be
+                       colour-only information (WCAG 1.4.1). -->
+                  @if (month === focusMonth()) {
+                    <span class="command-status uppercase neutral" data-test="focused-month">In review</span>
+                  }
                 </div>
                 <div class="flex items-center gap-3">
                   <span class="text-xs font-semibold text-ink-secondary font-mono tabular-nums"
@@ -121,9 +136,9 @@ const EMPTY_DATA: CalendarData = {
                   </span>
                   @if (isOpen(month)) {
                     <div class="flex items-center gap-1.5">
-                      <button type="button" (click)="fill(month, 1)" [attr.aria-label]="'Allocazione 100% — ' + monthLabel(month)" class="command-button secondary text-xs px-3 py-1.5">Allocazione 100%</button>
-                      <button type="button" (click)="fill(month, 0.5)" [attr.aria-label]="'Allocazione 50% — ' + monthLabel(month)" class="command-button secondary text-xs px-3 py-1.5">50%</button>
-                      <button type="button" (click)="clear(month)" [attr.aria-label]="'Azzera — ' + monthLabel(month)" class="command-button secondary text-xs px-3 py-1.5">Azzera</button>
+                      <button type="button" (click)="fill(month, 1)" [attr.aria-label]="'100% allocation — ' + monthLabel(month)" class="command-button secondary text-xs px-3 py-1.5">100% allocation</button>
+                      <button type="button" (click)="fill(month, 0.5)" [attr.aria-label]="'50% allocation — ' + monthLabel(month)" class="command-button secondary text-xs px-3 py-1.5">50%</button>
+                      <button type="button" (click)="clear(month)" [attr.aria-label]="'Clear — ' + monthLabel(month)" class="command-button secondary text-xs px-3 py-1.5">Clear</button>
                     </div>
                   }
                 </div>
@@ -131,7 +146,7 @@ const EMPTY_DATA: CalendarData = {
 
               @if (!isOpen(month)) {
                 <p class="text-xs font-medium text-[var(--cc-muted)] mb-4 flex items-center gap-1">
-                  <mat-icon class="text-[14px] w-[14px] h-[14px]">lock</mat-icon> Mese chiuso: sola lettura.
+                  <mat-icon class="text-[14px] w-[14px] h-[14px]">lock</mat-icon> Month closed: read-only.
                 </p>
               }
 
@@ -148,7 +163,7 @@ const EMPTY_DATA: CalendarData = {
                         <input type="number" min="0" step="0.5"
                                [ngModel]="hoursFor(month, cell.date)"
                                (ngModelChange)="setHours(month, cell.date, $event)"
-                               [attr.aria-label]="'Ore del ' + dayLabel(cell.date)"
+                               [attr.aria-label]="'Hours for ' + dayLabel(cell.date)"
                                [attr.aria-invalid]="over(month, cell.date)"
                                [class.text-critical-text]="over(month, cell.date)"
                                class="command-input w-full text-center px-1 py-0.5 text-sm font-mono tabular-nums mt-1">
@@ -161,8 +176,8 @@ const EMPTY_DATA: CalendarData = {
                            the state is perceivable without relying on the red highlight alone. -->
                       @if (over(month, cell.date)) {
                         <div class="text-[9px] font-bold text-critical-text uppercase tracking-wide flex items-center justify-center gap-0.5 mt-0.5"
-                             title="Oltre la capacità giornaliera">
-                          <mat-icon class="text-[11px] w-[11px] h-[11px]">warning</mat-icon> oltre
+                             title="Over daily capacity">
+                          <mat-icon class="text-[11px] w-[11px] h-[11px]">warning</mat-icon> over
                         </div>
                       }
                     </div>
@@ -171,20 +186,42 @@ const EMPTY_DATA: CalendarData = {
                          [title]="cell.holidayName || 'Weekend'">
                       <div class="text-[11px] font-bold text-ink-muted tabular-nums">{{ cell.dom }}</div>
                       <div class="text-[9px] font-semibold text-ink-muted uppercase tracking-wide mt-1 truncate">
-                        {{ cell.holidayName ? 'Festivo' : 'Weekend' }}
+                        {{ cell.holidayName ? 'Holiday' : 'Weekend' }}
                       </div>
                     </div>
                   }
                 }
               </div>
 
+              <div class="mt-4 grid gap-3 sm:grid-cols-2">
+                <label class="text-xs font-semibold text-ink-secondary">
+                  Note for the approver
+                  <textarea rows="2" class="command-input mt-1 w-full"
+                            [disabled]="!monthRow(month)"
+                            [attr.aria-label]="'Note for the approver — ' + monthLabel(month)"
+                            [ngModel]="plannerNoteDraft(month)"
+                            (ngModelChange)="setPlannerNoteDraft(month, $event)"
+                            (blur)="savePlannerNote(month)"></textarea>
+                </label>
+                @if (monthRow(month)?.approverNote; as approverNote) {
+                  <p class="text-xs text-ink-secondary"><span class="font-semibold">Approver note:</span> {{ approverNote }}</p>
+                }
+              </div>
+
               @if (isOpen(month)) {
-                <div class="flex justify-end mt-4 pt-4 border-t border-[var(--cc-line)]">
+                <div class="flex justify-end items-center gap-3 mt-4 pt-4 border-t border-[var(--cc-line)]">
+                  <button type="button" (click)="submitMonth(month)"
+                          [disabled]="!canSubmit(month) || submittingMonth() === month"
+                          [attr.aria-label]="'Submit month for approval — ' + monthLabel(month)"
+                          class="command-button secondary disabled:opacity-50 disabled:cursor-not-allowed">
+                    <mat-icon class="text-[18px] w-[18px] h-[18px]">send</mat-icon>
+                    {{ submittingMonth() === month ? 'Submitting…' : 'Submit month for approval' }}
+                  </button>
                   <button type="button" (click)="saveMonth(month)" [disabled]="savingMonth() === month"
-                          [attr.aria-label]="'Salva mese — ' + monthLabel(month)"
+                          [attr.aria-label]="'Save month — ' + monthLabel(month)"
                           class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
                     <mat-icon class="text-[18px] w-[18px] h-[18px]">save</mat-icon>
-                    {{ savingMonth() === month ? 'Salvataggio…' : 'Salva mese' }}
+                    {{ savingMonth() === month ? 'Saving…' : 'Save month' }}
                   </button>
                 </div>
               }
@@ -194,7 +231,7 @@ const EMPTY_DATA: CalendarData = {
       </div>
 
       <div class="p-6 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end">
-        <button type="button" (click)="closed.emit()" class="command-button secondary">Chiudi</button>
+        <button type="button" (click)="closed.emit()" class="command-button secondary">Close</button>
       </div>
     </div>
   `,
@@ -209,8 +246,37 @@ export class AllocationCalendarComponent {
   readonly assignmentId = input.required<string>();
   /** Resource display name for the header (optional). */
   readonly resourceName = input<string>('');
+  /**
+   * Optional 'YYYY-MM' the caller wants the user to land on — the approvals
+   * modal's "correct the hours" deep link. Purely presentational: that month's
+   * section is labelled and scrolled into view; every open month stays editable
+   * exactly as before, and an unknown/absent value changes nothing.
+   */
+  readonly focusMonth = input<string>('');
   /** Emitted when the user dismisses the calendar. */
   readonly closed = output<void>();
+
+  private hostEl = inject<ElementRef<HTMLElement>>(ElementRef);
+  /** The focus month already scrolled to, so a later render (e.g. editing a day)
+   *  never yanks the viewport back. */
+  private scrolledTo = '';
+
+  constructor() {
+    // Bring the deep link's month into view once its section has ACTUALLY
+    // rendered — the sections only exist after the async load resolves, so this
+    // cannot be a one-shot afterNextRender. `afterRenderEffect` re-runs on the
+    // signals it reads and never runs on the server, so this stays SSR-safe.
+    afterRenderEffect(() => {
+      const month = this.focusMonth();
+      // Read reactively so the effect re-runs when the load resolves.
+      const known = this.months().includes(month);
+      if (!month || !known || month === this.scrolledTo) return;
+      const el = this.hostEl.nativeElement.querySelector(`[data-month="${month}"]`);
+      if (!el) return;
+      this.scrolledTo = month;
+      el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    });
+  }
 
   // Principal-gated reads (allocation/planning-periods) 401 until the OIDC bootstrap
   // settles — key the load on authReady AND the assignment id so it fires with a
@@ -276,11 +342,114 @@ export class AllocationCalendarComponent {
     },
   });
 
+  /**
+   * Per-month lifecycle rows (B3), keyed by month — deliberately a SEPARATE
+   * linkedSignal from `data`, not a plain read of `data.value().allocation.months`.
+   * `linkedSignal.computation` always re-runs in FULL whenever `source()` is
+   * merely marked dirty (it diffs the computed OUTPUT, never the source value —
+   * see Angular's `LinkedSignalNode.producerRecomputeValue`), so patching a row
+   * through `data.update()`, even leaving `allocation.days`'s array reference
+   * untouched, would still force `edited` above to rebuild from scratch and
+   * wipe every OTHER open month's unsaved hour edits. Keeping this map on its
+   * own signal means `patchMonthRow` never touches `data` at all, so `edited`
+   * is only ever rebuilt on a genuine full (re)load.
+   */
+  protected monthRows = linkedSignal<AssignmentMonth[], Record<string, AssignmentMonth>>({
+    source: () => this.data.value().allocation.months ?? [],
+    computation: (months) => Object.fromEntries(months.map(m => [m.month, m])),
+  });
+
   /** Which month is currently being saved (disables its Save button); null when idle. */
   protected savingMonth = signal<string | null>(null);
+  /** Which month is currently being submitted for approval; null when idle. */
+  protected submittingMonth = signal<string | null>(null);
+  /** In-flight planner-note edits, keyed by month, before they are blurred to the server. */
+  private plannerNoteDrafts = signal<Record<string, string>>({});
 
   protected isOpen(month: string): boolean {
     return this.data.value().periods.find(p => p.id === month)?.status === 'Open';
+  }
+
+  /** Lifecycle row of a month, when the assignment has one (created on first save). */
+  protected monthRow = (month: string): AssignmentMonth | undefined => this.monthRows()[month];
+
+  protected monthStatus = (month: string): AssignmentMonth['status'] | undefined => this.monthRow(month)?.status;
+
+  /** A month may be submitted when it exists, its planning period is open, and it is
+   *  not already pending approval or already approved (Draft/Rejected only). */
+  protected canSubmit = (month: string): boolean => {
+    const status = this.monthStatus(month);
+    return this.isOpen(month) && (status === 'Draft' || status === 'Rejected');
+  };
+
+  /** command-status tone modifier for a month's lifecycle status (same palette as
+   *  the assignment-level status chip: Draft neutral, Requested amber, Allocated
+   *  green, Rejected red). */
+  protected monthStatusClass(status: AssignmentMonth['status']): string {
+    switch (status) {
+      case 'Allocated': return 'green';
+      case 'Requested': return 'amber';
+      case 'Rejected': return 'red';
+      default: return 'neutral';
+    }
+  }
+
+  /** Current planner-note value for a month: an in-flight local edit if present,
+   *  else the persisted row's note, else empty (row may not exist yet). */
+  protected plannerNoteDraft(month: string): string {
+    return this.plannerNoteDrafts()[month] ?? this.monthRow(month)?.plannerNote ?? '';
+  }
+
+  protected setPlannerNoteDraft(month: string, value: string): void {
+    this.plannerNoteDrafts.update(d => ({ ...d, [month]: value }));
+  }
+
+  /** Persist the planner note on blur — only when the month row already exists
+   *  (the server 404s otherwise, mirroring the RPT rule that a note can only be
+   *  saved once the month has been drafted) and only when it actually changed.
+   *  The endpoint returns the updated row directly, so it is patched straight
+   *  into `monthRows` (see patchMonthRow) rather than a full `data.reload()`,
+   *  which would flash the whole calendar back to its loading placeholder and
+   *  wipe any unsaved hour edits in OTHER open months — the same concern
+   *  `saveMonth` documents below. */
+  protected savePlannerNote(month: string): void {
+    const row = this.monthRow(month);
+    const draft = this.plannerNoteDraft(month);
+    if (!row || draft === (row.plannerNote ?? '')) return;
+    this.api.setAssignmentMonthNote(this.assignmentId(), month, draft)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: updated => this.patchMonthRow(updated),
+        error: () => { /* the global error interceptor surfaces the message */ },
+      });
+  }
+
+  /**
+   * Submit a Draft/Rejected month for approval. The server may hand back either
+   * 'Requested' (a manager approval was created) or 'Allocated' (the proposer IS
+   * the resource's manager, so the request is auto-approved on the spot) — the
+   * success message reflects whichever actually came back rather than assuming
+   * 'Requested', so it never claims a pending approval that didn't happen. Like
+   * savePlannerNote, the response IS the updated row, so it is patched directly
+   * into `monthRows` — no full `data.reload()` (see saveMonth's doc comment for why).
+   */
+  protected submitMonth(month: string): void {
+    if (this.submittingMonth() !== null) return;
+    this.submittingMonth.set(month);
+    this.api.submitAssignmentMonth(this.assignmentId(), month, this.plannerNoteDraft(month) || undefined)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: row => {
+          this.submittingMonth.set(null);
+          const label = this.monthLabel(month);
+          this.notifications.show(
+            row.status === 'Allocated' ? `${label} allocated (self-managed, no approval needed).` : `${label} submitted for approval.`,
+            'success',
+          );
+          this.patchMonthRow(row);
+        },
+        error: () => this.submittingMonth.set(null),
+      });
   }
 
   protected hoursFor(month: string, date: string): number {
@@ -336,7 +505,7 @@ export class AllocationCalendarComponent {
    * On success it patches ONLY the saved month in `edited` from the response's
    * day rows (server-truth) — deliberately NOT a global `data.reload()`, which would
    * reset the `edited` linkedSignal for EVERY month and wipe unsaved edits in other
-   * open months (and flash the "Caricamento…" placeholder, losing scroll). The
+   * open months (and flash the "Loading calendar…" placeholder, losing scroll). The
    * resulting status is surfaced (an edit to an Allocated assignment demotes it to
    * Requested for re-approval unless self-managed). On error the global error
    * interceptor already toasts the server message (which names the offending date on
@@ -361,30 +530,71 @@ export class AllocationCalendarComponent {
           for (const d of result.days) persisted[d.date] = d.hours;
           this.edited.update(map => ({ ...map, [month]: persisted }));
           this.notifications.show(this.saveMessage(month, result.status), 'success');
+          // `result.status` above is the ASSIGNMENT's derived rollup, not this
+          // month's own lifecycle row (B3) — the save may have just lazily
+          // created a Draft row (first booking in this month) or demoted an
+          // Allocated row to Requested, and either way the badge/Submit button
+          // read `data.value().allocation.months`, which this response does not
+          // carry. Refresh that one row (see refreshMonthRow) instead of a full
+          // `data.reload()`, which would discard `edited`'s in-flight state.
+          this.refreshMonthRow(month);
         },
         error: () => this.savingMonth.set(null),
       });
+  }
+
+  /**
+   * saveAssignmentAllocation's response carries only the ASSIGNMENT's derived
+   * rollup, not the saved month's own lifecycle row, so — unlike submitMonth /
+   * savePlannerNote, which already get the fresh row back directly — a save
+   * needs its own narrow re-read to learn it (e.g. the lazily-created Draft row
+   * on a month's first booking). Best-effort: on failure the badge simply stays
+   * as it was until the next patch.
+   */
+  private refreshMonthRow(month: string): void {
+    this.api.getAssignmentAllocation(this.assignmentId(), month, month)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: fresh => {
+          const row = fresh.months?.find(m => m.month === month);
+          if (row) this.patchMonthRow(row);
+        },
+        error: () => { /* best-effort refresh; the badge just stays stale until the next reload */ },
+      });
+  }
+
+  /**
+   * Merge one fresh month row into `monthRows` — NOT into `data` (see
+   * `monthRows`'s doc comment for why: touching `data` at all, even leaving
+   * `allocation.days` untouched, would force `edited` to rebuild from scratch
+   * and wipe every other open month's unsaved hour edits). This is the ONLY
+   * way this component updates a month's lifecycle state; it never calls a
+   * full `data.reload()`, which would additionally flash the whole calendar
+   * back to its loading placeholder.
+   */
+  private patchMonthRow(row: AssignmentMonth): void {
+    this.monthRows.update(map => ({ ...map, [row.month]: row }));
   }
 
   private saveMessage(month: string, status: string): string {
     const label = this.monthLabel(month);
     switch (status) {
       case 'Requested':
-        return `Allocazione di ${label} salvata e inviata in approvazione.`;
+        return `${label} allocation saved and submitted for approval.`;
       case 'Allocated':
-        return `Allocazione di ${label} salvata (allocata).`;
+        return `${label} allocation saved (allocated).`;
       default:
-        return `Allocazione di ${label} salvata.`;
+        return `${label} allocation saved.`;
     }
   }
 
-  private static readonly MONTH_FMT = new Intl.DateTimeFormat('it-IT', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  private static readonly MONTH_FMT = new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
   protected monthLabel(month: string): string {
     return AllocationCalendarComponent.MONTH_FMT.format(new Date(month + '-01T00:00:00Z'));
   }
 
-  private static readonly DAY_FMT = new Intl.DateTimeFormat('it-IT', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
-  /** Human-readable Italian date for aria-labels, e.g. '15 luglio 2026'. */
+  private static readonly DAY_FMT = new Intl.DateTimeFormat('en-US', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+  /** Human-readable date for aria-labels, e.g. 'July 15, 2026'. */
   protected dayLabel(date: string): string {
     return AllocationCalendarComponent.DAY_FMT.format(new Date(date + 'T00:00:00Z'));
   }

@@ -64,10 +64,12 @@ import type {
   AuditLog,
   FxRate,
   AssignmentDay,
+  AssignmentMonth,
   Holiday,
   PlanningPeriod,
 } from '../app/services/api.service';
 import { distributeHoursOverWindow } from '../app/services/calendar.util';
+import { deriveAssignmentStatus, type MonthStatus } from '../app/services/allocation-month.util';
 
 // --- Core resources ---------------------------------------------------------
 
@@ -113,9 +115,15 @@ export const users: User[] = [
 // equals the sum of assignedHours across its assignments, keeping the seed coherent.
 // Date windows are anchored across 2026-04 .. 2026-09 so the bookings fall inside
 // the schedule view's default ~12-week horizon from "today" (2026-06-12).
-// ALLOCATION APPROVAL WORKFLOW: staffedEffortPlanned mirrors staffedEffort for the
-// seed because every seeded assignment status is 'Allocated' (confirmed) — there
-// are no pending allocations, so planned == confirmed here.
+// ALLOCATION APPROVAL WORKFLOW: staffedEffortPlanned mirrors staffedEffort here.
+// KNOWN SEED DRIFT (pre-existing, deliberately not "fixed" as data): both numbers
+// are hand-typed sums of `assignedHours`, whereas the runtime aggregates are
+// `monthlyAggregateHours` — per-DAY hours weighed by the status of their OWN
+// month row. The one seeded pending month (2:2026-08) therefore means request
+// '3''s true CONFIRMED effort is below the 24 typed below until that month is
+// approved. Deriving these two columns from the month rows would also flip the
+// seeded request statuses, so it is a separate change; the first mutation of
+// either request recomputes both from source of truth regardless.
 export const requests: ResourceRequest[] = [
   { id: '1', name: 'Project Alpha - Backend', requiredRole: 'Developer', requiredEffort: 20, staffedEffort: 20, staffedEffortPlanned: 20, status: 'Fulfilled', skills: ['Java'], description: 'Backend development for Project Alpha', startDate: '2026-04-01', endDate: '2026-06-30', requesterId: '1', projectId: '1' },
   { id: '2', name: 'Project Beta - UI', requiredRole: 'Designer', requiredEffort: 15, staffedEffort: 8, staffedEffortPlanned: 8, status: 'Published', skills: ['Figma'], description: 'UI Design for Project Beta', startDate: '2026-05-01', endDate: '2026-07-31', requesterId: '1', projectId: '2' },
@@ -138,17 +146,23 @@ export const requests: ResourceRequest[] = [
 // 2026-07-31, A5 starts 2026-08-01; the half-open [start,end) interval makes these
 // adjacent, NOT conflicting).
 // NOTE(alloc-approval Task 1): status literals were 'hard-booked'/'soft-booked'
-// (free string) prior to this feature; typing Assignment.status as a
-// 'Draft' | 'Requested' | 'Allocated' | 'Rejected' union made those literals
-// incompatible with the type and broke `ng build`. Minimally remapped to
-// 'Allocated' here ONLY to unblock the build — the real hard/soft distinction
-// (and any richer seed migration) is Task 7's job, not this one.
-export const assignments: Assignment[] = [
-  { id: '1', requestId: '1', resourceId: '1', assignedHours: 20, status: 'Allocated', startDate: '2026-05-01', endDate: '2026-06-30', allocationPct: 60 },
-  { id: '2', requestId: '3', resourceId: '1', assignedHours: 24, status: 'Allocated', startDate: '2026-06-15', endDate: '2026-08-31', allocationPct: 70 },
-  { id: '3', requestId: '4', resourceId: '2', assignedHours: 30, status: 'Allocated', startDate: '2026-05-15', endDate: '2026-09-15', allocationPct: 100 },
-  { id: '4', requestId: '2', resourceId: '3', assignedHours: 8, status: 'Allocated', startDate: '2026-05-01', endDate: '2026-07-31', allocationPct: 50 },
-  { id: '5', requestId: '5', resourceId: '3', assignedHours: 10, status: 'Allocated', startDate: '2026-08-01', endDate: '2026-09-30', allocationPct: 50 },
+// (free string) prior to that feature; typing Assignment.status as a
+// 'Draft' | 'Requested' | 'Allocated' | 'Rejected' union made them incompatible.
+// The hard/soft distinction was never reintroduced and is not modelled today.
+//
+// B3: `status` is NOT part of this literal. It is a DERIVED rollup of the
+// assignment's month rows (`deriveAssignmentStatus`), so hard-coding it here let
+// the seed contradict its own invariant from the very first boot: assignment '2'
+// shipped 'Allocated' while its 2:2026-08 month row is 'Requested', which the
+// rollup reads as 'Requested'. The exported `assignments` below is built from
+// this base once the month rows exist, so a fresh database is consistent by
+// construction and no hand-maintained pair can drift.
+const assignmentsBase: readonly Omit<Assignment, 'status'>[] = [
+  { id: '1', requestId: '1', resourceId: '1', assignedHours: 20, startDate: '2026-05-01', endDate: '2026-06-30', allocationPct: 60 },
+  { id: '2', requestId: '3', resourceId: '1', assignedHours: 24, startDate: '2026-06-15', endDate: '2026-08-31', allocationPct: 70 },
+  { id: '3', requestId: '4', resourceId: '2', assignedHours: 30, startDate: '2026-05-15', endDate: '2026-09-15', allocationPct: 100 },
+  { id: '4', requestId: '2', resourceId: '3', assignedHours: 8, startDate: '2026-05-01', endDate: '2026-07-31', allocationPct: 50 },
+  { id: '5', requestId: '5', resourceId: '3', assignedHours: 10, startDate: '2026-08-01', endDate: '2026-09-30', allocationPct: 50 },
 ];
 
 // --- Time-phased allocation (B1) config --------------------------------------
@@ -188,7 +202,7 @@ export const planningPeriods: PlanningPeriod[] = [
  * days — none of the seeded rows above hit that case.
  */
 function buildAssignmentDays(
-  rows: readonly Assignment[],
+  rows: readonly Omit<Assignment, 'status'>[],
   holidayRows: readonly Holiday[],
 ): AssignmentDay[] {
   const holidaySet = new Set(holidayRows.map((h) => h.id));
@@ -205,7 +219,59 @@ function buildAssignmentDays(
   return out;
 }
 
-export const assignmentDays: AssignmentDay[] = buildAssignmentDays(assignments, holidays);
+export const assignmentDays: AssignmentDay[] = buildAssignmentDays(assignmentsBase, holidays);
+
+/**
+ * Per-month lifecycle rows (B3), derived — not hand-typed — from the seeded
+ * assignmentDays so a month row exists for exactly the months each assignment
+ * actually books. Months are seeded 'Allocated' (booked, approved work); ONE
+ * month of assignment '2' is left 'Requested' (governed by the seeded approval
+ * AR4 below) to give the People Manager page and the smoke suite a pending item
+ * to decide out of the box — which is why assignment '2' then DERIVES to
+ * 'Requested' rather than 'Allocated'.
+ */
+const PENDING_SEED_MONTH = { assignmentId: '2', month: '2026-08', approvalId: 'AR4' } as const;
+
+function buildAssignmentMonths(
+  rows: readonly Omit<Assignment, 'status'>[],
+  days: readonly AssignmentDay[],
+): AssignmentMonth[] {
+  const monthsByAssignment = new Map<string, Set<string>>();
+  for (const d of days) {
+    const set = monthsByAssignment.get(d.assignmentId) ?? new Set<string>();
+    set.add(d.date.slice(0, 7));
+    monthsByAssignment.set(d.assignmentId, set);
+  }
+  const out: AssignmentMonth[] = [];
+  for (const a of rows) {
+    for (const month of [...(monthsByAssignment.get(a.id) ?? [])].sort()) {
+      const pending = a.id === PENDING_SEED_MONTH.assignmentId && month === PENDING_SEED_MONTH.month;
+      out.push({
+        id: `${a.id}:${month}`,
+        assignmentId: a.id,
+        month,
+        status: pending ? 'Requested' : 'Allocated',
+        ...(pending ? { approvalId: PENDING_SEED_MONTH.approvalId, plannerNote: 'Extra month to cover the migration cut-over' } : {}),
+      });
+    }
+  }
+  return out;
+}
+
+export const assignmentMonths: AssignmentMonth[] = buildAssignmentMonths(assignmentsBase, assignmentDays);
+
+/**
+ * The seeded assignments, with `status` DERIVED from the month rows above via
+ * the very same rollup the server applies (`refreshDerivedAssignmentStatus`), so
+ * a freshly seeded database already satisfies the B3 invariant instead of
+ * needing the first mutation to repair it.
+ */
+export const assignments: Assignment[] = assignmentsBase.map(a => ({
+  ...a,
+  status: deriveAssignmentStatus(
+    assignmentMonths.filter(m => m.assignmentId === a.id).map(m => m.status as MonthStatus),
+  ),
+}));
 
 export const timeEntries: TimeEntry[] = [
   { id: 'TE1', assignmentId: '1', requestId: '1', resourceId: '1', projectId: '1', date: '2026-04-06', hours: 8, status: 'Approved', notes: 'Backend integration', approvedBy: '1', approvedAt: '2026-04-07T09:00:00.000Z' },
@@ -594,6 +660,11 @@ export const approvalRequests: ApprovalRequest[] = [
   { id: 'AR3', kind: 'ChangeRequest', refId: 'CR1', projectId: '1', amount: 12000, requestedBy: '3', createdAt: '2026-04-20T10:30:00.000Z', note: 'Scope extension awaiting delivery sign-off',
     status: 'Pending', currentStep: 0, slaDueAt: '2026-04-23T10:30:00.000Z',
     steps: [{ role: 'delivery-executive', status: 'Pending' }] },
+  // AR4: Allocation (B3). refId is the MONTH ROW id, not an assignment id —
+  // this is the pending month the People Manager page opens on.
+  { id: 'AR4', kind: 'Allocation', refId: '2:2026-08', projectId: '1', requestedBy: '3', createdAt: '2026-07-28T08:00:00.000Z', note: 'Extra month to cover the migration cut-over',
+    status: 'Pending', currentStep: 0, slaDueAt: '2026-07-31T08:00:00.000Z',
+    steps: [{ role: 'resource-manager', status: 'Pending' }] },
 ];
 
 // --- Audit log --------------------------------------------------------------

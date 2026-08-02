@@ -1,4 +1,5 @@
 import { InMemoryRepository, nullsToUndefined } from './repository';
+import type { AssignmentMonth } from '../app/services/api.service';
 
 /**
  * Unit tests for the DEV adapter (`InMemoryRepository`). These exercise the full
@@ -95,6 +96,59 @@ describe('InMemoryRepository', () => {
     const updated = await repo.update('1', {});
     expect(updated).toEqual(widget('1', 'a', 1));
     expect(await repo.get('1')).toEqual(widget('1', 'a', 1));
+  });
+
+  it('keeps assignment-month optional fields absent (nulls-to-undefined parity)', async () => {
+    // Regression on a real domain type (B3's AssignmentMonth), not the synthetic
+    // Widget: optional fields the in-memory adapter never touches must stay
+    // `undefined` (never leak in as `null`), matching the Pg adapter's
+    // `nullsToUndefined()`-normalized return shape.
+    const repo = new InMemoryRepository<AssignmentMonth>();
+    const created = await repo.create({
+      id: 'A9:2026-09', assignmentId: 'A9', month: '2026-09', status: 'Draft',
+    });
+    expect(created.approvalId).toBeUndefined();
+    const updated = await repo.update('A9:2026-09', { status: 'Requested' });
+    expect(updated?.status).toBe('Requested');
+    expect(updated?.plannerNote).toBeUndefined();
+  });
+
+  it('update() with an explicit `null` patch value clears the field to absent, not `null`', async () => {
+    // SEAM PARITY WITH PgRepository (B3 fix, round 2): on Postgres, an explicit
+    // `null` patch value sets the column NULL, and `nullsToUndefined()` then
+    // normalizes it back to `undefined` on every subsequent read. Before this
+    // fix, `InMemoryRepository.update()` merged the patch verbatim, so a `null`
+    // would be stored and returned LITERALLY — the exact inverse of the parity
+    // bug `nullsToUndefined` exists to prevent (Postgres was fixed to clear the
+    // column; the in-memory/dev adapter regressed to leaking `null` instead of
+    // `undefined`). No entity type ever declares an optional field as `V |
+    // null` (e.g. `AssignmentMonth.approvalId?: string`), so `null` in a patch
+    // must mean "clear", identically on both adapters.
+    const repo = new InMemoryRepository<AssignmentMonth>();
+    await repo.create({
+      id: 'A9:2026-10', assignmentId: 'A9', month: '2026-10', status: 'Requested', approvalId: 'AR1',
+    });
+    const updated = await repo.update('A9:2026-10', {
+      status: 'Allocated', approvalId: null as unknown as undefined,
+    });
+    expect(updated?.status).toBe('Allocated');
+    expect(updated?.approvalId).toBeUndefined();
+    // Not just `=== undefined` (a present key with value `undefined` would
+    // also satisfy that) — the key itself must be gone, matching "absent".
+    expect(Object.prototype.hasOwnProperty.call(updated, 'approvalId')).toBe(false);
+    const fetched = await repo.get('A9:2026-10');
+    expect(fetched?.approvalId).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(fetched, 'approvalId')).toBe(false);
+  });
+
+  it('update() with a `null` patch value never clears `id` even if the patch tries to', async () => {
+    // `id` is exempted from the null-clears-to-absent rule above: it is never
+    // client-clearable (mirrors PgRepository.update(), which strips `id` from
+    // the patch before building the SQL SET clause).
+    const repo = new InMemoryRepository<Widget>([widget('1', 'a', 1)]);
+    const updated = await repo.update('1', { id: null as unknown as string, name: 'b' });
+    expect(updated?.id).toBe('1');
+    expect(await repo.get('1')).toEqual(widget('1', 'b', 1));
   });
 
   it('remove() deletes an existing entity and returns true', async () => {

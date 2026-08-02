@@ -69,3 +69,13 @@ export const CAPACITY_ROLES: readonly UserRole[] = ['pm', 'resource-manager', 'd
  * may read the monthly FTE capacity dashboard (B2).
  */
 export const capacityGuard: CanMatchFn = roleGuard(auth => auth.hasAnyRole([...CAPACITY_ROLES]));
+
+/**
+ * Approver-grade roles allowed to open the per-month allocation approvals page
+ * (B3), mirroring the server's '/allocation-approvals' READ_RULE. Single source
+ * of truth shared by {@link allocationApprovalsGuard} and the nav entry in app.ts.
+ */
+export const ALLOCATION_APPROVAL_ROLES: readonly UserRole[] = ['resource-manager', 'delivery-executive', 'admin'];
+
+/** Allows matching only for {@link ALLOCATION_APPROVAL_ROLES}. */
+export const allocationApprovalsGuard: CanMatchFn = roleGuard(auth => auth.hasAnyRole([...ALLOCATION_APPROVAL_ROLES]));

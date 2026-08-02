@@ -132,9 +132,27 @@ export class InMemoryRepository<T extends Entity> implements Repository<T> {
       return Promise.resolve(undefined);
     }
     // Merge a cloned patch onto the stored row; never allow `id` to be changed.
-    const merged: T = { ...this.items[index], ...clone(patch), id };
-    this.items[index] = merged;
-    return Promise.resolve(clone(merged));
+    const clonedPatch = clone(patch) as Record<string, unknown>;
+    const merged = { ...this.items[index], ...clonedPatch, id } as unknown as Record<string, unknown>;
+    // SEAM PARITY WITH PgRepository (see `nullsToUndefined`'s doc comment): an
+    // explicit `null` in the patch means "clear this field", never "store a
+    // literal null" — every entity type declares its optional fields as
+    // `V | undefined`, NEVER `V | null` (e.g. `AssignmentMonth.approvalId?:
+    // string`, `Resource.costRate?: number`). On Postgres, `.set()` sets the
+    // column NULL and every subsequent READ normalizes it back to `undefined`
+    // via `nullsToUndefined`; this in-memory store has no separate read-side
+    // normalization step, so `null` must drop the key outright HERE, on
+    // write, or a `null` would leak into every later response for this row —
+    // the exact inverse of the bug `nullsToUndefined` exists to prevent.
+    // `undefined` still means "leave untouched" (the existing empty-patch
+    // parity rule, unchanged). `id` is exempted: it is never client-clearable
+    // and the trailing `id` reassignment above already guards it — this loop
+    // must not undo that by deleting it back out.
+    for (const [key, value] of Object.entries(clonedPatch)) {
+      if (key !== 'id' && value === null) delete merged[key];
+    }
+    this.items[index] = merged as T;
+    return Promise.resolve(clone(merged) as T);
   }
 
   remove(id: string): Promise<boolean> {

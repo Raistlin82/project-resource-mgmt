@@ -65,41 +65,20 @@ export function isAllowedTimeEntryTransition(from: TimeEntry['status'], to: Time
 
 export type AllocationStatus = Assignment['status'];
 
-/** Only these statuses may be set by a client via POST/PUT /assignments. */
-export const ALLOCATION_CLIENT_SETTABLE: readonly AllocationStatus[] = ['Draft', 'Requested'];
-
-// CLIENT-SETTABLE transitions only. The system transitions Requested -> Allocated
-// and Requested -> Rejected are applied DIRECTLY by the decision hook (a later task)
-// and never routed through this guard, so they are intentionally absent here. This
-// keeps the table consistent with ALLOCATION_CLIENT_SETTABLE.
-const ALLOCATION_TRANSITIONS: Readonly<Record<AllocationStatus, readonly AllocationStatus[]>> = {
-  Draft: ['Requested'],
-  Requested: ['Draft'],
-  Allocated: ['Requested'],
-  Rejected: ['Requested'],
-};
-
-export function isAllowedAllocationTransition(from: AllocationStatus, to: AllocationStatus): boolean {
-  if (from === to) return true;
-  return ALLOCATION_TRANSITIONS[from].includes(to);
-}
+// B3 REMOVALS. `ALLOCATION_CLIENT_SETTABLE`, `isAllowedAllocationTransition`
+// (with its ALLOCATION_TRANSITIONS table) and `assignmentAggregateHours` lived
+// here until B3 made `assignments.status` a DERIVED rollup of the month rows.
+// They had no runtime caller left, and their specs asserted a contract the
+// server no longer implements — a client-settable assignment lifecycle and an
+// assignment-level hour rollup — so they were deleted rather than left as
+// documentation of a retired design. Their replacements all live in
+// allocation-month.util: `deriveAssignmentStatus` and `monthlyAggregateHours`.
 
 /** Build the single approval step for an allocation: the resource's manager (resource-id), fallback role only. */
 export function allocationApproverStep(managerId: string | undefined): ApprovalStep {
   return managerId
     ? { role: 'resource-manager', status: 'Pending', approverId: managerId }
     : { role: 'resource-manager', status: 'Pending' };
-}
-
-/** Sum assignedHours split by lifecycle: confirmed = Allocated; planned = Requested + Allocated. */
-export function assignmentAggregateHours(rows: Pick<Assignment, 'assignedHours' | 'status'>[]): { confirmed: number; planned: number } {
-  let confirmed = 0, planned = 0;
-  for (const a of rows) {
-    const h = Number.isFinite(a.assignedHours) ? a.assignedHours : 0;
-    if (a.status === 'Allocated') { confirmed += h; planned += h; }
-    else if (a.status === 'Requested') { planned += h; }
-  }
-  return { confirmed, planned };
 }
 
 /** Map an approval decision to the resulting assignment status. */

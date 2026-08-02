@@ -3,7 +3,7 @@
 > **Diátaxis mode: Explanation + Reference.** The first half explains the shape
 > of the backend and the Repository pattern that gives Delivery Control a single
 > dev-vs-prod parity guarantee. The second half is reference material: the
-> domain ER diagrams and a 31-entity catalogue. For the layer overview start at
+> domain ER diagrams and a 43-entity catalogue. For the layer overview start at
 > [`01-overview.md`](./01-overview.md); for who may call what, see
 > [`04-security-identity.md`](./04-security-identity.md) and
 > [`../roles-and-permissions.md`](../roles-and-permissions.md).
@@ -277,7 +277,7 @@ handlers run concurrently and there is no atomic-increment primitive on the
 
 ## Domain ER diagrams (reference)
 
-The 31 tables (`src/db/schema.ts`) are split into four domain groups below.
+The 43 tables (`src/db/schema.ts`) are split into four domain groups below.
 Crow's-foot relationships show the **declared** foreign keys; soft links
 (`requesterId`, `ownerId`, `refId`) carry the column without a hard FK and are
 called out in the catalogue. Money/FX columns use `doublePrecision`; date-like
@@ -287,10 +287,12 @@ values are `text` (ISO strings); nested arrays/objects are `jsonb`.
 
 ```mermaid
 erDiagram
-    resources ||--o{ users : "identifies"
-    resources ||--o{ assignments : "staffed on"
-    requests  ||--o{ assignments : "fulfilled by"
-    resources ||--o{ resources : "manages (managerId, soft)"
+    resources   ||--o{ users : "identifies"
+    resources   ||--o{ assignments : "staffed on"
+    requests    ||--o{ assignments : "fulfilled by"
+    resources   ||--o{ resources : "manages (managerId, soft)"
+    assignments ||--o{ assignmentDays : "booked per day (B1)"
+    assignments ||--o{ assignmentMonths : "governed per month (B3)"
 
     resources {
         text id PK
@@ -319,6 +321,20 @@ erDiagram
         text requestId FK
         text resourceId FK
         double assignedHours
+        text status "DERIVED from assignmentMonths"
+    }
+    assignmentDays {
+        text id PK "assignmentId:YYYY-MM-DD"
+        text assignmentId FK
+        text date
+        double hours
+    }
+    assignmentMonths {
+        text id PK "assignmentId:YYYY-MM"
+        text assignmentId FK
+        text month
+        text status "authoritative"
+        text approvalId "soft"
     }
 ```
 
@@ -453,7 +469,7 @@ erDiagram
 
 ## Entity catalogue (reference)
 
-All 31 tables in `src/db/schema.ts`. **Key FKs** lists declared `references()`
+All 43 tables in `src/db/schema.ts`. **Key FKs** lists declared `references()`
 foreign keys; *(soft)* marks columns that carry a reference without a hard FK.
 
 | Entity (table) | Purpose | Key fields & FKs | Domain |
@@ -462,6 +478,8 @@ foreign keys; *(soft)* marks columns that carry a reference without a hard FK.
 | `users` | Identity → resource + RBAC role mapping | `id`, `role`; **FK** `resourceId→resources` | Resourcing |
 | `requests` | Demand (resource requests) | `id`, `requiredEffort`, `staffedEffort`, `status`; **FK** `projectId→projects`; `requesterId` *(soft)* | Resourcing |
 | `assignments` | Staffing of a resource onto a request | `id`, `assignedHours`; **FK** `requestId→requests`, `resourceId→resources` | Resourcing |
+| `assignmentDays` | Per-day hours of an assignment (B1, time-phased allocation) | `id` = `<assignmentId>:<YYYY-MM-DD>`, `date`, `hours`; **FK** `assignmentId→assignments` | Resourcing |
+| `assignmentMonths` | Per-(assignment, month) approval lifecycle (B3) — **authoritative**; `assignments.status` is a derived rollup of these rows | `id` = `<assignmentId>:<YYYY-MM>`, `month`, `status`, `plannerNote`, `approverNote`; **FK** `assignmentId→assignments`; `approvalId` *(soft → approvalRequests)* | Resourcing / Governance |
 | `timeEntries` | Logged hours with approval lifecycle | `id`, `hours`, `status`, `approvedBy/At`; **FK** `assignmentId→assignments`, `requestId→requests`, `resourceId→resources`, `projectId→projects` | Resourcing / Governance |
 | `languages` | UI languages (natural key `code`) | `code` PK, `isDefault` | Config |
 | `skillCatalogs` | Named collections of skills | `id`, `skills` (jsonb id array) | Config |
@@ -470,6 +488,16 @@ foreign keys; *(soft)* marks columns that carry a reference without a hard FK.
 | `projectRoles` | Project role master data | `id`, `code`, `restricted` | Config |
 | `serviceOrganizations` | Delivery org units | `id`, `code`, `costCenters` (jsonb) | Config |
 | `resourceOrganizations` | Resource org units | `id`, `costCenters` (jsonb); **FK** `serviceOrganizationId→serviceOrganizations` | Config |
+| `countries` | Country master data (natural key `code`) | `code` PK, `name` | Config |
+| `cities` | City master data | `id`, `name`; **FK** `countryCode→countries` | Config |
+| `industries` | Industry master data | `id`, `name` | Config |
+| `costCategories` | Cost-category master data | `id`, `name` | Config / Finance |
+| `partnerRoles` | Partner-role master data | `id`, `name` | Config |
+| `vendors` | Vendor / subcontractor master data | `id`, `vatId`, `country` | Config |
+| `rateCards` | Default cost/bill rates by role + organization | `id`, `role`, `currency`, `costRate`, `billRate` | Config / Finance |
+| `holidays` | Non-working days (natural key: the ISO date IS the `id`) | `id` = `YYYY-MM-DD`, `name` | Config |
+| `planningPeriods` | Open/closed state of a calendar month (natural key: `id` IS `YYYY-MM`) | `id` = `YYYY-MM`, `status` | Config |
+| `settings` | Global key/value settings (e.g. hours-per-day) | `id` PK, `value` | Config |
 | `projects` | Delivery projects | `id`, `status`; **FK** `contractId→contracts`; `ownerId` *(soft)* | Projects |
 | `projectPartners` | Partner companies on a project | `id`, `company`, `status`; **FK** `projectId→projects` | Projects |
 | `projectDocuments` | Project document metadata | `id`, `name`, `type`; **FK** `projectId→projects` | Projects |

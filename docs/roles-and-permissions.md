@@ -83,6 +83,8 @@ server, re-evaluate in the browser after `authReady`).
 | `approvals` | `roleGuard(a => a.hasAnyRole(['pm','resource-manager','delivery-executive','finance','admin']))` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `schedule` | `roleGuard(a => a.hasAnyRole(['pm','resource-manager','delivery-executive','admin']))` | `pm`, `resource-manager`, `delivery-executive`, `admin` |
 | `resources` | `roleGuard(a => a.hasAnyRole(['resource-manager','delivery-executive','admin']))` | `resource-manager`, `delivery-executive`, `admin` |
+| `capacity` (B2) | `capacityGuard` → `hasAnyRole(CAPACITY_ROLES)` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `allocation-approvals` (B3, the People Manager per-month approval page) | `allocationApprovalsGuard` → `hasAnyRole(ALLOCATION_APPROVAL_ROLES)` | `resource-manager`, `delivery-executive`, `admin` |
 | Everything else (dashboard, profile, assignments, requests, staffing, utilization, forecast, what-if, remaining `projects/*`, `reporting`, remaining `config/*`) | _none_ | open to any signed-in user (UX layer; API still enforces RBAC) |
 
 > The **`schedule`** route (the read-only Resource Schedule timeline) is gated to
@@ -105,6 +107,17 @@ server, re-evaluate in the browser after `authReady`).
 > The `billing` route stacks `commercialGuard` **and** `financeGuard`, so a user
 > must satisfy *both* — effectively the `canApproveFinancials` set, since it is a
 > subset of `canManageCommercial`.
+
+> The **`capacity`** route (the monthly FTE capacity/demand dashboard, B2) and the
+> **`allocation-approvals`** route (the People Manager's per-month approval page,
+> B3) are each gated to a single exported role-set constant
+> (`CAPACITY_ROLES`/`ALLOCATION_APPROVAL_ROLES` in `role.guard.ts`) so the route
+> guard and the corresponding nav-item visibility check can never drift from one
+> another. Both sets mirror their server `READ_RULE` exactly (`/capacity` and
+> `/allocation-approvals` respectively — see
+> [Server endpoint RBAC](#server-endpoint-rbac)); neither route introduces a
+> mutation of its own — `allocation-approvals` writes through
+> `POST /allocation-approvals/decide` and the `/assignments` per-month endpoints.
 
 ---
 
@@ -129,6 +142,7 @@ and **403** otherwise. Path tests use `startsWith`.
 | `/capacity` (read-only computed rollup, e.g. `GET /capacity/monthly`) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/time-entries` | `employee`, `pm`, `resource-manager`, `delivery-executive`, `finance`, `sales`, `admin` |
 | `/approval-requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/allocation-approvals` (B3 People Manager feed, e.g. `GET /allocation-approvals?from&to&status`) | `resource-manager`, `delivery-executive`, `admin` |
 | `/integrations` | `finance`, `delivery-executive`, `admin` |
 
 **Open reads (no rule):** all other GETs — catalogs (`/skill-catalogs`,
@@ -151,12 +165,13 @@ A role not in the matched rule's list gets **403**. Path tests use `startsWith`
 | `/project-financials`, `/project-cost-centers`, `/cost-centers` | `finance`, `delivery-executive`, `admin` |
 | `/resources` | `resource-manager`, `delivery-executive`, `admin` |
 | `/time-entries` | `employee`, `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
-| `/assignments`, `/requests` | `pm`, `resource-manager`, `delivery-executive`, `admin` |
+| `/assignments`, `/requests` (incl. the B3 per-month endpoints `POST /assignments/:id/months/:month/submit` and `PUT /assignments/:id/months/:month/note`, matched by the same `/assignments` prefix test — no separate rule) | `pm`, `resource-manager`, `delivery-executive`, `admin` |
 | `/projects`, `/project-partners`, `/project-documents`, `/work-packages`, `/milestones`, `/project-tasks`, `/project-issues`, `/change-requests` | `pm`, `delivery-executive`, `admin` |
 | `/skill-catalogs`, `/proficiency-sets`, `/skills`, `/project-roles`, `/resource-organizations`, `/languages` | `admin`, `delivery-executive` |
 | `/holidays` | `admin`, `delivery-executive` |
 | `/planning-periods` | `admin` only |
 | `/approval-requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/allocation-approvals` (B3 batch month decisions, `POST /allocation-approvals/decide`) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/integrations` | `finance`, `delivery-executive`, `admin` |
 
 **Open mutations (no rule):** collections not matched above are open to any
@@ -226,7 +241,8 @@ for the rationale.
 | **Time entry** (`PUT /time-entries/:id` → `Approved`) | any role in the time-entries mutation rule | the entry's **owner** (its `resourceId`, resolved from the actor's user→resource mapping) | `resourceId` (not reassignable on PUT); `status` forced to `Draft` on create |
 | **Change request** (`PUT /change-requests/:id` → `Approved`) | only `delivery-executive` or `admin` | the CR **creator** (`createdBy`); legacy rows fall back to `requestedBy`/`owner` | `createdBy` (pinned on POST) |
 | **Approval request** (`PUT /approval-requests/:id/decision`) | the role assigned to the **current step**, **or** (Allocation steps only) the specific resource identified by `step.approverId` (resource-id match); `admin` may decide any step; an `'unknown'` actor is rejected 401 | the **requester** (`requestedBy`) | `requestedBy` (pinned on POST); `step.approverId` (Allocation only, see below) |
-| **Allocation** (`PUT /approval-requests/:id/decision`, kind `Allocation`) | the resource's **People Manager** (`step.approverId`, matched in resource-id space via `actorResourceId`) — or any `resource-manager`-role holder as fallback when the resource has no `managerId`; `admin` may decide any step | the **proposer** (`requestedBy`, the actor who called `POST`/`PUT /assignments` with `status: 'Requested'`) | `requestedBy` (pinned at open); `step.approverId` = the resource's `managerId` at approval-creation time |
+| **Allocation** (`PUT /approval-requests/:id/decision`, kind `Allocation`) | the resource's **People Manager** (`step.approverId`, matched in resource-id space via `actorResourceId`) — or any `resource-manager`-role holder as fallback when the resource has no `managerId`; `admin` may decide any step | the **proposer** (`requestedBy`, the actor who called `POST /assignments/:id/months/:month/submit` — B3's per-month submit endpoint; see below) | `requestedBy` (pinned at open); `step.approverId` = the resource's `managerId` at approval-creation time |
+| **Allocation, batched** (`POST /allocation-approvals/decide`, B3) | identical — the batch resolves each item's month row to its `approvalId` and runs the **same** `decideOneApproval` core, so SoD and per-step enforcement are one implementation, not two | identical (the **requester** of each item's approval) | identical; the month row's `approvalId` is server-written only (never taken from the body) |
 
 **Approval routing** (`buildApprovalSteps`): an item whose `amount` exceeds the
 high-value threshold (**50 000**) routes through a two-step chain
@@ -241,40 +257,71 @@ high-value threshold (**50 000**) routes through a two-step chain
 
 ### Allocation approval (resource staffing)
 
-An `Assignment` (`/assignments`) carries its own lifecycle, independent of the
-approval-request `status` enum: **`Draft` → `Requested` → `Allocated` /
-`Rejected`**. Only `Draft` and `Requested` are client-settable on
-`POST`/`PUT /assignments`; `Allocated`/`Rejected` are reached exclusively
-through the approval-decision hook below (or the self-managed shortcut) — a
-client attempt to set either directly is rejected with **400**.
+**B3** moved the allocation lifecycle off the `Assignment` itself and onto the
+**(assignment, month) pair**: each `AssignmentMonth` row (`Draft` → `Requested`
+→ `Allocated`/`Rejected`, transitions in `allocation-month.util.ts`) carries
+its own status, and `assignments.status` is now a **derived rollup** of those
+rows (`deriveAssignmentStatus`, precedence `Requested > Rejected > Allocated >
+Draft` — anything awaiting a decision dominates, then anything refused, then
+approved work, else `Draft`). Neither `POST /assignments` nor
+`PUT /assignments/:id` accepts a client-supplied `status` **at all** any
+more — presence of *any* `status` field in the body is rejected with **400**
+(`"status is derived from the per-month allocation and cannot be set on an
+assignment"`). This is stricter than pre-B3, which allowed `Draft`/`Requested`
+client-side; `refreshDerivedAssignmentStatus` is the only writer of the column
+now.
 
-- A `POST`/`PUT /assignments` proposing `status: 'Requested'` opens an
-  `Allocation` approval request (`kind: 'Allocation'`, `refId` = the
-  assignment id) with a **single step** routed to the resource's **People
-  Manager** — the assignment's `resource.managerId`, addressed in
-  **resource-id space** (`step.approverId = managerId`, `step.role =
-  'resource-manager'`). When the resource has no `managerId` set, the step
-  still carries `role: 'resource-manager'` but no `approverId`, so it falls
-  back to **any** actor holding the `resource-manager` role (or `admin`).
-- **Self-managed auto-approval shortcut**: when the proposer *is* the target
-  resource's own manager (`resource.managerId` equals the proposer's own
-  resource-id, resolved via the users directory), the proposal auto-completes
-  straight to `Allocated` with **no** approval request opened at all —
-  approver and requester would be the same principal, so SoD would block the
-  decision anyway.
-- **Decision-endpoint step enforcement**: a step is decided by an actor who
-  either (a) holds the step's `role` (or is `admin`), **or** (b) is the
-  specific resource identified by `step.approverId`. This resource-id match is
-  what lets the correct manager — and only that manager — decide their own
-  reports' allocations, rather than letting any `resource-manager`-role holder
-  decide anyone's.
+The proposal/decision workflow instead runs through the **per-month
+endpoints**, both reached under the existing `/assignments` mutation rule
+(matched by prefix — `pm`, `resource-manager`, `delivery-executive`, `admin`;
+see [Server endpoint RBAC](#server-endpoint-rbac)):
+
+- **`POST /assignments/:id/months/:month/submit`** ("Invia mese in
+  approvazione") — moves **one** month row `Draft`/`Rejected` → `Requested`
+  and opens an `Allocation` approval request (`kind: 'Allocation'`, `refId` =
+  the **month-row id**, i.e. `<assignmentId>:<YYYY-MM>`) with a **single
+  step** routed to the resource's **People Manager** — the assignment's
+  `resource.managerId`, addressed in **resource-id space**
+  (`step.approverId = managerId`, `step.role = 'resource-manager'`). When the
+  resource has no `managerId` set, the step still carries
+  `role: 'resource-manager'` but no `approverId`, so it falls back to **any**
+  actor holding the `resource-manager` role (or `admin`). The target month
+  must be an **Open** planning period (403 otherwise), and the month row must
+  currently be `Draft`/`Rejected` — an already-`Requested`/`Allocated` month
+  is refused with **400** (submit is not idempotent).
+- **`PUT /assignments/:id/months/:month/note`** — the **planner's** note on
+  that month row (`plannerNote`), independent of the *approver's* note
+  captured at decision time (`step.note`, mirrored onto `approverNote`).
+- **Self-managed auto-approval shortcut** (unchanged from the pre-B3 flow):
+  when the proposer *is* the target resource's own manager (`resource.
+  managerId` equals the proposer's own resource-id, resolved via the users
+  directory), the month auto-completes straight to `Allocated` with **no**
+  approval request opened at all — approver and requester would be the same
+  principal, so SoD would block the decision anyway.
+- **Retarget propagation**: `PUT /assignments/:id` changing `resourceId`
+  re-baselines every **live** month row (`Requested` or `Allocated`) against
+  the **new** resource — withdrawing any pending approval, then either
+  auto-approving (self-managed) or opening a fresh `Requested` approval
+  routed to the new resource's manager. `Draft` and `Rejected` rows are left
+  untouched (no promise was made / the conversation is closed).
+- **Decision-endpoint step enforcement** (shared by `PUT
+  /approval-requests/:id/decision` and the B3 batch `POST
+  /allocation-approvals/decide`, both through the same `decideOneApproval`
+  core): a step is decided by an actor who either (a) holds the step's `role`
+  (or is `admin`), **or** (b) is the specific resource identified by
+  `step.approverId`. This resource-id match is what lets the correct manager —
+  and only that manager — decide their own reports' allocations, rather than
+  letting any `resource-manager`-role holder decide anyone's.
 - On decision, the approver's `note` (if supplied) is recorded on the
   **decided step** (`step.note`), never on the approval request's top-level
   `note` (which remains the *requester's* note captured at creation).
-- On a terminal `Approved`/`Rejected` decision the governed assignment's
-  `status` is transitioned server-side to `Allocated`/`Rejected` respectively
-  (never client-settable), and the resource/request staffing aggregates are
-  recomputed.
+- On a terminal `Approved`/`Rejected` decision, `applyAllocationDecision`
+  parses `refId` (`parseMonthRowId`): a **composite** id transitions that one
+  month row and then re-derives the assignment's rollup `status`; a **bare**
+  assignment id is a **legacy** approval opened before the B3 migration and is
+  applied directly to the assignment's `status` so nothing already in flight
+  is orphaned. Either way the resource/request staffing aggregates are
+  recomputed afterwards.
 
 ---
 

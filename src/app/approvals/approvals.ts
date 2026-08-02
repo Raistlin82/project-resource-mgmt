@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
 import { CurrencyPipe, DatePipe } from '@angular/common';
+import { RouterLink } from '@angular/router';
 import { MatIconModule } from '@angular/material/icon';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { forkJoin, of } from 'rxjs';
@@ -15,6 +16,7 @@ import {
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ListStateComponent } from '../shared/list-state.component';
+import { parseMonthRowId } from '../services/allocation-month.util';
 
 interface ApprovalsData {
   approvals: ApprovalRequest[];
@@ -56,7 +58,7 @@ interface ApprovalRow {
 @Component({
   selector: 'app-approvals',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CurrencyPipe, DatePipe, MatIconModule, ListStateComponent],
+  imports: [CurrencyPipe, DatePipe, RouterLink, MatIconModule, ListStateComponent],
   template: `
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -117,6 +119,7 @@ interface ApprovalRow {
                     @if (row.kind === 'Allocation') {
                       <div class="font-semibold text-[var(--cc-ink)]">{{ row.label }}</div>
                       <div class="text-xs font-mono tabular-nums text-[var(--cc-muted)] mt-0.5">{{ row.reference }}</div>
+                      <a routerLink="/allocation-approvals" class="text-xs text-accent-text hover:underline transition-colors">Open monthly approvals</a>
                     } @else {
                       <span class="font-mono tabular-nums">{{ row.reference }}</span>
                     }
@@ -370,10 +373,17 @@ export class Approvals {
    * refId, so surface a readable label built from the fields on hand (the project;
    * the allocated resource isn't joinable here without loading assignments — an
    * accepted limitation). Other kinds fall back to the raw reference.
+   *
+   * B3's `refId` is the composite `<assignmentId>:<YYYY-MM>`; a bare id (no
+   * `parseMonthRowId` match) is a pre-B3 approval, which keeps the un-suffixed
+   * wording below. (Translated from the file's original Italian strings —
+   * this run's UI-copy decision is English; the rest of the file is untouched.)
    */
   private rowLabel(request: ApprovalRequest, projectLabel: string): string {
     if (request.kind === 'Allocation') {
-      return request.projectId ? `Allocazione su ${projectLabel}` : 'Allocazione risorsa';
+      const base = request.projectId ? `Allocation on ${projectLabel}` : 'Resource allocation';
+      const parsed = parseMonthRowId(request.refId);
+      return parsed ? `${base} — ${parsed.month}` : base;
     }
     return request.refId;
   }

@@ -49,9 +49,14 @@ describe('rollupMonthly', () => {
     { id: 'r2', name: 'Part', contractHoursPerDay: 4 },
   ];
   const assignments = [
-    { id: 'a1', resourceId: 'r1', status: 'Allocated' },
-    { id: 'a2', resourceId: 'r1', status: 'Requested' },
-    { id: 'a3', resourceId: 'r2', status: 'Allocated' },
+    { id: 'a1', resourceId: 'r1' },
+    { id: 'a2', resourceId: 'r1' },
+    { id: 'a3', resourceId: 'r2' },
+  ];
+  const assignmentMonths = [
+    { assignmentId: 'a1', month: '2026-05', status: 'Allocated' },
+    { assignmentId: 'a2', month: '2026-05', status: 'Requested' },
+    { assignmentId: 'a3', month: '2026-05', status: 'Allocated' },
   ];
   const assignmentDays = [
     { assignmentId: 'a1', date: '2026-05-04', hours: 100 },
@@ -59,7 +64,7 @@ describe('rollupMonthly', () => {
     { assignmentId: 'a3', date: '2026-05-04', hours: 84 },
   ];
 
-  const out = rollupMonthly({ resources, assignments, assignmentDays, months, hoursPerDay, holidays: NO_HOL });
+  const out = rollupMonthly({ resources, assignments, assignmentDays, assignmentMonths, months, hoursPerDay, holidays: NO_HOL });
 
   it('splits confirmed vs planned per resource/month', () => {
     const r1 = out.rows.find(r => r.resourceId === 'r1')!.monthly['2026-05'];
@@ -79,13 +84,14 @@ describe('rollupMonthly', () => {
   });
   it('idle active resource still appears with a 0% cell', () => {
     const out2 = rollupMonthly({ resources: [{ id: 'r9', name: 'Idle', contractHoursPerDay: 8 }],
-      assignments: [], assignmentDays: [], months, hoursPerDay, holidays: NO_HOL });
+      assignments: [], assignmentDays: [], assignmentMonths: [], months, hoursPerDay, holidays: NO_HOL });
     expect(out2.rows[0].monthly['2026-05'].band).toBe('idle');
   });
   it('ignores non-finite hours rows (NaN would poison the sum and mis-band the cell as over)', () => {
     const out3 = rollupMonthly({
       resources: [{ id: 'r9', name: 'Poisoned', contractHoursPerDay: 8 }],
-      assignments: [{ id: 'aX', resourceId: 'r9', status: 'Requested' }],
+      assignments: [{ id: 'aX', resourceId: 'r9' }],
+      assignmentMonths: [{ assignmentId: 'aX', month: '2026-05', status: 'Requested' }],
       assignmentDays: [{ assignmentId: 'aX', date: '2026-05-04', hours: Number.NaN }],
       months, hoursPerDay, holidays: NO_HOL,
     });
@@ -94,5 +100,26 @@ describe('rollupMonthly', () => {
     expect(Number.isFinite(cell.ftePlanned)).toBe(true);
     expect(cell.band).toBe('idle');
     expect(cell.band).not.toBe('over');
+  });
+  it('classifies each month by ITS OWN status, not the assignment status', () => {
+    const rollup = rollupMonthly({
+      resources: [{ id: 'R1', name: 'Ada' }],
+      assignments: [{ id: 'A1', resourceId: 'R1' }],
+      assignmentMonths: [
+        { assignmentId: 'A1', month: '2026-09', status: 'Allocated' },
+        { assignmentId: 'A1', month: '2026-10', status: 'Requested' },
+      ],
+      assignmentDays: [
+        { assignmentId: 'A1', date: '2026-09-01', hours: 8 },
+        { assignmentId: 'A1', date: '2026-10-01', hours: 8 },
+      ],
+      months: ['2026-09', '2026-10'],
+      hoursPerDay: 8,
+      holidays: new Set<string>(),
+    });
+    const row = rollup.rows[0];
+    expect(row.monthly['2026-09'].confirmedHours).toBe(8);
+    expect(row.monthly['2026-10'].confirmedHours).toBe(0);
+    expect(row.monthly['2026-10'].plannedHours).toBe(8);
   });
 });

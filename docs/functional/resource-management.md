@@ -449,8 +449,12 @@ flowchart TD
 2. **Assign the chosen resource.**
    - **Who:** `resource-manager`. **When:** a candidate is selected.
    - **How:** confirm with `assignedHours` (defaults to the request's remaining
-     effort) → `createAssignment({ requestId, resourceId, assignedHours, status })`
-     → `POST /assignments`.
+     effort) → `createAssignment({ requestId, resourceId, assignedHours })`
+     → `POST /assignments`. **No `status`:** since B3 the assignment's status is
+     a *derived* rollup of its per-month rows, so `POST`/`PUT /assignments`
+     reject a client-supplied `status` with **400**. A brand-new assignment has
+     no month rows and therefore reads as `Draft`; the lifecycle continues from
+     the allocation calendar (book the days, then submit the month for approval).
    - **Output:** an assignment. The server then, **under per-key locks**:
      - **recomputes the resource's utilization** from the *full* set of its
        assignments (never a lossy running delta — see `recomputeResourceUtilization`);

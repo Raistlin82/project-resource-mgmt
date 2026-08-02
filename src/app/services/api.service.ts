@@ -119,6 +119,29 @@ export interface AssignmentDay {
 }
 
 /**
+ * Per-month lifecycle state of an assignment (B3). The approval unit is the
+ * (assignment, month) pair — RPT approves month by month across projects — so
+ * this row, not `Assignment.status`, is authoritative. `Assignment.status` is a
+ * derived rollup of these (see allocation-month.util `deriveAssignmentStatus`).
+ * A row exists even for a month with 0 hours: zeroing an approved month is
+ * itself a proposal the People Manager must approve.
+ */
+export interface AssignmentMonth {
+  /** Composite `<assignmentId>:<YYYY-MM>`. */
+  id: string;
+  assignmentId: string;
+  /** 'YYYY-MM'. */
+  month: string;
+  status: 'Draft' | 'Requested' | 'Allocated' | 'Rejected';
+  /** Id of the ApprovalRequest currently governing THIS month, if any. */
+  approvalId?: string;
+  /** Note written by the planner (PM) for the approver. */
+  plannerNote?: string;
+  /** Note written by the approver (People Manager) on the decision. */
+  approverNote?: string;
+}
+
+/**
  * Envelope returned by `GET /assignments/:id/allocation` (B1): the assignment's
  * per-day rows within [from,to] plus the effective daily contract cap. `from`/`to`
  * default server-side to the assignment's spanned months and are omitted when the
@@ -129,18 +152,76 @@ export interface AssignmentAllocation {
   from?: string;
   to?: string;
   contractHoursPerDay: number;
+  /** Per-month lifecycle rows for the requested span (B3). */
+  months?: AssignmentMonth[];
   days: AssignmentDay[];
 }
 
 /**
  * Response of `PUT /assignments/:id/allocation` (B1): the fresh assignment (whose
- * `status` may have been demoted to 'Requested' by the edit, triggering re-approval)
- * plus the just-replaced month and its persisted day rows.
+ * `status` is a DERIVED rollup of its months, B3 — editing an 'Allocated' month
+ * forces THAT month back to 'Requested' for re-approval, which may or may not
+ * change the rollup depending on the assignment's other months) plus the
+ * just-replaced month and its persisted day rows.
  */
 export interface AssignmentAllocationResult extends Assignment {
   month: string;
   contractHoursPerDay: number;
   days: AssignmentDay[];
+}
+
+/**
+ * One (assignment, month) row within a resource's `AllocationApprovalRow.items`
+ * (B3): the project it belongs to, its lifecycle state, hours and notes.
+ */
+export interface AllocationApprovalItem {
+  assignmentMonthId: string;
+  assignmentId: string;
+  month: string;
+  status: AssignmentMonth['status'];
+  projectId?: string;
+  projectName?: string;
+  requestId: string;
+  hours: number;
+  plannerNote?: string;
+  approverNote?: string;
+  approvalId?: string;
+}
+
+/**
+ * One resource's row in the People Manager approval feed (B3): its per-month
+ * target/total hours across the requested window, plus every (assignment,
+ * month) item across all its projects.
+ */
+export interface AllocationApprovalRow {
+  resourceId: string;
+  resourceName: string;
+  managerId?: string;
+  contractHoursPerDay: number;
+  targetHours: Record<string, number>;
+  totalHours: Record<string, number>;
+  items: AllocationApprovalItem[];
+}
+
+/** Envelope returned by `GET /allocation-approvals` (B3): the People Manager's
+ *  approval feed — resources x months x projects with per-month state. */
+export interface AllocationApprovalFeed {
+  months: string[];
+  rows: AllocationApprovalRow[];
+}
+
+/** One decision in a `decideAllocationMonths` batch call (B3). */
+export interface AllocationDecisionItem {
+  assignmentMonthId: string;
+  decision: 'Approved' | 'Rejected';
+  note?: string;
+}
+
+/** One result entry in a `decideAllocationMonths` batch response (B3). */
+export interface AllocationDecisionResult {
+  assignmentMonthId: string;
+  status: string;
+  error?: string;
 }
 
 /**
@@ -753,6 +834,32 @@ export class ApiService {
 
   /** Non-working days excluded from working-day math (B1). */
   getHolidays(): Observable<Holiday[]> { return this.http.get<Holiday[]>(`${this.baseUrl}/holidays`); }
+
+  // --- Per-month approval (B3) ---
+
+  /** Read the People Manager approval feed. Omitted bounds default to the open planning periods. */
+  getAllocationApprovals(from?: string, to?: string, status?: 'all' | 'Requested' | 'Allocated'): Observable<AllocationApprovalFeed> {
+    let params = new HttpParams();
+    if (from) params = params.set('from', from);
+    if (to) params = params.set('to', to);
+    if (status) params = params.set('status', status);
+    return this.http.get<AllocationApprovalFeed>(`${this.baseUrl}/allocation-approvals`, { params });
+  }
+
+  /** Send ONE month of an assignment for approval ("Invia mese in approvazione"). */
+  submitAssignmentMonth(assignmentId: string, month: string, plannerNote?: string): Observable<AssignmentMonth> {
+    return this.http.post<AssignmentMonth>(`${this.baseUrl}/assignments/${assignmentId}/months/${month}/submit`, { plannerNote });
+  }
+
+  /** Save the planner's note on a month row. */
+  setAssignmentMonthNote(assignmentId: string, month: string, plannerNote: string): Observable<AssignmentMonth> {
+    return this.http.put<AssignmentMonth>(`${this.baseUrl}/assignments/${assignmentId}/months/${month}/note`, { plannerNote });
+  }
+
+  /** Decide N month rows in one call ("Approva Mese" / "Approva e Prosegui"). */
+  decideAllocationMonths(items: AllocationDecisionItem[]): Observable<{ results: AllocationDecisionResult[] }> {
+    return this.http.post<{ results: AllocationDecisionResult[] }>(`${this.baseUrl}/allocation-approvals/decide`, { items });
+  }
 
   // --- Monthly FTE capacity (B2) ---
 

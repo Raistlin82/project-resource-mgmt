@@ -9,9 +9,10 @@ import { db } from './db/client';
 import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
-import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
-import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours, decisionToAssignmentStatus, allocationApproverStep, isAllowedAllocationTransition, ALLOCATION_CLIENT_SETTABLE, type AllocationStatus } from './app/services/staffing.util';
-import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity } from './app/services/calendar.util';
+import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter, AllocationApprovalRow, AllocationApprovalItem } from './app/services/api.service';
+import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, decisionToAssignmentStatus, allocationApproverStep } from './app/services/staffing.util';
+import { deriveAssignmentStatus, monthRowId, parseMonthRowId, monthlyAggregateHours, type MonthStatus } from './app/services/allocation-month.util';
+import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity, monthlyTargetHours } from './app/services/calendar.util';
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
@@ -259,13 +260,27 @@ const auditRepoBySegment = new Map<string, AuditReadable>([
   // harmless (findAuditEntity is only ever consulted for paths the router
   // actually mounts) but keeps the map exhaustive over the Repositories surface.
   ['holidays', repos.holidays], ['planning-periods', repos.planningPeriods],
-  ['assignment-days', repos.assignmentDays],
+  ['assignment-days', repos.assignmentDays], ['assignment-months', repos.assignmentMonths],
 ]);
 
-/** Find the current entity targeted by a `/collection/:id` request path. */
+/**
+ * Find the current entity targeted by a `/collection/:id` request path.
+ *
+ * Special-cases B3's nested per-month sub-resource shape
+ * `/assignments/:id/months/:month/...` (the `note` PUT — `submit` is a POST,
+ * which the audit middleware never before/after-snapshots): that handler
+ * never touches the parent assignment, so resolving `segments[1]` against
+ * `repos.assignments` (the generic path below) would diff an unchanged
+ * assignment against itself and silently produce an empty `changedKeys`,
+ * masking the actual mutation. Resolve against the assignmentMonths row
+ * (composite id) instead.
+ */
 async function findAuditEntity(path: string): Promise<Entity | undefined> {
   const segments = path.split('/').filter(Boolean);
   if (segments.length < 2) return undefined;
+  if (segments[0] === 'assignments' && segments[2] === 'months' && segments.length >= 4) {
+    return repos.assignmentMonths.get(monthRowId(segments[1], segments[3]));
+  }
   const repo = auditRepoBySegment.get(segments[0]);
   return repo ? repo.get(segments[1]) : undefined;
 }
@@ -520,6 +535,9 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
     // Task-8 calendar (pm/resource-manager) can render open/closed months.
     { test: p => p.startsWith('/planning-periods'), roles: ['admin'] },
     { test: p => p.startsWith('/approval-requests'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
+    // B3 batch month decisions run the SAME engine as /approval-requests, so the
+    // coarse gate matches; the fine filter is the per-step approverId check.
+    { test: p => p.startsWith('/allocation-approvals'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
     // Integration actions (prepare CRM sync payloads, ...) mirror the read gate.
     { test: p => p.startsWith('/integrations'), roles: ['finance', 'delivery-executive', 'admin'] },
   ];
@@ -566,6 +584,9 @@ const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   // Monthly FTE capacity/demand rollup (B2): a read-only computed view derived
   // from assignments/resources — same need-to-know as the staffing reads above.
   { test: p => p.startsWith('/capacity'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
+  // B3 approval feed: the People Manager's month-by-month queue — approver-grade
+  // roles only (stricter than /capacity, which is a read-only rollup).
+  { test: p => p.startsWith('/allocation-approvals'), roles: ['resource-manager', 'delivery-executive', 'admin'] },
   // Timesheets for the whole org: require an authenticated principal (any role),
   // never served to an unauthenticated ('unknown') caller.
   { test: p => p.startsWith('/time-entries'), roles: ['employee', 'pm', 'resource-manager', 'delivery-executive', 'finance', 'sales', 'admin'] },
@@ -1013,20 +1034,21 @@ async function validateResourceOrgRefs(body: { costCenters?: unknown; serviceOrg
  * B-UTILIZATION: recompute a resource's utilization FROM THE SOURCE OF TRUTH
  * (the status-filtered sum of its assigned hours across all assignments) rather
  * than mutating a stored counter by deltas. `utilization` is the confirmed
- * aggregate (Allocated assignments only); `utilizationPlanned` is the planned
- * aggregate (Requested + Allocated) — the two use different status subsets via
- * `assignmentAggregateHours`, not one shared total. Incremental ±contribution
- * with a per-step round+clamp[0,100] is lossy: a 100%→add→remove cycle
- * permanently loses the over-100 magnitude, an over-removal clamped at 0
- * destroys magnitude, and Math.round on every step accumulates drift — so the
- * stored number diverges from reality and saturates irreversibly. We
- * round/clamp only the final derived value here. MUST be called inside
- * `withLock('res:<id>')` so the read of all assignments + the single write are
- * serialized against concurrent changes.
+ * aggregate (Allocated MONTHS only); `utilizationPlanned` is the planned
+ * aggregate (Requested + Allocated months) — the two use different status
+ * subsets via `monthlyAggregateHours` (B3: weighed per-day by the status of the
+ * day's OWN month row, not the assignment's derived rollup), not one shared
+ * total. Incremental ±contribution with a per-step round+clamp[0,100] is lossy:
+ * a 100%→add→remove cycle permanently loses the over-100 magnitude, an
+ * over-removal clamped at 0 destroys magnitude, and Math.round on every step
+ * accumulates drift — so the stored number diverges from reality and saturates
+ * irreversibly. We round/clamp only the final derived value here. MUST be
+ * called inside `withLock('res:<id>')` so the read of all assignments + the
+ * single write are serialized against concurrent changes.
  *
- * Writes a dual aggregate: `utilization` (confirmed — Allocated assignments
- * only) and `utilizationPlanned` (planned — Requested + Allocated), via the
- * pure `assignmentAggregateHours` split.
+ * Writes a dual aggregate: `utilization` (confirmed — Allocated months only)
+ * and `utilizationPlanned` (planned — Requested + Allocated months), via the
+ * pure `monthlyAggregateHours` split.
  *
  * The `utilization_planned` column exists in Pg (migration `0008_big_speed.sql`),
  * so `utilizationPlanned` is persisted identically by both the in-memory and Pg
@@ -1036,7 +1058,10 @@ async function recomputeResourceUtilization(resourceId: string): Promise<void> {
   const resource = await repos.resources.get(resourceId);
   if (!resource) return;
   const rows = (await repos.assignments.list()).filter(a => a.resourceId === resourceId);
-  const { confirmed, planned } = assignmentAggregateHours(rows);
+  const statusByRowId = await monthStatusByRowId();
+  const assignmentIds = new Set(rows.map(a => a.id));
+  const days = (await repos.assignmentDays.list()).filter(d => assignmentIds.has(d.assignmentId));
+  const { confirmed, planned } = monthlyAggregateHours(days, statusByRowId);
   await repos.resources.update(resourceId, {
     utilization: clampUtil(utilizationContribution(confirmed, resource.capacity)),
     utilizationPlanned: clampUtil(utilizationContribution(planned, resource.capacity)),
@@ -1050,10 +1075,11 @@ async function recomputeResourceUtilization(resourceId: string): Promise<void> {
  * MUST be called inside `withLock('req:<id>')` so the read-all + single write
  * is serialized against concurrent assignment changes.
  *
- * Writes a dual aggregate: `staffedEffort` (confirmed — Allocated assignments
- * only, the basis `requestStatusFor` uses to derive Fulfilled/Open) and
- * `staffedEffortPlanned` (planned — Requested + Allocated), via the pure
- * `assignmentAggregateHours` split.
+ * Writes a dual aggregate: `staffedEffort` (confirmed — Allocated months only,
+ * the basis `requestStatusFor` uses to derive Fulfilled/Open) and
+ * `staffedEffortPlanned` (planned — Requested + Allocated months), via the
+ * pure `monthlyAggregateHours` split (B3: per-day, weighed by the status of
+ * the day's OWN month row).
  *
  * The `staffed_effort_planned` column exists in Pg (migration `0008_big_speed.sql`),
  * so `staffedEffortPlanned` is persisted identically by both the in-memory and Pg
@@ -1063,7 +1089,10 @@ async function recomputeRequestStaffing(requestId: string): Promise<void> {
   const request = await repos.requests.get(requestId);
   if (!request) return;
   const rows = (await repos.assignments.list()).filter(a => a.requestId === requestId);
-  const { confirmed, planned } = assignmentAggregateHours(rows);
+  const statusByRowId = await monthStatusByRowId();
+  const assignmentIds = new Set(rows.map(a => a.id));
+  const days = (await repos.assignmentDays.list()).filter(d => assignmentIds.has(d.assignmentId));
+  const { confirmed, planned } = monthlyAggregateHours(days, statusByRowId);
   await repos.requests.update(request.id, {
     staffedEffort: confirmed,
     staffedEffortPlanned: planned,
@@ -1080,13 +1109,69 @@ async function recomputeRequestStaffing(requestId: string): Promise<void> {
 // lock (never nested inside a recompute critical section).
 // ---------------------------------------------------------------------------
 
-/** Open a single-step (resource-manager) approval for `assig` and return its id. */
-async function createAllocationApproval(req: Request, assig: Assignment): Promise<string> {
+/** Snapshot of every month row's status, keyed by composite row id. Consumed by
+ *  the status-weighted aggregates (`recomputeResourceUtilization`,
+ *  `recomputeRequestStaffing`) via `monthlyAggregateHours`. */
+async function monthStatusByRowId(): Promise<Map<string, MonthStatus>> {
+  const rows = await repos.assignmentMonths.list();
+  return new Map(rows.map(r => [r.id, r.status as MonthStatus]));
+}
+
+/**
+ * Get (or lazily create as 'Draft') the month row for an assignment. The row is
+ * created on the FIRST allocation write to that month, so a month with hours
+ * always has a lifecycle state to carry.
+ *
+ * CONCURRENCY: get-then-create is a read-modify-write over a SHARED row, so it
+ * runs inside `withLock('month:<rowId>')` — Express handlers interleave freely
+ * across every `await`, and two concurrent first-writes to the same new month
+ * used to both miss the `get` and both `create`: an unmapped `23505`
+ * (unique_violation) 500 on Postgres, and a genuine DUPLICATE row in memory
+ * (the in-memory adapter's `create` just pushes, it has no key constraint), after
+ * which the approval feed emitted two items with the same `assignmentMonthId`.
+ * The lock key is the ROW id, so different months never serialize against each
+ * other. `month:` locks are only ever taken here and are never nested inside (or
+ * around) a `res:`/`req:` section, so they cannot participate in a lock cycle.
+ *
+ * Belt-and-braces for a MULTI-PROCESS Postgres deployment (where the in-process
+ * lock spans one process only): a failed `create` is re-`get` before rethrowing,
+ * so losing the insert race still returns the winner's row instead of a 500.
+ */
+async function ensureAssignmentMonth(assignmentId: string, month: string): Promise<AssignmentMonth> {
+  const id = monthRowId(assignmentId, month);
+  return withLock(`month:${id}`, async () => {
+    const existing = await repos.assignmentMonths.get(id);
+    if (existing) return existing;
+    try {
+      return await repos.assignmentMonths.create({ id, assignmentId, month, status: 'Draft' } as AssignmentMonth);
+    } catch (err) {
+      const raced = await repos.assignmentMonths.get(id);
+      if (raced) return raced;
+      throw err;
+    }
+  });
+}
+
+/**
+ * Recompute and persist `assignments.status` from its month rows. The column is
+ * DERIVED (B3): no handler may write it from a client body — see the rollup rule
+ * in allocation-month.util.
+ */
+async function refreshDerivedAssignmentStatus(assignmentId: string): Promise<void> {
+  const rows = (await repos.assignmentMonths.list()).filter(r => r.assignmentId === assignmentId);
+  const derived = deriveAssignmentStatus(rows.map(r => r.status as MonthStatus));
+  await repos.assignments.update(assignmentId, { status: derived });
+}
+
+/** Open a single-step (resource-manager) approval for `assig` and return its id.
+ *  `refId` defaults to the assignment id (legacy gap-A shape); B3 passes the
+ *  month-row id so the decision governs ONE month. */
+async function createAllocationApproval(req: Request, assig: Assignment, refId: string = assig.id): Promise<string> {
   const createdAt = new Date().toISOString();
   const request = await repos.requests.get(assig.requestId);
   const resource = await repos.resources.get(assig.resourceId);
   const ar: ApprovalRequestEntry = {
-    id: `AR${newId()}`, kind: 'Allocation', refId: assig.id, projectId: request?.projectId,
+    id: `AR${newId()}`, kind: 'Allocation', refId, projectId: request?.projectId,
     requestedBy: actorId(req), status: 'Pending',
     steps: [allocationApproverStep(resource?.managerId)], currentStep: 0,
     createdAt, slaDueAt: slaDueFrom(createdAt),
@@ -1357,7 +1442,12 @@ apiRouter.delete('/requests/:id', async (req, res) => {
 
 apiRouter.get('/assignments', async (_req, res) => { res.json(await repos.assignments.list()); });
 apiRouter.post('/assignments', async (req, res) => {
-  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'status', 'startDate', 'endDate', 'allocationPct']);
+  // B3: the lifecycle lives on the month rows; a client may not seed a status.
+  if ((req.body as { status?: unknown } | undefined)?.status !== undefined) {
+    res.status(400).json({ error: 'status is derived from the per-month allocation and cannot be set on an assignment' });
+    return;
+  }
+  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'startDate', 'endDate', 'allocationPct']);
   if (!isNonNegNumber(body.assignedHours)) {
     { res.status(400).json({ error: 'assignedHours must be a non-negative number' }); return; }
   }
@@ -1368,31 +1458,13 @@ apiRouter.post('/assignments', async (req, res) => {
   if (!(await existsRepo(repos.requests, body.requestId))) { res.status(400).json({ error: 'requestId must reference an existing request' }); return; }
   if (!(await existsRepo(repos.resources, body.resourceId))) { res.status(400).json({ error: 'resourceId must reference an existing resource' }); return; }
 
-  // ALLOCATION LIFECYCLE: a client may only PROPOSE an assignment as 'Draft' or
-  // 'Requested' (ALLOCATION_CLIENT_SETTABLE). 'Allocated'/'Rejected' are reached
-  // only through the approval-decision hook (or the self-managed shortcut below),
-  // never forged on create.
-  const requestedStatus = (body.status ?? 'Draft') as AllocationStatus;
-  if (!ALLOCATION_CLIENT_SETTABLE.includes(requestedStatus)) {
-    res.status(400).json({ error: "status must be 'Draft' or 'Requested'" });
-    return;
-  }
-  // SELF-MANAGED SHORTCUT: when the proposer IS the resource's own manager, a
-  // 'Requested' proposal auto-approves straight to 'Allocated' with NO approval
-  // request (approver and requester would be the same principal — SoD would block
-  // the decision anyway). Any other actor's 'Requested' opens a manager approval.
-  const selfManaged = requestedStatus === 'Requested' && await autoApprovesAllocation(req, body.resourceId ?? '');
-  const effectiveStatus: AllocationStatus = selfManaged ? 'Allocated' : requestedStatus;
-
-  const created = await repos.assignments.create({ id: newId(), ...body, status: effectiveStatus } as Assignment);
-
-  // Open the manager approval only for a non-self-managed 'Requested' proposal,
-  // and link it back onto the assignment so a later edit/delete can withdraw it.
-  // Done OUTSIDE the res:/req: locks below.
-  if (requestedStatus === 'Requested' && !selfManaged) {
-    const approvalId = await createAllocationApproval(req, created);
-    await repos.assignments.update(created.id, { approvalId });
-  }
+  // B3: assignment status is DERIVED from its month rows (deriveAssignmentStatus)
+  // — never set directly here. A brand-new assignment has no month rows yet, so
+  // it starts 'Draft' (the same value deriveAssignmentStatus([]) returns). The
+  // lifecycle (submit for approval, self-managed auto-approve, etc.) is now
+  // driven exclusively by the per-month endpoints (PUT .../allocation,
+  // POST .../months/:month/submit) once hours are booked into a month.
+  const created = await repos.assignments.create({ id: newId(), ...body, status: 'Draft' } as Assignment);
 
   // B-CONCURRENCY + B-UTILIZATION: recompute BOTH aggregates from the full set of
   // assignments (never a lossy running delta). Sequential per-key locks.
@@ -1403,7 +1475,12 @@ apiRouter.post('/assignments', async (req, res) => {
 apiRouter.put('/assignments/:id', async (req, res) => {
   const oldAssig = await repos.assignments.get(req.params.id);
   if (oldAssig === undefined) { res.status(404).json({ error: 'Not found' }); return; }
-  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'status', 'startDate', 'endDate', 'allocationPct']);
+  // B3: the lifecycle lives on the month rows; a client may not seed a status.
+  if ((req.body as { status?: unknown } | undefined)?.status !== undefined) {
+    res.status(400).json({ error: 'status is derived from the per-month allocation and cannot be set on an assignment' });
+    return;
+  }
+  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'startDate', 'endDate', 'allocationPct']);
   if (body.assignedHours !== undefined && !isNonNegNumber(body.assignedHours)) {
     { res.status(400).json({ error: 'assignedHours must be a non-negative number' }); return; }
   }
@@ -1424,76 +1501,63 @@ apiRouter.put('/assignments/:id', async (req, res) => {
     res.status(400).json({ error: 'requestId must reference an existing request' });
     return;
   }
-  const oldStatus = oldAssig.status;
-  // ALLOCATION LIFECYCLE: a client-supplied status must be client-settable
-  // ('Draft'|'Requested') AND a legal transition from the current status. The
-  // system transitions into 'Allocated'/'Rejected' are applied only by the
-  // approval-decision hook (or the self-managed shortcut below), never here.
-  if (body.status !== undefined) {
-    if (!ALLOCATION_CLIENT_SETTABLE.includes(body.status)) {
-      res.status(400).json({ error: "status must be 'Draft' or 'Requested'" });
-      return;
+
+  // B3: status is DERIVED from the month rows — this PUT never writes `status`
+  // or `approvalId` on the assignment itself (both are now owned by the
+  // per-month endpoints and their approval side-effects). Persist the
+  // FK/hours/schedule patch first.
+  await repos.assignments.update(req.params.id, body);
+
+  // RETARGET PROPAGATION (B3): a resource retarget invalidates the governance
+  // of every month row carrying a LIVE commitment — a 'Requested' row's
+  // pending approval names the OLD resource's manager as approver, and an
+  // 'Allocated' row is a commitment the OLD resource made. Re-baseline each
+  // one against the NEW resource, mirroring what a fresh submit would do:
+  // withdraw any pending approval, then either auto-approve (self-managed)
+  // straight back to 'Allocated' with no approval, or open a fresh
+  // 'Requested' approval routed to the NEW resource's manager. 'Draft' rows
+  // are untouched — they carry no approval and nothing has been promised
+  // about them. 'Rejected' rows are ALSO untouched, deliberately, and for a
+  // different reason: a rejection is a closed conversation, not a live
+  // commitment, and sweeping it in here would silently
+  // resubmit (or, on the self-managed branch, auto-approve) a month no
+  // planner ever asked to reopen; any stale approvalId it carries is left
+  // exactly as is, never withdrawn. Also deliberately absent: a
+  // planning-period (open/closed) gate — unlike a voluntary submit, a
+  // retarget corrects WHO does already-planned work, not how many hours are
+  // booked, so a closed month must not block fixing the assignee. Pass the
+  // MERGED assignment (old fields + this body's new resourceId/requestId),
+  // never the stale `oldAssig`, to `createAllocationApproval` — it resolves
+  // the routing manager and the request's project FROM the assignment object
+  // it's given, so a stale resourceId would route the fresh approval to the
+  // OLD resource's manager, reproducing the exact bug this closes. The
+  // self-managed check is hoisted out of the loop: the answer (is the
+  // proposer the NEW resource's manager?) cannot change between month rows of
+  // the same retarget. This is approval-repo I/O + month-row writes only,
+  // done OUTSIDE any res:/req: lock and never nested inside an aggregate
+  // critical section (mirrors every other approval side-effect in this
+  // file); the aggregate recomputes below stay LAST so they read the
+  // post-retarget statuses.
+  if (body.resourceId !== undefined && body.resourceId !== oldAssig.resourceId) {
+    const mergedAssig = { ...oldAssig, ...body, id: oldAssig.id } as Assignment;
+    const selfManaged = await autoApprovesAllocation(req, body.resourceId);
+    const monthRows = (await repos.assignmentMonths.list())
+      .filter(m => m.assignmentId === oldAssig.id && (m.status === 'Allocated' || m.status === 'Requested'));
+    for (const row of monthRows) {
+      await withdrawAllocationApproval(row.approvalId, 'resource retargeted');
+      if (selfManaged) {
+        // `null`, not `undefined`: clears approvalId to absent on both
+        // adapters (Task 4's seam fix) — see the submit handler above for the
+        // full rationale on this cast.
+        await repos.assignmentMonths.update(row.id, { status: 'Allocated', approvalId: null as unknown as undefined });
+      } else {
+        const approvalId = await createAllocationApproval(req, mergedAssig, row.id);
+        await repos.assignmentMonths.update(row.id, { status: 'Requested', approvalId } as Partial<AssignmentMonth>);
+      }
     }
-    if (!isAllowedAllocationTransition(oldStatus, body.status)) {
-      res.status(400).json({ error: `illegal status transition ${oldStatus} -> ${body.status}` });
-      return;
-    }
   }
 
-  // A "material" edit to an already-Allocated assignment invalidates its prior
-  // approval, so it is forced back to 'Requested' for re-approval.
-  const MATERIAL_KEYS = ['assignedHours', 'startDate', 'endDate', 'resourceId', 'allocationPct'] as const;
-  const materialChange = MATERIAL_KEYS.some(k => body[k] !== undefined && body[k] !== oldAssig[k]);
-
-  // Target status: an explicit client status wins; else an Allocated assignment
-  // with a material change is forced to 'Requested' (re-approval); else unchanged.
-  const targetStatus: AllocationStatus =
-    body.status !== undefined ? body.status
-    : (oldStatus === 'Allocated' && materialChange) ? 'Requested'
-    : oldStatus;
-
-  // SELF-MANAGED SHORTCUT (parity with POST): when the target is 'Requested' and
-  // the effective resource's manager IS the proposer, auto-approve to 'Allocated'
-  // with NO approval request.
-  let finalStatus: AllocationStatus = targetStatus;
-  let autoApproved = false;
-  if (targetStatus === 'Requested' && await autoApprovesAllocation(req, body.resourceId ?? oldAssig.resourceId)) {
-    finalStatus = 'Allocated';
-    autoApproved = true;
-  }
-
-  // APPROVAL SIDE-EFFECTS (outside any res:/req: lock, never nested). We touch the
-  // approval only on a status change into/out of the approvable state:
-  //  - ENTERING 'Requested' (from a non-Requested status): supersede any prior
-  //    approval and open a fresh one on the merged assignment.
-  //  - a still-'Requested' assignment RETARGETED to a different resource: re-route
-  //    the pending approval to the NEW resource's manager (supersede + reopen), so
-  //    the empowered approver is never left as the previous resource's manager.
-  //  - back to 'Draft': supersede the pending approval; the assignment carries none.
-  //  - auto-approved to 'Allocated': supersede the pending approval; none remains.
-  //  - otherwise (a still-'Requested' assignment whose non-resource material fields
-  //    change): leave the pending approval untouched — the approver reads the fresh
-  //    assignment via refId (same manager, same routing).
-  const resourceRetargeted = body.resourceId !== undefined && body.resourceId !== oldAssig.resourceId;
-  let approvalId = oldAssig.approvalId;
-  let approvalChanged = false;
-  if (finalStatus === 'Requested' && (oldStatus !== 'Requested' || resourceRetargeted)) {
-    await withdrawAllocationApproval(oldAssig.approvalId, 'superseded');
-    approvalId = await createAllocationApproval(req, { ...oldAssig, ...body, id: oldAssig.id });
-    approvalChanged = true;
-  } else if (finalStatus === 'Draft') {
-    await withdrawAllocationApproval(oldAssig.approvalId, 'returned to draft');
-    approvalId = undefined;
-    approvalChanged = true;
-  } else if (finalStatus === 'Allocated' && autoApproved) {
-    await withdrawAllocationApproval(oldAssig.approvalId, 'superseded');
-    approvalId = undefined;
-    approvalChanged = true;
-  }
-
-  const patch: Partial<Assignment> = { ...body, status: finalStatus };
-  if (approvalChanged) patch.approvalId = approvalId;
-  await repos.assignments.update(req.params.id, patch);
+  await refreshDerivedAssignmentStatus(req.params.id);
 
   const newResourceId = body.resourceId ?? oldAssig.resourceId;
   const newRequestId = body.requestId ?? oldAssig.requestId;
@@ -1531,6 +1595,14 @@ apiRouter.delete('/assignments/:id', async (req, res) => {
   // adapters behave identically.
   const daysToRemove = (await repos.assignmentDays.list()).filter(d => d.assignmentId === req.params.id);
   for (const d of daysToRemove) await repos.assignmentDays.remove(d.id);
+  // B3: withdraw each month's pending approval and drop the month rows before
+  // the parent delete (assignment_months -> assignments is ON DELETE no action,
+  // so Postgres would otherwise reject the parent delete with an FK violation).
+  const monthRows = (await repos.assignmentMonths.list()).filter(m => m.assignmentId === oldAssig.id);
+  for (const m of monthRows) {
+    await withdrawAllocationApproval(m.approvalId, 'assignment deleted');
+    await repos.assignmentMonths.remove(m.id);
+  }
   await repos.assignments.remove(req.params.id);
 
   // B-CONCURRENCY + B-UTILIZATION + B-STAFFING: recompute BOTH aggregates from the
@@ -1571,16 +1643,23 @@ apiRouter.get('/assignments/:id/allocation', async (req, res) => {
 
   const resource = await repos.resources.get(assig.resourceId);
   const contractHoursPerDay = resource?.contractHoursPerDay ?? await getHoursPerDay();
-  res.json({ assignmentId: assig.id, from, to, contractHoursPerDay, days });
+
+  const months = (await repos.assignmentMonths.list())
+    .filter(m => m.assignmentId === assig.id && (from === undefined || m.month >= from) && (to === undefined || m.month <= to))
+    .sort((a, b) => a.month.localeCompare(b.month));
+  res.json({ assignmentId: assig.id, from, to, contractHoursPerDay, months, days });
 });
 
 // WRITE: replace ONE month's per-day hours in a single call. Gates: open-month,
 // working-day, daily-capacity. Then (ordering is load-bearing, gap-A discipline):
 //   1. withLock('res:<id>'): TOCTOU capacity re-check → replace the month's day
 //      rows → write assignedHours = Σ of ALL remaining day rows.
-//   2. OUTSIDE any res:/req: lock: forced re-approval (approval-repo I/O + the
-//      status write) — never nested in an aggregate lock. Trigger = the prior
-//      status was 'Allocated' (the days changed by definition), NOT a delta.
+//   2. OUTSIDE any res:/req: lock: forced re-approval, SCOPED TO THE EDITED MONTH
+//      (approval-repo I/O + the month row's status write) — never nested in an
+//      aggregate lock. Trigger = the edited month's OWN prior status was
+//      'Allocated' (its days changed by definition), NOT a delta; sibling months
+//      are untouched. `assignments.status` is then recomputed as a DERIVED
+//      rollup of all its months (B3) — never written directly here.
 //   3. FINAL: recompute the status-aware resource/request aggregates AFTER the
 //      status change, so confirmed/planned totals reflect the new status.
 apiRouter.put('/assignments/:id/allocation', async (req, res) => {
@@ -1656,7 +1735,9 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   const preOffender = await capacityOffender();
   if (preOffender !== undefined) { res.status(400).json({ error: capExceeded(preOffender) }); return; }
 
-  const oldStatus = assig.status;
+  // The lifecycle state of the month being written, read BEFORE the replace.
+  const monthRow = await ensureAssignmentMonth(assig.id, month);
+  const priorMonthStatus = monthRow.status as MonthStatus;
   // STEP 1 — inside res: lock: TOCTOU re-check, then replace the month's day rows
   // and rewrite assignedHours from the full remaining day set (source of truth).
   const replaced = await withLock(`res:${resource.id}`, async (): Promise<{ offender?: string }> => {
@@ -1684,20 +1765,47 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   });
   if (replaced.offender !== undefined) { res.status(400).json({ error: capExceeded(replaced.offender) }); return; }
 
-  // STEP 2 — OUTSIDE any res:/req: lock: forced re-approval. Trigger is the PRIOR
-  // status 'Allocated' (days changed), not an assignedHours delta. Self-managed →
-  // stays Allocated with no approval; otherwise supersede the old approval and open
-  // a fresh one, moving to 'Requested'. A still-'Requested' assignment keeps its
-  // pending approval (the approver re-reads the days via refId); Draft/Rejected
-  // have no approval effect.
-  if (oldStatus === 'Allocated' && !(await autoApprovesAllocation(req, resource.id))) {
-    await withdrawAllocationApproval(assig.approvalId, 'superseded');
-    const updatedAssig = await repos.assignments.get(assig.id);
-    if (updatedAssig) {
-      const approvalId = await createAllocationApproval(req, updatedAssig);
-      await repos.assignments.update(assig.id, { status: 'Requested', approvalId });
-    }
-  }
+  // STEP 2 — OUTSIDE any res:/req: lock: forced re-approval, scoped to THIS month.
+  // Trigger is the month's PRIOR status 'Allocated' (its days changed by
+  // definition), not an assignedHours delta. Self-managed → stays Allocated with
+  // no approval; otherwise supersede this month's approval and open a fresh one.
+  // A still-'Requested' month keeps its pending approval (the approver re-reads
+  // the days); Draft/Rejected have no approval effect. Months OTHER than the one
+  // written are untouched — that is the whole point of B3.
+  //
+  // SERIALIZED on `month:<rowId>`. read `approvalId` -> withdraw -> create ->
+  // write is a read-modify-write over one shared row, and re-reading alone only
+  // NARROWS the window: two near-simultaneous day-edits of the same Allocated
+  // month can still both read the same id, both open a fresh approval, and leave
+  // the loser's orphaned and Pending. The lock is the same `month:` namespace
+  // `ensureAssignmentMonth` uses, taken here sequentially (that call has long
+  // since returned), never nested.
+  //
+  // This does NOT break the handler's documented ordering: the rule is that
+  // STEP 2 runs outside any `res:`/`req:` lock — it must never hold an aggregate
+  // lock across approval I/O — and `month:` is a different namespace keyed on a
+  // single row. `month:` locks are taken in exactly two places (here and
+  // `ensureAssignmentMonth`), neither of which is nested inside a `res:`/`req:`/
+  // `approval:` section, so no lock cycle is reachable.
+  await withLock(`month:${monthRow.id}`, async () => {
+    if (priorMonthStatus !== 'Allocated' || await autoApprovesAllocation(req, resource.id)) return;
+    // RE-READ the row here rather than reusing the `monthRow` snapshot taken
+    // before STEP 1's lock: `approvalId` is shared mutable state, and STEP 1
+    // spans several awaits during which a CONCURRENT edit of the same month may
+    // already have superseded the approval and written a new id. Withdrawing
+    // the STALE id would cancel an approval that no longer governs anything
+    // while leaving the CURRENT one Pending and orphaned — a manager could
+    // still decide it, applying a decision to days nobody approved. `status` is
+    // deliberately NOT re-read: `priorMonthStatus` is this writer's own
+    // observation that the month WAS approved when its days changed, which is
+    // what the forced re-approval is a consequence of.
+    const currentRow = await repos.assignmentMonths.get(monthRow.id);
+    await withdrawAllocationApproval(currentRow?.approvalId, 'superseded');
+    const approvalId = await createAllocationApproval(req, assig, monthRow.id);
+    await repos.assignmentMonths.update(monthRow.id, { status: 'Requested', approvalId });
+  });
+  // The assignment's own status is a rollup of its months — recompute it last.
+  await refreshDerivedAssignmentStatus(assig.id);
 
   // STEP 3 — FINAL (after the status change): recompute the status-aware aggregates
   // so confirmed/planned utilization + staffed-effort reflect the new status. Best-
@@ -1715,6 +1823,107 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
     .filter(d => d.assignmentId === assig.id && monthOf(d.date) === month)
     .sort((a, b) => a.date.localeCompare(b.date));
   res.json({ ...fresh, month, contractHoursPerDay: cap, days });
+});
+
+/**
+ * Shared preamble for the per-month endpoints: resolve the assignment and
+ * validate the :month path parameter. Returns undefined after having written
+ * the error response.
+ */
+async function resolveMonthTarget(req: Request, res: Response): Promise<{ assig: Assignment; month: string } | undefined> {
+  // Bracket access + typeof guard (not dot access): Express 5's ParamsDictionary
+  // types a param as `string | string[]` via its index signature, same reason
+  // the /capacity/monthly and allocation GET handlers guard req.query this way.
+  const id = req.params['id'];
+  const assig = typeof id === 'string' ? await repos.assignments.get(id) : undefined;
+  if (assig === undefined) { res.status(404).json({ error: 'Not found' }); return undefined; }
+  const month = req.params['month'];
+  if (typeof month !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    res.status(400).json({ error: 'month must match YYYY-MM' }); return undefined;
+  }
+  return { assig, month };
+}
+
+// SUBMIT one month for approval ("Invia mese in approvazione"). Draft|Rejected
+// -> Requested with a fresh single-step manager approval, or straight to
+// Allocated when the proposer IS the resource's manager (the gap-A self-managed
+// shortcut, unchanged). Requires an OPEN planning period: proposing work in a
+// closed month is a planning error, not a governance one.
+apiRouter.post('/assignments/:id/months/:month/submit', async (req, res) => {
+  const target = await resolveMonthTarget(req, res);
+  if (target === undefined) return;
+  const { assig, month } = target;
+
+  const period = await repos.planningPeriods.get(month);
+  if (period?.status !== 'Open') { res.status(403).json({ error: 'month is not open for planning' }); return; }
+
+  const row = await repos.assignmentMonths.get(monthRowId(assig.id, month));
+  if (row === undefined) { res.status(404).json({ error: 'no allocation for this month' }); return; }
+  // ONLY Draft/Rejected may be voluntarily submitted. A generic month-transition
+  // table is the wrong check here: its Allocated -> Requested edge belongs to a
+  // DIFFERENT caller (the allocation PUT's day-edit forced-reapproval path), not
+  // to an explicit planner submit — an already-Requested OR already-Allocated
+  // month must be refused. Enforced inline for exactly that reason.
+  if (row.status !== 'Draft' && row.status !== 'Rejected') {
+    res.status(400).json({ error: `illegal month transition ${row.status} -> Requested` });
+    return;
+  }
+
+  const body = pick<{ plannerNote?: string }>(req.body, ['plannerNote']);
+  const plannerNote = typeof body.plannerNote === 'string' ? body.plannerNote : undefined;
+
+  // Self-managed: approver and requester would be the same principal (SoD would
+  // block the decision anyway), so the month is approved on the spot.
+  await withdrawAllocationApproval(row.approvalId, 'superseded');
+  if (await autoApprovesAllocation(req, assig.resourceId)) {
+    await repos.assignmentMonths.update(row.id, {
+      status: 'Allocated',
+      // `null`, not `undefined`: both `PgRepository.update()` and (now)
+      // `InMemoryRepository.update()` treat an explicit `null` patch value as
+      // "clear this field" (Drizzle sets the column NULL; the in-memory store
+      // drops the key) — see src/db/repository.ts's documented seam. Plain
+      // `undefined` means "leave untouched" on both adapters, so it would NOT
+      // clear a stale approvalId. `AssignmentMonth.approvalId` is typed
+      // `string | undefined` (never `null` — every READ path normalizes a
+      // cleared column back to `undefined`), so `null` only ever appears
+      // transiently in this one WRITE-side value. Cast just this value (not
+      // the whole patch literal) so a typo in `status`/`plannerNote` is still
+      // caught by the type checker.
+      approvalId: null as unknown as undefined,
+      ...(plannerNote !== undefined ? { plannerNote } : {}),
+    });
+  } else {
+    const approvalId = await createAllocationApproval(req, assig, row.id);
+    await repos.assignmentMonths.update(row.id, {
+      status: 'Requested', approvalId, ...(plannerNote !== undefined ? { plannerNote } : {}),
+    } as Partial<AssignmentMonth>);
+  }
+
+  await refreshDerivedAssignmentStatus(assig.id);
+  // Status-aware aggregates follow the month's new state. Best-effort, same
+  // discipline as the allocation endpoint: the transition is already committed.
+  try {
+    await withLock(`res:${assig.resourceId}`, () => recomputeResourceUtilization(assig.resourceId));
+    await withLock(`req:${assig.requestId}`, () => recomputeRequestStaffing(assig.requestId));
+  } catch { /* aggregates self-heal on the next mutation */ }
+
+  res.json(await repos.assignmentMonths.get(row.id));
+});
+
+// PLANNER NOTE on a month ("campo note" in RPT §3.5): saved only once the month
+// exists, i.e. after the allocation has been drafted.
+apiRouter.put('/assignments/:id/months/:month/note', async (req, res) => {
+  const target = await resolveMonthTarget(req, res);
+  if (target === undefined) return;
+  const { assig, month } = target;
+
+  const body = pick<{ plannerNote?: string }>(req.body, ['plannerNote']);
+  if (typeof body.plannerNote !== 'string') { res.status(400).json({ error: 'plannerNote must be a string' }); return; }
+
+  const row = await repos.assignmentMonths.get(monthRowId(assig.id, month));
+  if (row === undefined) { res.status(404).json({ error: 'no allocation for this month' }); return; }
+  await repos.assignmentMonths.update(row.id, { plannerNote: body.plannerNote });
+  res.json(await repos.assignmentMonths.get(row.id));
 });
 
 // ---------------------------------------------------------------------------
@@ -1752,16 +1961,148 @@ apiRouter.get('/capacity/monthly', async (req, res) => {
   if (monthToIdx(to) - monthToIdx(from) + 1 > 24) { res.status(400).json({ error: 'range must span at most 24 months' }); return; }
   const months = monthsInRange(from, to);
 
-  const [resources, assignments, assignmentDays, holidays, hoursPerDay] = await Promise.all([
+  const [resources, assignments, assignmentDays, assignmentMonthRows, holidays, hoursPerDay] = await Promise.all([
     repos.resources.list(),
     repos.assignments.list(),
     repos.assignmentDays.list(),
+    repos.assignmentMonths.list(),
     repos.holidays.list(),
     getHoursPerDay(),
   ]);
   const holSet = new Set(holidays.map(h => h.id));
+  const assignmentMonths = assignmentMonthRows.map(m => ({ assignmentId: m.assignmentId, month: m.month, status: m.status }));
 
-  res.json(rollupMonthly({ resources, assignments, assignmentDays, months, hoursPerDay, holidays: holSet }));
+  res.json(rollupMonthly({ resources, assignments, assignmentDays, assignmentMonths, months, hoursPerDay, holidays: holSet }));
+});
+
+/**
+ * B3 — People Manager approval feed: resources × months × projects with the
+ * per-month lifecycle state, hours, target and notes. Read-only; gated by the
+ * '/allocation-approvals' READ_RULE (roleGate is GLOBAL middleware — do NOT
+ * re-gate per handler).
+ */
+apiRouter.get('/allocation-approvals', async (req, res) => {
+  const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+  const qParam = (name: string): string | undefined => {
+    const v = req.query[name];
+    return typeof v === 'string' ? v : undefined;
+  };
+  // month <-> absolute-index helpers so span math is correct across year
+  // bounds — same shape as /capacity/monthly's local helpers.
+  const monthToIdx = (mo: string): number => { const [y, m] = mo.split('-').map(Number); return y * 12 + (m - 1); };
+  const idxToMonth = (i: number): string => `${Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, '0')}`;
+
+  const fromRaw = qParam('from');
+  const toRaw = qParam('to');
+  if (fromRaw !== undefined && !MONTH_RE.test(fromRaw)) { res.status(400).json({ error: 'from must be a YYYY-MM month' }); return; }
+  if (toRaw !== undefined && !MONTH_RE.test(toRaw)) { res.status(400).json({ error: 'to must be a YYYY-MM month' }); return; }
+  const statusFilter = qParam('status') ?? 'all';
+  if (!['all', 'Requested', 'Allocated'].includes(statusFilter)) {
+    res.status(400).json({ error: "status must be 'all', 'Requested' or 'Allocated'" }); return;
+  }
+
+  // Each side defaults INDEPENDENTLY, so a caller-supplied bound is never
+  // silently discarded or inverted:
+  //  - NEITHER supplied -> the whole window defaults to the span of Open
+  //    planning periods (RPT's "Mesi aperti") — no bound was given, so there
+  //    is nothing to honour.
+  //  - Exactly ONE supplied -> the OTHER side defaults to a fixed 6-month
+  //    window anchored on the supplied bound (same shape as
+  //    /capacity/monthly's own `to = from + 5` default), never touching open
+  //    periods — that lookup is only meaningful when NEITHER bound is given.
+  let from = fromRaw;
+  let to = toRaw;
+  if (fromRaw === undefined && toRaw === undefined) {
+    const openMonths = (await repos.planningPeriods.list()).filter(p => p.status === 'Open').map(p => p.id).sort();
+    from = openMonths[0];
+    to = openMonths[openMonths.length - 1];
+  } else {
+    if (toRaw === undefined && fromRaw !== undefined) to = idxToMonth(monthToIdx(fromRaw) + 5);
+    if (fromRaw === undefined && toRaw !== undefined) from = idxToMonth(monthToIdx(toRaw) - 5);
+  }
+  if (from === undefined || to === undefined) { res.json({ months: [], rows: [] }); return; }
+  if (from > to) { res.status(400).json({ error: 'from must be <= to' }); return; }
+  if (monthToIdx(to) - monthToIdx(from) + 1 > 24) { res.status(400).json({ error: 'range must span at most 24 months' }); return; }
+  const months = monthsInRange(from, to);
+
+  const [resources, assignments, monthRows, days, requests, projects, holidayRows] = await Promise.all([
+    repos.resources.list(), repos.assignments.list(), repos.assignmentMonths.list(),
+    repos.assignmentDays.list(), repos.requests.list(), repos.projects.list(), repos.holidays.list(),
+  ]);
+  const holidays = new Set(holidayRows.map(h => h.id));
+  const hoursPerDay = await getHoursPerDay();
+  const assignmentById = new Map(assignments.map(a => [a.id, a]));
+  const resourceById = new Map(resources.map(r => [r.id, r]));
+  const requestById = new Map(requests.map(r => [r.id, r]));
+  const projectById = new Map(projects.map(p => [p.id, p]));
+
+  // Hours per (assignment, month), summed from the day rows.
+  const hoursByRow = new Map<string, number>();
+  for (const d of days) {
+    const key = monthRowId(d.assignmentId, monthOf(d.date));
+    hoursByRow.set(key, (hoursByRow.get(key) ?? 0) + (Number.isFinite(d.hours) ? d.hours : 0));
+  }
+
+  // PASS 1 — totals, UNCONDITIONAL on statusFilter: a resource's per-month
+  // total must reflect every one of its month rows in range (Draft/Requested/
+  // Allocated/Rejected alike), never just the ones the current filtered view
+  // happens to list. Computed separately from PASS 2 below so a `status=`
+  // filter can never corrupt this number.
+  const totalsByResource = new Map<string, Record<string, number>>();
+  for (const m of monthRows) {
+    if (m.month < from || m.month > to) continue;
+    const assig = assignmentById.get(m.assignmentId);
+    if (assig === undefined) continue;
+    const resource = resourceById.get(assig.resourceId);
+    if (resource === undefined) continue;
+    let totals = totalsByResource.get(resource.id);
+    if (totals === undefined) {
+      totals = Object.fromEntries(months.map(mo => [mo, 0]));
+      totalsByResource.set(resource.id, totals);
+    }
+    const hours = hoursByRow.get(m.id) ?? 0;
+    totals[m.month] = (totals[m.month] ?? 0) + hours;
+  }
+
+  // PASS 2 — the rows/items actually returned. `statusFilter` selects which
+  // items are listed (and therefore which resources appear at all), but each
+  // row's `totalHours` is seeded from the unconditional PASS 1 totals above,
+  // not accumulated from the filtered items here.
+  const rowsByResource = new Map<string, AllocationApprovalRow>();
+  for (const m of monthRows) {
+    if (m.month < from || m.month > to) continue;
+    if (statusFilter !== 'all' && m.status !== statusFilter) continue;
+    const assig = assignmentById.get(m.assignmentId);
+    if (assig === undefined) continue;
+    const resource = resourceById.get(assig.resourceId);
+    if (resource === undefined) continue;
+
+    let row = rowsByResource.get(resource.id);
+    if (row === undefined) {
+      const cap = (typeof resource.contractHoursPerDay === 'number' && Number.isFinite(resource.contractHoursPerDay) && resource.contractHoursPerDay > 0)
+        ? resource.contractHoursPerDay : hoursPerDay;
+      row = {
+        resourceId: resource.id, resourceName: resource.name, managerId: resource.managerId,
+        contractHoursPerDay: cap,
+        targetHours: Object.fromEntries(months.map(mo => [mo, monthlyTargetHours(cap, mo, holidays)])),
+        totalHours: { ...(totalsByResource.get(resource.id) ?? Object.fromEntries(months.map(mo => [mo, 0]))) },
+        items: [],
+      };
+      rowsByResource.set(resource.id, row);
+    }
+    const request = requestById.get(assig.requestId);
+    const project = request?.projectId ? projectById.get(request.projectId) : undefined;
+    const hours = hoursByRow.get(m.id) ?? 0;
+    row.items.push({
+      assignmentMonthId: m.id, assignmentId: m.assignmentId, month: m.month, status: m.status,
+      projectId: project?.id, projectName: project?.name, requestId: assig.requestId, hours,
+      plannerNote: m.plannerNote, approverNote: m.approverNote, approvalId: m.approvalId,
+    } satisfies AllocationApprovalItem);
+  }
+
+  const rows = [...rowsByResource.values()].sort((a, b) => a.resourceName.localeCompare(b.resourceName));
+  for (const row of rows) row.items.sort((a, b) => a.month.localeCompare(b.month) || a.assignmentId.localeCompare(b.assignmentId));
+  res.json({ months, rows });
 });
 
 apiRouter.get('/time-entries', async (_req, res) => { res.json(await repos.timeEntries.list()); });
@@ -2933,8 +3274,14 @@ apiRouter.post('/approval-requests', async (req, res) => {
  * before/after/changedKeys convention) and its TRUSTED-actor attribution
  * (`auditActorId`/`trustedRole`, never the raw spoofable `X-User-*` headers)
  * — see the "AUDIT ATTRIBUTION INTEGRITY" note on the middleware above.
+ *
+ * SCOPE (B3): this builder is for the LEGACY bare-refId approval only, where the
+ * governed entity genuinely IS the assignment. A B3 decision governs a MONTH
+ * ROW and is recorded by `monthTransitionAudit` below — the two must not be
+ * conflated: `before`/`after` here are Assignment snapshots differing only in
+ * `status`, which cannot express what a month decision changed.
  */
-function allocationTransitionAudit(req: Request, assig: Assignment, newStatus: Assignment['status']): AuditLog {
+function allocationTransitionAudit(req: Request, assig: Assignment, newStatus: Assignment['status'], path: string): AuditLog {
   const afterAssig: Assignment = { ...assig, status: newStatus };
   const before = cloneEntity(assig);
   const after = cloneEntity(afterAssig);
@@ -2944,13 +3291,329 @@ function allocationTransitionAudit(req: Request, assig: Assignment, newStatus: A
     actorId: auditActorId(req),
     actorRole: trustedRole(req),
     method: 'PUT',
-    path: `/assignments/${assig.id}`,
+    path,
     statusCode: 200,
     before,
     after,
     changedKeys: diffChangedKeys(before, after),
   };
   return entry as unknown as AuditLog;
+}
+
+/**
+ * Build the explicit audit entry for a MONTH ROW's decided transition (B3).
+ *
+ * The entity governed by an allocation decision is the (assignment, month) pair,
+ * so the trail must record THAT row's own before/after — its `status`,
+ * `approvalId` and `approverNote` — not the assignment's. Auditing the
+ * assignment instead loses the decision entirely whenever the derived rollup
+ * does not move: two sibling months decided Approved and Rejected in one batch
+ * both roll up to the same assignment status, so both entries would show
+ * `changedKeys: []` and neither would say what was decided.
+ *
+ * NO SECOND ENTRY is written for the assignment's derived-status change, and
+ * that omission is deliberate: the rollup is a COMPUTED CONSEQUENCE of the month
+ * decision (`deriveAssignmentStatus` over the month rows), not an independent
+ * governance act. This entry is the record of what was decided; the assignment's
+ * status can always be re-derived from the month rows it summarises.
+ *
+ * Same shape, id prefix and TRUSTED-actor attribution as the builder above
+ * (`auditActorId`/`trustedRole`, never the raw spoofable `X-User-*` headers) —
+ * see the "AUDIT ATTRIBUTION INTEGRITY" note on the middleware. `method` stays
+ * 'PUT' like the sibling builder: these are synthetic entries for a state
+ * transition applied straight through the repository, so it describes the
+ * mutation, not the HTTP verb that triggered it (which may be the batch POST).
+ */
+function monthTransitionAudit(req: Request, rowBefore: AssignmentMonth, rowAfter: AssignmentMonth): AuditLog {
+  const before = cloneEntity(rowBefore);
+  const after = cloneEntity(rowAfter);
+  const entry: AuditEntry = {
+    id: `AL${newId()}`,
+    at: new Date().toISOString(),
+    actorId: auditActorId(req),
+    actorRole: trustedRole(req),
+    method: 'PUT',
+    path: `/assignment-months/${rowBefore.id}`,
+    statusCode: 200,
+    before,
+    after,
+    changedKeys: diffChangedKeys(before, after),
+  };
+  return entry as unknown as AuditLog;
+}
+
+/** The SERVER-VERIFIED principal driving a decision. Never client-supplied: a
+ *  client-controlled `by` would defeat the SoD check and forge the recorded
+ *  approver. Resolved once by the caller and passed down unchanged. */
+interface DeciderContext { by: string; decidingRole: string; deciderResourceId: string | undefined }
+/** What `decideOneApproval` gives back: the HTTP shape the single-request
+ *  endpoint returns verbatim, plus the surfaced allocation outcome the
+ *  post-decision hook consumes once the approval lock has been released. */
+interface DecisionOutcome { status: number; body: unknown; allocation?: { refId: string; decided: 'Approved' | 'Rejected' } }
+
+/**
+ * Decide ONE approval request. Extracted from the /decision handler so the B3
+ * batch endpoint and the single-request endpoint share ONE implementation of
+ * SoD + per-manager step enforcement — duplicating those rules is exactly how a
+ * governance hole gets introduced. This is the security boundary for EVERY
+ * approval kind (TimeEntry, Invoice, ChangeRequest, ..., Allocation), not just
+ * allocations: the body below was MOVED here unchanged, never rewritten.
+ *
+ * B-CONCURRENCY: serializes the read-decide-write under `approval:<id>`, and
+ * re-reads INSIDE the lock so the decision applies to the freshest state.
+ */
+async function decideOneApproval(
+  req: Request,
+  approvalId: string,
+  decision: 'Approved' | 'Rejected',
+  note: string | undefined,
+  ctx: DeciderContext,
+): Promise<DecisionOutcome> {
+  const { by, decidingRole, deciderResourceId } = ctx;
+  return withLock(`approval:${approvalId}`, async (): Promise<DecisionOutcome> => {
+    const ar = await repos.approvalRequests.get(approvalId) as ApprovalRequestEntry | undefined;
+    if (ar === undefined) return { status: 404, body: { error: 'Not found' } };
+    if (ar.status !== 'Pending') return { status: 400, body: { error: `approval request already ${ar.status}` } };
+    // SoD: the requester may never approve/reject their own item. Meaningful now
+    // that `by` is the trusted principal rather than a forgeable body field.
+    if (by === ar.requestedBy) {
+      return { status: 403, body: { error: 'Segregation of duties: the requester cannot decide their own approval request' } };
+    }
+    const step = ar.steps[ar.currentStep];
+    if (!step) return { status: 400, body: { error: 'No pending step to decide' } };
+    // STEP ENFORCEMENT — the actor may decide when EITHER holds:
+    //   roleMatch:    they hold the ROLE the routing assigned to the CURRENT
+    //                 step; 'admin' matches any step.
+    //   managerMatch: the step carries an explicit `approverId` (a manager, by
+    //                 RESOURCE id — that is how `allocationApproverStep` routes
+    //                 allocation requests) and the deciding actor IS that
+    //                 resource.
+    //
+    // READ THIS BEFORE "FIXING" IT. The two are a genuine OR, so for an
+    // ALLOCATION step — which `allocationApproverStep` always builds with
+    // `role: 'resource-manager'` — `roleMatch` alone admits ANY resource-manager,
+    // not only the one named by `approverId`. That is DELIBERATE, per the gap-A
+    // design spec §4.3: "un altro resource-manager, diverso dal proponente, può
+    // approvare" — a manager must not be a single point of failure for their own
+    // team's bookings. An earlier version of this comment claimed the block exists
+    // to stop "any resource-manager deciding ANY manager's allocation", which is
+    // the opposite of what the code does and of what was specified; do not
+    // tighten the code to match that wording without reopening the spec decision.
+    //
+    // What the block DOES buy: a role the routing did NOT assign gets in only by
+    // being the named approver. Concretely, a `delivery-executive` (who passes the
+    // coarse `/approval-requests` gate and sees the whole approval feed) can
+    // decide an allocation only for a resource they personally manage.
+    // Segregation of duties is enforced separately, above, and binds every role.
+    // `canDecideFor` in the approvals modal mirrors exactly this rule.
+    const roleMatch = decidingRole === step.role || decidingRole === 'admin';
+    const managerMatch = step.approverId !== undefined && deciderResourceId === step.approverId;
+    if (!roleMatch && !managerMatch) {
+      return { status: 403, body: { error: `Actor cannot decide a step assigned to ${step.approverId ?? step.role}` } };
+    }
+    const decidedAt = new Date().toISOString();
+    step.decidedBy = by;
+    step.decidedAt = decidedAt;
+    // Record the APPROVER's note on the decided step — never overwrite `ar.note`,
+    // which is the requester's note captured at creation.
+    if (typeof note === 'string') step.note = note;
+    if (decision === 'Rejected') {
+      // A rejection at any step fails the whole chain and steps back currentStep.
+      step.status = 'Rejected';
+      ar.status = 'Rejected';
+      ar.currentStep = Math.max(0, ar.currentStep - 1);
+    } else {
+      step.status = 'Approved';
+      // Advance; when the chain is exhausted the overall request is Approved.
+      ar.currentStep = ar.currentStep + 1;
+      if (ar.currentStep >= ar.steps.length) ar.status = 'Approved';
+    }
+    const updated = await repos.approvalRequests.update(ar.id, ar as ApprovalRequest);
+    return {
+      status: 200,
+      body: updated ?? ar,
+      // ALLOCATION HOOK: Allocation requests are single-step, so a terminal
+      // Approved/Rejected decision here is the FINAL outcome for the whole
+      // request — surface it so the caller can translate it into the governed
+      // assignment's status once this lock has been released (see below).
+      allocation: ar.kind === 'Allocation' && (ar.status === 'Approved' || ar.status === 'Rejected')
+        ? { refId: ar.refId, decided: ar.status as 'Approved' | 'Rejected' }
+        : undefined,
+    };
+  });
+}
+
+/**
+ * Apply an Allocation decision to the governed entity. `refId` carries the
+ * shape: a composite `<assignmentId>:<YYYY-MM>` targets ONE month row (B3);
+ * a bare assignment id is a LEGACY gap-A approval opened before B3 and still
+ * pending — applied to the assignment AND to every non-Draft month row a
+ * migrated database backfilled under it, so nothing in flight is orphaned (see
+ * the branch's own comment for why the assignment write alone was a no-op).
+ *
+ * Called AFTER the `approval:<id>` lock has been released, under the fixed
+ * res -> req lock order used by every other assignment mutation, so this can
+ * never deadlock against a concurrent POST/PUT/DELETE on /assignments.
+ *
+ * `deferAggregates` lets the BATCH endpoint skip the per-item follow-up work and
+ * do it once per distinct entity at the end (spec §4.4): approving twelve months
+ * of one resource must not recompute her utilization twelve times, nor re-derive
+ * the same assignment's status twelve times (each rollup is a full
+ * `assignmentMonths` scan). What is deferred is everything ASSIGNMENT-or-wider:
+ * the status rollup, its explicit audit entry, and the aggregate recompute. The
+ * MONTH-row write is never deferred — it is the decision itself. The returned
+ * ids are what the caller then dedupes; it must run the rollups BEFORE the
+ * recomputes, since `recomputeResourceUtilization` weighs assignments by the
+ * status the rollup produces.
+ */
+async function applyAllocationDecision(
+  req: Request,
+  refId: string,
+  decided: 'Approved' | 'Rejected',
+  note: string | undefined,
+  deferAggregates = false,
+): Promise<{ resourceId: string; requestId: string; assignmentId: string } | undefined> {
+  const parsed = parseMonthRowId(refId);
+  const newStatus = decisionToAssignmentStatus(decided);
+
+  const recompute = async (resourceId: string, requestId: string): Promise<void> => {
+    if (deferAggregates) return;
+    await withLock(`res:${resourceId}`, () => recomputeResourceUtilization(resourceId));
+    await withLock(`req:${requestId}`, () => recomputeRequestStaffing(requestId));
+  };
+
+  if (parsed === undefined) {
+    const assig = await repos.assignments.get(refId);
+    if (!assig) return undefined;
+    // The transition MUST succeed (or surface as a 500) — see the month branch.
+    await repos.assignments.update(assig.id, { status: newStatus });
+
+    // LEGACY + B3 RECONCILIATION. A pre-B3 database migrated into B3 has month
+    // rows created by `backfillAssignmentMonths`, which COPIES the assignment's
+    // status onto each of them and gives them no `approvalId`. Writing only
+    // `assignments.status` here left those rows exactly where they were, and
+    // that is the state everything downstream actually reads:
+    //   - `monthlyAggregateHours` weighs each day by the status of ITS month
+    //     row, so confirmed/planned hours never moved;
+    //   - the very next `refreshDerivedAssignmentStatus` (any month endpoint on
+    //     this assignment) re-derived the column straight back from those
+    //     unchanged rows, silently undoing the decision.
+    // Nothing else could rescue them either: `submit` only accepts
+    // Draft/Rejected and the allocation PUT's forced re-approval only fires from
+    // 'Allocated', so a backfilled 'Requested' row with no approval was
+    // unreachable.
+    //
+    // SCOPE — `approvalId === undefined` is the load-bearing half of this guard,
+    // not a nicety. It is exactly the shape described above (the backfill never
+    // attaches one), and it is what keeps this legacy sweep off months that have
+    // a governance story of their OWN. One assignment can hold both: a stranded
+    // month from the migration AND a later month the planner has since submitted
+    // through the normal B3 flow, which carries a live, still-Pending
+    // per-month approval. Moving that second row here would decouple it from its
+    // approval forever — the approval stays Pending while the row already shows a
+    // terminal status, so the month drops out of the 'Requested' feed (invisible
+    // to whoever must decide it) and the aggregates count it as decided until the
+    // real decision lands and flips it back. The same guard is what stops an
+    // already-decided 'Rejected' month (a closed conversation, and one that kept
+    // the approvalId of the request that closed it) from being flipped back to
+    // 'Allocated'.
+    //
+    // 'Draft' is excluded for the separate reason that it was never submitted, so
+    // no decision governs it — a Draft row also has no approvalId, so both halves
+    // of the guard are needed. Then re-derive the column so the stored status and
+    // the status-weighted aggregates agree.
+    const monthRows = (await repos.assignmentMonths.list()).filter(m => m.assignmentId === assig.id);
+    for (const row of monthRows) {
+      if (row.approvalId !== undefined) continue;
+      if (row.status === 'Draft' || row.status === newStatus) continue;
+      // Not best-effort: this write IS the decision for that month, same rule as
+      // the B3 branch below.
+      const rowAfter = await repos.assignmentMonths.update(row.id, { status: newStatus });
+      // AUDIT per moved month row, the SAME shape the B3 branch and the batch
+      // write. A legacy decision now moves N rows at once, which is precisely
+      // the case `monthTransitionAudit` exists for: the assignment-level entry
+      // records only the rollup and cannot say which months moved. Best-effort,
+      // as everywhere else — the month write has already committed.
+      try {
+        if (rowAfter) await repos.auditLogs.create(monthTransitionAudit(req, row, rowAfter));
+      } catch { /* audit is best-effort; the month transition already committed */ }
+    }
+    // Re-derive ONLY when the assignment actually has month rows. With none at
+    // all (a truly pre-B1 assignment: no day rows, so the backfill created
+    // nothing) `deriveAssignmentStatus([])` is 'Draft', which would DOWNGRADE
+    // the decision that was just applied — there the direct write above is the
+    // whole effect, exactly as before B3. Deferred in batch mode like the month
+    // branch, though the batch never reaches here (it resolves a month row
+    // first, so its refIds are always composite).
+    if (monthRows.length > 0 && !deferAggregates) await refreshDerivedAssignmentStatus(assig.id);
+    try {
+      // Read INSIDE the best-effort block: it exists only to label the audit
+      // entry below, so it must never be the thing that 500s a decision that has
+      // already committed.
+      const settled = await repos.assignments.get(assig.id);
+      // Aggregate recompute + the explicit audit entry are best-effort, same
+      // discipline as the audit middleware ("audit is best-effort... failures
+      // here never affect the already-sent response"): the decision AND the
+      // transition have already committed by this point, so a recompute/audit
+      // failure must not turn an otherwise-successful decision into a 500.
+      await recompute(assig.resourceId, assig.requestId);
+      // The assignment entry records the status the column ACTUALLY settled on
+      // (the derived rollup when month rows exist), never the decision's raw
+      // outcome — an audit trail that claims a value the row does not hold is
+      // worse than none.
+      await repos.auditLogs.create(
+        allocationTransitionAudit(req, assig, settled?.status ?? newStatus, `/assignments/${assig.id}`));
+    } catch { /* recompute/audit are best-effort; the decision already committed */ }
+    return { resourceId: assig.resourceId, requestId: assig.requestId, assignmentId: assig.id };
+  }
+
+  const row = await repos.assignmentMonths.get(refId);
+  if (!row) return undefined;
+  const assig = await repos.assignments.get(row.assignmentId);
+  if (!assig) return undefined;
+
+  // The month transition MUST succeed (or surface as a 500): an approval that
+  // reports Approved while the governed month stays Requested is the exact
+  // divergence this hook exists to prevent. The approver's note is mirrored onto
+  // the row (it also lives on the decided step, as in gap A) so the calendar can
+  // show it without resolving the approval request.
+  //
+  // A decision carrying NO note CLEARS the field rather than leaving it: this is
+  // the only writer of `approverNote`, and a month can be decided more than once
+  // (approve with "ok" -> planner edits the days -> forced re-approval -> the
+  // next approver rejects silently). Without the clear, the row would render
+  // 'Rejected' still carrying the previous approver's "ok". `null` is the
+  // documented "clear to absent" patch value on BOTH adapters (Drizzle sets the
+  // column NULL, the in-memory store drops the key) — `undefined` would mean
+  // "leave untouched". Cast just this value so a typo in `status` is still
+  // type-checked; every READ path normalizes the cleared column back to absent.
+  const rowAfter = await repos.assignmentMonths.update(row.id, {
+    status: newStatus, approverNote: (note ?? null) as unknown as undefined,
+  } as Partial<AssignmentMonth>);
+
+  // AUDIT — written HERE, on both the single-request and the batch path, so the
+  // two record the same decision identically. It captures the MONTH ROW's own
+  // before/after, which depends on nothing but this write: unlike the rollup and
+  // the aggregates it is neither expensive nor idempotent, so it is never
+  // deferred or deduplicated. Best-effort, as everywhere else — the decision has
+  // already committed. `rowAfter` is the repository's own post-state (both
+  // adapters normalize a cleared column back to absent), never a locally
+  // reconstructed guess.
+  try {
+    if (rowAfter) await repos.auditLogs.create(monthTransitionAudit(req, row, rowAfter));
+  } catch { /* audit is best-effort; the decision already committed */ }
+
+  if (deferAggregates) {
+    // The rollup and the recompute are the caller's job — they are
+    // assignment-or-wider, expensive and idempotent, so the batch runs them once
+    // per entity instead of once per month.
+    return { resourceId: assig.resourceId, requestId: assig.requestId, assignmentId: assig.id };
+  }
+  await refreshDerivedAssignmentStatus(assig.id);
+  try {
+    await recompute(assig.resourceId, assig.requestId);
+  } catch { /* recompute is best-effort; the decision already committed */ }
+  return { resourceId: assig.resourceId, requestId: assig.requestId, assignmentId: assig.id };
 }
 
 apiRouter.put('/approval-requests/:id/decision', async (req, res) => {
@@ -2982,96 +3645,146 @@ apiRouter.put('/approval-requests/:id/decision', async (req, res) => {
   // above, also computed before the lock).
   const deciderResourceId = await actorResourceId(req);
 
-  // B-CONCURRENCY: serialize the read-decide-write so two concurrent decisions
-  // on the same multi-step request can't both read the same currentStep and
-  // double-advance / clobber each other's decision. Re-read INSIDE the lock so
-  // the decision is applied to the freshest state (mirrors the invoice-seq
-  // critical section).
-  const result = await withLock(`approval:${req.params.id}`, async (): Promise<{ status: number; body: unknown; allocation?: { refId: string; decided: 'Approved' | 'Rejected' } }> => {
-    const ar = await repos.approvalRequests.get(req.params.id) as ApprovalRequestEntry | undefined;
-    if (ar === undefined) return { status: 404, body: { error: 'Not found' } };
-    if (ar.status !== 'Pending') return { status: 400, body: { error: `approval request already ${ar.status}` } };
-    // SoD: the requester may never approve/reject their own item. Meaningful now
-    // that `by` is the trusted principal rather than a forgeable body field.
-    if (by === ar.requestedBy) {
-      return { status: 403, body: { error: 'Segregation of duties: the requester cannot decide their own approval request' } };
-    }
-    const step = ar.steps[ar.currentStep];
-    if (!step) return { status: 400, body: { error: 'No pending step to decide' } };
-    // STEP ENFORCEMENT: either the actor holds the ROLE the routing assigned to
-    // the CURRENT step (admin may decide any step), OR the step carries an
-    // explicit approverId (a manager, by resource-id — allocation requests) and
-    // the deciding actor IS that resource. Without this the coarse roleGate lets
-    // e.g. any resource-manager decide ANY manager's allocation, defeating the
-    // per-manager routing `allocationApproverStep` builds.
-    const roleMatch = decidingRole === step.role || decidingRole === 'admin';
-    const managerMatch = step.approverId !== undefined && deciderResourceId === step.approverId;
-    if (!roleMatch && !managerMatch) {
-      return { status: 403, body: { error: `Actor cannot decide a step assigned to ${step.approverId ?? step.role}` } };
-    }
-    const decidedAt = new Date().toISOString();
-    step.decidedBy = by;
-    step.decidedAt = decidedAt;
-    // Record the APPROVER's note on the decided step — never overwrite `ar.note`,
-    // which is the requester's note captured at creation.
-    if (typeof body.note === 'string') step.note = body.note;
-    if (decision === 'Rejected') {
-      // A rejection at any step fails the whole chain and steps back currentStep.
-      step.status = 'Rejected';
-      ar.status = 'Rejected';
-      ar.currentStep = Math.max(0, ar.currentStep - 1);
-    } else {
-      step.status = 'Approved';
-      // Advance; when the chain is exhausted the overall request is Approved.
-      ar.currentStep = ar.currentStep + 1;
-      if (ar.currentStep >= ar.steps.length) ar.status = 'Approved';
-    }
-    const updated = await repos.approvalRequests.update(ar.id, ar as ApprovalRequest);
-    return {
-      status: 200,
-      body: updated ?? ar,
-      // ALLOCATION HOOK: Allocation requests are single-step, so a terminal
-      // Approved/Rejected decision here is the FINAL outcome for the whole
-      // request — surface it so the caller can translate it into the governed
-      // assignment's status once this lock has been released (see below).
-      allocation: ar.kind === 'Allocation' && (ar.status === 'Approved' || ar.status === 'Rejected')
-        ? { refId: ar.refId, decided: ar.status as 'Approved' | 'Rejected' }
-        : undefined,
-    };
-  });
+  const result = await decideOneApproval(req, req.params.id, decision, body.note, { by, decidingRole, deciderResourceId });
 
   // POST-DECISION EFFECT (Allocation): applied AFTER the `approval:<id>` lock
-  // has been released — never nested inside it. Runs under the FIXED
-  // res -> req lock order the rest of the assignment-mutating code already
-  // uses (never both held at once), so this can never deadlock against a
-  // concurrent POST/PUT/DELETE on /assignments. Executes at most once per
-  // decision: `ar.status` starts 'Pending' and the block above only ever sets
-  // it to 'Approved'/'Rejected' once (a retried decision 400s on the
+  // has been released — never nested inside it. Executes at most once per
+  // decision: `ar.status` starts 'Pending' and `decideOneApproval` only ever
+  // sets it to 'Approved'/'Rejected' once (a retried decision 400s on the
   // `ar.status !== 'Pending'` guard, so `result.allocation` is undefined then).
+  // Same note the step recorded; no deferral — a single decision has exactly
+  // one resource/request to recompute.
   if (result.status === 200 && result.allocation) {
-    const { refId, decided } = result.allocation;
-    const assig = await repos.assignments.get(refId);
-    if (assig) {
-      const newStatus = decisionToAssignmentStatus(decided);
-      // The assignment's status transition MUST succeed (or surface as a 500):
-      // an approval that reports Approved/Rejected while the governed
-      // assignment silently stays Requested is the exact divergence this hook
-      // exists to prevent, so this write is left OUTSIDE the best-effort catch.
-      await repos.assignments.update(assig.id, { status: newStatus });
-      try {
-        // Aggregate recompute + the explicit audit entry are best-effort, same
-        // discipline as the audit middleware ("audit is best-effort... failures
-        // here never affect the already-sent response"): the decision AND the
-        // assignment transition have already committed by this point, so a
-        // recompute/audit failure must not turn an otherwise-successful
-        // decision into a 500 for the caller.
-        await withLock(`res:${assig.resourceId}`, () => recomputeResourceUtilization(assig.resourceId));
-        await withLock(`req:${assig.requestId}`, () => recomputeRequestStaffing(assig.requestId));
-        await repos.auditLogs.create(allocationTransitionAudit(req, assig, newStatus));
-      } catch { /* recompute/audit are best-effort; the decision + transition already committed */ }
-    }
+    await applyAllocationDecision(req, result.allocation.refId, result.allocation.decided, body.note);
   }
   res.status(result.status).json(result.body);
+});
+
+/** Hard cap on one batch: a People Manager approving a month across projects
+ *  for a multi-resource selection stays far below this. */
+const DECIDE_BATCH_MAX = 200;
+
+/**
+ * B3 — "Approva Mese" / "Approva e Prosegui": decide N month rows in one call.
+ * Each item is independent: a row already decided, missing, carrying no pending
+ * approval, or refused by SoD / step enforcement yields an Error result and
+ * never fails its neighbours. Aggregate recompute is deduplicated per
+ * resource/request at the END of the batch rather than per item.
+ */
+apiRouter.post('/allocation-approvals/decide', async (req, res) => {
+  // Identity resolution mirrors the single-request endpoint EXACTLY — the
+  // deciding principal is server-verified, never a client-supplied `by`.
+  const decidingRole = trustedRole(req);
+  if (decidingRole === 'unknown') {
+    res.status(401).json({ error: 'A verified principal is required to decide an approval request' });
+    return;
+  }
+  const body = pick<{ items?: unknown }>(req.body, ['items']);
+  const items = body.items;
+  if (!Array.isArray(items) || items.length === 0) {
+    res.status(400).json({ error: 'items must be a non-empty array' }); return;
+  }
+  if (items.length > DECIDE_BATCH_MAX) {
+    res.status(400).json({ error: `items must contain at most ${DECIDE_BATCH_MAX} entries` }); return;
+  }
+
+  const ctx: DeciderContext = { by: actorId(req), decidingRole, deciderResourceId: await actorResourceId(req) };
+  const results: { assignmentMonthId: string; status: string; error?: string }[] = [];
+  // EXPENSIVE + IDEMPOTENT work is deduplicated per distinct entity and run
+  // AFTER the loop (spec §4.4): the status rollup per assignment, then the
+  // aggregates per resource/request.
+  // The AUDIT is deliberately NOT deduplicated and NOT deferred: it is
+  // per-decision by nature, so `applyAllocationDecision` writes one entry per
+  // decided MONTH ROW inline, identically on both endpoints.
+  const touchedAssignments = new Set<string>();
+  const touchedResources = new Set<string>();
+  const touchedRequests = new Set<string>();
+
+  try {
+    for (const raw of items) {
+      // Declared OUTSIDE the per-item try so the catch can still name the item
+      // it failed on (a `null` entry throws on the very first property read).
+      let id = '';
+      // PER-ITEM CONTAINMENT: `applyAllocationDecision` deliberately leaves the
+      // month-row write outside its best-effort catch so a failure surfaces as a
+      // 500 — correct for the single-request endpoint, wrong here. Without this
+      // catch, one throwing item would unwind the loop: its predecessors would
+      // stay committed (approvals flipped, month rows moved) with NO response
+      // body naming them, its successors would be silently skipped, and a retry
+      // would report "already Approved" for work the caller never saw succeed.
+      // The documented contract is per-item independence, so a thrown item
+      // becomes an Error result like any refused one.
+      try {
+        const item = (raw ?? {}) as { assignmentMonthId?: unknown; decision?: unknown; note?: unknown };
+        id = typeof item.assignmentMonthId === 'string' ? item.assignmentMonthId : '';
+        const decision = item.decision === 'Approved' || item.decision === 'Rejected' ? item.decision : undefined;
+        const note = typeof item.note === 'string' ? item.note : undefined;
+        if (!id || decision === undefined) {
+          results.push({ assignmentMonthId: id, status: 'Error', error: "each item needs assignmentMonthId and decision 'Approved'|'Rejected'" });
+          continue;
+        }
+        const row = await repos.assignmentMonths.get(id);
+        if (row === undefined) { results.push({ assignmentMonthId: id, status: 'Error', error: 'Not found' }); continue; }
+        if (row.approvalId === undefined) { results.push({ assignmentMonthId: id, status: 'Error', error: 'month has no pending approval' }); continue; }
+
+        const outcome = await decideOneApproval(req, row.approvalId, decision, note, ctx);
+        if (outcome.status !== 200) {
+          const message = (outcome.body as { error?: string } | undefined)?.error ?? `decision failed (${outcome.status})`;
+          results.push({ assignmentMonthId: id, status: 'Error', error: message });
+          continue;
+        }
+        if (outcome.allocation) {
+          const touched = await applyAllocationDecision(req, outcome.allocation.refId, outcome.allocation.decided, note, true);
+          if (touched) {
+            touchedAssignments.add(touched.assignmentId);
+            touchedResources.add(touched.resourceId);
+            touchedRequests.add(touched.requestId);
+          }
+        }
+        results.push({ assignmentMonthId: id, status: decision });
+      } catch (err) {
+        // The RESPONSE stays generic — never leak driver internals to the caller,
+        // same discipline as the FK-violation mapper below. But this loop
+        // deliberately turns a crash into an ordinary-looking Error result, so
+        // without a log a genuine bug would be indistinguishable from a business
+        // refusal and would leave no trace anywhere.
+        console.error(`POST /allocation-approvals/decide: item ${id || '(unnamed)'} threw`, err);
+        results.push({ assignmentMonthId: id, status: 'Error', error: 'unexpected error while deciding this item' });
+      }
+    }
+  } finally {
+    // Runs even if the loop itself unwinds, so committed decisions are never
+    // left with stale derived state. Every `try` sits INSIDE its loop, not
+    // around it: one bad entity must not take out the entities that follow it in
+    // iteration order. All of it is best-effort — the decisions have committed,
+    // and their audit entries are already written by the loop above.
+
+    // (1) ROLLUPS, once per ASSIGNMENT: each one is a full assignmentMonths
+    // scan, so twelve decided months of one assignment must not trigger twelve.
+    for (const assignmentId of touchedAssignments) {
+      try {
+        await refreshDerivedAssignmentStatus(assignmentId);
+      } catch { /* this assignment's rollup self-heals on its next mutation */ }
+    }
+
+    // (2) AGGREGATES, once per resource/request. AFTER the rollups: the
+    // assignment status those produce is exactly what
+    // `recomputeResourceUtilization` weighs its hours by, so recomputing first
+    // would bake in the pre-decision statuses. Fixed res -> req lock order,
+    // never both held at once.
+    for (const resourceId of touchedResources) {
+      try {
+        await withLock(`res:${resourceId}`, () => recomputeResourceUtilization(resourceId));
+      } catch { /* this resource's utilization self-heals on its next mutation */ }
+    }
+    for (const requestId of touchedRequests) {
+      try {
+        await withLock(`req:${requestId}`, () => recomputeRequestStaffing(requestId));
+      } catch { /* this request's staffing self-heals on its next mutation */ }
+    }
+  }
+
+  res.json({ results });
 });
 
 /** Default + maximum page size for the (paged) audit log read. */

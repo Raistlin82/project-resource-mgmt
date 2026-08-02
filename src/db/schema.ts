@@ -39,6 +39,7 @@ import type {
   ApprovalKind,
   ApprovalStatus,
   ApprovalStep,
+  AssignmentMonth,
 } from '../app/services/api.service';
 
 // ---------------------------------------------------------------------------
@@ -204,6 +205,28 @@ export const assignmentDays = pgTable(
   (t) => [
     index('assignment_days_assignment_id_idx').on(t.assignmentId),
     index('assignment_days_date_idx').on(t.date),
+  ],
+);
+
+// Per-month lifecycle state of an assignment (B3): the approval unit is the
+// (assignment, month) pair, so this table — not `assignments.status` — is
+// authoritative; `assignments.status` is a derived rollup of these rows.
+export const assignmentMonths = pgTable(
+  'assignment_months',
+  {
+    id: text('id').primaryKey(), // '<assignmentId>:<YYYY-MM>'
+    assignmentId: text('assignment_id')
+      .notNull()
+      .references(() => assignments.id),
+    month: text('month').notNull(), // 'YYYY-MM'
+    status: text('status').$type<AssignmentMonth['status']>().notNull(),
+    approvalId: text('approval_id'),
+    plannerNote: text('planner_note'),
+    approverNote: text('approver_note'),
+  },
+  (t) => [
+    index('assignment_months_assignment_id_idx').on(t.assignmentId),
+    index('assignment_months_month_idx').on(t.month),
   ],
 );
 

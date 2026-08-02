@@ -71,6 +71,13 @@
       "when": 1785521800354,
       "tag": "0009_brave_overlord",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1785666366656,
+      "tag": "0010_puzzling_kang",
+      "breakpoints": true
     }
   ]
 }

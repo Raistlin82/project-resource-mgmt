@@ -3,14 +3,10 @@ import {
   requestStatusFor,
   isAllowedTimeEntryTransition,
   TIME_ENTRY_TRANSITIONS,
-  isAllowedAllocationTransition,
   allocationApproverStep,
-  ALLOCATION_CLIENT_SETTABLE,
-  assignmentAggregateHours,
   decisionToAssignmentStatus,
 } from './staffing.util';
 import { ResourceRequest } from './api.service';
-import type { Assignment } from './api.service';
 
 function req(status: ResourceRequest['status'], requiredEffort: number): ResourceRequest {
   return { id: 'R1', name: 'Req', requiredRole: 'Dev', requiredEffort, status, skills: [] };
@@ -150,57 +146,12 @@ describe('staffing.util utilization recompute (derive from source of truth)', ()
   });
 });
 
-describe('allocation transition guard', () => {
-  it('exposes the client-settable statuses (consumed by a later PUT-handler task)', () => {
-    expect(ALLOCATION_CLIENT_SETTABLE).toEqual(['Draft', 'Requested']);
-  });
-
-  it('allows client-settable moves: Draft<->Requested, Rejected->Requested, Allocated->Requested', () => {
-    expect(isAllowedAllocationTransition('Draft', 'Requested')).toBe(true);
-    expect(isAllowedAllocationTransition('Requested', 'Draft')).toBe(true);
-    expect(isAllowedAllocationTransition('Rejected', 'Requested')).toBe(true);
-    // Allocated -> Requested is the manual re-request path (a later task relies on it).
-    expect(isAllowedAllocationTransition('Allocated', 'Requested')).toBe(true);
-  });
-  it('rejects client jumps straight to Allocated/Rejected', () => {
-    expect(isAllowedAllocationTransition('Draft', 'Allocated')).toBe(false);
-    expect(isAllowedAllocationTransition('Requested', 'Rejected')).toBe(false);
-  });
-  it('allows no-op', () => {
-    for (const s of ['Draft','Requested','Allocated','Rejected'] as const) {
-      expect(isAllowedAllocationTransition(s, s)).toBe(true);
-    }
-  });
-});
-
 describe('allocationApproverStep', () => {
   it('routes to the resource manager (resource-id) with fallback role', () => {
     expect(allocationApproverStep('R42')).toEqual({ role: 'resource-manager', status: 'Pending', approverId: 'R42' });
   });
   it('falls back to role only when no manager', () => {
     expect(allocationApproverStep(undefined)).toEqual({ role: 'resource-manager', status: 'Pending' });
-  });
-});
-
-describe('assignmentAggregateHours', () => {
-  const rows = [
-    { assignedHours: 10, status: 'Allocated' },
-    { assignedHours: 5, status: 'Requested' },
-    { assignedHours: 3, status: 'Draft' },
-    { assignedHours: 7, status: 'Rejected' },
-  ] as Assignment[];
-  it('confirmed counts only Allocated', () => {
-    expect(assignmentAggregateHours(rows).confirmed).toBe(10);
-  });
-  it('planned counts Requested + Allocated (not Draft/Rejected)', () => {
-    expect(assignmentAggregateHours(rows).planned).toBe(15);
-  });
-  it('treats non-finite assignedHours as 0', () => {
-    const withNaN = [
-      { assignedHours: NaN, status: 'Allocated' },
-      { assignedHours: 10, status: 'Allocated' },
-    ] as Assignment[];
-    expect(assignmentAggregateHours(withNaN)).toEqual({ confirmed: 10, planned: 10 });
   });
 });
 
