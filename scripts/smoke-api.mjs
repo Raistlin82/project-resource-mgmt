@@ -430,6 +430,21 @@ async function checkAllocationApproval() {
       assig ? `status=${assig.status}` : `status=${status}, missing id=${assignmentId}`,
     );
   }
+  // The SINGLE-REQUEST path must write the SAME audit shape the batch does —
+  // the record of a decision cannot depend on which endpoint made it. The batch
+  // half of this invariant is asserted in checkMonthlyApproval(); this is the
+  // other half, on the very same month row decided above.
+  {
+    const { body: logs } = await req('GET', '/audit-logs?limit=1000', { headers: DECIDER_HEADERS });
+    const entry = (Array.isArray(logs) ? logs : []).find((e) => e.path === `/assignment-months/${monthRowId}`);
+    check(
+      'B3 the single-request decision writes a month-row audit entry, same shape as the batch',
+      Boolean(entry) && entry.before?.status === 'Requested' && entry.after?.status === 'Allocated' &&
+      Array.isArray(entry.changedKeys) && entry.changedKeys.includes('status') &&
+      entry.after?.approverNote === APPROVER_NOTE && entry.actorId === '1' && entry.actorRole === 'admin',
+      `entry=${JSON.stringify(entry)}`,
+    );
+  }
 
   // 7) REGRESSION CLOSED (B3 carry-forward #2) — a DELETE must withdraw a
   // Pending month approval and drop the month rows, never orphan either. Uses
@@ -1454,6 +1469,25 @@ async function checkMonthlyApproval() {
     check('B3 those audit entries are attributed to the trusted deciding actor',
       novEntry?.actorId === '1' && novEntry?.actorRole === 'admin' && decEntry?.actorId === '1' && decEntry?.actorRole === 'admin',
       `nov=${novEntry?.actorId}/${novEntry?.actorRole}, dec=${decEntry?.actorId}/${decEntry?.actorRole}`);
+
+    // CONTENT, not just shape. The entries must record the MONTH ROW's own
+    // transition. Auditing the assignment instead would silently pass the
+    // checks above and fail these: assignment 1 also owns 2026-07, submitted
+    // earlier in this section and never decided, so `deriveAssignmentStatus`
+    // holds the assignment at 'Requested' both before AND after this pair —
+    // two opposite decisions would both record before === after and an EMPTY
+    // changedKeys, i.e. a trail that shows no transition at all.
+    check('B3 each audit entry records its OWN month outcome (opposite decisions, opposite after.status)',
+      novEntry?.before?.status === 'Requested' && novEntry?.after?.status === 'Allocated' &&
+      decEntry?.before?.status === 'Requested' && decEntry?.after?.status === 'Rejected',
+      `nov=${novEntry?.before?.status}->${novEntry?.after?.status}, dec=${decEntry?.before?.status}->${decEntry?.after?.status}`);
+    check('B3 each audit entry reports a real transition in changedKeys (status + the approver note)',
+      Array.isArray(novEntry?.changedKeys) && novEntry.changedKeys.includes('status') && novEntry.changedKeys.includes('approverNote') &&
+      Array.isArray(decEntry?.changedKeys) && decEntry.changedKeys.includes('status') && decEntry.changedKeys.includes('approverNote'),
+      `nov=${JSON.stringify(novEntry?.changedKeys)}, dec=${JSON.stringify(decEntry?.changedKeys)}`);
+    check("B3 the audited after-state carries the approver's note verbatim",
+      novEntry?.after?.approverNote === 'November is fine' && decEntry?.after?.approverNote === 'December is not',
+      `nov=${JSON.stringify(novEntry?.after?.approverNote)}, dec=${JSON.stringify(decEntry?.after?.approverNote)}`);
   }
 
   // A month CLOSED after submission must still be decidable (spec §4.5) — a
