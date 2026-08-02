@@ -1832,18 +1832,21 @@ apiRouter.post('/assignments/:id/months/:month/submit', async (req, res) => {
   await withdrawAllocationApproval(row.approvalId, 'superseded');
   if (await autoApprovesAllocation(req, assig.resourceId)) {
     await repos.assignmentMonths.update(row.id, {
-      // `null`, not `undefined`: Drizzle's `.set()` OMITS undefined-valued keys
-      // (see src/db/repository.ts's documented update() contract) but honors an
-      // explicit `null` as a real column clear, so `undefined` here would leave
-      // a stale approvalId on Postgres while the in-memory adapter clears it.
-      // `AssignmentMonth.approvalId` is typed `string | undefined` (never
-      // `null`) since every READ path normalizes a Postgres NULL back to
-      // `undefined` (`nullsToUndefined`) — so `null` only ever appears
-      // transiently in this WRITE-side patch. Cast through `unknown` (rather
-      // than widening the shared type for one call site) since `null` and
-      // `string | undefined` don't otherwise overlap for a direct assertion.
-      status: 'Allocated', approvalId: null, ...(plannerNote !== undefined ? { plannerNote } : {}),
-    } as unknown as Partial<AssignmentMonth>);
+      status: 'Allocated',
+      // `null`, not `undefined`: both `PgRepository.update()` and (now)
+      // `InMemoryRepository.update()` treat an explicit `null` patch value as
+      // "clear this field" (Drizzle sets the column NULL; the in-memory store
+      // drops the key) — see src/db/repository.ts's documented seam. Plain
+      // `undefined` means "leave untouched" on both adapters, so it would NOT
+      // clear a stale approvalId. `AssignmentMonth.approvalId` is typed
+      // `string | undefined` (never `null` — every READ path normalizes a
+      // cleared column back to `undefined`), so `null` only ever appears
+      // transiently in this one WRITE-side value. Cast just this value (not
+      // the whole patch literal) so a typo in `status`/`plannerNote` is still
+      // caught by the type checker.
+      approvalId: null as unknown as undefined,
+      ...(plannerNote !== undefined ? { plannerNote } : {}),
+    });
   } else {
     const approvalId = await createAllocationApproval(req, assig, row.id);
     await repos.assignmentMonths.update(row.id, {

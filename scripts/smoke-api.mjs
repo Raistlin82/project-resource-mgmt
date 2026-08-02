@@ -818,6 +818,28 @@ async function checkMonthlyApproval() {
 
   const closed = await req('POST', '/assignments/1/months/2026-03/submit', { headers: SUBMIT_HEADERS, body: {} });
   check('B3 submit on a non-open month is refused', closed.status === 403 || closed.status === 404, `status=${closed.status}`);
+
+  // Self-managed submit-clear path: exercise it directly instead of routing
+  // around it. Assignment 1's resource is '1' (Julie Armstrong), whose
+  // managerId is ALSO '1' — the default RBAC_HEADERS admin actor — so
+  // submitting as the DEFAULT actor hits the self-managed auto-approval
+  // shortcut (straight to 'Allocated', approvalId cleared, no approval
+  // opened). 2026-09 is an OPEN period neither of assignment 1's assignments
+  // books (assignment 1 ends 2026-06-30; assignment 2, also resource 1, ends
+  // 2026-08-31), so a PUT there is guaranteed conflict-free and creates a
+  // fresh Draft row to submit. This is the regression coverage for the
+  // self-managed branch's `approvalId: null` clear: it must leave the field
+  // ABSENT in the response (both adapters), never a literal `null`.
+  const selfManagedPut = await req('PUT', '/assignments/1/allocation', { body: { month: '2026-09', dailyHours: { '2026-09-07': 1 } } });
+  check('B3 self-managed setup: PUT into an unbooked open month creates a Draft row', selfManagedPut.status === 200, `status=${selfManagedPut.status}`);
+
+  const selfManagedSubmit = await req('POST', '/assignments/1/months/2026-09/submit', { body: {} });
+  check('B3 self-managed submit auto-approves to Allocated', selfManagedSubmit.status === 200 && selfManagedSubmit.body?.status === 'Allocated',
+    `status=${selfManagedSubmit.status} row=${selfManagedSubmit.body?.status}`);
+  check('B3 self-managed submit clears approvalId to absent, not null',
+    selfManagedSubmit.body !== null && typeof selfManagedSubmit.body === 'object' &&
+    !Object.prototype.hasOwnProperty.call(selfManagedSubmit.body, 'approvalId') && selfManagedSubmit.body.approvalId === undefined,
+    `approvalId=${JSON.stringify(selfManagedSubmit.body?.approvalId)} hasOwn=${Object.prototype.hasOwnProperty.call(selfManagedSubmit.body ?? {}, 'approvalId')}`);
 }
 
 async function main() {
