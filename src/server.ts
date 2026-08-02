@@ -11,7 +11,7 @@ import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
 import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours, decisionToAssignmentStatus, allocationApproverStep, isAllowedAllocationTransition, ALLOCATION_CLIENT_SETTABLE, type AllocationStatus } from './app/services/staffing.util';
-import { deriveAssignmentStatus, monthRowId, type MonthStatus } from './app/services/allocation-month.util';
+import { deriveAssignmentStatus, monthRowId, isAllowedMonthTransition, type MonthStatus } from './app/services/allocation-month.util';
 // `parseMonthRowId`/`monthlyAggregateHours` are unused until later B3 tasks (4-6, 8)
 // wire the decision hook and status-weighted aggregates onto month rows. Kept on
 // their OWN import line (not merged into the one above) so the unused-vars
@@ -1764,6 +1764,90 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
     .filter(d => d.assignmentId === assig.id && monthOf(d.date) === month)
     .sort((a, b) => a.date.localeCompare(b.date));
   res.json({ ...fresh, month, contractHoursPerDay: cap, days });
+});
+
+/**
+ * Shared preamble for the per-month endpoints: resolve the assignment and
+ * validate the :month path parameter. Returns undefined after having written
+ * the error response.
+ */
+async function resolveMonthTarget(req: Request, res: Response): Promise<{ assig: Assignment; month: string } | undefined> {
+  // Bracket access + typeof guard (not dot access): Express 5's ParamsDictionary
+  // types a param as `string | string[]` via its index signature, same reason
+  // the /capacity/monthly and allocation GET handlers guard req.query this way.
+  const id = req.params['id'];
+  const assig = typeof id === 'string' ? await repos.assignments.get(id) : undefined;
+  if (assig === undefined) { res.status(404).json({ error: 'Not found' }); return undefined; }
+  const month = req.params['month'];
+  if (typeof month !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    res.status(400).json({ error: 'month must match YYYY-MM' }); return undefined;
+  }
+  return { assig, month };
+}
+
+// SUBMIT one month for approval ("Invia mese in approvazione"). Draft|Rejected
+// -> Requested with a fresh single-step manager approval, or straight to
+// Allocated when the proposer IS the resource's manager (the gap-A self-managed
+// shortcut, unchanged). Requires an OPEN planning period: proposing work in a
+// closed month is a planning error, not a governance one.
+apiRouter.post('/assignments/:id/months/:month/submit', async (req, res) => {
+  const target = await resolveMonthTarget(req, res);
+  if (target === undefined) return;
+  const { assig, month } = target;
+
+  const period = await repos.planningPeriods.get(month);
+  if (period?.status !== 'Open') { res.status(403).json({ error: 'month is not open for planning' }); return; }
+
+  const row = await repos.assignmentMonths.get(monthRowId(assig.id, month));
+  if (row === undefined) { res.status(404).json({ error: 'no allocation for this month' }); return; }
+  if (!isAllowedMonthTransition(row.status as MonthStatus, 'Requested') || row.status === 'Requested') {
+    res.status(400).json({ error: `illegal month transition ${row.status} -> Requested` });
+    return;
+  }
+
+  const body = pick<{ plannerNote?: string }>(req.body, ['plannerNote']);
+  const plannerNote = typeof body.plannerNote === 'string' ? body.plannerNote : undefined;
+
+  // Self-managed: approver and requester would be the same principal (SoD would
+  // block the decision anyway), so the month is approved on the spot.
+  if (await autoApprovesAllocation(req, assig.resourceId)) {
+    await withdrawAllocationApproval(row.approvalId, 'superseded');
+    await repos.assignmentMonths.update(row.id, {
+      status: 'Allocated', approvalId: undefined, ...(plannerNote !== undefined ? { plannerNote } : {}),
+    } as Partial<AssignmentMonth>);
+  } else {
+    await withdrawAllocationApproval(row.approvalId, 'superseded');
+    const approvalId = await createAllocationApproval(req, assig, row.id);
+    await repos.assignmentMonths.update(row.id, {
+      status: 'Requested', approvalId, ...(plannerNote !== undefined ? { plannerNote } : {}),
+    } as Partial<AssignmentMonth>);
+  }
+
+  await refreshDerivedAssignmentStatus(assig.id);
+  // Status-aware aggregates follow the month's new state. Best-effort, same
+  // discipline as the allocation endpoint: the transition is already committed.
+  try {
+    await withLock(`res:${assig.resourceId}`, () => recomputeResourceUtilization(assig.resourceId));
+    await withLock(`req:${assig.requestId}`, () => recomputeRequestStaffing(assig.requestId));
+  } catch { /* aggregates self-heal on the next mutation */ }
+
+  res.json(await repos.assignmentMonths.get(row.id));
+});
+
+// PLANNER NOTE on a month ("campo note" in RPT §3.5): saved only once the month
+// exists, i.e. after the allocation has been drafted.
+apiRouter.put('/assignments/:id/months/:month/note', async (req, res) => {
+  const target = await resolveMonthTarget(req, res);
+  if (target === undefined) return;
+  const { assig, month } = target;
+
+  const body = pick<{ plannerNote?: string }>(req.body, ['plannerNote']);
+  if (typeof body.plannerNote !== 'string') { res.status(400).json({ error: 'plannerNote must be a string' }); return; }
+
+  const row = await repos.assignmentMonths.get(monthRowId(assig.id, month));
+  if (row === undefined) { res.status(404).json({ error: 'no allocation for this month' }); return; }
+  await repos.assignmentMonths.update(row.id, { plannerNote: body.plannerNote });
+  res.json(await repos.assignmentMonths.get(row.id));
 });
 
 // ---------------------------------------------------------------------------

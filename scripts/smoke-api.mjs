@@ -778,6 +778,35 @@ async function checkMonthlyApproval() {
   check('B3 sibling month stays Allocated', siblingRow?.status === 'Allocated', `status=${siblingRow?.status}`);
   check('B3 edited month row gained an approvalId', typeof editedRow?.approvalId === 'string' && editedRow.approvalId.length > 0,
     `approvalId=${editedRow?.approvalId}`);
+
+  // Submit: assignment '1' spans 2026-05..2026-06. Its resource is '1' (Julie
+  // Armstrong), whose managerId is ALSO '1' — the SAME id as the default
+  // RBAC_HEADERS admin actor used everywhere else in this suite. Editing/
+  // submitting as that actor hits the self-managed auto-approval shortcut
+  // (straight to 'Allocated', no approval opened), which would defeat these
+  // checks' purpose. So: edit 2026-06 with the DEFAULT (self-managed) actor —
+  // that leaves the month's status untouched at 'Allocated' (the allocation
+  // PUT skips forced re-approval for a self-managed edit) — then submit as
+  // resource '2' (John Miller), who is NOT resource 1's manager, so the submit
+  // opens a REAL approval and moves the month to 'Requested'.
+  const SUBMIT_HEADERS = { 'X-User-Id': '2', 'X-User-Role': 'pm' };
+  const alloc1 = await req('GET', '/assignments/1/allocation?from=2026-05&to=2026-06');
+  const june = (alloc1.body.days || []).find(d => d.date.startsWith('2026-06'));
+  if (june) {
+    await req('PUT', '/assignments/1/allocation', { body: { month: '2026-06', dailyHours: { [june.date]: 3 } } });
+  }
+  const noteRes = await req('PUT', '/assignments/1/months/2026-06/note', { headers: SUBMIT_HEADERS, body: { plannerNote: 'ramp-up month' } });
+  check('B3 planner note saved', noteRes.status === 200 && noteRes.body?.plannerNote === 'ramp-up month', `status=${noteRes.status}`);
+
+  const submit = await req('POST', '/assignments/1/months/2026-06/submit', { headers: SUBMIT_HEADERS, body: {} });
+  check('B3 submit moves the month to Requested', submit.status === 200 && submit.body?.status === 'Requested', `status=${submit.status} row=${submit.body?.status}`);
+  check('B3 submit opens an approval', typeof submit.body?.approvalId === 'string', `approvalId=${submit.body?.approvalId}`);
+
+  const resubmit = await req('POST', '/assignments/1/months/2026-06/submit', { headers: SUBMIT_HEADERS, body: {} });
+  check('B3 double submit is rejected', resubmit.status === 400, `status=${resubmit.status}`);
+
+  const closed = await req('POST', '/assignments/1/months/2026-03/submit', { headers: SUBMIT_HEADERS, body: {} });
+  check('B3 submit on a non-open month is refused', closed.status === 403 || closed.status === 404, `status=${closed.status}`);
 }
 
 async function main() {
