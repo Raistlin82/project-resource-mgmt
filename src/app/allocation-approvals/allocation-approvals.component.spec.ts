@@ -63,6 +63,28 @@ describe('AllocationApprovalsComponent', () => {
     expect(getAllocationApprovals).toHaveBeenCalled();
   });
 
+  it('seeds the From/To selects to the loaded window in the actual DOM, not just the signal', async () => {
+    // Regression for the reported bug: the <select>'s live DOM `.value` must
+    // match the seeded from/to signal (the loaded window), not just the signal
+    // itself — a mismatch here means the browser silently fell back to the
+    // first padded option because [value] was applied before the @for's
+    // <option> elements existed.
+    const { fixture } = setup(true);
+    await flush(fixture);
+
+    const host = fixture.nativeElement as HTMLElement;
+    const fromEl = host.querySelector('select[aria-label="Range start month"]') as HTMLSelectElement;
+    const toEl = host.querySelector('select[aria-label="Range end month"]') as HTMLSelectElement;
+    expect(fromEl).not.toBeNull();
+    expect(toEl).not.toBeNull();
+
+    expect(fixture.componentInstance['from']()).toBe('2026-09');
+    expect(fixture.componentInstance['to']()).toBe('2026-09');
+    // The assertion that actually catches the bug: the live DOM value.
+    expect(fromEl.value).toBe('2026-09');
+    expect(toEl.value).toBe('2026-09');
+  });
+
   it('does not call the API before auth is ready', async () => {
     const { fixture, getAllocationApprovals } = setup(false);
     await flush(fixture);

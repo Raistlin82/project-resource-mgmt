@@ -122,17 +122,17 @@ function shiftMonth(month: string, delta: number): string {
           @if (monthOptions().length > 0) {
             <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
               <span class="text-ink-muted">From</span>
-              <select [value]="from() ?? ''" (change)="onFromChange($event)" aria-label="Range start month" class="command-select">
+              <select (change)="onFromChange($event)" aria-label="Range start month" class="command-select">
                 @for (m of monthOptions(); track m) {
-                  <option [value]="m">{{ monthLabel(m) }}</option>
+                  <option [value]="m" [selected]="m === from()">{{ monthLabel(m) }}</option>
                 }
               </select>
             </label>
             <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
               <span class="text-ink-muted">To</span>
-              <select [value]="to() ?? ''" (change)="onToChange($event)" aria-label="Range end month" class="command-select">
+              <select (change)="onToChange($event)" aria-label="Range end month" class="command-select">
                 @for (m of monthOptions(); track m) {
-                  <option [value]="m">{{ monthLabel(m) }}</option>
+                  <option [value]="m" [selected]="m === to()">{{ monthLabel(m) }}</option>
                 }
               </select>
             </label>
