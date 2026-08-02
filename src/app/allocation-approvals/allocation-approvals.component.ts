@@ -15,6 +15,7 @@ import { AllocationApprovalFeed, AllocationApprovalRow, ApiService } from '../se
 import { AuthService } from '../services/auth.service';
 import { ListStateComponent } from '../shared/list-state.component';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
+import { ApprovalModalComponent } from './approval-modal.component';
 import { monthsInRange, semaphoreBand, type SemaphoreBand } from '../services/capacity.util';
 
 /** Empty envelope used until auth settles (and as the resource default). */
@@ -90,15 +91,15 @@ function shiftMonth(month: string, delta: number): string {
  * settles (no 401 latch). Identity is read reactively — never snapshotted at
  * field-init.
  *
- * The approval decision UI itself (Task 11) and multi-resource approve (Task 12)
- * are NOT built here: `modalResourceId` and `selectedResourceIds` are the public
- * hooks those tasks wire into. The `@if (modalResourceId())` block below is a
- * placeholder using the app's standard modal backdrop.
+ * The single-resource approval modal (Task 11 — `ApprovalModalComponent`) is
+ * rendered behind the standard `appModal` backdrop when `modalResourceId()` is
+ * set; deciding a month reloads the feed. Multi-resource approve (Task 12) is
+ * NOT built here: `selectedResourceIds` is the public hook that task wires into.
  */
 @Component({
   selector: 'app-allocation-approvals',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DecimalPipe, ListStateComponent, ModalDialogDirective],
+  imports: [MatIconModule, DecimalPipe, ListStateComponent, ModalDialogDirective, ApprovalModalComponent],
   template: `
     <div class="command-page space-y-6">
       <div class="command-header">
@@ -236,22 +237,17 @@ function shiftMonth(month: string, delta: number): string {
         }
       </app-list-state>
 
-      <!-- Approval modal placeholder (Task 11 builds the real decision panel here);
-           the standard modal backdrop + focus trap directive used across the app. -->
+      <!-- Approval modal (Task 11): the standard modal backdrop + focus trap
+           directive used across the app; the panel content lives in
+           ApprovalModalComponent, which owns its own header/body/footer. -->
       @if (modalResourceId()) {
         <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-             appModal ariaLabelledby="allocApprovalModalTitle" (dismiss)="closeModal()">
-          <div class="command-card shadow-2xl w-full max-w-lg overflow-hidden flex flex-col" data-test="modal-placeholder">
-            <div class="command-card-header">
-              <h2 id="allocApprovalModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Approve month — {{ modalResourceName() }}</h2>
-              <button type="button" (click)="closeModal()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary transition-colors">
-                <mat-icon>close</mat-icon>
-              </button>
-            </div>
-            <div class="p-6 text-sm text-ink-secondary">
-              The approval decision panel is not built yet. Close this dialog to return to the list.
-            </div>
-          </div>
+             appModal ariaLabelledby="approvalModalTitle" (dismiss)="closeModal()">
+          <app-approval-modal
+            [rows]="modalRows()"
+            [months]="months()"
+            (decided)="reload()"
+            (closed)="closeModal()" />
         </div>
       }
     </div>
@@ -356,9 +352,20 @@ export class AllocationApprovalsComponent {
     this.modalResourceId.set(null);
   }
 
-  protected modalResourceName = computed<string | null>(() => {
+  /** The modal's `rows` input: the single resource behind `modalResourceId`, as
+   *  a one-element array of its full `AllocationApprovalRow` (with `items`) —
+   *  NOT `rows()` above, whose `RowVm` view models carry only grid cells, never
+   *  `items`. Reflects the page's current status filter (e.g. under the default
+   *  'Requested'/Pending filter the modal only lists pending items for that
+   *  month; switch the page to 'All' first to also see already-decided
+   *  siblings). Empty when no modal is open, or the target resource dropped out
+   *  of the feed (e.g. a reload after deciding its only pending item under the
+   *  Pending filter) — the modal then simply shows "no projects this month". */
+  protected modalRows = computed<AllocationApprovalRow[]>(() => {
     const id = this.modalResourceId();
-    return id ? (this.rows().find(r => r.resourceId === id)?.resourceName ?? null) : null;
+    if (!id) return [];
+    const row = this.feed().rows.find(r => r.resourceId === id);
+    return row ? [row] : [];
   });
 
   protected openMultiApprove(): void {
