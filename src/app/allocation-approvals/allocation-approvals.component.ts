@@ -352,6 +352,13 @@ export class AllocationApprovalsComponent {
   }
 
   protected closeModal(): void {
+    // Closing a completed multi-approve flow must also drop the toolbar
+    // checkbox selection — otherwise the page keeps showing checked rows and a
+    // stale "Approve selected (N)" count after the modal is gone. Single-
+    // resource close (openModal) never touched the selection, so leave it be.
+    if (this.multiMode()) {
+      this.selectedResourceIds.set(new Set());
+    }
     this.modalResourceId.set(null);
     this.multiMode.set(false);
   }

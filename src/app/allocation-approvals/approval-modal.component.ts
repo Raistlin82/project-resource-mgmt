@@ -262,7 +262,7 @@ export class ApprovalModalComponent {
   protected title = computed(() => {
     if (this.multi()) {
       const n = this.rows().length;
-      return n > 0 ? `Approve ${n} resources` : 'Approve selected resources';
+      return n > 0 ? `Approve ${n} resource${n === 1 ? '' : 's'}` : 'Approve selected resources';
     }
     const name = this.rows()[0]?.resourceName;
     return name ? `Approve month — ${name}` : 'Approve month';
