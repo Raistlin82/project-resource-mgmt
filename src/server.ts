@@ -3204,10 +3204,16 @@ async function decideOneApproval(
  * res -> req lock order used by every other assignment mutation, so this can
  * never deadlock against a concurrent POST/PUT/DELETE on /assignments.
  *
- * `deferAggregates` lets the BATCH endpoint skip the per-item recompute and
- * instead recompute once per distinct resource/request at the end (spec §4.4):
- * approving twelve months of one resource must not recompute her utilization
- * twelve times. The returned ids are what the caller then dedupes.
+ * `deferAggregates` lets the BATCH endpoint skip the per-item follow-up work and
+ * do it once per distinct entity at the end (spec §4.4): approving twelve months
+ * of one resource must not recompute her utilization twelve times, nor re-derive
+ * the same assignment's status twelve times (each rollup is a full
+ * `assignmentMonths` scan). What is deferred is everything ASSIGNMENT-or-wider:
+ * the status rollup, its explicit audit entry, and the aggregate recompute. The
+ * MONTH-row write is never deferred — it is the decision itself. The returned
+ * ids are what the caller then dedupes; it must run the rollups BEFORE the
+ * recomputes, since `recomputeResourceUtilization` weighs assignments by the
+ * status the rollup produces.
  */
 async function applyAllocationDecision(
   req: Request,
@@ -3215,7 +3221,7 @@ async function applyAllocationDecision(
   decided: 'Approved' | 'Rejected',
   note: string | undefined,
   deferAggregates = false,
-): Promise<{ resourceId: string; requestId: string } | undefined> {
+): Promise<{ resourceId: string; requestId: string; assignmentId: string } | undefined> {
   const parsed = parseMonthRowId(refId);
   const newStatus = decisionToAssignmentStatus(decided);
 
@@ -3239,7 +3245,7 @@ async function applyAllocationDecision(
       await recompute(assig.resourceId, assig.requestId);
       await repos.auditLogs.create(allocationTransitionAudit(req, assig, newStatus, `/assignments/${assig.id}`));
     } catch { /* recompute/audit are best-effort; the decision already committed */ }
-    return { resourceId: assig.resourceId, requestId: assig.requestId };
+    return { resourceId: assig.resourceId, requestId: assig.requestId, assignmentId: assig.id };
   }
 
   const row = await repos.assignmentMonths.get(refId);
@@ -3252,9 +3258,24 @@ async function applyAllocationDecision(
   // divergence this hook exists to prevent. The approver's note is mirrored onto
   // the row (it also lives on the decided step, as in gap A) so the calendar can
   // show it without resolving the approval request.
+  //
+  // A decision carrying NO note CLEARS the field rather than leaving it: this is
+  // the only writer of `approverNote`, and a month can be decided more than once
+  // (approve with "ok" -> planner edits the days -> forced re-approval -> the
+  // next approver rejects silently). Without the clear, the row would render
+  // 'Rejected' still carrying the previous approver's "ok". `null` is the
+  // documented "clear to absent" patch value on BOTH adapters (Drizzle sets the
+  // column NULL, the in-memory store drops the key) — `undefined` would mean
+  // "leave untouched". Cast just this value so a typo in `status` is still
+  // type-checked; every READ path normalizes the cleared column back to absent.
   await repos.assignmentMonths.update(row.id, {
-    status: newStatus, ...(note !== undefined ? { approverNote: note } : {}),
+    status: newStatus, approverNote: (note ?? null) as unknown as undefined,
   } as Partial<AssignmentMonth>);
+  if (deferAggregates) {
+    // The rollup, its audit entry and the recompute are the caller's job — they
+    // are assignment-or-wider and must run ONCE per entity, not once per month.
+    return { resourceId: assig.resourceId, requestId: assig.requestId, assignmentId: assig.id };
+  }
   await refreshDerivedAssignmentStatus(assig.id);
   try {
     await recompute(assig.resourceId, assig.requestId);
@@ -3269,7 +3290,7 @@ async function applyAllocationDecision(
     const derived = (await repos.assignments.get(assig.id))?.status ?? newStatus;
     await repos.auditLogs.create(allocationTransitionAudit(req, assig, derived, `/assignment-months/${row.id}`));
   } catch { /* recompute/audit are best-effort; the decision already committed */ }
-  return { resourceId: assig.resourceId, requestId: assig.requestId };
+  return { resourceId: assig.resourceId, requestId: assig.requestId, assignmentId: assig.id };
 }
 
 apiRouter.put('/approval-requests/:id/decision', async (req, res) => {
@@ -3346,47 +3367,92 @@ apiRouter.post('/allocation-approvals/decide', async (req, res) => {
 
   const ctx: DeciderContext = { by: actorId(req), decidingRole, deciderResourceId: await actorResourceId(req) };
   const results: { assignmentMonthId: string; status: string; error?: string }[] = [];
-  // Aggregates are recomputed ONCE per distinct resource/request after the loop
-  // (spec §4.4), never per item.
+  // Follow-up work is deduplicated per distinct entity and run AFTER the loop
+  // (spec §4.4), never per item: the status rollup per assignment, then the
+  // aggregates per resource/request.
+  const touchedAssignments = new Set<string>();
   const touchedResources = new Set<string>();
   const touchedRequests = new Set<string>();
 
-  for (const raw of items) {
-    const item = raw as { assignmentMonthId?: unknown; decision?: unknown; note?: unknown };
-    const id = typeof item.assignmentMonthId === 'string' ? item.assignmentMonthId : '';
-    const decision = item.decision === 'Approved' || item.decision === 'Rejected' ? item.decision : undefined;
-    const note = typeof item.note === 'string' ? item.note : undefined;
-    if (!id || decision === undefined) {
-      results.push({ assignmentMonthId: id, status: 'Error', error: "each item needs assignmentMonthId and decision 'Approved'|'Rejected'" });
-      continue;
-    }
-    const row = await repos.assignmentMonths.get(id);
-    if (row === undefined) { results.push({ assignmentMonthId: id, status: 'Error', error: 'Not found' }); continue; }
-    if (row.approvalId === undefined) { results.push({ assignmentMonthId: id, status: 'Error', error: 'month has no pending approval' }); continue; }
-
-    const outcome = await decideOneApproval(req, row.approvalId, decision, note, ctx);
-    if (outcome.status !== 200) {
-      const message = (outcome.body as { error?: string } | undefined)?.error ?? `decision failed (${outcome.status})`;
-      results.push({ assignmentMonthId: id, status: 'Error', error: message });
-      continue;
-    }
-    if (outcome.allocation) {
-      const touched = await applyAllocationDecision(req, outcome.allocation.refId, outcome.allocation.decided, note, true);
-      if (touched) { touchedResources.add(touched.resourceId); touchedRequests.add(touched.requestId); }
-    }
-    results.push({ assignmentMonthId: id, status: decision });
-  }
-
-  // Deduplicated aggregate recompute, fixed res -> req lock order. Best-effort:
-  // every decision above has already committed.
   try {
-    for (const resourceId of touchedResources) {
-      await withLock(`res:${resourceId}`, () => recomputeResourceUtilization(resourceId));
+    for (const raw of items) {
+      // Declared OUTSIDE the per-item try so the catch can still name the item
+      // it failed on (a `null` entry throws on the very first property read).
+      let id = '';
+      // PER-ITEM CONTAINMENT: `applyAllocationDecision` deliberately leaves the
+      // month-row write outside its best-effort catch so a failure surfaces as a
+      // 500 — correct for the single-request endpoint, wrong here. Without this
+      // catch, one throwing item would unwind the loop: its predecessors would
+      // stay committed (approvals flipped, month rows moved) with NO response
+      // body naming them, its successors would be silently skipped, and a retry
+      // would report "already Approved" for work the caller never saw succeed.
+      // The documented contract is per-item independence, so a thrown item
+      // becomes an Error result like any refused one.
+      try {
+        const item = (raw ?? {}) as { assignmentMonthId?: unknown; decision?: unknown; note?: unknown };
+        id = typeof item.assignmentMonthId === 'string' ? item.assignmentMonthId : '';
+        const decision = item.decision === 'Approved' || item.decision === 'Rejected' ? item.decision : undefined;
+        const note = typeof item.note === 'string' ? item.note : undefined;
+        if (!id || decision === undefined) {
+          results.push({ assignmentMonthId: id, status: 'Error', error: "each item needs assignmentMonthId and decision 'Approved'|'Rejected'" });
+          continue;
+        }
+        const row = await repos.assignmentMonths.get(id);
+        if (row === undefined) { results.push({ assignmentMonthId: id, status: 'Error', error: 'Not found' }); continue; }
+        if (row.approvalId === undefined) { results.push({ assignmentMonthId: id, status: 'Error', error: 'month has no pending approval' }); continue; }
+
+        const outcome = await decideOneApproval(req, row.approvalId, decision, note, ctx);
+        if (outcome.status !== 200) {
+          const message = (outcome.body as { error?: string } | undefined)?.error ?? `decision failed (${outcome.status})`;
+          results.push({ assignmentMonthId: id, status: 'Error', error: message });
+          continue;
+        }
+        if (outcome.allocation) {
+          const touched = await applyAllocationDecision(req, outcome.allocation.refId, outcome.allocation.decided, note, true);
+          if (touched) {
+            touchedAssignments.add(touched.assignmentId);
+            touchedResources.add(touched.resourceId);
+            touchedRequests.add(touched.requestId);
+          }
+        }
+        results.push({ assignmentMonthId: id, status: decision });
+      } catch {
+        // Fixed message, never the raw throw: the same non-leaking discipline as
+        // the FK-violation mapper below (a driver error text would expose schema
+        // internals in a 200 body).
+        results.push({ assignmentMonthId: id, status: 'Error', error: 'unexpected error while deciding this item' });
+      }
     }
-    for (const requestId of touchedRequests) {
-      await withLock(`req:${requestId}`, () => recomputeRequestStaffing(requestId));
-    }
-  } catch { /* aggregates self-heal on the next mutation of the same resource/request */ }
+  } finally {
+    // Runs even if the loop itself unwinds, so committed decisions are never
+    // left with stale derived state. Best-effort throughout.
+    try {
+      // ROLLUPS FIRST, then aggregates: the assignment status this produces is
+      // exactly what `recomputeResourceUtilization` weighs its hours by, so
+      // recomputing before the rollup would bake in the pre-decision statuses.
+      // Once per ASSIGNMENT — each rollup is a full assignmentMonths scan, so
+      // twelve months of one assignment must not trigger twelve of them. The
+      // explicit audit entry rides along here for the same reason: the
+      // assignment transitions ONCE per batch, not once per decided month.
+      // `before` is read pre-rollup and is a true snapshot — the batch has
+      // written only month rows up to this point, never the assignment.
+      for (const assignmentId of touchedAssignments) {
+        const before = await repos.assignments.get(assignmentId);
+        await refreshDerivedAssignmentStatus(assignmentId);
+        const after = await repos.assignments.get(assignmentId);
+        if (before && after) {
+          await repos.auditLogs.create(allocationTransitionAudit(req, before, after.status, `/assignments/${assignmentId}`));
+        }
+      }
+      // Fixed res -> req lock order, never both held at once.
+      for (const resourceId of touchedResources) {
+        await withLock(`res:${resourceId}`, () => recomputeResourceUtilization(resourceId));
+      }
+      for (const requestId of touchedRequests) {
+        await withLock(`req:${requestId}`, () => recomputeRequestStaffing(requestId));
+      }
+    } catch { /* rollups/aggregates self-heal on the next mutation of the same entity */ }
+  }
 
   res.json({ results });
 });

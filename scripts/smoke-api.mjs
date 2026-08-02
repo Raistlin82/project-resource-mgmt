@@ -1340,6 +1340,63 @@ async function checkMonthlyApproval() {
   const emptyBatch = await req('POST', '/allocation-approvals/decide', { body: { items: [] } });
   check('B3 batch decide rejects an empty items array', emptyBatch.status === 400, `status=${emptyBatch.status}`);
 
+  // DECIDE_BATCH_MAX is 200 in src/server.ts; 201 must be refused outright
+  // (400), not truncated or processed.
+  const oversize = await req('POST', '/allocation-approvals/decide', {
+    body: { items: Array.from({ length: 201 }, () => ({ assignmentMonthId: BATCH_ROW_ID, decision: 'Approved' })) },
+  });
+  check('B3 batch decide rejects more than DECIDE_BATCH_MAX items', oversize.status === 400, `status=${oversize.status}`);
+
+  // Re-open the decided month so the remaining batch checks have a genuinely
+  // pending approval again: editing an 'Allocated' month's days as a
+  // NON-self-managing proposer (pm '3' is neither resource 1 nor its manager
+  // '1') is the forced-re-approval path — the row goes back to 'Requested'
+  // under a fresh approval requested by '3'. 2026-10-07 is a Wednesday.
+  await req('PUT', '/assignments/1/allocation', { headers: PROPOSER_HEADERS, body: { month: BATCH_MONTH, dailyHours: { [`${BATCH_MONTH}-07`]: 1 } } });
+  const reopened = await req('GET', `/assignments/1/allocation?from=${BATCH_MONTH}&to=${BATCH_MONTH}`);
+  const reopenedRow = (reopened.body.months || [])[0];
+  check('B3 batch setup: the decided month is re-opened by a day edit (forced re-approval)',
+    reopenedRow?.status === 'Requested' && typeof reopenedRow?.approvalId === 'string',
+    `row=${JSON.stringify(reopenedRow)}`);
+
+  // STEP ENFORCEMENT through the batch — the filter the coarse
+  // '/allocation-approvals' role gate relies on. pm '2' (John Miller, resource
+  // '2') passes that gate and is NOT the requester ('3'), so SoD lets him
+  // through; he is refused by the per-step check instead, because the step is
+  // routed to resource 1's manager, approverId '1'. Without this the coarse
+  // gate would let any pm decide any manager's allocation.
+  const wrongApprover = await req('POST', '/allocation-approvals/decide', {
+    body: { items: [{ assignmentMonthId: BATCH_ROW_ID, decision: 'Approved' }] },
+    headers: { 'X-User-Id': '2', 'X-User-Role': 'pm' },
+  });
+  const wrongApproverResult = (wrongApprover.body?.results || [])[0];
+  check('B3 batch enforces per-step approver routing (non-requester, non-manager is refused)',
+    wrongApprover.status === 200 && wrongApproverResult?.status === 'Error' && /cannot decide a step assigned to 1/.test(String(wrongApproverResult?.error)),
+    `result=${JSON.stringify(wrongApproverResult)}`);
+
+  // The SAME id twice in one batch: decided once, the duplicate reported as
+  // already decided — the shared core's Pending guard, reached through the
+  // batch's own loop. This decision carries NO note, which must CLEAR the
+  // 'ok for me' the earlier decision left on the row.
+  const dup = await req('POST', '/allocation-approvals/decide', {
+    body: { items: [
+      { assignmentMonthId: BATCH_ROW_ID, decision: 'Approved' },
+      { assignmentMonthId: BATCH_ROW_ID, decision: 'Approved' },
+    ] },
+  });
+  const dupResults = dup.body?.results || [];
+  check('B3 batch decides a duplicated id exactly once', dupResults[0]?.status === 'Approved', `result=${JSON.stringify(dupResults[0])}`);
+  check('B3 batch reports the duplicate as already decided',
+    dupResults[1]?.status === 'Error' && /already Approved/.test(String(dupResults[1]?.error)),
+    `result=${JSON.stringify(dupResults[1])}`);
+
+  const recleared = await req('GET', `/assignments/1/allocation?from=${BATCH_MONTH}&to=${BATCH_MONTH}`);
+  const reclearedRow = (recleared.body.months || [])[0];
+  check("B3 a decision without a note clears the previous approver's note (absent, not null)",
+    reclearedRow?.status === 'Allocated' && reclearedRow?.approverNote === undefined &&
+    !Object.prototype.hasOwnProperty.call(reclearedRow ?? {}, 'approverNote'),
+    `row=${JSON.stringify(reclearedRow)}`);
+
   // A month CLOSED after submission must still be decidable (spec §4.5) — a
   // request in flight may never be left hanging — while its hours are frozen.
   // The seed leaves '2:2026-08' Requested under approval AR4 (requestedBy '3'),
