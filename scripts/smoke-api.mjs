@@ -1397,6 +1397,65 @@ async function checkMonthlyApproval() {
     !Object.prototype.hasOwnProperty.call(reclearedRow ?? {}, 'approverNote'),
     `row=${JSON.stringify(reclearedRow)}`);
 
+  // TWO MONTHS OF THE SAME ASSIGNMENT IN ONE BATCH, decided differently. This
+  // is the case that proves the audit trail keeps its per-month granularity:
+  // the expensive follow-up work (status rollup, utilization/staffing
+  // recompute) is deduplicated per assignment, but the AUDIT is per decision,
+  // so a mixed Approve/Reject must leave TWO distinct entries — collapsing them
+  // into one per-assignment entry would record only the final derived status
+  // and lose both decisions. It also pins that the batch and single-request
+  // endpoints write the SAME shape (`/assignment-months/<rowId>`), so the trail
+  // never depends on which endpoint made the decision. Nothing else in this
+  // suite asserts audit-log content.
+  //
+  // 2026-11 and 2026-12 are Open periods assignment 1 does not book (its seeded
+  // days end 2026-06; this section has used 2026-07/09/10). 2026-11-03 and
+  // 2026-12-01 are Tuesdays; 2026-12-25 (the seeded holiday) is avoided. The
+  // PUTs run as the default self-managing admin so the rows are created Draft,
+  // then SUBMIT_HEADERS (user '2') submits so a real approval opens requested
+  // by '2' — the default admin '1' is then an SoD-compliant decider for both.
+  const PAIR = [['2026-11', '2026-11-03'], ['2026-12', '2026-12-01']];
+  let pairSetupOk = true;
+  for (const [month, day] of PAIR) {
+    await req('PUT', '/assignments/1/allocation', { body: { month, dailyHours: { [day]: 1 } } });
+    const s = await req('POST', `/assignments/1/months/${month}/submit`, { headers: SUBMIT_HEADERS, body: {} });
+    pairSetupOk = check(`B3 audit-granularity setup: ${month} submitted for approval`,
+      s.status === 200 && s.body?.status === 'Requested' && typeof s.body?.approvalId === 'string',
+      `status=${s.status} row=${s.body?.status}`) && pairSetupOk;
+  }
+  if (pairSetupOk) {
+    const pair = await req('POST', '/allocation-approvals/decide', {
+      body: { items: [
+        { assignmentMonthId: '1:2026-11', decision: 'Approved', note: 'November is fine' },
+        { assignmentMonthId: '1:2026-12', decision: 'Rejected', note: 'December is not' },
+      ] },
+    });
+    const pairResults = pair.body?.results || [];
+    check('B3 batch decides two months of one assignment independently',
+      pair.status === 200 && pairResults[0]?.status === 'Approved' && pairResults[1]?.status === 'Rejected',
+      `results=${JSON.stringify(pairResults)}`);
+
+    const pairRows = (await req('GET', '/assignments/1/allocation?from=2026-11&to=2026-12')).body?.months || [];
+    check('B3 the two months carry their OWN outcomes, not a shared one',
+      pairRows.find(m => m.month === '2026-11')?.status === 'Allocated' &&
+      pairRows.find(m => m.month === '2026-12')?.status === 'Rejected',
+      `rows=${JSON.stringify(pairRows)}`);
+
+    // GET /audit-logs is admin-only and newest-first. The explicit entries are
+    // written inline (before the response is sent), so they are already
+    // durable here — no polling needed.
+    const { status: logStatus, body: logs } = await req('GET', '/audit-logs?limit=1000');
+    const entries = Array.isArray(logs) ? logs : [];
+    const novEntry = entries.find(e => e.path === '/assignment-months/1:2026-11');
+    const decEntry = entries.find(e => e.path === '/assignment-months/1:2026-12');
+    check('B3 the batch writes one audit entry per DECIDED MONTH, not one per assignment',
+      logStatus === 200 && Boolean(novEntry) && Boolean(decEntry) && novEntry.id !== decEntry.id,
+      `novEntry=${novEntry?.id}, decEntry=${decEntry?.id}, logs=${entries.length}`);
+    check('B3 those audit entries are attributed to the trusted deciding actor',
+      novEntry?.actorId === '1' && novEntry?.actorRole === 'admin' && decEntry?.actorId === '1' && decEntry?.actorRole === 'admin',
+      `nov=${novEntry?.actorId}/${novEntry?.actorRole}, dec=${decEntry?.actorId}/${decEntry?.actorRole}`);
+  }
+
   // A month CLOSED after submission must still be decidable (spec §4.5) — a
   // request in flight may never be left hanging — while its hours are frozen.
   // The seed leaves '2:2026-08' Requested under approval AR4 (requestedBy '3'),

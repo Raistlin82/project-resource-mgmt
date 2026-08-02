@@ -3367,12 +3367,24 @@ apiRouter.post('/allocation-approvals/decide', async (req, res) => {
 
   const ctx: DeciderContext = { by: actorId(req), decidingRole, deciderResourceId: await actorResourceId(req) };
   const results: { assignmentMonthId: string; status: string; error?: string }[] = [];
-  // Follow-up work is deduplicated per distinct entity and run AFTER the loop
-  // (spec §4.4), never per item: the status rollup per assignment, then the
+  // EXPENSIVE + IDEMPOTENT work is deduplicated per distinct entity and run
+  // AFTER the loop (spec §4.4): the status rollup per assignment, then the
   // aggregates per resource/request.
   const touchedAssignments = new Set<string>();
   const touchedResources = new Set<string>();
   const touchedRequests = new Set<string>();
+  // THE AUDIT IS NOT DEDUPLICATED — it is per-decision by nature. One entry per
+  // DECIDED MONTH, exactly the shape the single-request endpoint emits, so the
+  // governance trail can answer "was month X decided, by whom, when" regardless
+  // of which endpoint made the decision. Collapsing N months of one assignment
+  // into one entry would also erase a mixed Approve/Reject batch down to the
+  // assignment's final derived status.
+  const decidedMonths: { assignmentId: string; rowId: string }[] = [];
+  // Pre-decision assignment snapshots, first-touch-wins, for those entries'
+  // `before`. Safe to capture anywhere in the loop: the batch writes only MONTH
+  // rows until the `finally` rolls the derived status forward, so the assignment
+  // row is untouched until then.
+  const assignmentBefore = new Map<string, Assignment>();
 
   try {
     for (const raw of items) {
@@ -3408,50 +3420,81 @@ apiRouter.post('/allocation-approvals/decide', async (req, res) => {
           continue;
         }
         if (outcome.allocation) {
-          const touched = await applyAllocationDecision(req, outcome.allocation.refId, outcome.allocation.decided, note, true);
+          const { refId } = outcome.allocation;
+          const touched = await applyAllocationDecision(req, refId, outcome.allocation.decided, note, true);
           if (touched) {
             touchedAssignments.add(touched.assignmentId);
             touchedResources.add(touched.resourceId);
             touchedRequests.add(touched.requestId);
+            if (!assignmentBefore.has(touched.assignmentId)) {
+              const snapshot = await repos.assignments.get(touched.assignmentId);
+              if (snapshot) assignmentBefore.set(touched.assignmentId, snapshot);
+            }
+            // Only a MONTH-row decision is queued: the legacy bare-refId branch
+            // writes its own entry inline (it mutates the assignment directly),
+            // so queueing it here would double-write.
+            if (parseMonthRowId(refId) !== undefined) {
+              decidedMonths.push({ assignmentId: touched.assignmentId, rowId: refId });
+            }
           }
         }
         results.push({ assignmentMonthId: id, status: decision });
-      } catch {
-        // Fixed message, never the raw throw: the same non-leaking discipline as
-        // the FK-violation mapper below (a driver error text would expose schema
-        // internals in a 200 body).
+      } catch (err) {
+        // The RESPONSE stays generic — never leak driver internals to the caller,
+        // same discipline as the FK-violation mapper below. But this loop
+        // deliberately turns a crash into an ordinary-looking Error result, so
+        // without a log a genuine bug would be indistinguishable from a business
+        // refusal and would leave no trace anywhere.
+        console.error(`POST /allocation-approvals/decide: item ${id || '(unnamed)'} threw`, err);
         results.push({ assignmentMonthId: id, status: 'Error', error: 'unexpected error while deciding this item' });
       }
     }
   } finally {
     // Runs even if the loop itself unwinds, so committed decisions are never
-    // left with stale derived state. Best-effort throughout.
+    // left with stale derived state or an unrecorded trail. Three independent
+    // best-effort blocks, so a failure in one never suppresses the others — in
+    // particular a recompute failure must not cost us the governance entries.
+
+    // (1) ROLLUPS, once per ASSIGNMENT: each one is a full assignmentMonths
+    // scan, so twelve decided months of one assignment must not trigger twelve.
+    // Remember each post-rollup status for the audit entries below.
+    const derivedByAssignment = new Map<string, Assignment['status']>();
     try {
-      // ROLLUPS FIRST, then aggregates: the assignment status this produces is
-      // exactly what `recomputeResourceUtilization` weighs its hours by, so
-      // recomputing before the rollup would bake in the pre-decision statuses.
-      // Once per ASSIGNMENT — each rollup is a full assignmentMonths scan, so
-      // twelve months of one assignment must not trigger twelve of them. The
-      // explicit audit entry rides along here for the same reason: the
-      // assignment transitions ONCE per batch, not once per decided month.
-      // `before` is read pre-rollup and is a true snapshot — the batch has
-      // written only month rows up to this point, never the assignment.
       for (const assignmentId of touchedAssignments) {
-        const before = await repos.assignments.get(assignmentId);
         await refreshDerivedAssignmentStatus(assignmentId);
         const after = await repos.assignments.get(assignmentId);
-        if (before && after) {
-          await repos.auditLogs.create(allocationTransitionAudit(req, before, after.status, `/assignments/${assignmentId}`));
+        if (after) derivedByAssignment.set(assignmentId, after.status);
+      }
+    } catch { /* the rollup self-heals on the next mutation of the same assignment */ }
+
+    // (2) ONE AUDIT ENTRY PER DECIDED MONTH — identical in shape to what the
+    // single-request endpoint writes (assignment before/after, path naming the
+    // month row), so the trail does not depend on which endpoint was used.
+    // Emitted after (1) because `after` must be the post-rollup derived status,
+    // exactly as the single-request path reads it.
+    try {
+      for (const { assignmentId, rowId } of decidedMonths) {
+        const before = assignmentBefore.get(assignmentId);
+        const derived = derivedByAssignment.get(assignmentId);
+        if (before && derived) {
+          await repos.auditLogs.create(allocationTransitionAudit(req, before, derived, `/assignment-months/${rowId}`));
         }
       }
-      // Fixed res -> req lock order, never both held at once.
+    } catch { /* audit is best-effort, as everywhere else; the decisions already committed */ }
+
+    // (3) AGGREGATES, once per resource/request. AFTER the rollups: the
+    // assignment status those produce is exactly what
+    // `recomputeResourceUtilization` weighs its hours by, so recomputing first
+    // would bake in the pre-decision statuses. Fixed res -> req lock order,
+    // never both held at once.
+    try {
       for (const resourceId of touchedResources) {
         await withLock(`res:${resourceId}`, () => recomputeResourceUtilization(resourceId));
       }
       for (const requestId of touchedRequests) {
         await withLock(`req:${requestId}`, () => recomputeRequestStaffing(requestId));
       }
-    } catch { /* rollups/aggregates self-heal on the next mutation of the same entity */ }
+    } catch { /* aggregates self-heal on the next mutation of the same resource/request */ }
   }
 
   res.json({ results });
