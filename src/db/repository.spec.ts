@@ -1,4 +1,5 @@
 import { InMemoryRepository, nullsToUndefined } from './repository';
+import type { AssignmentMonth } from '../app/services/api.service';
 
 /**
  * Unit tests for the DEV adapter (`InMemoryRepository`). These exercise the full
@@ -95,6 +96,21 @@ describe('InMemoryRepository', () => {
     const updated = await repo.update('1', {});
     expect(updated).toEqual(widget('1', 'a', 1));
     expect(await repo.get('1')).toEqual(widget('1', 'a', 1));
+  });
+
+  it('keeps assignment-month optional fields absent (nulls-to-undefined parity)', async () => {
+    // Regression on a real domain type (B3's AssignmentMonth), not the synthetic
+    // Widget: optional fields the in-memory adapter never touches must stay
+    // `undefined` (never leak in as `null`), matching the Pg adapter's
+    // `nullsToUndefined()`-normalized return shape.
+    const repo = new InMemoryRepository<AssignmentMonth>();
+    const created = await repo.create({
+      id: 'A9:2026-09', assignmentId: 'A9', month: '2026-09', status: 'Draft',
+    });
+    expect(created.approvalId).toBeUndefined();
+    const updated = await repo.update('A9:2026-09', { status: 'Requested' });
+    expect(updated?.status).toBe('Requested');
+    expect(updated?.plannerNote).toBeUndefined();
   });
 
   it('remove() deletes an existing entity and returns true', async () => {

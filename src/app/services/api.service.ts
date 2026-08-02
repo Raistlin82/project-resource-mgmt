@@ -119,6 +119,29 @@ export interface AssignmentDay {
 }
 
 /**
+ * Per-month lifecycle state of an assignment (B3). The approval unit is the
+ * (assignment, month) pair — RPT approves month by month across projects — so
+ * this row, not `Assignment.status`, is authoritative. `Assignment.status` is a
+ * derived rollup of these (see allocation-month.util `deriveAssignmentStatus`).
+ * A row exists even for a month with 0 hours: zeroing an approved month is
+ * itself a proposal the People Manager must approve.
+ */
+export interface AssignmentMonth {
+  /** Composite `<assignmentId>:<YYYY-MM>`. */
+  id: string;
+  assignmentId: string;
+  /** 'YYYY-MM'. */
+  month: string;
+  status: 'Draft' | 'Requested' | 'Allocated' | 'Rejected';
+  /** Id of the ApprovalRequest currently governing THIS month, if any. */
+  approvalId?: string;
+  /** Note written by the planner (PM) for the approver. */
+  plannerNote?: string;
+  /** Note written by the approver (People Manager) on the decision. */
+  approverNote?: string;
+}
+
+/**
  * Envelope returned by `GET /assignments/:id/allocation` (B1): the assignment's
  * per-day rows within [from,to] plus the effective daily contract cap. `from`/`to`
  * default server-side to the assignment's spanned months and are omitted when the

@@ -78,6 +78,45 @@ async function seedIfEmpty<T extends PgTable>(
 }
 
 /**
+ * Create the month rows an already-populated database is missing (B3).
+ *
+ * Idempotent and additive: only (assignment, month) pairs that have day rows but
+ * no lifecycle row are inserted, carrying the assignment's CURRENT status — what
+ * was booked and approved before B3 stays approved. Runs after seeding so a
+ * fresh database (already consistent via seed.ts) finds nothing to do. The
+ * mapping day -> month needs the calendar, so it cannot live in the SQL migration.
+ */
+async function backfillAssignmentMonths(database: DrizzleDb): Promise<number> {
+  const days = await database.select().from(schema.assignmentDays);
+  if (days.length === 0) return 0;
+  const existing = new Set((await database.select().from(schema.assignmentMonths)).map(m => m.id));
+  const statusById = new Map(
+    (await database.select().from(schema.assignments)).map(a => [a.id, a.status]),
+  );
+  const VALID = new Set(['Draft', 'Requested', 'Allocated', 'Rejected']);
+
+  const rows: { id: string; assignmentId: string; month: string; status: 'Draft' | 'Requested' | 'Allocated' | 'Rejected' }[] = [];
+  const seen = new Set<string>();
+  for (const d of days) {
+    const month = d.date.slice(0, 7);
+    const id = `${d.assignmentId}:${month}`;
+    if (existing.has(id) || seen.has(id)) continue;
+    const raw = statusById.get(d.assignmentId);
+    if (raw === undefined) continue; // orphan day row: nothing to attach a lifecycle to
+    seen.add(id);
+    rows.push({
+      id, assignmentId: d.assignmentId, month,
+      // A pre-B3 free-text status that is not one of the four is treated as
+      // booked work: 'Allocated' preserves the aggregates it already fed.
+      status: (VALID.has(raw) ? raw : 'Allocated') as 'Draft' | 'Requested' | 'Allocated' | 'Rejected',
+    });
+  }
+  if (rows.length === 0) return 0;
+  await database.insert(schema.assignmentMonths).values(rows);
+  return rows.length;
+}
+
+/**
  * Initialize persistence at server boot.
  *
  * - `DATABASE_URL` set   -> migrate, then seed empty core tables.
@@ -164,6 +203,8 @@ export async function initPersistence(): Promise<void> {
   // Demand/staffing fulfilment.
   await seedIfEmpty(database, schema.assignments, seed.assignments); // -> requests, resources
   await seedIfEmpty(database, schema.assignmentDays, seed.assignmentDays); // -> assignments
+  await seedIfEmpty(database, schema.assignmentMonths, seed.assignmentMonths); // -> assignments
+  await backfillAssignmentMonths(database); // B3: month rows for pre-existing day rows
 
   // Commercial chain.
   await seedIfEmpty(database, schema.orders, seed.orders); // -> contracts, projectPartners

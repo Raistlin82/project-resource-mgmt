@@ -64,6 +64,7 @@ import type {
   AuditLog,
   FxRate,
   AssignmentDay,
+  AssignmentMonth,
   Holiday,
   PlanningPeriod,
 } from '../app/services/api.service';
@@ -206,6 +207,44 @@ function buildAssignmentDays(
 }
 
 export const assignmentDays: AssignmentDay[] = buildAssignmentDays(assignments, holidays);
+
+/**
+ * Per-month lifecycle rows (B3), derived — not hand-typed — from the seeded
+ * assignmentDays so a month row exists for exactly the months each assignment
+ * actually books. Every seeded assignment is 'Allocated', so its months are too;
+ * ONE month of assignment '2' is left 'Requested' (governed by the seeded
+ * approval AR4 below) to give the People Manager page and the smoke suite a
+ * pending item to decide out of the box.
+ */
+const PENDING_SEED_MONTH = { assignmentId: '2', month: '2026-08', approvalId: 'AR4' } as const;
+
+function buildAssignmentMonths(
+  rows: readonly Assignment[],
+  days: readonly AssignmentDay[],
+): AssignmentMonth[] {
+  const monthsByAssignment = new Map<string, Set<string>>();
+  for (const d of days) {
+    const set = monthsByAssignment.get(d.assignmentId) ?? new Set<string>();
+    set.add(d.date.slice(0, 7));
+    monthsByAssignment.set(d.assignmentId, set);
+  }
+  const out: AssignmentMonth[] = [];
+  for (const a of rows) {
+    for (const month of [...(monthsByAssignment.get(a.id) ?? [])].sort()) {
+      const pending = a.id === PENDING_SEED_MONTH.assignmentId && month === PENDING_SEED_MONTH.month;
+      out.push({
+        id: `${a.id}:${month}`,
+        assignmentId: a.id,
+        month,
+        status: pending ? 'Requested' : 'Allocated',
+        ...(pending ? { approvalId: PENDING_SEED_MONTH.approvalId, plannerNote: 'Extra month to cover the migration cut-over' } : {}),
+      });
+    }
+  }
+  return out;
+}
+
+export const assignmentMonths: AssignmentMonth[] = buildAssignmentMonths(assignments, assignmentDays);
 
 export const timeEntries: TimeEntry[] = [
   { id: 'TE1', assignmentId: '1', requestId: '1', resourceId: '1', projectId: '1', date: '2026-04-06', hours: 8, status: 'Approved', notes: 'Backend integration', approvedBy: '1', approvedAt: '2026-04-07T09:00:00.000Z' },
@@ -594,6 +633,11 @@ export const approvalRequests: ApprovalRequest[] = [
   { id: 'AR3', kind: 'ChangeRequest', refId: 'CR1', projectId: '1', amount: 12000, requestedBy: '3', createdAt: '2026-04-20T10:30:00.000Z', note: 'Scope extension awaiting delivery sign-off',
     status: 'Pending', currentStep: 0, slaDueAt: '2026-04-23T10:30:00.000Z',
     steps: [{ role: 'delivery-executive', status: 'Pending' }] },
+  // AR4: Allocation (B3). refId is the MONTH ROW id, not an assignment id —
+  // this is the pending month the People Manager page opens on.
+  { id: 'AR4', kind: 'Allocation', refId: '2:2026-08', projectId: '1', requestedBy: '3', createdAt: '2026-07-28T08:00:00.000Z', note: 'Extra month to cover the migration cut-over',
+    status: 'Pending', currentStep: 0, slaDueAt: '2026-07-31T08:00:00.000Z',
+    steps: [{ role: 'resource-manager', status: 'Pending' }] },
 ];
 
 // --- Audit log --------------------------------------------------------------

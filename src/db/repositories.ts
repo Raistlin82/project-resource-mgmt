@@ -86,6 +86,7 @@ import type {
   AuditLog,
   FxRate,
   AssignmentDay,
+  AssignmentMonth,
   Holiday,
   PlanningPeriod,
 } from '../app/services/api.service';
@@ -350,6 +351,8 @@ export interface Repositories {
   // entities whose `id` IS the natural key (ISO date / 'YYYY-MM') already, so —
   // unlike `languages`/`fxRates`/`countries` — they need no synthetic-id adapter.
   assignmentDays: Repository<AssignmentDay>;
+  // Per-month lifecycle rows (B3) — see assignmentDays comment above.
+  assignmentMonths: Repository<AssignmentMonth>;
   holidays: Repository<Holiday>;
   planningPeriods: Repository<PlanningPeriod>;
 }
@@ -430,6 +433,7 @@ function buildPgRepositories(database: DrizzleDb): Repositories {
     approvalRequests: pg<ApprovalRequest>(schema.approvalRequests),
     auditLogs: pg<AuditLog>(schema.auditLogs),
     assignmentDays: pg<AssignmentDay>(schema.assignmentDays),
+    assignmentMonths: pg<AssignmentMonth>(schema.assignmentMonths),
     holidays: pg<Holiday>(schema.holidays),
     planningPeriods: pg<PlanningPeriod>(schema.planningPeriods),
   };
@@ -496,6 +500,7 @@ function buildInMemoryRepositories(): Repositories {
     approvalRequests: mem<ApprovalRequest>(seed.approvalRequests),
     auditLogs: mem<AuditLog>(seed.auditLogs),
     assignmentDays: mem<AssignmentDay>(seed.assignmentDays),
+    assignmentMonths: mem<AssignmentMonth>(seed.assignmentMonths),
     holidays: mem<Holiday>(seed.holidays),
     planningPeriods: mem<PlanningPeriod>(seed.planningPeriods),
   };
