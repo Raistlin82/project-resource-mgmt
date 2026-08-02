@@ -1771,6 +1771,39 @@ async function checkLegacyAllocationApproval() {
   await req('DELETE', `/assignments/${assignmentId}`);
 }
 
+/**
+ * C1 — resource kinds. A subco must carry a vendor; nobody else may. The kind
+ * itself must be one of the three known values.
+ */
+async function checkResourceKinds() {
+  const vendors = await req('GET', '/vendors');
+  const vendorId = (vendors.body || [])[0]?.id;
+  check('C1 a vendor exists to attach a subco to', typeof vendorId === 'string', `vendors=${vendors.body?.length}`);
+  if (!vendorId) return;
+
+  const base = { role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, hireDate: '2026-01-01' };
+
+  const badKind = await req('POST', '/resources', { body: { ...base, name: 'C1 bad kind', kind: 'contractor' } });
+  check('C1 an unknown kind is rejected', badKind.status === 400, `status=${badKind.status}`);
+
+  const subcoNoVendor = await req('POST', '/resources', { body: { ...base, name: 'C1 subco no vendor', kind: 'subco' } });
+  check('C1 a subco without a vendor is rejected', subcoNoVendor.status === 400, `status=${subcoNoVendor.status}`);
+
+  const subcoBadVendor = await req('POST', '/resources', { body: { ...base, name: 'C1 subco bad vendor', kind: 'subco', vendorId: 'V-nope' } });
+  check('C1 a subco with an unknown vendor is rejected', subcoBadVendor.status === 400, `status=${subcoBadVendor.status}`);
+
+  const internalWithVendor = await req('POST', '/resources', { body: { ...base, name: 'C1 internal with vendor', kind: 'internal', vendorId } });
+  check('C1 a non-subco carrying a vendor is rejected', internalWithVendor.status === 400, `status=${internalWithVendor.status}`);
+
+  // POST /resources responds 201 Created (see src/server.ts), not the generic
+  // crud() 200 — matched here rather than asserting 200 to avoid a false FAIL.
+  const subco = await req('POST', '/resources', { body: { ...base, name: 'C1 subco ok', kind: 'subco', vendorId } });
+  check('C1 a subco with a vendor is created', subco.status === 201 && subco.body?.kind === 'subco', `status=${subco.status} kind=${subco.body?.kind}`);
+
+  const plain = await req('POST', '/resources', { body: { ...base, name: 'C1 plain resource' } });
+  check('C1 an omitted kind defaults to internal', plain.status === 201 && plain.body?.kind === 'internal', `kind=${plain.body?.kind}`);
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -1850,6 +1883,15 @@ async function main() {
     await checkLegacyAllocationApproval();
   } catch (err) {
     console.log(`FAIL  legacy allocation-approval flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the C1 resource-kind
+  // validation flow never masks or blocks any of the prior section results.
+  try {
+    await checkResourceKinds();
+  } catch (err) {
+    console.log(`FAIL  resource-kinds flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

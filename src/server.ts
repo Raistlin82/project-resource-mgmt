@@ -16,6 +16,7 @@ import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity, monthlyTar
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
+import { isResourceKind, RESOURCE_KINDS } from './app/services/resource-kind.util';
 import { maxIdSeq } from './server/id-seq.util';
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
@@ -729,7 +730,7 @@ apiRouter.use((req, res, next) => {
 // are the RESOLVED effective rate (override ?? rate card). The per-resource
 // OVERRIDE is written via costRateOverride/billRateOverride, which the handlers
 // map onto the cost_rate/bill_rate columns (see applyRateOverrides).
-const RESOURCE_FIELDS = ['name', 'role', 'skills', 'projectRoles', 'externalExperience', 'profilePicture', 'resume', 'capacity', 'managerId', 'organization', 'location', 'hireDate', 'terminationDate'] as const;
+const RESOURCE_FIELDS = ['name', 'role', 'skills', 'projectRoles', 'externalExperience', 'profilePicture', 'resume', 'capacity', 'managerId', 'organization', 'location', 'hireDate', 'terminationDate', 'kind', 'vendorId'] as const;
 
 /**
  * Repository-backed equivalent of the array `exists()` helper: a value is a
@@ -1275,6 +1276,26 @@ function applyRateOverrides(body: Partial<Resource>, reqBody: unknown): string |
   return null;
 }
 
+/**
+ * Validate the C1 kind/vendor pair. Returns a 400-suitable message, or null.
+ * A subco MUST belong to a vendor; nobody else may carry one — an internal
+ * person with a supplier attached is an incoherent record, not a harmless
+ * extra field.
+ */
+async function validateResourceKind(kind: unknown, vendorId: unknown): Promise<string | null> {
+  if (kind !== undefined && !isResourceKind(kind)) {
+    return `kind must be one of ${RESOURCE_KINDS.join(', ')}`;
+  }
+  const effective = isResourceKind(kind) ? kind : 'internal';
+  if (effective === 'subco') {
+    if (typeof vendorId !== 'string' || vendorId === '') return 'a subco resource requires a vendorId';
+    if (!(await existsRepo(repos.vendors, vendorId))) return 'vendorId must reference an existing vendor';
+  } else if (vendorId !== undefined && vendorId !== null && vendorId !== '') {
+    return `only a subco resource may carry a vendorId (kind is ${effective})`;
+  }
+  return null;
+}
+
 apiRouter.get('/resources', async (_req, res) => { res.json(await resolveResourceRates(await repos.resources.list())); });
 apiRouter.get('/users', async (_req, res) => { res.json(await repos.users.list()); });
 apiRouter.get('/resources/:id', async (req, res) => {
@@ -1323,6 +1344,12 @@ apiRouter.post('/resources', async (req, res) => {
   // resource-organizations. Optional; only supplied values are checked.
   const catalogErr = await validateResourceCatalogRefs(body);
   if (catalogErr) { res.status(400).json({ error: catalogErr }); return; }
+  // C1: kind must be one of the known values, and only a subco may carry a
+  // vendorId (and must carry one). Pin the default so downstream reads never
+  // see kind absent.
+  const kindErr = await validateResourceKind(body.kind, body.vendorId);
+  if (kindErr) { res.status(400).json({ error: kindErr }); return; }
+  if (body.kind === undefined) body.kind = 'internal';
   const item = {
     skills: [], projectRoles: [], externalExperience: [],
     ...body,
@@ -1374,6 +1401,24 @@ apiRouter.put('/resources/:id', async (req, res) => {
   // REFERENCE-DATA INTEGRITY (Phase F2): validate any supplied location/organization.
   const catalogErr = await validateResourceCatalogRefs(body);
   if (catalogErr) { res.status(400).json({ error: catalogErr }); return; }
+  // C1: validate the MERGED kind/vendorId state, not the body in isolation —
+  // a partial PUT that changes only one of the two fields must still produce
+  // a coherent pair (e.g. a kind-only PUT to 'subco' is rejected when the
+  // stored row has no vendor, and a vendorId-only PUT is rejected when the
+  // stored kind isn't 'subco'). When the effective kind is no longer 'subco'
+  // and the caller did not touch vendorId, the stale stored vendor is cleared
+  // with an explicit null (which means "clear to absent" on both adapters)
+  // rather than rejected or silently carried forward — a PUT that moves a
+  // resource away from being a subco must not leave an orphaned vendor behind.
+  const mergedKind = body.kind ?? existing.kind;
+  const vendorSupplied = body.vendorId !== undefined;
+  let mergedVendorId: string | null | undefined = vendorSupplied ? body.vendorId : existing.vendorId;
+  if (!vendorSupplied && mergedKind !== 'subco' && existing.vendorId !== undefined) {
+    body.vendorId = null as unknown as undefined;
+    mergedVendorId = null;
+  }
+  const kindErr = await validateResourceKind(mergedKind, mergedVendorId);
+  if (kindErr) { res.status(400).json({ error: kindErr }); return; }
   const updated = await repos.resources.update(req.params.id, body);
   const [resolved] = await resolveResourceRates([updated as Resource]);
   res.json(resolved);
