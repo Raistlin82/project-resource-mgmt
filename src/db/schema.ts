@@ -40,6 +40,7 @@ import type {
   ApprovalStatus,
   ApprovalStep,
   AssignmentMonth,
+  ResourceKind,
 } from '../app/services/api.service';
 
 // ---------------------------------------------------------------------------
@@ -100,6 +101,11 @@ export const resources = pgTable(
     managerId: text('manager_id'),
     organization: text('organization'),
     location: text('location'),
+    // C1: resource kind. Default 'internal' keeps every pre-existing row a real
+    // person, so the migration needs no backfill.
+    kind: text('kind').$type<ResourceKind>().notNull().default('internal'),
+    // Vendor a subco belongs to; NULL for internal and dummy resources.
+    vendorId: text('vendor_id').references(() => vendors.id),
     costRate: doublePrecision('cost_rate'),
     billRate: doublePrecision('bill_rate'),
     // Resource lifecycle: hireDate (data di assunzione) is required at create

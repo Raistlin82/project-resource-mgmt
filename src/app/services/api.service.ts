@@ -3,8 +3,9 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { API_BASE_URL } from './api-config';
 import type { CapacityCell, CapacityRow, CapacityTotals } from './capacity.util';
+import type { ResourceKind } from './resource-kind.util';
 
-export type { CapacityCell, CapacityRow, CapacityTotals };
+export type { CapacityCell, CapacityRow, CapacityTotals, ResourceKind };
 
 export interface Resource {
   id: string;
@@ -66,6 +67,15 @@ export interface Resource {
    * `Setting` keyed `hoursPerDay`. Time-phased allocation (B1).
    */
   contractHoursPerDay?: number;
+  /**
+   * Resource kind (C1). 'internal' is a real person; 'dummy' is a placeholder
+   * for a person not yet identified; 'subco' is an external collaborator
+   * belonging to a vendor. Optional on the wire for backward compatibility —
+   * read it through `kindOf()`, which defaults an absent value to 'internal'.
+   */
+  kind?: ResourceKind;
+  /** Vendor a 'subco' resource belongs to (FK to the vendors catalog). Required for subco, absent otherwise. */
+  vendorId?: string;
 }
 
 export interface ResourceRequest {

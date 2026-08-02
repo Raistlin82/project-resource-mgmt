@@ -99,6 +99,24 @@ export const resources: Resource[] = [
   { id: '3', name: 'Alice Smith', role: 'Designer',
     skills: [{ name: 'Figma', level: 3 }], projectRoles: ['UX Designer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 55, utilizationPlanned: 55, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', hireDate: '2023-01-16', contractHoursPerDay: 4 },
+  // C1 — placeholder and external resources. The manual pre-loads dummies by
+  // practice / professional level / day rate (§3.2.3.1); these mirror that, so
+  // the feature is visible on first boot. `contractHoursPerDay` is the BASE for
+  // ONE FTE — the multi-FTE ceiling is derived from it (dailyCapFor), never
+  // stored. `utilization` starts at 0: nothing is booked on them yet, and for a
+  // placeholder the scalar is meaningless anyway (it is not an internal KPI).
+  { id: '4', name: 'Dummy — Senior Developer', role: 'Developer', kind: 'dummy',
+    skills: [], projectRoles: ['Senior Developer'],
+    externalExperience: [], profilePicture: '', resume: '', utilization: 0, utilizationPlanned: 0, capacity: 40,
+    organization: 'Engineering', location: 'Remote', hireDate: '2026-01-01', contractHoursPerDay: 8 },
+  { id: '5', name: 'Dummy — Associate PMO', role: 'Consultant', kind: 'dummy',
+    skills: [], projectRoles: ['Business Consultant'],
+    externalExperience: [], profilePicture: '', resume: '', utilization: 0, utilizationPlanned: 0, capacity: 40,
+    organization: 'Consulting', location: 'Remote', hireDate: '2026-01-01', contractHoursPerDay: 8 },
+  { id: '6', name: 'Subco — Mediolanum Senior Developer', role: 'Developer', kind: 'subco', vendorId: 'V4',
+    skills: [{ name: 'Java', level: 3 }], projectRoles: ['Senior Developer'],
+    externalExperience: [], profilePicture: '', resume: '', utilization: 0, utilizationPlanned: 0, capacity: 40,
+    organization: 'Engineering', location: 'Remote', hireDate: '2026-01-01', contractHoursPerDay: 8 },
 ];
 
 export const users: User[] = [
