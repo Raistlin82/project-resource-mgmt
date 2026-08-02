@@ -87,4 +87,21 @@ describe('AllocationApprovalsComponent', () => {
     fixture.detectChanges();
     expect((host.querySelector('[data-test="multi-approve"]') as HTMLButtonElement).disabled).toBe(false);
   });
+
+  it('opens the modal in multi mode with a section per selected resource', async () => {
+    const { fixture } = setup(true);
+    await flush(fixture);
+
+    const host = fixture.nativeElement as HTMLElement;
+    host.querySelectorAll<HTMLInputElement>('[data-test="select-resource"]').forEach(cb => cb.click());
+    fixture.detectChanges();
+    host.querySelector<HTMLButtonElement>('[data-test="multi-approve"]')!.click();
+    fixture.detectChanges();
+
+    expect(host.querySelector('[data-test="approve-continue"]')).not.toBeNull();
+    const sections = host.querySelectorAll('[data-test="resource-section"]');
+    expect(sections.length).toBe(2);
+    const names = Array.from(sections).map(s => s.textContent?.trim());
+    expect(names).toEqual(expect.arrayContaining(['Ada', 'Bob']));
+  });
 });

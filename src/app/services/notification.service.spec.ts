@@ -40,6 +40,15 @@ describe('NotificationService', () => {
     expect(service.items()[0].type).toBe('error');
   });
 
+  it('success() shows an auto-dismissing success toast', () => {
+    service.success('Saved');
+    expect(service.items().length).toBe(1);
+    expect(service.items()[0].type).toBe('success');
+
+    vi.advanceTimersByTime(5000);
+    expect(service.items().length).toBe(0);
+  });
+
   it('does not let repeated errors auto-clear, so a flaky backend keeps them visible', () => {
     service.error('fail 1');
     service.error('fail 2');

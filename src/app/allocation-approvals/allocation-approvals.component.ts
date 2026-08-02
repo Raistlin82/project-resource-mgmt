@@ -91,10 +91,11 @@ function shiftMonth(month: string, delta: number): string {
  * settles (no 401 latch). Identity is read reactively — never snapshotted at
  * field-init.
  *
- * The single-resource approval modal (Task 11 — `ApprovalModalComponent`) is
- * rendered behind the standard `appModal` backdrop when `modalResourceId()` is
- * set; deciding a month reloads the feed. Multi-resource approve (Task 12) is
- * NOT built here: `selectedResourceIds` is the public hook that task wires into.
+ * The approval modal (`ApprovalModalComponent`) is rendered behind the standard
+ * `appModal` backdrop whenever `modalResourceId()` (single-resource, Task 11) or
+ * `multiMode()` (multi-resource, Task 12 — the toolbar's "Approve selected"
+ * button, gated on more than one entry in `selectedResourceIds()`) is set;
+ * deciding a month reloads the feed either way.
  */
 @Component({
   selector: 'app-allocation-approvals',
@@ -237,15 +238,17 @@ function shiftMonth(month: string, delta: number): string {
         }
       </app-list-state>
 
-      <!-- Approval modal (Task 11): the standard modal backdrop + focus trap
-           directive used across the app; the panel content lives in
-           ApprovalModalComponent, which owns its own header/body/footer. -->
-      @if (modalResourceId()) {
+      <!-- Approval modal (Task 11 single-resource, Task 12 multi-resource): the
+           standard modal backdrop + focus trap directive used across the app;
+           the panel content lives in ApprovalModalComponent, which owns its
+           own header/body/footer. -->
+      @if (modalResourceId() || multiMode()) {
         <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
              appModal ariaLabelledby="approvalModalTitle" (dismiss)="closeModal()">
           <app-approval-modal
-            [rows]="modalRows()"
+            [rows]="multiMode() ? selectedRows() : modalRows()"
             [months]="months()"
+            [multi]="multiMode()"
             (decided)="reload()"
             (closed)="closeModal()" />
         </div>
@@ -328,12 +331,12 @@ export class AllocationApprovalsComponent {
     }));
   });
 
-  /** Public: the spec asserts on it, and Task 12's multi-resource mode reads it. */
+  /** Public: the spec asserts on it, and the multi-resource mode reads it. */
   selectedResourceIds = signal<ReadonlySet<string>>(new Set());
 
-  /** Placeholder hook for the Task 11 approval modal. */
+  /** Set while the single-resource approval modal is open. */
   protected modalResourceId = signal<string | null>(null);
-  /** Placeholder hook for the Task 12 multi-resource approve flow. */
+  /** Set while the multi-resource approve modal is open. */
   protected multiMode = signal(false);
 
   protected toggleResource(resourceId: string): void {
@@ -350,6 +353,7 @@ export class AllocationApprovalsComponent {
 
   protected closeModal(): void {
     this.modalResourceId.set(null);
+    this.multiMode.set(false);
   }
 
   /** The modal's `rows` input: the single resource behind `modalResourceId`, as
@@ -366,6 +370,14 @@ export class AllocationApprovalsComponent {
     if (!id) return [];
     const row = this.feed().rows.find(r => r.resourceId === id);
     return row ? [row] : [];
+  });
+
+  /** The modal's `rows` input in multi mode: every currently-selected
+   *  resource's full `AllocationApprovalRow` (with `items`) from the current
+   *  feed, in the same shape `modalRows` uses for the single-resource case. */
+  protected selectedRows = computed<AllocationApprovalRow[]>(() => {
+    const ids = this.selectedResourceIds();
+    return this.feed().rows.filter(r => ids.has(r.resourceId));
   });
 
   protected openMultiApprove(): void {

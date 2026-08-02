@@ -34,6 +34,10 @@ export class NotificationService {
     this.show(message, 'error');
   }
 
+  success(message: string): void {
+    this.show(message, 'success');
+  }
+
   dismiss(id: number): void {
     this._items.update(list => list.filter(n => n.id !== id));
   }
