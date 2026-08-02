@@ -20,7 +20,7 @@ import type { SemaphoreBand } from '../services/capacity.util';
 import { monthsInRange } from '../services/capacity.util';
 
 /** Empty envelope used until auth settles (and as the resource default). */
-const EMPTY: CapacityMonthly = { months: [], rows: [], totals: {} };
+const EMPTY: CapacityMonthly = { months: [], rows: [], demandRows: [], totals: {} };
 
 /** How many months to pad the range-selector option list beyond the loaded window. */
 const OPTION_PAD_MONTHS = 6;

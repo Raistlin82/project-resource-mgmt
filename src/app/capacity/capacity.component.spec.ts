@@ -30,9 +30,12 @@ const ENVELOPE: CapacityMonthly = {
       },
     },
   ],
+  // C1: no dummy/subco in this fixture, so demandRows is empty and no month
+  // has uncovered demand — this test predates the rollup partition (B2).
+  demandRows: [],
   totals: {
-    '2026-07': { demandFteConfirmed: 1.125, demandFtePlanned: 1.5, capacityFte: 2, resourceCount: 2 },
-    '2026-08': { demandFteConfirmed: 1.45, demandFtePlanned: 1.8, capacityFte: 2, resourceCount: 2 },
+    '2026-07': { demandFteConfirmed: 1.125, demandFtePlanned: 1.5, capacityFte: 2, resourceCount: 2, demandFteUncovered: 0 },
+    '2026-08': { demandFteConfirmed: 1.45, demandFtePlanned: 1.8, capacityFte: 2, resourceCount: 2, demandFteUncovered: 0 },
   },
 };
 

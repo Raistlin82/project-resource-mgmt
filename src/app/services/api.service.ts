@@ -244,12 +244,15 @@ export interface AllocationDecisionResult {
 /**
  * Envelope returned by `GET /capacity/monthly` (B2): a monthly FTE
  * capacity/demand rollup across resources. `months` are the requested
- * ('YYYY-MM') buckets; `rows` carry each resource's per-month cells; `totals`
- * aggregates confirmed/planned demand and capacity FTE per month.
+ * ('YYYY-MM') buckets; `rows` carry each internal resource's per-month cells;
+ * `totals` aggregates confirmed/planned demand and capacity FTE per month.
+ * `demandRows` (C1) carries dummy/subco rows — same monthly cells, but they
+ * contribute no capacity or headcount, only `totals[month].demandFteUncovered`.
  */
 export interface CapacityMonthly {
   months: string[];
   rows: CapacityRow[];
+  demandRows: CapacityRow[];
   totals: Record<string, CapacityTotals>;
 }
 

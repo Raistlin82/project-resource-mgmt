@@ -122,4 +122,78 @@ describe('rollupMonthly', () => {
     expect(row.monthly['2026-10'].confirmedHours).toBe(0);
     expect(row.monthly['2026-10'].plannedHours).toBe(8);
   });
+
+  it('keeps dummy and subco out of the internal rows, totals and headcount', () => {
+    const rollup = rollupMonthly({
+      resources: [
+        { id: 'R1', name: 'Ada', kind: 'internal' },
+        { id: 'R2', name: 'Dummy SAP', kind: 'dummy' },
+        { id: 'R3', name: 'Subco Dev', kind: 'subco' },
+      ],
+      assignments: [
+        { id: 'A1', resourceId: 'R1' },
+        { id: 'A2', resourceId: 'R2' },
+        { id: 'A3', resourceId: 'R3' },
+      ],
+      assignmentMonths: [
+        { assignmentId: 'A1', month: '2026-09', status: 'Allocated' },
+        { assignmentId: 'A2', month: '2026-09', status: 'Allocated' },
+        { assignmentId: 'A3', month: '2026-09', status: 'Allocated' },
+      ],
+      assignmentDays: [
+        { assignmentId: 'A1', date: '2026-09-01', hours: 8 },
+        { assignmentId: 'A2', date: '2026-09-01', hours: 16 },
+        { assignmentId: 'A3', date: '2026-09-01', hours: 8 },
+      ],
+      months: ['2026-09'],
+      hoursPerDay: 8,
+      holidays: new Set<string>(),
+    });
+
+    expect(rollup.rows.map(r => r.resourceId)).toEqual(['R1']);
+    expect(rollup.demandRows.map(r => r.resourceId)).toEqual(['R2', 'R3']);
+    // One internal head, so one FTE of capacity — the dummy and the subco add none.
+    expect(rollup.totals['2026-09'].resourceCount).toBe(1);
+    expect(rollup.totals['2026-09'].capacityFte).toBeCloseTo(1, 5);
+  });
+
+  it('reports uncovered demand separately from internal demand', () => {
+    const rollup = rollupMonthly({
+      resources: [
+        { id: 'R1', name: 'Ada', kind: 'internal' },
+        { id: 'R2', name: 'Dummy SAP', kind: 'dummy' },
+      ],
+      assignments: [{ id: 'A1', resourceId: 'R1' }, { id: 'A2', resourceId: 'R2' }],
+      assignmentMonths: [
+        { assignmentId: 'A1', month: '2026-09', status: 'Allocated' },
+        { assignmentId: 'A2', month: '2026-09', status: 'Requested' },
+      ],
+      assignmentDays: [
+        { assignmentId: 'A1', date: '2026-09-01', hours: 8 },
+        { assignmentId: 'A2', date: '2026-09-01', hours: 16 },
+      ],
+      months: ['2026-09'],
+      hoursPerDay: 8,
+      holidays: new Set<string>(),
+    });
+
+    const t = rollup.totals['2026-09'];
+    const standard = standardMonthlyHours('2026-09', 8, new Set<string>());
+    // The internal figure counts only Ada; the uncovered figure only the dummy,
+    // and it follows the same planned (Requested + Allocated) rule.
+    expect(t.demandFtePlanned).toBeCloseTo(8 / standard, 5);
+    expect(t.demandFteUncovered).toBeCloseTo(16 / standard, 5);
+  });
+
+  it('treats a resource with no kind as internal', () => {
+    const rollup = rollupMonthly({
+      resources: [{ id: 'R1', name: 'Legacy row' }],
+      assignments: [{ id: 'A1', resourceId: 'R1' }],
+      assignmentMonths: [{ assignmentId: 'A1', month: '2026-09', status: 'Allocated' }],
+      assignmentDays: [{ assignmentId: 'A1', date: '2026-09-01', hours: 8 }],
+      months: ['2026-09'], hoursPerDay: 8, holidays: new Set<string>(),
+    });
+    expect(rollup.rows.map(r => r.resourceId)).toEqual(['R1']);
+    expect(rollup.demandRows).toEqual([]);
+  });
 });
