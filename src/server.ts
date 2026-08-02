@@ -10,14 +10,8 @@ import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
 import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
-import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours, decisionToAssignmentStatus, allocationApproverStep } from './app/services/staffing.util';
-import { deriveAssignmentStatus, monthRowId, parseMonthRowId, type MonthStatus } from './app/services/allocation-month.util';
-// `monthlyAggregateHours` is unused until a later B3 task wires the
-// status-weighted aggregates onto month rows. Kept on its OWN import line (not
-// merged into the one above) so the unused-vars suppression below covers only
-// that one name, not the four already in use.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import { monthlyAggregateHours } from './app/services/allocation-month.util';
+import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, decisionToAssignmentStatus, allocationApproverStep } from './app/services/staffing.util';
+import { deriveAssignmentStatus, monthRowId, parseMonthRowId, monthlyAggregateHours, type MonthStatus } from './app/services/allocation-month.util';
 import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity } from './app/services/calendar.util';
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
@@ -1037,20 +1031,21 @@ async function validateResourceOrgRefs(body: { costCenters?: unknown; serviceOrg
  * B-UTILIZATION: recompute a resource's utilization FROM THE SOURCE OF TRUTH
  * (the status-filtered sum of its assigned hours across all assignments) rather
  * than mutating a stored counter by deltas. `utilization` is the confirmed
- * aggregate (Allocated assignments only); `utilizationPlanned` is the planned
- * aggregate (Requested + Allocated) — the two use different status subsets via
- * `assignmentAggregateHours`, not one shared total. Incremental ±contribution
- * with a per-step round+clamp[0,100] is lossy: a 100%→add→remove cycle
- * permanently loses the over-100 magnitude, an over-removal clamped at 0
- * destroys magnitude, and Math.round on every step accumulates drift — so the
- * stored number diverges from reality and saturates irreversibly. We
- * round/clamp only the final derived value here. MUST be called inside
- * `withLock('res:<id>')` so the read of all assignments + the single write are
- * serialized against concurrent changes.
+ * aggregate (Allocated MONTHS only); `utilizationPlanned` is the planned
+ * aggregate (Requested + Allocated months) — the two use different status
+ * subsets via `monthlyAggregateHours` (B3: weighed per-day by the status of the
+ * day's OWN month row, not the assignment's derived rollup), not one shared
+ * total. Incremental ±contribution with a per-step round+clamp[0,100] is lossy:
+ * a 100%→add→remove cycle permanently loses the over-100 magnitude, an
+ * over-removal clamped at 0 destroys magnitude, and Math.round on every step
+ * accumulates drift — so the stored number diverges from reality and saturates
+ * irreversibly. We round/clamp only the final derived value here. MUST be
+ * called inside `withLock('res:<id>')` so the read of all assignments + the
+ * single write are serialized against concurrent changes.
  *
- * Writes a dual aggregate: `utilization` (confirmed — Allocated assignments
- * only) and `utilizationPlanned` (planned — Requested + Allocated), via the
- * pure `assignmentAggregateHours` split.
+ * Writes a dual aggregate: `utilization` (confirmed — Allocated months only)
+ * and `utilizationPlanned` (planned — Requested + Allocated months), via the
+ * pure `monthlyAggregateHours` split.
  *
  * The `utilization_planned` column exists in Pg (migration `0008_big_speed.sql`),
  * so `utilizationPlanned` is persisted identically by both the in-memory and Pg
@@ -1060,7 +1055,10 @@ async function recomputeResourceUtilization(resourceId: string): Promise<void> {
   const resource = await repos.resources.get(resourceId);
   if (!resource) return;
   const rows = (await repos.assignments.list()).filter(a => a.resourceId === resourceId);
-  const { confirmed, planned } = assignmentAggregateHours(rows);
+  const statusByRowId = await monthStatusByRowId();
+  const assignmentIds = new Set(rows.map(a => a.id));
+  const days = (await repos.assignmentDays.list()).filter(d => assignmentIds.has(d.assignmentId));
+  const { confirmed, planned } = monthlyAggregateHours(days, statusByRowId);
   await repos.resources.update(resourceId, {
     utilization: clampUtil(utilizationContribution(confirmed, resource.capacity)),
     utilizationPlanned: clampUtil(utilizationContribution(planned, resource.capacity)),
@@ -1074,10 +1072,11 @@ async function recomputeResourceUtilization(resourceId: string): Promise<void> {
  * MUST be called inside `withLock('req:<id>')` so the read-all + single write
  * is serialized against concurrent assignment changes.
  *
- * Writes a dual aggregate: `staffedEffort` (confirmed — Allocated assignments
- * only, the basis `requestStatusFor` uses to derive Fulfilled/Open) and
- * `staffedEffortPlanned` (planned — Requested + Allocated), via the pure
- * `assignmentAggregateHours` split.
+ * Writes a dual aggregate: `staffedEffort` (confirmed — Allocated months only,
+ * the basis `requestStatusFor` uses to derive Fulfilled/Open) and
+ * `staffedEffortPlanned` (planned — Requested + Allocated months), via the
+ * pure `monthlyAggregateHours` split (B3: per-day, weighed by the status of
+ * the day's OWN month row).
  *
  * The `staffed_effort_planned` column exists in Pg (migration `0008_big_speed.sql`),
  * so `staffedEffortPlanned` is persisted identically by both the in-memory and Pg
@@ -1087,7 +1086,10 @@ async function recomputeRequestStaffing(requestId: string): Promise<void> {
   const request = await repos.requests.get(requestId);
   if (!request) return;
   const rows = (await repos.assignments.list()).filter(a => a.requestId === requestId);
-  const { confirmed, planned } = assignmentAggregateHours(rows);
+  const statusByRowId = await monthStatusByRowId();
+  const assignmentIds = new Set(rows.map(a => a.id));
+  const days = (await repos.assignmentDays.list()).filter(d => assignmentIds.has(d.assignmentId));
+  const { confirmed, planned } = monthlyAggregateHours(days, statusByRowId);
   await repos.requests.update(request.id, {
     staffedEffort: confirmed,
     staffedEffortPlanned: planned,
@@ -1105,8 +1107,8 @@ async function recomputeRequestStaffing(requestId: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /** Snapshot of every month row's status, keyed by composite row id. Consumed by
- *  the decision hook and the status-weighted aggregates (later B3 tasks). */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+ *  the status-weighted aggregates (`recomputeResourceUtilization`,
+ *  `recomputeRequestStaffing`) via `monthlyAggregateHours`. */
 async function monthStatusByRowId(): Promise<Map<string, MonthStatus>> {
   const rows = await repos.assignmentMonths.list();
   return new Map(rows.map(r => [r.id, r.status as MonthStatus]));
@@ -1907,16 +1909,18 @@ apiRouter.get('/capacity/monthly', async (req, res) => {
   if (monthToIdx(to) - monthToIdx(from) + 1 > 24) { res.status(400).json({ error: 'range must span at most 24 months' }); return; }
   const months = monthsInRange(from, to);
 
-  const [resources, assignments, assignmentDays, holidays, hoursPerDay] = await Promise.all([
+  const [resources, assignments, assignmentDays, assignmentMonthRows, holidays, hoursPerDay] = await Promise.all([
     repos.resources.list(),
     repos.assignments.list(),
     repos.assignmentDays.list(),
+    repos.assignmentMonths.list(),
     repos.holidays.list(),
     getHoursPerDay(),
   ]);
   const holSet = new Set(holidays.map(h => h.id));
+  const assignmentMonths = assignmentMonthRows.map(m => ({ assignmentId: m.assignmentId, month: m.month, status: m.status }));
 
-  res.json(rollupMonthly({ resources, assignments, assignmentDays, months, hoursPerDay, holidays: holSet }));
+  res.json(rollupMonthly({ resources, assignments, assignmentDays, assignmentMonths, months, hoursPerDay, holidays: holSet }));
 });
 
 apiRouter.get('/time-entries', async (_req, res) => { res.json(await repos.timeEntries.list()); });

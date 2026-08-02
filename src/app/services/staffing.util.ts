@@ -101,7 +101,11 @@ export function allocationApproverStep(managerId: string | undefined): ApprovalS
     : { role: 'resource-manager', status: 'Pending' };
 }
 
-/** Sum assignedHours split by lifecycle: confirmed = Allocated; planned = Requested + Allocated. */
+/**
+ * @deprecated B3 — superseded by `monthlyAggregateHours` (allocation-month.util),
+ * which weighs each day by the status of ITS month. Kept for the gap-A unit
+ * tests that document the pre-B3 rollup; no runtime caller remains.
+ */
 export function assignmentAggregateHours(rows: Pick<Assignment, 'assignedHours' | 'status'>[]): { confirmed: number; planned: number } {
   let confirmed = 0, planned = 0;
   for (const a of rows) {

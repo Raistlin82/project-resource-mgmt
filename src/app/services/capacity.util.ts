@@ -13,10 +13,13 @@ export interface CapacityTotals { demandFteConfirmed: number; demandFtePlanned: 
 export interface CapacityRollup { months: string[]; rows: CapacityRow[]; totals: Record<string, CapacityTotals>; }
 
 interface RollupResource { id: string; name: string; contractHoursPerDay?: number; hireDate?: string; terminationDate?: string; }
-interface RollupAssignment { id: string; resourceId: string; status: string; }
+interface RollupAssignment { id: string; resourceId: string; }
+interface RollupMonth { assignmentId: string; month: string; status: string; }
 interface RollupDay { assignmentId: string; date: string; hours: number; }
 export interface RollupInput {
   resources: RollupResource[]; assignments: RollupAssignment[]; assignmentDays: RollupDay[];
+  /** B3: per-month lifecycle state — the classifier for confirmed/planned. */
+  assignmentMonths: RollupMonth[];
   months: string[]; hoursPerDay: number; holidays: ReadonlySet<string>;
 }
 
@@ -54,8 +57,9 @@ export function isActiveInMonth(r: { hireDate?: string; terminationDate?: string
 }
 
 export function rollupMonthly(input: RollupInput): CapacityRollup {
-  const { resources, assignments, assignmentDays, months, hoursPerDay, holidays } = input;
+  const { resources, assignments, assignmentDays, assignmentMonths, months, hoursPerDay, holidays } = input;
   const asgById = new Map(assignments.map(a => [a.id, a]));
+  const statusByRowId = new Map(assignmentMonths.map(m => [`${m.assignmentId}:${m.month}`, m.status]));
   const byResMonth = new Map<string, Map<string, { confirmed: number; planned: number }>>();
   for (const d of assignmentDays) {
     const a = asgById.get(d.assignmentId); if (!a) continue;
@@ -63,10 +67,15 @@ export function rollupMonthly(input: RollupInput): CapacityRollup {
     // and semaphoreBand(NaN) falls through to 'over' — skip the row (cf. sumHoursByDate).
     if (!Number.isFinite(d.hours)) continue;
     const m = monthOf(d.date);
+    // B3: classify by THIS day's month-row status, not the assignment's derived
+    // rollup — a day whose month row is missing contributes to neither total
+    // (same rule as the pure `monthlyAggregateHours`).
+    const status = statusByRowId.get(`${d.assignmentId}:${m}`);
+    if (status === undefined) continue;
     let rm = byResMonth.get(a.resourceId); if (!rm) { rm = new Map(); byResMonth.set(a.resourceId, rm); }
     let c = rm.get(m); if (!c) { c = { confirmed: 0, planned: 0 }; rm.set(m, c); }
-    if (PLANNED.has(a.status)) c.planned += d.hours;
-    if (CONFIRMED.has(a.status)) c.confirmed += d.hours;
+    if (PLANNED.has(status)) c.planned += d.hours;
+    if (CONFIRMED.has(status)) c.confirmed += d.hours;
   }
   const targetByMonth = new Map(months.map(m => [m, standardMonthlyHours(m, hoursPerDay, holidays)]));
   const totals: Record<string, CapacityTotals> = {};
