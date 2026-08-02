@@ -157,6 +157,7 @@ A role not in the matched rule's list gets **403**. Path tests use `startsWith`
 | `/holidays` | `admin`, `delivery-executive` |
 | `/planning-periods` | `admin` only |
 | `/approval-requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/allocation-approvals` (B3 batch month decisions, `POST /allocation-approvals/decide`) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/integrations` | `finance`, `delivery-executive`, `admin` |
 
 **Open mutations (no rule):** collections not matched above are open to any
@@ -227,6 +228,7 @@ for the rationale.
 | **Change request** (`PUT /change-requests/:id` → `Approved`) | only `delivery-executive` or `admin` | the CR **creator** (`createdBy`); legacy rows fall back to `requestedBy`/`owner` | `createdBy` (pinned on POST) |
 | **Approval request** (`PUT /approval-requests/:id/decision`) | the role assigned to the **current step**, **or** (Allocation steps only) the specific resource identified by `step.approverId` (resource-id match); `admin` may decide any step; an `'unknown'` actor is rejected 401 | the **requester** (`requestedBy`) | `requestedBy` (pinned on POST); `step.approverId` (Allocation only, see below) |
 | **Allocation** (`PUT /approval-requests/:id/decision`, kind `Allocation`) | the resource's **People Manager** (`step.approverId`, matched in resource-id space via `actorResourceId`) — or any `resource-manager`-role holder as fallback when the resource has no `managerId`; `admin` may decide any step | the **proposer** (`requestedBy`, the actor who called `POST`/`PUT /assignments` with `status: 'Requested'`) | `requestedBy` (pinned at open); `step.approverId` = the resource's `managerId` at approval-creation time |
+| **Allocation, batched** (`POST /allocation-approvals/decide`, B3) | identical — the batch resolves each item's month row to its `approvalId` and runs the **same** `decideOneApproval` core, so SoD and per-step enforcement are one implementation, not two | identical (the **requester** of each item's approval) | identical; the month row's `approvalId` is server-written only (never taken from the body) |
 
 **Approval routing** (`buildApprovalSteps`): an item whose `amount` exceeds the
 high-value threshold (**50 000**) routes through a two-step chain
