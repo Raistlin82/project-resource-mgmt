@@ -1477,31 +1477,45 @@ apiRouter.put('/assignments/:id', async (req, res) => {
   // FK/hours/schedule patch first.
   await repos.assignments.update(req.params.id, body);
 
-  // RETARGET PROPAGATION (B3): a resource retarget invalidates every NON-DRAFT
-  // month row's governance — a 'Requested' row's pending approval names the
-  // OLD resource's manager as approver, and an 'Allocated' row is a commitment
-  // the OLD resource made. Re-baseline each one against the NEW resource,
-  // mirroring what a fresh submit would do: withdraw any pending approval,
-  // then either auto-approve (self-managed) straight back to 'Allocated' with
-  // no approval, or open a fresh 'Requested' approval routed to the NEW
-  // resource's manager. 'Draft' rows are untouched — they carry no approval
-  // and nothing has been promised about them. Pass the MERGED assignment (old
-  // fields + this body's new resourceId/requestId), never the stale
-  // `oldAssig`, to `createAllocationApproval` — it resolves the routing
-  // manager and the request's project FROM the assignment object it's given,
-  // so a stale resourceId would route the fresh approval to the OLD
-  // resource's manager, reproducing the exact bug this closes. This is
-  // approval-repo I/O + month-row writes only, done OUTSIDE any res:/req:
-  // lock and never nested inside an aggregate critical section (mirrors every
-  // other approval side-effect in this file); the aggregate recomputes below
-  // stay LAST so they read the post-retarget statuses.
+  // RETARGET PROPAGATION (B3): a resource retarget invalidates the governance
+  // of every month row carrying a LIVE commitment — a 'Requested' row's
+  // pending approval names the OLD resource's manager as approver, and an
+  // 'Allocated' row is a commitment the OLD resource made. Re-baseline each
+  // one against the NEW resource, mirroring what a fresh submit would do:
+  // withdraw any pending approval, then either auto-approve (self-managed)
+  // straight back to 'Allocated' with no approval, or open a fresh
+  // 'Requested' approval routed to the NEW resource's manager. 'Draft' rows
+  // are untouched — they carry no approval and nothing has been promised
+  // about them. 'Rejected' rows are ALSO untouched, deliberately, and for a
+  // different reason: a rejection is a closed conversation, not a live
+  // commitment — MONTH_TRANSITIONS (allocation-month.util) has no
+  // Rejected -> Allocated edge, and sweeping it in here would silently
+  // resubmit (or, on the self-managed branch, auto-approve) a month no
+  // planner ever asked to reopen; any stale approvalId it carries is left
+  // exactly as is, never withdrawn. Also deliberately absent: a
+  // planning-period (open/closed) gate — unlike a voluntary submit, a
+  // retarget corrects WHO does already-planned work, not how many hours are
+  // booked, so a closed month must not block fixing the assignee. Pass the
+  // MERGED assignment (old fields + this body's new resourceId/requestId),
+  // never the stale `oldAssig`, to `createAllocationApproval` — it resolves
+  // the routing manager and the request's project FROM the assignment object
+  // it's given, so a stale resourceId would route the fresh approval to the
+  // OLD resource's manager, reproducing the exact bug this closes. The
+  // self-managed check is hoisted out of the loop: the answer (is the
+  // proposer the NEW resource's manager?) cannot change between month rows of
+  // the same retarget. This is approval-repo I/O + month-row writes only,
+  // done OUTSIDE any res:/req: lock and never nested inside an aggregate
+  // critical section (mirrors every other approval side-effect in this
+  // file); the aggregate recomputes below stay LAST so they read the
+  // post-retarget statuses.
   if (body.resourceId !== undefined && body.resourceId !== oldAssig.resourceId) {
     const mergedAssig = { ...oldAssig, ...body, id: oldAssig.id } as Assignment;
+    const selfManaged = await autoApprovesAllocation(req, body.resourceId);
     const monthRows = (await repos.assignmentMonths.list())
-      .filter(m => m.assignmentId === oldAssig.id && m.status !== 'Draft');
+      .filter(m => m.assignmentId === oldAssig.id && (m.status === 'Allocated' || m.status === 'Requested'));
     for (const row of monthRows) {
       await withdrawAllocationApproval(row.approvalId, 'resource retargeted');
-      if (await autoApprovesAllocation(req, body.resourceId)) {
+      if (selfManaged) {
         // `null`, not `undefined`: clears approvalId to absent on both
         // adapters (Task 4's seam fix) — see the submit handler above for the
         // full rationale on this cast.

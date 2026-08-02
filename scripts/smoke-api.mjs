@@ -497,14 +497,23 @@ async function checkUtilizationAssignmentPayload() {
 /**
  * Regression guard for the retarget-propagation fix in `PUT /assignments/:id`
  * (src/server.ts): retargeting an assignment's `resourceId` must re-baseline
- * every NON-DRAFT month row's governance against the NEW resource — withdraw
- * any pending approval (it names the OLD resource's manager as approver) and
- * open a fresh one routed to the NEW resource's manager (or auto-approve if
- * the proposer IS the new resource's manager). Before this fix,
- * `refreshDerivedAssignmentStatus` only re-rolled the derived status from the
- * EXISTING month rows; a retargeted month kept reading its old status, booked
- * against the new resource, still governed (if any) by an approval naming
- * the OLD resource's manager as the empowered approver.
+ * every month row carrying a LIVE commitment (`Allocated`/`Requested`)
+ * against the NEW resource — withdraw any pending approval (it names the OLD
+ * resource's manager as approver) and open a fresh one routed to the NEW
+ * resource's manager (or auto-approve if the proposer IS the new resource's
+ * manager) — while `Draft`/`Rejected` rows, which carry no live commitment,
+ * are left exactly as they are. Before this fix, `refreshDerivedAssignmentStatus`
+ * only re-rolled the derived status from the EXISTING month rows; a
+ * retargeted month kept reading its old status, booked against the new
+ * resource, still governed (if any) by an approval naming the OLD resource's
+ * manager as the empowered approver.
+ *
+ * Asserts (a)-(d) below on the retargeted 'Requested' month, plus (e): a
+ * SECOND, 'Draft' month on the same assignment survives untouched. (e) is the
+ * closest live proof available for the exclusion boundary today — see the
+ * "NOT COVERED" note inline for why a genuine 'Rejected'-survives assertion
+ * could not be added (the decision hook that would let a live API call
+ * produce a 'Rejected' month row is a later, unimplemented task).
  *
  * SEED CHOICE — a resource pair with DIFFERENT managers, and a caller who is
  * the manager of NEITHER, so both the initial submit and the retarget open a
@@ -576,6 +585,44 @@ async function checkResourceRetargetPropagation() {
     );
   }
 
+  // SETUP 5 — a second month on the SAME assignment, left 'Draft' (booked,
+  // never submitted). This is the one EXCLUDED, no-live-commitment state
+  // actually reachable through the live API today (see the note on the
+  // 'Rejected' case below), so it stands in to prove the retarget code's
+  // exclusion branch is real, not just "no rows matched": a genuine month
+  // row exists on this assignment, is NOT Allocated/Requested, and must come
+  // through untouched.
+  const DRAFT_MONTH = '2026-08';
+  const draftDay = `${DRAFT_MONTH}-04`; // Tuesday
+  const draftAlloc = await req('PUT', `/assignments/${assignmentId}/allocation`, {
+    headers: CALLER_HEADERS,
+    body: { month: DRAFT_MONTH, dailyHours: { [draftDay]: 1 } },
+  });
+  check('retarget-propagation setup: a second month stays Draft (booked, not submitted)', draftAlloc.status === 200, `status=${draftAlloc.status}`);
+
+  // NOT COVERED (and why): a THIRD month built through submit -> reject
+  // (PUT /approval-requests/:id/decision as a non-requester) to exercise the
+  // 'Rejected' exclusion specifically, as asked. Verified live (throwaway
+  // repro, same steps, against this same running build) that this does NOT
+  // land a 'Rejected' row: the decision resolves fine and the ApprovalRequest
+  // itself flips to 'Rejected', but the single-request decision hook
+  // (PUT /approval-requests/:id/decision's post-decision effect) still
+  // resolves `refId` via a bare `repos.assignments.get(refId)` only — a B3
+  // approval's refId is the composite month-row id, which never matches a
+  // bare assignment id, so the month row's OWN `status` is left at
+  // 'Requested' (not 'Rejected') with the now-decided approvalId still
+  // attached. No handler in src/server.ts ever writes `status: 'Rejected'` to
+  // an assignmentMonths row today (confirmed by grep), and
+  // `isAllowedMonthTransition` — the transition guard that would gate this —
+  // is referenced only in a comment here, never called (the same "test-only,
+  // no server caller" shape already flagged for ALLOCATION_CLIENT_SETTABLE /
+  // isAllowedAllocationTransition earlier in this task). Wiring the decision
+  // hook onto month rows is a later, unimplemented task (per the B3 plan);
+  // per this task's own scope boundary, that is not this task's job. A
+  // genuine 'Rejected'-survives-retarget check belongs with that task, once a
+  // 'Rejected' month row is reachable through the live API without writing
+  // repo state directly.
+
   // RETARGET — PUT /assignments/:id { resourceId: NEW_RESOURCE_ID }.
   const retargeted = await req('PUT', `/assignments/${assignmentId}`, {
     headers: CALLER_HEADERS,
@@ -583,7 +630,8 @@ async function checkResourceRetargetPropagation() {
   });
   check(`PUT /api/assignments/${assignmentId} {resourceId:'${NEW_RESOURCE_ID}'} -> 200`, retargeted.status === 200, `status=${retargeted.status}, body=${JSON.stringify(retargeted.body)}`);
 
-  const after = await req('GET', `/assignments/${assignmentId}/allocation?from=${MONTH}&to=${MONTH}`, { headers: CALLER_HEADERS });
+  // Range spans BOTH the retargeted month and the untouched Draft month (e).
+  const after = await req('GET', `/assignments/${assignmentId}/allocation?from=${MONTH}&to=${DRAFT_MONTH}`, { headers: CALLER_HEADERS });
   const monthRow = Array.isArray(after.body?.months) ? after.body.months.find((m) => m.month === MONTH) : undefined;
 
   // (a) the month row came back as 'Requested'.
@@ -618,6 +666,15 @@ async function checkResourceRetargetPropagation() {
       newAr ? `ar=${JSON.stringify(newAr)}` : `missing id=${newApprovalId}`,
     );
   }
+
+  // (e) the excluded 'Draft' month is untouched: same status, still no
+  // approvalId — the retarget's month-row loop never even reaches it.
+  const draftRow = Array.isArray(after.body?.months) ? after.body.months.find((m) => m.month === DRAFT_MONTH) : undefined;
+  check(
+    "B3 retarget: the excluded 'Draft' month survives untouched (same status, no approvalId)",
+    draftRow?.status === 'Draft' && draftRow?.approvalId === undefined,
+    `status=${draftRow?.status}, approvalId=${draftRow?.approvalId}`,
+  );
 
   // Cleanup: disposable throwaway assignment — delete it so reruns never
   // accumulate cruft (and incidentally re-proves the DELETE fix withdraws the
