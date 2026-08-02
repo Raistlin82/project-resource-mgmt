@@ -214,8 +214,15 @@ async function checkCrud() {
 }
 
 /**
- * Step 3: ALLOCATION APPROVAL flow (src/server.ts POST /assignments + the
- * 'Allocation' approval kind + PUT /approval-requests/:id/decision).
+ * Step 3: ALLOCATION APPROVAL flow — B3 (Task 7) rewrite. Originally this
+ * section drove the whole lifecycle through POST /assignments carrying a
+ * client `status` (gap-A shape). That path no longer exists: `status` is now
+ * DERIVED exclusively from the (assignment, month) rows, and any client
+ * `status` on POST/PUT /assignments is a 400 (asserted below — this is one of
+ * the two carry-forward regressions this task closes). The lifecycle now
+ * runs: create (no status, derived 'Draft') -> book hours into a month via
+ * PUT .../allocation (lazily opens a 'Draft' month row) -> submit that month
+ * for approval -> decide via the still-existing PUT /approval-requests/:id/decision.
  *
  * IDENTITIES — chosen from src/db/seed.ts so this reads deterministically
  * against the demo dataset, and kept separate from RBAC_HEADERS/CRUD_SEGMENT
@@ -228,13 +235,20 @@ async function checkCrud() {
  *
  *   TARGET_RESOURCE_ID '2' (John Miller). His seeded `managerId` is '1'
  *     (Julie Armstrong) — NOT '3' (the proposer's own resource-id) — so
- *     `autoApprovesAllocation()` is false: the proposal does NOT auto-approve
- *     and a real 'Allocation' approval step is opened, routed to approverId
- *     '1' (role 'resource-manager', per allocationApproverStep()).
+ *     `autoApprovesAllocation()` is false: submitting the month does NOT
+ *     auto-approve and a real 'Allocation' approval step is opened, routed to
+ *     approverId '1' (role 'resource-manager', per allocationApproverStep()).
+ *     This is the "manager routing" the original section proved, now
+ *     exercised at the per-month layer.
  *
  *   TARGET_REQUEST_ID '4' (Project Beta - Platform Migration, Consultant) —
- *     matches resource '2's role and is the request it is already partly
- *     staffed against, so an incremental 'Requested' assignment is realistic.
+ *     matches resource '2's role.
+ *
+ *   MONTH '2026-07' — an Open planning period (seed opens 2026-04..2026-12).
+ *     Resource 2's only seeded assignment (id '3', 30h spread thinly over
+ *     2026-05-15..2026-09-15) contributes negligible hours on any single July
+ *     day, so booking 1h on 2026-07-06 (a Monday) stays far under the 8h/day
+ *     cap (resource 2's contractHoursPerDay).
  *
  *   DECIDER_HEADERS  X-User-Id '1' / X-User-Role 'admin'
  *     -> 'admin' may decide ANY step regardless of its role/approverId (so
@@ -242,6 +256,24 @@ async function checkCrud() {
  *        and actor '1' != the proposer's actor id '3', so the "requester
  *        cannot decide their own approval request" SoD guard (403 otherwise)
  *        does not trip.
+ *
+ * NOT PORTED (yet), and why: the ORIGINAL section also asserted that, after
+ * the decision, `GET /assignments` showed the governed assignment as
+ * 'Allocated'. The post-decision effect inside `PUT /approval-requests/:id/
+ * decision` still resolves `refId` via a bare `repos.assignments.get(refId)`
+ * only — it has no month-row-aware branch yet (per src/server.ts's own
+ * comment: "parseMonthRowId/monthlyAggregateHours are unused until later B3
+ * tasks (4-6, 8)"). A B3 approval's refId is the composite month-row id
+ * (`<assignmentId>:<month>`), which never matches a bare assignment id, so
+ * TODAY that post-decision hook is a silent no-op for a B3 approval: the
+ * ApprovalRequest itself DOES flip to 'Approved' (asserted below — this is
+ * "the decision applying to the governed entity" insofar as the governed
+ * APPROVAL is concerned), but neither the month row's nor the assignment's
+ * derived status changes as a result. Reinstating the original "assignment
+ * reads Allocated after decision" assertion here would pin exactly the gap a
+ * later task (wiring the decision hook onto month rows) is meant to close, so
+ * it is intentionally left out rather than asserted against today's (wrong)
+ * no-op behaviour. Expected to be added back once that task lands.
  *
  * Kept in its OWN try/catch in main() so an unexpected failure here never
  * masks or blocks the pre-existing checkReads()/checkCrud() results.
@@ -251,37 +283,110 @@ async function checkAllocationApproval() {
   const DECIDER_HEADERS = { 'X-User-Id': '1', 'X-User-Role': 'admin' };
   const TARGET_RESOURCE_ID = '2'; // John Miller — managerId '1' (Julie Armstrong), != proposer resource-id '3'
   const TARGET_REQUEST_ID = '4'; // Project Beta - Platform Migration (Consultant)
+  const MONTH = '2026-07';
+  const DAY = `${MONTH}-06`; // Monday
 
-  // 1) PROPOSE — POST /assignments as the proposer, status 'Requested'. Must
-  // NOT auto-approve (proposer resource-id '3' != target's managerId '1'), so
-  // the response should carry status 'Requested' + a non-empty approvalId.
-  const proposed = await req('POST', '/assignments', {
+  // 0) REGRESSION CLOSED (B3 carry-forward #1) — a client can no longer seed a
+  // status on create/update; ANY explicit `status`, even a previously-legal
+  // 'Draft', is now a 400 on both POST and PUT (assignments.status is derived
+  // exclusively from the month rows).
+  {
+    const forged = await req('POST', '/assignments', {
+      headers: PROPOSER_HEADERS,
+      body: { requestId: TARGET_REQUEST_ID, resourceId: TARGET_RESOURCE_ID, assignedHours: 5, status: 'Draft' },
+    });
+    check(
+      "POST /api/assignments with a client status (even 'Draft') is rejected (400, status is derived)",
+      forged.status === 400,
+      `status=${forged.status}, body=${JSON.stringify(forged.body)}`,
+    );
+  }
+  {
+    const forgedPut = await req('PUT', '/assignments/3', {
+      headers: PROPOSER_HEADERS,
+      body: { status: 'Draft' },
+    });
+    check(
+      "PUT /api/assignments/:id with a client status is rejected (400, status is derived)",
+      forgedPut.status === 400,
+      `status=${forgedPut.status}, body=${JSON.stringify(forgedPut.body)}`,
+    );
+  }
+
+  // 1) CREATE — POST /assignments carries NO status; the server derives
+  // 'Draft' (no month rows exist yet).
+  const created = await req('POST', '/assignments', {
     headers: PROPOSER_HEADERS,
-    body: { requestId: TARGET_REQUEST_ID, resourceId: TARGET_RESOURCE_ID, assignedHours: 5, status: 'Requested' },
+    body: { requestId: TARGET_REQUEST_ID, resourceId: TARGET_RESOURCE_ID, assignedHours: 0 },
   });
-  const proposeOk = check(
-    "POST /api/assignments (Requested) -> 200, status 'Requested' + approvalId",
-    proposed.status === 200 && Boolean(proposed.body) && proposed.body.status === 'Requested' && typeof proposed.body.approvalId === 'string' && proposed.body.approvalId.length > 0,
-    `status=${proposed.status}, assignmentStatus=${proposed.body && proposed.body.status}, approvalId=${proposed.body && proposed.body.approvalId}`,
+  const createOk = check(
+    "POST /api/assignments (no status) -> 200, derived status 'Draft'",
+    created.status === 200 && Boolean(created.body) && typeof created.body.id === 'string' && created.body.status === 'Draft',
+    `status=${created.status}, assignmentStatus=${created.body && created.body.status}`,
   );
-  if (!proposeOk) return; // nothing more to verify without an assignment id + approvalId
-  const assignmentId = proposed.body.id;
-  const approvalId = proposed.body.approvalId;
+  if (!createOk) return; // nothing more to verify without an assignment id
+  const assignmentId = created.body.id;
 
-  // 2) GET /approval-requests — a Pending 'Allocation' entry must exist whose
-  // refId is the new assignment.
+  // 2) ALLOCATE — PUT .../allocation books ONE working day, lazily creating a
+  // 'Draft' month row for MONTH (ensureAssignmentMonth).
+  const alloc = await req('PUT', `/assignments/${assignmentId}/allocation`, {
+    headers: PROPOSER_HEADERS,
+    body: { month: MONTH, dailyHours: { [DAY]: 1 } },
+  });
+  check(
+    `PUT /api/assignments/${assignmentId}/allocation (open a Draft month) -> 200`,
+    alloc.status === 200,
+    `status=${alloc.status}, body=${JSON.stringify(alloc.body)}`,
+  );
+
+  // 3) PROPOSE — POST .../months/:month/submit as the non-self-managing
+  // proposer. Must NOT auto-approve: the month moves Draft -> Requested with a
+  // fresh approval, routed to the manager.
+  const submitted = await req('POST', `/assignments/${assignmentId}/months/${MONTH}/submit`, {
+    headers: PROPOSER_HEADERS,
+    body: {},
+  });
+  const submitOk = check(
+    "POST /api/assignments/:id/months/:month/submit -> 200, status 'Requested' + approvalId (manager routing, not self-managed)",
+    submitted.status === 200 && Boolean(submitted.body) && submitted.body.status === 'Requested' && typeof submitted.body.approvalId === 'string' && submitted.body.approvalId.length > 0,
+    `status=${submitted.status}, monthStatus=${submitted.body && submitted.body.status}, approvalId=${submitted.body && submitted.body.approvalId}`,
+  );
+  if (!submitOk) return; // nothing more to verify without an approval id
+  const approvalId = submitted.body.approvalId;
+  const monthRowId = `${assignmentId}:${MONTH}`;
+
+  // 4) GET /approval-requests — a Pending 'Allocation' entry must exist whose
+  // refId is the MONTH ROW (B3: the governed entity is the (assignment,
+  // month) pair, not the bare assignment id).
   {
     const { status, body } = await req('GET', '/approval-requests', { headers: DECIDER_HEADERS });
     const ar = Array.isArray(body) ? body.find((a) => a.id === approvalId) : undefined;
     check(
-      "GET /api/approval-requests includes the new 'Allocation' request (Pending, refId matches)",
-      status === 200 && Boolean(ar) && ar.kind === 'Allocation' && ar.refId === assignmentId && ar.status === 'Pending',
+      "GET /api/approval-requests includes the new 'Allocation' request (Pending, refId is the month row)",
+      status === 200 && Boolean(ar) && ar.kind === 'Allocation' && ar.refId === monthRowId && ar.status === 'Pending',
       ar ? `kind=${ar.kind}, refId=${ar.refId}, status=${ar.status}` : `status=${status}, missing id=${approvalId}`,
     );
   }
 
-  // 3) DECIDE — PUT /approval-requests/:id/decision as a DIFFERENT identity
-  // than the proposer (SoD): admin '1' != pm '3'.
+  // 5) SoD — the proposer may never decide their own approval request. This
+  // guard runs BEFORE the refId is resolved into a governed-entity update, so
+  // it is unaffected by the month-row-awareness gap noted above.
+  {
+    const selfDecided = await req('PUT', `/approval-requests/${approvalId}/decision`, {
+      headers: PROPOSER_HEADERS,
+      body: { decision: 'Approved', note: 'Smoke: SoD refusal (requester deciding their own request)' },
+    });
+    check(
+      `PUT /api/approval-requests/${approvalId}/decision as the proposer (SoD) -> 403`,
+      selfDecided.status === 403,
+      `status=${selfDecided.status}, body=${JSON.stringify(selfDecided.body)}`,
+    );
+  }
+
+  // 6) DECIDE — PUT /approval-requests/:id/decision as a DIFFERENT identity
+  // than the proposer (SoD-compliant): admin '1' != pm '3'. The approval
+  // request itself transitions to 'Approved' — see the NOT PORTED note above
+  // for why the governed month/assignment status is not asserted here.
   {
     const decided = await req('PUT', `/approval-requests/${approvalId}/decision`, {
       headers: DECIDER_HEADERS,
@@ -294,30 +399,60 @@ async function checkAllocationApproval() {
     );
   }
 
-  // 4) The governed assignment must now be 'Allocated' (system transition
-  // applied by the decision hook, never client-forged).
+  // 7) REGRESSION CLOSED (B3 carry-forward #2) — a DELETE must withdraw a
+  // Pending month approval and drop the month rows, never orphan either. Uses
+  // a SEPARATE throwaway assignment (never touches the one decided above) so
+  // this section's own state can't interfere.
   {
-    const { status, body } = await req('GET', '/assignments', { headers: DECIDER_HEADERS });
-    const assig = Array.isArray(body) ? body.find((a) => a.id === assignmentId) : undefined;
-    check(
-      `GET /api/assignments reflects assignment ${assignmentId} -> 'Allocated'`,
-      status === 200 && Boolean(assig) && assig.status === 'Allocated',
-      assig ? `status=${assig.status}` : `status=${status}, missing`,
-    );
-  }
-
-  // 5) NEGATIVE — a client can never forge 'Allocated' (or 'Rejected') on
-  // create; only 'Draft'/'Requested' are client-settable.
-  {
-    const forged = await req('POST', '/assignments', {
+    const created2 = await req('POST', '/assignments', {
       headers: PROPOSER_HEADERS,
-      body: { requestId: TARGET_REQUEST_ID, resourceId: TARGET_RESOURCE_ID, assignedHours: 5, status: 'Allocated' },
+      body: { requestId: TARGET_REQUEST_ID, resourceId: TARGET_RESOURCE_ID, assignedHours: 0 },
     });
-    check(
-      "POST /api/assignments with status 'Allocated' is rejected (400, not client-settable)",
-      forged.status === 400,
-      `status=${forged.status}, body=${JSON.stringify(forged.body)}`,
+    const created2Ok = check(
+      'POST /api/assignments (throwaway, for delete-orphan check) -> 200',
+      created2.status === 200 && Boolean(created2.body) && typeof created2.body.id === 'string',
+      `status=${created2.status}`,
     );
+    if (created2Ok) {
+      const assignmentId2 = created2.body.id;
+      const MONTH2 = '2026-09';
+      const DAY2 = `${MONTH2}-07`; // Monday
+
+      await req('PUT', `/assignments/${assignmentId2}/allocation`, {
+        headers: PROPOSER_HEADERS,
+        body: { month: MONTH2, dailyHours: { [DAY2]: 1 } },
+      });
+      const submit2 = await req('POST', `/assignments/${assignmentId2}/months/${MONTH2}/submit`, {
+        headers: PROPOSER_HEADERS,
+        body: {},
+      });
+      const submit2Ok = check(
+        'B3 delete-orphan setup: submit opens a Pending month approval',
+        submit2.status === 200 && typeof submit2.body?.approvalId === 'string',
+        `status=${submit2.status}, approvalId=${submit2.body && submit2.body.approvalId}`,
+      );
+      if (submit2Ok) {
+        const orphanApprovalId = submit2.body.approvalId;
+
+        const del2 = await req('DELETE', `/assignments/${assignmentId2}`, { headers: PROPOSER_HEADERS });
+        check(`DELETE /api/assignments/${assignmentId2} (has a Pending month approval) -> 204`, del2.status === 204, `status=${del2.status}`);
+
+        const { status: arStatus, body: arList } = await req('GET', '/approval-requests', { headers: DECIDER_HEADERS });
+        const ar2 = Array.isArray(arList) ? arList.find((a) => a.id === orphanApprovalId) : undefined;
+        check(
+          'B3 regression closed: DELETE withdraws the month approval (no longer Pending)',
+          arStatus === 200 && Boolean(ar2) && ar2.status !== 'Pending',
+          ar2 ? `status=${ar2.status}` : `status=${arStatus}, missing`,
+        );
+
+        const { status: goneStatus } = await req('GET', `/assignments/${assignmentId2}/allocation`);
+        check(
+          `GET /api/assignments/${assignmentId2}/allocation after delete -> 404 (assignment AND its month rows gone)`,
+          goneStatus === 404,
+          `status=${goneStatus}`,
+        );
+      }
+    }
   }
 }
 
@@ -572,19 +707,19 @@ async function checkTimePhasedAllocation() {
     );
   }
 
-  // 6) DELETE CLEANUP — create a throwaway 'Draft' assignment (never touches
-  // seed data), allocate one day on it, then delete it and confirm 204 (never
-  // 409 — assignmentDays must be removed before the parent row) with no orphan
-  // left behind (a follow-up allocation GET 404s because the assignment itself
-  // is gone).
+  // 6) DELETE CLEANUP — create a throwaway assignment (B3: no client status;
+  // the server derives 'Draft' — never touches seed data), allocate one day
+  // on it, then delete it and confirm 204 (never 409 — assignmentDays must be
+  // removed before the parent row) with no orphan left behind (a follow-up
+  // allocation GET 404s because the assignment itself is gone).
   {
     const created = await req('POST', '/assignments', {
-      body: { requestId: '1', resourceId: '1', assignedHours: 0, status: 'Draft' },
+      body: { requestId: '1', resourceId: '1', assignedHours: 0 },
     });
     const createOk = check(
-      'POST /api/assignments (throwaway Draft, for delete-cleanup) -> 200',
-      created.status === 200 && Boolean(created.body) && typeof created.body.id === 'string',
-      `status=${created.status}, id=${created.body && created.body.id}`,
+      'POST /api/assignments (throwaway, for delete-cleanup) -> 200',
+      created.status === 200 && Boolean(created.body) && typeof created.body.id === 'string' && created.body.status === 'Draft',
+      `status=${created.status}, id=${created.body && created.body.id}, assignmentStatus=${created.body && created.body.status}`,
     );
     if (createOk) {
       const throwawayId = created.body.id;

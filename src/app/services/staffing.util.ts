@@ -65,8 +65,13 @@ export function isAllowedTimeEntryTransition(from: TimeEntry['status'], to: Time
 
 export type AllocationStatus = Assignment['status'];
 
-/** Only these statuses may be set by a client via POST/PUT /assignments. */
-export const ALLOCATION_CLIENT_SETTABLE: readonly AllocationStatus[] = ['Draft', 'Requested'];
+/**
+ * B3: NOTHING is client-settable — `assignments.status` is derived from the
+ * month rows (allocation-month.util `deriveAssignmentStatus`). The lifecycle is
+ * driven exclusively by the per-month endpoints. Kept as an exported constant so
+ * the handlers' guard reads the same way it did in gap A.
+ */
+export const ALLOCATION_CLIENT_SETTABLE: readonly AllocationStatus[] = [];
 
 // CLIENT-SETTABLE transitions only. The system transitions Requested -> Allocated
 // and Requested -> Rejected are applied DIRECTLY by the decision hook (a later task)

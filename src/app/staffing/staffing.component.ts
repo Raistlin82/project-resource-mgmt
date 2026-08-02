@@ -170,8 +170,7 @@ interface DimensionMeter {
                             </label>
                           </div>
                           <div class="flex items-center gap-2">
-                            <button (click)="confirmAssign(cand.resourceId, 'Draft')" [disabled]="assigning()" class="command-button secondary flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">Salva in bozza</button>
-                            <button (click)="confirmAssign(cand.resourceId, 'Requested')" [disabled]="assigning()" class="command-button flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">Manda in approvazione</button>
+                            <button (click)="confirmAssign(cand.resourceId)" [disabled]="assigning()" class="command-button flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">Crea proposta</button>
                             <button type="button" (click)="cancelAssign()" aria-label="Cancel assignment" title="Cancel assignment" class="command-button secondary"><mat-icon class="text-[20px] w-[20px] h-[20px]">close</mat-icon></button>
                           </div>
                         </div>
@@ -403,14 +402,13 @@ export class StaffingComponent {
   }
 
   /**
-   * Propose an assignment. `status` is what the client is allowed to set:
-   *  - 'Draft'     — save a draft (no approval opened);
-   *  - 'Requested' — send for approval. The server auto-approves it straight to
-   *    'Allocated' when the proposer IS the resource's manager, else opens an
-   *    Allocation approval and keeps it 'Requested'.
-   * The resulting (server-resolved) status is surfaced in a notification.
+   * Create a proposal (assignment). `status` is no longer client-settable (B3):
+   * the server always derives 'Draft' for a brand-new assignment — it has no
+   * month rows yet. Sending it for approval now happens per-month, from the
+   * resource's calendar (`POST /assignments/:id/months/:month/submit`), once
+   * hours have been booked into an open month.
    */
-  confirmAssign(resourceId: string, status: 'Draft' | 'Requested') {
+  confirmAssign(resourceId: string) {
     if (this.assigning()) return;
     const req = this.selectedRequest();
     const hours = this.assignHours();
@@ -423,7 +421,6 @@ export class StaffingComponent {
         requestId: req.id,
         resourceId: resourceId,
         assignedHours: hours,
-        status,
         // Carry the booking window + allocation; omit empty dates so the schedule
         // util falls back to the linked request's dates.
         ...(startDate ? { startDate } : {}),

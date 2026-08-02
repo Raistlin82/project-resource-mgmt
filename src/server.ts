@@ -10,7 +10,7 @@ import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
 import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
-import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours, decisionToAssignmentStatus, allocationApproverStep, isAllowedAllocationTransition, ALLOCATION_CLIENT_SETTABLE, type AllocationStatus } from './app/services/staffing.util';
+import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours, decisionToAssignmentStatus, allocationApproverStep } from './app/services/staffing.util';
 import { deriveAssignmentStatus, monthRowId, type MonthStatus } from './app/services/allocation-month.util';
 // `parseMonthRowId`/`monthlyAggregateHours` are unused until later B3 tasks (4-6, 8)
 // wire the decision hook and status-weighted aggregates onto month rows. Kept on
@@ -1411,7 +1411,12 @@ apiRouter.delete('/requests/:id', async (req, res) => {
 
 apiRouter.get('/assignments', async (_req, res) => { res.json(await repos.assignments.list()); });
 apiRouter.post('/assignments', async (req, res) => {
-  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'status', 'startDate', 'endDate', 'allocationPct']);
+  // B3: the lifecycle lives on the month rows; a client may not seed a status.
+  if ((req.body as { status?: unknown } | undefined)?.status !== undefined) {
+    res.status(400).json({ error: 'status is derived from the per-month allocation and cannot be set on an assignment' });
+    return;
+  }
+  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'startDate', 'endDate', 'allocationPct']);
   if (!isNonNegNumber(body.assignedHours)) {
     { res.status(400).json({ error: 'assignedHours must be a non-negative number' }); return; }
   }
@@ -1422,31 +1427,13 @@ apiRouter.post('/assignments', async (req, res) => {
   if (!(await existsRepo(repos.requests, body.requestId))) { res.status(400).json({ error: 'requestId must reference an existing request' }); return; }
   if (!(await existsRepo(repos.resources, body.resourceId))) { res.status(400).json({ error: 'resourceId must reference an existing resource' }); return; }
 
-  // ALLOCATION LIFECYCLE: a client may only PROPOSE an assignment as 'Draft' or
-  // 'Requested' (ALLOCATION_CLIENT_SETTABLE). 'Allocated'/'Rejected' are reached
-  // only through the approval-decision hook (or the self-managed shortcut below),
-  // never forged on create.
-  const requestedStatus = (body.status ?? 'Draft') as AllocationStatus;
-  if (!ALLOCATION_CLIENT_SETTABLE.includes(requestedStatus)) {
-    res.status(400).json({ error: "status must be 'Draft' or 'Requested'" });
-    return;
-  }
-  // SELF-MANAGED SHORTCUT: when the proposer IS the resource's own manager, a
-  // 'Requested' proposal auto-approves straight to 'Allocated' with NO approval
-  // request (approver and requester would be the same principal — SoD would block
-  // the decision anyway). Any other actor's 'Requested' opens a manager approval.
-  const selfManaged = requestedStatus === 'Requested' && await autoApprovesAllocation(req, body.resourceId ?? '');
-  const effectiveStatus: AllocationStatus = selfManaged ? 'Allocated' : requestedStatus;
-
-  const created = await repos.assignments.create({ id: newId(), ...body, status: effectiveStatus } as Assignment);
-
-  // Open the manager approval only for a non-self-managed 'Requested' proposal,
-  // and link it back onto the assignment so a later edit/delete can withdraw it.
-  // Done OUTSIDE the res:/req: locks below.
-  if (requestedStatus === 'Requested' && !selfManaged) {
-    const approvalId = await createAllocationApproval(req, created);
-    await repos.assignments.update(created.id, { approvalId });
-  }
+  // B3: assignment status is DERIVED from its month rows (deriveAssignmentStatus)
+  // — never set directly here. A brand-new assignment has no month rows yet, so
+  // it starts 'Draft' (the same value deriveAssignmentStatus([]) returns). The
+  // lifecycle (submit for approval, self-managed auto-approve, etc.) is now
+  // driven exclusively by the per-month endpoints (PUT .../allocation,
+  // POST .../months/:month/submit) once hours are booked into a month.
+  const created = await repos.assignments.create({ id: newId(), ...body, status: 'Draft' } as Assignment);
 
   // B-CONCURRENCY + B-UTILIZATION: recompute BOTH aggregates from the full set of
   // assignments (never a lossy running delta). Sequential per-key locks.
@@ -1457,7 +1444,12 @@ apiRouter.post('/assignments', async (req, res) => {
 apiRouter.put('/assignments/:id', async (req, res) => {
   const oldAssig = await repos.assignments.get(req.params.id);
   if (oldAssig === undefined) { res.status(404).json({ error: 'Not found' }); return; }
-  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'status', 'startDate', 'endDate', 'allocationPct']);
+  // B3: the lifecycle lives on the month rows; a client may not seed a status.
+  if ((req.body as { status?: unknown } | undefined)?.status !== undefined) {
+    res.status(400).json({ error: 'status is derived from the per-month allocation and cannot be set on an assignment' });
+    return;
+  }
+  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'startDate', 'endDate', 'allocationPct']);
   if (body.assignedHours !== undefined && !isNonNegNumber(body.assignedHours)) {
     { res.status(400).json({ error: 'assignedHours must be a non-negative number' }); return; }
   }
@@ -1478,76 +1470,13 @@ apiRouter.put('/assignments/:id', async (req, res) => {
     res.status(400).json({ error: 'requestId must reference an existing request' });
     return;
   }
-  const oldStatus = oldAssig.status;
-  // ALLOCATION LIFECYCLE: a client-supplied status must be client-settable
-  // ('Draft'|'Requested') AND a legal transition from the current status. The
-  // system transitions into 'Allocated'/'Rejected' are applied only by the
-  // approval-decision hook (or the self-managed shortcut below), never here.
-  if (body.status !== undefined) {
-    if (!ALLOCATION_CLIENT_SETTABLE.includes(body.status)) {
-      res.status(400).json({ error: "status must be 'Draft' or 'Requested'" });
-      return;
-    }
-    if (!isAllowedAllocationTransition(oldStatus, body.status)) {
-      res.status(400).json({ error: `illegal status transition ${oldStatus} -> ${body.status}` });
-      return;
-    }
-  }
 
-  // A "material" edit to an already-Allocated assignment invalidates its prior
-  // approval, so it is forced back to 'Requested' for re-approval.
-  const MATERIAL_KEYS = ['assignedHours', 'startDate', 'endDate', 'resourceId', 'allocationPct'] as const;
-  const materialChange = MATERIAL_KEYS.some(k => body[k] !== undefined && body[k] !== oldAssig[k]);
-
-  // Target status: an explicit client status wins; else an Allocated assignment
-  // with a material change is forced to 'Requested' (re-approval); else unchanged.
-  const targetStatus: AllocationStatus =
-    body.status !== undefined ? body.status
-    : (oldStatus === 'Allocated' && materialChange) ? 'Requested'
-    : oldStatus;
-
-  // SELF-MANAGED SHORTCUT (parity with POST): when the target is 'Requested' and
-  // the effective resource's manager IS the proposer, auto-approve to 'Allocated'
-  // with NO approval request.
-  let finalStatus: AllocationStatus = targetStatus;
-  let autoApproved = false;
-  if (targetStatus === 'Requested' && await autoApprovesAllocation(req, body.resourceId ?? oldAssig.resourceId)) {
-    finalStatus = 'Allocated';
-    autoApproved = true;
-  }
-
-  // APPROVAL SIDE-EFFECTS (outside any res:/req: lock, never nested). We touch the
-  // approval only on a status change into/out of the approvable state:
-  //  - ENTERING 'Requested' (from a non-Requested status): supersede any prior
-  //    approval and open a fresh one on the merged assignment.
-  //  - a still-'Requested' assignment RETARGETED to a different resource: re-route
-  //    the pending approval to the NEW resource's manager (supersede + reopen), so
-  //    the empowered approver is never left as the previous resource's manager.
-  //  - back to 'Draft': supersede the pending approval; the assignment carries none.
-  //  - auto-approved to 'Allocated': supersede the pending approval; none remains.
-  //  - otherwise (a still-'Requested' assignment whose non-resource material fields
-  //    change): leave the pending approval untouched — the approver reads the fresh
-  //    assignment via refId (same manager, same routing).
-  const resourceRetargeted = body.resourceId !== undefined && body.resourceId !== oldAssig.resourceId;
-  let approvalId = oldAssig.approvalId;
-  let approvalChanged = false;
-  if (finalStatus === 'Requested' && (oldStatus !== 'Requested' || resourceRetargeted)) {
-    await withdrawAllocationApproval(oldAssig.approvalId, 'superseded');
-    approvalId = await createAllocationApproval(req, { ...oldAssig, ...body, id: oldAssig.id });
-    approvalChanged = true;
-  } else if (finalStatus === 'Draft') {
-    await withdrawAllocationApproval(oldAssig.approvalId, 'returned to draft');
-    approvalId = undefined;
-    approvalChanged = true;
-  } else if (finalStatus === 'Allocated' && autoApproved) {
-    await withdrawAllocationApproval(oldAssig.approvalId, 'superseded');
-    approvalId = undefined;
-    approvalChanged = true;
-  }
-
-  const patch: Partial<Assignment> = { ...body, status: finalStatus };
-  if (approvalChanged) patch.approvalId = approvalId;
-  await repos.assignments.update(req.params.id, patch);
+  // B3: status is DERIVED from the month rows — this PUT never writes `status`
+  // or `approvalId` (both are now owned by the per-month endpoints and their
+  // approval side-effects). Persist the FK/hours/schedule patch, then refresh
+  // the derived rollup so a stale `assignments.status` never lingers.
+  await repos.assignments.update(req.params.id, body);
+  await refreshDerivedAssignmentStatus(req.params.id);
 
   const newResourceId = body.resourceId ?? oldAssig.resourceId;
   const newRequestId = body.requestId ?? oldAssig.requestId;
@@ -1585,6 +1514,14 @@ apiRouter.delete('/assignments/:id', async (req, res) => {
   // adapters behave identically.
   const daysToRemove = (await repos.assignmentDays.list()).filter(d => d.assignmentId === req.params.id);
   for (const d of daysToRemove) await repos.assignmentDays.remove(d.id);
+  // B3: withdraw each month's pending approval and drop the month rows before
+  // the parent delete (assignment_months -> assignments is ON DELETE no action,
+  // so Postgres would otherwise reject the parent delete with an FK violation).
+  const monthRows = (await repos.assignmentMonths.list()).filter(m => m.assignmentId === oldAssig.id);
+  for (const m of monthRows) {
+    await withdrawAllocationApproval(m.approvalId, 'assignment deleted');
+    await repos.assignmentMonths.remove(m.id);
+  }
   await repos.assignments.remove(req.params.id);
 
   // B-CONCURRENCY + B-UTILIZATION + B-STAFFING: recompute BOTH aggregates from the

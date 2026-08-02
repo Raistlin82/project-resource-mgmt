@@ -151,8 +151,8 @@ describe('staffing.util utilization recompute (derive from source of truth)', ()
 });
 
 describe('allocation transition guard', () => {
-  it('exposes the client-settable statuses (consumed by a later PUT-handler task)', () => {
-    expect(ALLOCATION_CLIENT_SETTABLE).toEqual(['Draft', 'Requested']);
+  it('exposes no client-settable allocation status after B3 (status is derived)', () => {
+    expect([...ALLOCATION_CLIENT_SETTABLE]).toEqual([]);
   });
 
   it('allows client-settable moves: Draft<->Requested, Rejected->Requested, Allocated->Requested', () => {
