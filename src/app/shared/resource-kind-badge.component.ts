@@ -1,17 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
-import { isMultiFteEligible, kindOf, type ResourceKind } from '../services/resource-kind.util';
-
-/**
- * Human-readable label per {@link ResourceKind} (C1). Single source of truth
- * for the copy shown in the kind `<select>`, the kind filter, and this badge —
- * reused as-is by `resources.component.ts` for its two selects so the three
- * spellings never drift apart.
- */
-export const RESOURCE_KIND_LABELS: Record<ResourceKind, string> = {
-  internal: 'Internal',
-  dummy: 'Dummy (placeholder)',
-  subco: 'Subcontractor',
-};
+import { isMultiFteEligible, kindOf, RESOURCE_KIND_LABELS, type ResourceKind } from '../services/resource-kind.util';
 
 /**
  * Kind badge (C1) — a pill next to a resource's name showing whether it's a

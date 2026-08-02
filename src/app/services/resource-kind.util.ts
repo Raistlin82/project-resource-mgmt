@@ -18,6 +18,17 @@ export type ResourceKind = 'internal' | 'dummy' | 'subco';
 export const RESOURCE_KINDS: readonly ResourceKind[] = ['internal', 'dummy', 'subco'];
 
 /**
+ * Human-readable label per kind — the one spelling used everywhere a kind is shown
+ * to a user (the resource form's kind `<select>`, the resources list's kind filter,
+ * and the kind badge), so the three UI surfaces can never spell a kind differently.
+ */
+export const RESOURCE_KIND_LABELS: Record<ResourceKind, string> = {
+  internal: 'Internal',
+  dummy: 'Dummy (placeholder)',
+  subco: 'Subcontractor',
+};
+
+/**
  * Ceiling of the manual's multi-FTE planning (1,5 · 2 · … · 30 FTE). A code
  * constant, not customizing: it bounds a validation rule, not a preference.
  */

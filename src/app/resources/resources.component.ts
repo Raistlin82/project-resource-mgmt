@@ -15,8 +15,8 @@ import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 import { ListStateComponent } from '../shared/list-state.component';
-import { ResourceKindBadgeComponent, RESOURCE_KIND_LABELS } from '../shared/resource-kind-badge.component';
-import { RESOURCE_KINDS, kindOf, type ResourceKind } from '../services/resource-kind.util';
+import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
+import { RESOURCE_KINDS, RESOURCE_KIND_LABELS, kindOf, type ResourceKind } from '../services/resource-kind.util';
 
 /** Today as an ISO 'YYYY-MM-DD' string, used for status derivation + the terminate default. */
 function todayIso(): string {
@@ -601,18 +601,36 @@ export class ResourcesComponent {
     // assert via form.controls.vendorId.valid. RxJS's valueChanges emits
     // synchronously on setValue, so this takes effect immediately with no
     // extra change-detection plumbing.
-    this.form.controls.kind.valueChanges.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(kind => {
-      const vendorId = this.form.controls.vendorId;
-      if (kind === 'subco') {
-        vendorId.setValidators(Validators.required);
-      } else {
-        vendorId.clearValidators();
-        // A non-subco resource must not carry a vendor (the server REFUSES it) —
-        // clear any selection made before the user switched kind away from subco.
-        if (vendorId.value) vendorId.setValue('', { emitEvent: false });
-      }
-      vendorId.updateValueAndValidity({ emitEvent: false });
-    });
+    this.form.controls.kind.valueChanges.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(kind => this.syncVendorRequirement(kind));
+  }
+
+  /**
+   * Toggle vendorId's required-ness (and clear a stale value when kind isn't
+   * 'subco') to match the given kind. Called two ways:
+   *  - reactively, from the kind.valueChanges subscription above, for live edits
+   *    while the form is open;
+   *  - explicitly, from openForm() right after form.reset(), for loads.
+   * The explicit call in openForm() is NOT redundant with the reactive one:
+   * FormGroup.reset() resets each child control independently, in the group's
+   * declaration order (kind before vendorId here), so relying solely on the
+   * valueChanges side effect would make the freshly-loaded validity state depend
+   * on where 'kind' happens to sit relative to 'vendorId' in the FormGroup
+   * literal above — an implicit, easy-to-break coupling. Calling this again,
+   * explicitly, after reset() has fully settled both controls removes that
+   * dependency: the post-load state is correct by direct assertion, not by
+   * incidental ordering.
+   */
+  private syncVendorRequirement(kind: ResourceKind): void {
+    const vendorId = this.form.controls.vendorId;
+    if (kind === 'subco') {
+      vendorId.setValidators(Validators.required);
+    } else {
+      vendorId.clearValidators();
+      // A non-subco resource must not carry a vendor (the server REFUSES it) —
+      // clear any selection made before the user switched kind away from subco.
+      if (vendorId.value) vendorId.setValue('', { emitEvent: false });
+    }
+    vendorId.updateValueAndValidity({ emitEvent: false });
   }
 
   /** A resource is Terminated when terminationDate is set to a date on/before today. */
@@ -650,6 +668,8 @@ export class ResourcesComponent {
         kind: kindOf(r),
         vendorId: r.vendorId ?? '',
       });
+      // Explicit, not incidental — see syncVendorRequirement()'s doc comment.
+      this.syncVendorRequirement(kindOf(r));
     } else {
       this.editingId.set(null);
       this.editingRole.set('');
@@ -659,6 +679,7 @@ export class ResourcesComponent {
       this.editingVendorId.set('');
       this.countryOverride.set('');
       this.form.reset({ name: '', role: '', managerId: '', organization: '', location: '', capacity: 40, costRateOverride: null, billRateOverride: null, hireDate: '', kind: 'internal', vendorId: '' });
+      this.syncVendorRequirement('internal');
     }
     this.showForm.set(true);
   }

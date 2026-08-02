@@ -113,6 +113,43 @@ describe('ResourcesComponent', () => {
     expect(createResource).toHaveBeenCalledWith(expect.objectContaining({ kind: 'subco', vendorId: 'V4' }));
   });
 
+  it('loads an existing subco with its vendor pre-filled, valid, and the vendor field shown', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+
+    const subco = RESOURCES.find(r => r.id === '6')!;
+    fixture.componentInstance.openForm(subco);
+    fixture.detectChanges();
+
+    // No further interaction (no setValue/markAsTouched) — the load itself must
+    // already leave the form in this state.
+    const form = fixture.componentInstance.form;
+    expect(form.controls.kind.value).toBe('subco');
+    expect(form.controls.vendorId.value).toBe('V4');
+    expect(form.controls.vendorId.valid).toBe(true);
+
+    const host = fixture.nativeElement as HTMLElement;
+    const vendorSelect = host.querySelector('[data-test="res-vendor"]') as HTMLSelectElement | null;
+    expect(vendorSelect).not.toBeNull();
+    expect(vendorSelect!.value).toBe('V4');
+  });
+
+  it('loads an existing internal resource with no vendor field and a valid vendorId control', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+
+    const internal = RESOURCES.find(r => r.id === '1')!;
+    fixture.componentInstance.openForm(internal);
+    fixture.detectChanges();
+
+    const form = fixture.componentInstance.form;
+    expect(form.controls.kind.value).toBe('internal');
+    expect(form.controls.vendorId.valid).toBe(true);
+
+    const host = fixture.nativeElement as HTMLElement;
+    expect(host.querySelector('[data-test="res-vendor"]')).toBeNull();
+  });
+
   it('renders a kind badge per resource and the kind filter isolates one kind', async () => {
     const { fixture } = setup();
     await flush(fixture);
