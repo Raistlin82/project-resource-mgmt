@@ -1121,12 +1121,35 @@ async function monthStatusByRowId(): Promise<Map<string, MonthStatus>> {
  * Get (or lazily create as 'Draft') the month row for an assignment. The row is
  * created on the FIRST allocation write to that month, so a month with hours
  * always has a lifecycle state to carry.
+ *
+ * CONCURRENCY: get-then-create is a read-modify-write over a SHARED row, so it
+ * runs inside `withLock('month:<rowId>')` — Express handlers interleave freely
+ * across every `await`, and two concurrent first-writes to the same new month
+ * used to both miss the `get` and both `create`: an unmapped `23505`
+ * (unique_violation) 500 on Postgres, and a genuine DUPLICATE row in memory
+ * (the in-memory adapter's `create` just pushes, it has no key constraint), after
+ * which the approval feed emitted two items with the same `assignmentMonthId`.
+ * The lock key is the ROW id, so different months never serialize against each
+ * other. `month:` locks are only ever taken here and are never nested inside (or
+ * around) a `res:`/`req:` section, so they cannot participate in a lock cycle.
+ *
+ * Belt-and-braces for a MULTI-PROCESS Postgres deployment (where the in-process
+ * lock spans one process only): a failed `create` is re-`get` before rethrowing,
+ * so losing the insert race still returns the winner's row instead of a 500.
  */
 async function ensureAssignmentMonth(assignmentId: string, month: string): Promise<AssignmentMonth> {
   const id = monthRowId(assignmentId, month);
-  const existing = await repos.assignmentMonths.get(id);
-  if (existing) return existing;
-  return repos.assignmentMonths.create({ id, assignmentId, month, status: 'Draft' } as AssignmentMonth);
+  return withLock(`month:${id}`, async () => {
+    const existing = await repos.assignmentMonths.get(id);
+    if (existing) return existing;
+    try {
+      return await repos.assignmentMonths.create({ id, assignmentId, month, status: 'Draft' } as AssignmentMonth);
+    } catch (err) {
+      const raced = await repos.assignmentMonths.get(id);
+      if (raced) return raced;
+      throw err;
+    }
+  });
 }
 
 /**
@@ -1751,7 +1774,18 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   // the days); Draft/Rejected have no approval effect. Months OTHER than the one
   // written are untouched — that is the whole point of B3.
   if (priorMonthStatus === 'Allocated' && !(await autoApprovesAllocation(req, resource.id))) {
-    await withdrawAllocationApproval(monthRow.approvalId, 'superseded');
+    // RE-READ the row here rather than reusing the `monthRow` snapshot taken
+    // before STEP 1's lock: `approvalId` is shared mutable state, and STEP 1
+    // spans several awaits during which a CONCURRENT edit of the same month may
+    // already have superseded the approval and written a new id. Withdrawing
+    // the STALE id would cancel an approval that no longer governs anything
+    // while leaving the CURRENT one Pending and orphaned — a manager could
+    // still decide it, applying a decision to days nobody approved. `status` is
+    // deliberately NOT re-read: `priorMonthStatus` is this writer's own
+    // observation that the month WAS approved when its days changed, which is
+    // what the forced re-approval is a consequence of.
+    const currentRow = await repos.assignmentMonths.get(monthRow.id);
+    await withdrawAllocationApproval(currentRow?.approvalId, 'superseded');
     const approvalId = await createAllocationApproval(req, assig, monthRow.id);
     await repos.assignmentMonths.update(monthRow.id, { status: 'Requested', approvalId });
   }
@@ -3379,7 +3413,9 @@ async function decideOneApproval(
  * Apply an Allocation decision to the governed entity. `refId` carries the
  * shape: a composite `<assignmentId>:<YYYY-MM>` targets ONE month row (B3);
  * a bare assignment id is a LEGACY gap-A approval opened before B3 and still
- * pending — applied to the assignment itself so nothing in flight is orphaned.
+ * pending — applied to the assignment AND to every non-Draft month row a
+ * migrated database backfilled under it, so nothing in flight is orphaned (see
+ * the branch's own comment for why the assignment write alone was a no-op).
  *
  * Called AFTER the `approval:<id>` lock has been released, under the fixed
  * res -> req lock order used by every other assignment mutation, so this can
@@ -3417,6 +3453,47 @@ async function applyAllocationDecision(
     if (!assig) return undefined;
     // The transition MUST succeed (or surface as a 500) — see the month branch.
     await repos.assignments.update(assig.id, { status: newStatus });
+
+    // LEGACY + B3 RECONCILIATION. A pre-B3 database migrated into B3 has month
+    // rows created by `backfillAssignmentMonths`, which COPIES the assignment's
+    // status onto each of them and gives them no `approvalId`. Writing only
+    // `assignments.status` here left those rows exactly where they were, and
+    // that is the state everything downstream actually reads:
+    //   - `monthlyAggregateHours` weighs each day by the status of ITS month
+    //     row, so confirmed/planned hours never moved;
+    //   - the very next `refreshDerivedAssignmentStatus` (any month endpoint on
+    //     this assignment) re-derived the column straight back from those
+    //     unchanged rows, silently undoing the decision.
+    // Nothing else could rescue them either: `submit` only accepts
+    // Draft/Rejected and the allocation PUT's forced re-approval only fires from
+    // 'Allocated', so a backfilled 'Requested' row with no approval was
+    // unreachable. Apply the outcome to every NON-'Draft' month row (a Draft
+    // month was never submitted, so no decision governs it), then re-derive the
+    // column so the stored status and the status-weighted aggregates agree.
+    const monthRows = (await repos.assignmentMonths.list()).filter(m => m.assignmentId === assig.id);
+    for (const row of monthRows) {
+      if (row.status === 'Draft' || row.status === newStatus) continue;
+      // Not best-effort: this write IS the decision for that month, same rule as
+      // the B3 branch below.
+      const rowAfter = await repos.assignmentMonths.update(row.id, { status: newStatus });
+      // AUDIT per moved month row, the SAME shape the B3 branch and the batch
+      // write. A legacy decision now moves N rows at once, which is precisely
+      // the case `monthTransitionAudit` exists for: the assignment-level entry
+      // records only the rollup and cannot say which months moved. Best-effort,
+      // as everywhere else — the month write has already committed.
+      try {
+        if (rowAfter) await repos.auditLogs.create(monthTransitionAudit(req, row, rowAfter));
+      } catch { /* audit is best-effort; the month transition already committed */ }
+    }
+    // Re-derive ONLY when the assignment actually has month rows. With none at
+    // all (a truly pre-B1 assignment: no day rows, so the backfill created
+    // nothing) `deriveAssignmentStatus([])` is 'Draft', which would DOWNGRADE
+    // the decision that was just applied — there the direct write above is the
+    // whole effect, exactly as before B3. Deferred in batch mode like the month
+    // branch, though the batch never reaches here (it resolves a month row
+    // first, so its refIds are always composite).
+    if (monthRows.length > 0 && !deferAggregates) await refreshDerivedAssignmentStatus(assig.id);
+    const settled = await repos.assignments.get(assig.id);
     try {
       // Aggregate recompute + the explicit audit entry are best-effort, same
       // discipline as the audit middleware ("audit is best-effort... failures
@@ -3424,7 +3501,12 @@ async function applyAllocationDecision(
       // transition have already committed by this point, so a recompute/audit
       // failure must not turn an otherwise-successful decision into a 500.
       await recompute(assig.resourceId, assig.requestId);
-      await repos.auditLogs.create(allocationTransitionAudit(req, assig, newStatus, `/assignments/${assig.id}`));
+      // The assignment entry records the status the column ACTUALLY settled on
+      // (the derived rollup when month rows exist), never the decision's raw
+      // outcome — an audit trail that claims a value the row does not hold is
+      // worse than none.
+      await repos.auditLogs.create(
+        allocationTransitionAudit(req, assig, settled?.status ?? newStatus, `/assignments/${assig.id}`));
     } catch { /* recompute/audit are best-effort; the decision already committed */ }
     return { resourceId: assig.resourceId, requestId: assig.requestId, assignmentId: assig.id };
   }

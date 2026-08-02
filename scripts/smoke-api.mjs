@@ -1595,6 +1595,121 @@ async function checkMonthlyApproval() {
     `months=${JSON.stringify(defaultMonths)} openPeriods=${JSON.stringify(expectedOpenMonths)}`);
 }
 
+/**
+ * B3 BACKWARD COMPATIBILITY — a LEGACY (pre-B3) allocation approval, whose
+ * `refId` is a BARE assignment id rather than a `<assignmentId>:<YYYY-MM>` month
+ * row, must move the assignment's month rows too.
+ *
+ * Why this matters: `backfillAssignmentMonths` (src/db/bootstrap.ts) gives a
+ * migrated Postgres database one month row per booked month, COPYING the
+ * assignment's status onto it and attaching NO approvalId. The still-pending
+ * legacy `ApprovalRequest` can be decided, but before the fix the hook wrote
+ * only `assignments.status` — and everything downstream reads the MONTH rows
+ * (`monthlyAggregateHours` weighs each day by its own month's status, and the
+ * next `refreshDerivedAssignmentStatus` re-derives the column straight back off
+ * them). The approval was a no-op and the allocation was stranded.
+ *
+ * BUILDING THE FIXTURE THROUGH REAL API CALLS:
+ *  - The stranded shape is "a NON-Draft month row carrying NO approvalId". The
+ *    self-managed submit shortcut produces exactly that live: submitting a month
+ *    as the resource's OWN manager lands it 'Allocated' with `approvalId`
+ *    cleared. Resource '1' (Julie Armstrong) has managerId '1', which is the
+ *    default admin actor this suite runs as.
+ *  - A bare-`refId` approval can only be created through `POST
+ *    /approval-requests` (the B3 endpoints always open month-scoped ones). That
+ *    route is gated to the approver-grade roles (pm / resource-manager /
+ *    delivery-executive / finance / admin) and pins `requestedBy` to the
+ *    verified actor, so it is created as pm '3' and decided by admin '1' — two
+ *    different principals, so segregation of duties passes. For kind
+ *    'Allocation' `buildApprovalSteps` routes to a single 'delivery-executive'
+ *    step with no approverId; role 'admin' satisfies any step.
+ *  - The decision is a REJECTION, so the month must move Allocated -> Rejected
+ *    and the CONFIRMED hours (the request's `staffedEffort`, which sums only
+ *    'Allocated' months) must fall by exactly the booked hours.
+ *
+ * 2026-11 is an Open planning period; 2026-11-04 is a Wednesday and is booked by
+ * nothing else in this suite (checkMonthlyApproval uses 2026-11-03), so the
+ * daily-capacity gate (8h/day for resource '1') is never in play.
+ */
+async function checkLegacyAllocationApproval() {
+  const REQUESTER_HEADERS = { 'X-User-Id': '3', 'X-User-Role': 'pm' };
+  const RESOURCE_ID = '1'; // Julie Armstrong — managerId '1' == the default admin actor
+  const REQUEST_ID = '2';
+  const MONTH = '2026-11';
+  const DAY = `${MONTH}-04`;
+  const HOURS = 4;
+
+  const created = await req('POST', '/assignments', { body: { requestId: REQUEST_ID, resourceId: RESOURCE_ID, assignedHours: 0 } });
+  const createOk = check('B3 legacy setup: throwaway assignment created',
+    created.status === 200 && typeof created.body?.id === 'string', `status=${created.status}`);
+  if (!createOk) return;
+  const assignmentId = created.body.id;
+  const rowId = `${assignmentId}:${MONTH}`;
+
+  const booked = await req('PUT', `/assignments/${assignmentId}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: HOURS } } });
+  check('B3 legacy setup: hours booked (lazily opens a Draft month row)', booked.status === 200, `status=${booked.status} body=${JSON.stringify(booked.body)}`);
+
+  // Self-managed submit -> 'Allocated' with approvalId CLEARED: the same shape
+  // backfillAssignmentMonths leaves behind on a migrated database.
+  const submitted = await req('POST', `/assignments/${assignmentId}/months/${MONTH}/submit`, { body: {} });
+  const shapeOk = check('B3 legacy setup: month row is non-Draft and carries NO approvalId (the backfill shape)',
+    submitted.status === 200 && submitted.body?.status === 'Allocated' && submitted.body?.approvalId === undefined,
+    `status=${submitted.status} row=${submitted.body?.status} approvalId=${JSON.stringify(submitted.body?.approvalId)}`);
+  if (!shapeOk) return;
+
+  const confirmedBefore = ((await req('GET', '/requests')).body || []).find(r => r.id === REQUEST_ID)?.staffedEffort;
+  check('B3 legacy setup: the booked month counts toward confirmed hours',
+    typeof confirmedBefore === 'number', `staffedEffort=${JSON.stringify(confirmedBefore)}`);
+
+  // The legacy-shaped approval: kind 'Allocation', refId a BARE assignment id.
+  const legacyAr = await req('POST', '/approval-requests', {
+    headers: REQUESTER_HEADERS,
+    body: { kind: 'Allocation', refId: assignmentId, note: 'pre-B3 approval still in flight' },
+  });
+  const arOk = check('B3 legacy: POST /api/approval-requests opens a bare-refId Allocation approval',
+    legacyAr.status === 200 && typeof legacyAr.body?.id === 'string' && legacyAr.body?.refId === assignmentId &&
+    legacyAr.body?.status === 'Pending' && legacyAr.body?.requestedBy === '3',
+    `status=${legacyAr.status} body=${JSON.stringify(legacyAr.body)}`);
+  if (!arOk) return;
+  const legacyApprovalId = legacyAr.body.id;
+
+  // Decide it as the default admin '1' — not the requester ('3'), so SoD passes.
+  const decided = await req('PUT', `/approval-requests/${legacyApprovalId}/decision`, { body: { decision: 'Rejected', note: 'legacy rejection' } });
+  check('B3 legacy: the bare-refId approval can be decided',
+    decided.status === 200 && decided.body?.status === 'Rejected', `status=${decided.status} ar=${decided.body?.status}`);
+
+  // THE REGRESSION: the month row must have moved with the decision.
+  const after = await req('GET', `/assignments/${assignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+  const afterRow = (after.body?.months || [])[0];
+  check('B3 legacy: the decision moves the assignment\'s non-Draft month rows',
+    afterRow?.status === 'Rejected', `row=${JSON.stringify(afterRow)}`);
+
+  const afterAssig = ((await req('GET', '/assignments')).body || []).find(a => a.id === assignmentId);
+  check('B3 legacy: the derived assignment status agrees with its month rows',
+    afterAssig?.status === 'Rejected', `status=${afterAssig?.status}`);
+
+  const confirmedAfter = ((await req('GET', '/requests')).body || []).find(r => r.id === REQUEST_ID)?.staffedEffort;
+  check('B3 legacy: confirmed hours drop by the rejected month\'s hours (the aggregates followed)',
+    typeof confirmedAfter === 'number' && Math.abs((confirmedBefore - confirmedAfter) - HOURS) < 1e-6,
+    `before=${confirmedBefore} after=${confirmedAfter} expectedDelta=${HOURS}`);
+
+  // The trail records the MONTH ROW's own transition, the same shape the B3 and
+  // batch paths write — an auditor never has to know which refId shape produced it.
+  const { body: logs } = await req('GET', '/audit-logs?limit=1000');
+  const monthEntry = (Array.isArray(logs) ? logs : []).find(e => e.path === `/assignment-months/${rowId}`);
+  check('B3 legacy: a month-row audit entry records the moved month',
+    Boolean(monthEntry) && monthEntry.before?.status === 'Allocated' && monthEntry.after?.status === 'Rejected' &&
+    monthEntry.actorId === '1',
+    `entry=${JSON.stringify(monthEntry && { path: monthEntry.path, before: monthEntry.before?.status, after: monthEntry.after?.status, actor: monthEntry.actorId })}`);
+
+  const assigEntry = (Array.isArray(logs) ? logs : []).find(e => e.path === `/assignments/${assignmentId}` && e.after?.status === 'Rejected');
+  check('B3 legacy: the assignment-level (legacy governed entity) audit entry is still written',
+    Boolean(assigEntry), `entry=${JSON.stringify(assigEntry && { path: assigEntry.path, after: assigEntry.after?.status })}`);
+
+  // CLEANUP so re-runs against a persistent Postgres database start clean.
+  await req('DELETE', `/assignments/${assignmentId}`);
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -1665,6 +1780,15 @@ async function main() {
     await checkMonthlyApproval();
   } catch (err) {
     console.log(`FAIL  monthly-approval flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the legacy (bare-refId)
+  // approval flow never masks or blocks any of the prior section results.
+  try {
+    await checkLegacyAllocationApproval();
+  } catch (err) {
+    console.log(`FAIL  legacy allocation-approval flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 
