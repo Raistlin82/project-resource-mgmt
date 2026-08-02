@@ -1938,6 +1938,11 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
     const v = req.query[name];
     return typeof v === 'string' ? v : undefined;
   };
+  // month <-> absolute-index helpers so span math is correct across year
+  // bounds — same shape as /capacity/monthly's local helpers.
+  const monthToIdx = (mo: string): number => { const [y, m] = mo.split('-').map(Number); return y * 12 + (m - 1); };
+  const idxToMonth = (i: number): string => `${Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, '0')}`;
+
   const fromRaw = qParam('from');
   const toRaw = qParam('to');
   if (fromRaw !== undefined && !MONTH_RE.test(fromRaw)) { res.status(400).json({ error: 'from must be a YYYY-MM month' }); return; }
@@ -1947,12 +1952,28 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
     res.status(400).json({ error: "status must be 'all', 'Requested' or 'Allocated'" }); return;
   }
 
-  // Default window: the open planning periods, so the page opens on exactly the
-  // months a People Manager can act on (RPT's "Mesi aperti").
-  const openMonths = (await repos.planningPeriods.list()).filter(p => p.status === 'Open').map(p => p.id).sort();
-  const from = fromRaw ?? openMonths[0];
-  const to = toRaw ?? openMonths[openMonths.length - 1];
+  // Each side defaults INDEPENDENTLY, so a caller-supplied bound is never
+  // silently discarded or inverted:
+  //  - NEITHER supplied -> the whole window defaults to the span of Open
+  //    planning periods (RPT's "Mesi aperti") — no bound was given, so there
+  //    is nothing to honour.
+  //  - Exactly ONE supplied -> the OTHER side defaults to a fixed 6-month
+  //    window anchored on the supplied bound (same shape as
+  //    /capacity/monthly's own `to = from + 5` default), never touching open
+  //    periods — that lookup is only meaningful when NEITHER bound is given.
+  let from = fromRaw;
+  let to = toRaw;
+  if (fromRaw === undefined && toRaw === undefined) {
+    const openMonths = (await repos.planningPeriods.list()).filter(p => p.status === 'Open').map(p => p.id).sort();
+    from = openMonths[0];
+    to = openMonths[openMonths.length - 1];
+  } else {
+    if (toRaw === undefined && fromRaw !== undefined) to = idxToMonth(monthToIdx(fromRaw) + 5);
+    if (fromRaw === undefined && toRaw !== undefined) from = idxToMonth(monthToIdx(toRaw) - 5);
+  }
   if (from === undefined || to === undefined) { res.json({ months: [], rows: [] }); return; }
+  if (from > to) { res.status(400).json({ error: 'from must be <= to' }); return; }
+  if (monthToIdx(to) - monthToIdx(from) + 1 > 24) { res.status(400).json({ error: 'range must span at most 24 months' }); return; }
   const months = monthsInRange(from, to);
 
   const [resources, assignments, monthRows, days, requests, projects, holidayRows] = await Promise.all([
@@ -1962,6 +1983,7 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
   const holidays = new Set(holidayRows.map(h => h.id));
   const hoursPerDay = await getHoursPerDay();
   const assignmentById = new Map(assignments.map(a => [a.id, a]));
+  const resourceById = new Map(resources.map(r => [r.id, r]));
   const requestById = new Map(requests.map(r => [r.id, r]));
   const projectById = new Map(projects.map(p => [p.id, p]));
 
@@ -1972,13 +1994,38 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
     hoursByRow.set(key, (hoursByRow.get(key) ?? 0) + (Number.isFinite(d.hours) ? d.hours : 0));
   }
 
+  // PASS 1 — totals, UNCONDITIONAL on statusFilter: a resource's per-month
+  // total must reflect every one of its month rows in range (Draft/Requested/
+  // Allocated/Rejected alike), never just the ones the current filtered view
+  // happens to list. Computed separately from PASS 2 below so a `status=`
+  // filter can never corrupt this number.
+  const totalsByResource = new Map<string, Record<string, number>>();
+  for (const m of monthRows) {
+    if (m.month < from || m.month > to) continue;
+    const assig = assignmentById.get(m.assignmentId);
+    if (assig === undefined) continue;
+    const resource = resourceById.get(assig.resourceId);
+    if (resource === undefined) continue;
+    let totals = totalsByResource.get(resource.id);
+    if (totals === undefined) {
+      totals = Object.fromEntries(months.map(mo => [mo, 0]));
+      totalsByResource.set(resource.id, totals);
+    }
+    const hours = hoursByRow.get(m.id) ?? 0;
+    totals[m.month] = (totals[m.month] ?? 0) + hours;
+  }
+
+  // PASS 2 — the rows/items actually returned. `statusFilter` selects which
+  // items are listed (and therefore which resources appear at all), but each
+  // row's `totalHours` is seeded from the unconditional PASS 1 totals above,
+  // not accumulated from the filtered items here.
   const rowsByResource = new Map<string, AllocationApprovalRow>();
   for (const m of monthRows) {
     if (m.month < from || m.month > to) continue;
     if (statusFilter !== 'all' && m.status !== statusFilter) continue;
     const assig = assignmentById.get(m.assignmentId);
     if (assig === undefined) continue;
-    const resource = resources.find(r => r.id === assig.resourceId);
+    const resource = resourceById.get(assig.resourceId);
     if (resource === undefined) continue;
 
     let row = rowsByResource.get(resource.id);
@@ -1989,7 +2036,7 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
         resourceId: resource.id, resourceName: resource.name, managerId: resource.managerId,
         contractHoursPerDay: cap,
         targetHours: Object.fromEntries(months.map(mo => [mo, monthlyTargetHours(cap, mo, holidays)])),
-        totalHours: Object.fromEntries(months.map(mo => [mo, 0])),
+        totalHours: { ...(totalsByResource.get(resource.id) ?? Object.fromEntries(months.map(mo => [mo, 0]))) },
         items: [],
       };
       rowsByResource.set(resource.id, row);
@@ -1997,7 +2044,6 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
     const request = requestById.get(assig.requestId);
     const project = request?.projectId ? projectById.get(request.projectId) : undefined;
     const hours = hoursByRow.get(m.id) ?? 0;
-    row.totalHours[m.month] = (row.totalHours[m.month] ?? 0) + hours;
     row.items.push({
       assignmentMonthId: m.id, assignmentId: m.assignmentId, month: m.month, status: m.status,
       projectId: project?.id, projectName: project?.name, requestId: assig.requestId, hours,

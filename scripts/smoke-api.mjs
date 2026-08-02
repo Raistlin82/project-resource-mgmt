@@ -1525,6 +1525,74 @@ async function checkMonthlyApproval() {
 
   const feedDenied = await req('GET', '/allocation-approvals', { headers: { 'X-User-Id': '9', 'X-User-Role': 'employee' } });
   check('B3 feed refuses a non-staffing role', feedDenied.status === 403, `status=${feedDenied.status}`);
+
+  // --- REVIEW FIX #1 — totalHours must be UNCONDITIONAL on the status filter.
+  // Resource '2' (John Miller) already carries one 'Requested' month row here
+  // (3:2026-06, from the forced-re-approval edit at the very top of this
+  // function). Add a SECOND, self-managed assignment booking hours into the
+  // SAME resource + SAME month so it lands 'Allocated' — a resource with two
+  // assignments in one month under two different statuses is exactly the
+  // shape that corrupted totalHours (it was summing only the items that
+  // survived the status filter, instead of every month row of that resource
+  // in that month).
+  const TOTALS_MONTH = '2026-06';
+  const TOTALS_RESOURCE = '2';
+
+  const beforeTotalsFeed = await req('GET', `/allocation-approvals?from=${TOTALS_MONTH}&to=${TOTALS_MONTH}&status=all`);
+  const beforeTotalsRow = (beforeTotalsFeed.body?.rows || []).find(r => r.resourceId === TOTALS_RESOURCE);
+  const beforeTotal = beforeTotalsRow?.totalHours?.[TOTALS_MONTH] ?? 0;
+
+  const totalsCreate = await req('POST', '/assignments', { body: { requestId: '4', resourceId: TOTALS_RESOURCE, assignedHours: 0 } });
+  const totalsCreateOk = check('B3 totals setup: throwaway assignment created', totalsCreate.status === 200 && typeof totalsCreate.body?.id === 'string', `status=${totalsCreate.status}`);
+  if (totalsCreateOk) {
+    const totalsAssignmentId = totalsCreate.body.id;
+    const totalsPut = await req('PUT', `/assignments/${totalsAssignmentId}/allocation`, { body: { month: TOTALS_MONTH, dailyHours: { [`${TOTALS_MONTH}-16`]: 3 } } });
+    check('B3 totals setup: hours booked into the shared month', totalsPut.status === 200, `status=${totalsPut.status}`);
+
+    // Default actor (resource-id '1') IS resource 2's manager -> self-managed
+    // shortcut -> straight to 'Allocated', no approval opened.
+    const totalsSubmit = await req('POST', `/assignments/${totalsAssignmentId}/months/${TOTALS_MONTH}/submit`, { body: {} });
+    check('B3 totals setup: self-managed submit lands Allocated', totalsSubmit.status === 200 && totalsSubmit.body?.status === 'Allocated', `status=${totalsSubmit.status} row=${totalsSubmit.body?.status}`);
+
+    const afterAllFeed = await req('GET', `/allocation-approvals?from=${TOTALS_MONTH}&to=${TOTALS_MONTH}&status=all`);
+    const afterAllRow = (afterAllFeed.body?.rows || []).find(r => r.resourceId === TOTALS_RESOURCE);
+    const afterRequestedFeed = await req('GET', `/allocation-approvals?from=${TOTALS_MONTH}&to=${TOTALS_MONTH}&status=Requested`);
+    const afterRequestedRow = (afterRequestedFeed.body?.rows || []).find(r => r.resourceId === TOTALS_RESOURCE);
+
+    check('B3 totals: the new Allocated month raises the UNFILTERED total by its own hours',
+      afterAllRow?.totalHours?.[TOTALS_MONTH] === beforeTotal + 3,
+      `before=${beforeTotal} after=${afterAllRow?.totalHours?.[TOTALS_MONTH]}`);
+
+    check("B3 totals: status=Requested does NOT shrink totalHours — it still covers the Allocated sibling",
+      afterRequestedRow?.totalHours?.[TOTALS_MONTH] === afterAllRow?.totalHours?.[TOTALS_MONTH],
+      `all=${afterAllRow?.totalHours?.[TOTALS_MONTH]} requested=${afterRequestedRow?.totalHours?.[TOTALS_MONTH]}`);
+
+    const allItemsForMonth = (afterAllRow?.items || []).filter(i => i.month === TOTALS_MONTH);
+    const requestedItemsForMonth = (afterRequestedRow?.items || []).filter(i => i.month === TOTALS_MONTH);
+    check('B3 totals: status=Requested DOES narrow the listed items (excludes the Allocated sibling)',
+      requestedItemsForMonth.length < allItemsForMonth.length && requestedItemsForMonth.every(i => i.status === 'Requested'),
+      `all=${allItemsForMonth.length} requested=${requestedItemsForMonth.length}`);
+
+    check('B3 totals: the new Allocated item is listed unfiltered but absent from the Requested-filtered view',
+      allItemsForMonth.some(i => i.assignmentId === totalsAssignmentId && i.status === 'Allocated') &&
+      !requestedItemsForMonth.some(i => i.assignmentId === totalsAssignmentId),
+      `allItems=${JSON.stringify(allItemsForMonth.map(i => ({ a: i.assignmentId, s: i.status })))}`);
+  }
+
+  // --- REVIEW FIX #2 — window defaulting must never discard or invert a
+  // caller-supplied bound, and must reject an inverted range outright.
+  const inverted = await req('GET', '/allocation-approvals?from=2026-09&to=2026-05');
+  check('B3 feed rejects an inverted from>to range with 400', inverted.status === 400, `status=${inverted.status} body=${JSON.stringify(inverted.body)}`);
+
+  const periodsResp = await req('GET', '/planning-periods');
+  const expectedOpenMonths = (periodsResp.body || []).filter(p => p.status === 'Open').map(p => p.id).sort();
+  const defaultWindowFeed = await req('GET', '/allocation-approvals');
+  const defaultMonths = defaultWindowFeed.body?.months;
+  check('B3 feed default window (neither bound supplied) spans exactly the Open planning periods',
+    defaultWindowFeed.status === 200 && Array.isArray(defaultMonths) && expectedOpenMonths.length > 0 &&
+    defaultMonths[0] === expectedOpenMonths[0] && defaultMonths[defaultMonths.length - 1] === expectedOpenMonths[expectedOpenMonths.length - 1] &&
+    expectedOpenMonths.every(m => defaultMonths.includes(m)),
+    `months=${JSON.stringify(defaultMonths)} openPeriods=${JSON.stringify(expectedOpenMonths)}`);
 }
 
 async function main() {
