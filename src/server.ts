@@ -9,10 +9,10 @@ import { db } from './db/client';
 import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
-import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
+import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter, AllocationApprovalRow, AllocationApprovalItem } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, decisionToAssignmentStatus, allocationApproverStep } from './app/services/staffing.util';
 import { deriveAssignmentStatus, monthRowId, parseMonthRowId, monthlyAggregateHours, type MonthStatus } from './app/services/allocation-month.util';
-import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity } from './app/services/calendar.util';
+import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity, monthlyTargetHours } from './app/services/calendar.util';
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
@@ -584,6 +584,9 @@ const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   // Monthly FTE capacity/demand rollup (B2): a read-only computed view derived
   // from assignments/resources — same need-to-know as the staffing reads above.
   { test: p => p.startsWith('/capacity'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
+  // B3 approval feed: the People Manager's month-by-month queue — approver-grade
+  // roles only (stricter than /capacity, which is a read-only rollup).
+  { test: p => p.startsWith('/allocation-approvals'), roles: ['resource-manager', 'delivery-executive', 'admin'] },
   // Timesheets for the whole org: require an authenticated principal (any role),
   // never served to an unauthenticated ('unknown') caller.
   { test: p => p.startsWith('/time-entries'), roles: ['employee', 'pm', 'resource-manager', 'delivery-executive', 'finance', 'sales', 'admin'] },
@@ -1921,6 +1924,90 @@ apiRouter.get('/capacity/monthly', async (req, res) => {
   const assignmentMonths = assignmentMonthRows.map(m => ({ assignmentId: m.assignmentId, month: m.month, status: m.status }));
 
   res.json(rollupMonthly({ resources, assignments, assignmentDays, assignmentMonths, months, hoursPerDay, holidays: holSet }));
+});
+
+/**
+ * B3 — People Manager approval feed: resources × months × projects with the
+ * per-month lifecycle state, hours, target and notes. Read-only; gated by the
+ * '/allocation-approvals' READ_RULE (roleGate is GLOBAL middleware — do NOT
+ * re-gate per handler).
+ */
+apiRouter.get('/allocation-approvals', async (req, res) => {
+  const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+  const qParam = (name: string): string | undefined => {
+    const v = req.query[name];
+    return typeof v === 'string' ? v : undefined;
+  };
+  const fromRaw = qParam('from');
+  const toRaw = qParam('to');
+  if (fromRaw !== undefined && !MONTH_RE.test(fromRaw)) { res.status(400).json({ error: 'from must be a YYYY-MM month' }); return; }
+  if (toRaw !== undefined && !MONTH_RE.test(toRaw)) { res.status(400).json({ error: 'to must be a YYYY-MM month' }); return; }
+  const statusFilter = qParam('status') ?? 'all';
+  if (!['all', 'Requested', 'Allocated'].includes(statusFilter)) {
+    res.status(400).json({ error: "status must be 'all', 'Requested' or 'Allocated'" }); return;
+  }
+
+  // Default window: the open planning periods, so the page opens on exactly the
+  // months a People Manager can act on (RPT's "Mesi aperti").
+  const openMonths = (await repos.planningPeriods.list()).filter(p => p.status === 'Open').map(p => p.id).sort();
+  const from = fromRaw ?? openMonths[0];
+  const to = toRaw ?? openMonths[openMonths.length - 1];
+  if (from === undefined || to === undefined) { res.json({ months: [], rows: [] }); return; }
+  const months = monthsInRange(from, to);
+
+  const [resources, assignments, monthRows, days, requests, projects, holidayRows] = await Promise.all([
+    repos.resources.list(), repos.assignments.list(), repos.assignmentMonths.list(),
+    repos.assignmentDays.list(), repos.requests.list(), repos.projects.list(), repos.holidays.list(),
+  ]);
+  const holidays = new Set(holidayRows.map(h => h.id));
+  const hoursPerDay = await getHoursPerDay();
+  const assignmentById = new Map(assignments.map(a => [a.id, a]));
+  const requestById = new Map(requests.map(r => [r.id, r]));
+  const projectById = new Map(projects.map(p => [p.id, p]));
+
+  // Hours per (assignment, month), summed from the day rows.
+  const hoursByRow = new Map<string, number>();
+  for (const d of days) {
+    const key = monthRowId(d.assignmentId, monthOf(d.date));
+    hoursByRow.set(key, (hoursByRow.get(key) ?? 0) + (Number.isFinite(d.hours) ? d.hours : 0));
+  }
+
+  const rowsByResource = new Map<string, AllocationApprovalRow>();
+  for (const m of monthRows) {
+    if (m.month < from || m.month > to) continue;
+    if (statusFilter !== 'all' && m.status !== statusFilter) continue;
+    const assig = assignmentById.get(m.assignmentId);
+    if (assig === undefined) continue;
+    const resource = resources.find(r => r.id === assig.resourceId);
+    if (resource === undefined) continue;
+
+    let row = rowsByResource.get(resource.id);
+    if (row === undefined) {
+      const cap = (typeof resource.contractHoursPerDay === 'number' && Number.isFinite(resource.contractHoursPerDay) && resource.contractHoursPerDay > 0)
+        ? resource.contractHoursPerDay : hoursPerDay;
+      row = {
+        resourceId: resource.id, resourceName: resource.name, managerId: resource.managerId,
+        contractHoursPerDay: cap,
+        targetHours: Object.fromEntries(months.map(mo => [mo, monthlyTargetHours(cap, mo, holidays)])),
+        totalHours: Object.fromEntries(months.map(mo => [mo, 0])),
+        items: [],
+      };
+      rowsByResource.set(resource.id, row);
+    }
+    const request = requestById.get(assig.requestId);
+    const project = request?.projectId ? projectById.get(request.projectId) : undefined;
+    const hours = hoursByRow.get(m.id) ?? 0;
+    row.totalHours[m.month] = (row.totalHours[m.month] ?? 0) + hours;
+    row.items.push({
+      assignmentMonthId: m.id, assignmentId: m.assignmentId, month: m.month, status: m.status,
+      projectId: project?.id, projectName: project?.name, requestId: assig.requestId, hours,
+      plannerNote: m.plannerNote, approverNote: m.approverNote, approvalId: m.approvalId,
+    } satisfies AllocationApprovalItem);
+  }
+
+  const rows = [...rowsByResource.values()].sort((a, b) => a.resourceName.localeCompare(b.resourceName));
+  for (const row of rows) row.items.sort((a, b) => a.month.localeCompare(b.month) || a.assignmentId.localeCompare(b.assignmentId));
+  res.json({ months, rows });
 });
 
 apiRouter.get('/time-entries', async (_req, res) => { res.json(await repos.timeEntries.list()); });

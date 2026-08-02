@@ -1507,6 +1507,24 @@ async function checkMonthlyApproval() {
     (closedRow.body?.months || [])[0]?.status === 'Allocated',
     `row=${JSON.stringify((closedRow.body?.months || [])[0])}`);
   await req('PUT', '/planning-periods/2026-08', { body: { status: 'Open' } }); // restore for reruns
+
+  // --- READ SIDE (Task 8): the People Manager approval feed ------------------
+  // By this point in the suite, seeded data has already been mutated (months
+  // submitted/decided, an assignment retargeted, a throwaway assignment
+  // deleted) — assert on the envelope's SHAPE and the filter's narrowing
+  // behaviour, not on exact counts or a specific resource's exact state.
+  const feed = await req('GET', '/allocation-approvals?from=2026-05&to=2026-09&status=all');
+  check('B3 feed returns months and rows', feed.status === 200 && Array.isArray(feed.body?.months) && Array.isArray(feed.body?.rows), `status=${feed.status}`);
+  const withItems = (feed.body?.rows || []).find(r => (r.items || []).length > 0);
+  check('B3 feed rows carry per-month items', !!withItems && typeof withItems.items[0].assignmentMonthId === 'string', `rows=${feed.body?.rows?.length}`);
+  check('B3 feed exposes the monthly target', !!withItems && typeof withItems.targetHours === 'object', 'targetHours missing');
+
+  const pendingOnly = await req('GET', '/allocation-approvals?from=2026-05&to=2026-09&status=Requested');
+  const allPending = (pendingOnly.body?.rows || []).every(r => (r.items || []).every(i => i.status === 'Requested'));
+  check('B3 feed status filter narrows to pending months', pendingOnly.status === 200 && allPending, `status=${pendingOnly.status}`);
+
+  const feedDenied = await req('GET', '/allocation-approvals', { headers: { 'X-User-Id': '9', 'X-User-Role': 'employee' } });
+  check('B3 feed refuses a non-staffing role', feedDenied.status === 403, `status=${feedDenied.status}`);
 }
 
 async function main() {
