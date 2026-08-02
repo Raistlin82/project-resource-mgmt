@@ -65,55 +65,20 @@ export function isAllowedTimeEntryTransition(from: TimeEntry['status'], to: Time
 
 export type AllocationStatus = Assignment['status'];
 
-/**
- * B3: NOTHING is client-settable — `assignments.status` is derived from the
- * month rows (allocation-month.util `deriveAssignmentStatus`). The lifecycle is
- * driven exclusively by the per-month endpoints. No handler consults this
- * constant any more (POST/PUT /assignments in src/server.ts reject any client
- * `status` outright, via an inline literal check, not this list) — kept
- * exported and empty so the gap-A test suite below, which documents the
- * retired pre-B3 contract, still has something to assert against.
- */
-export const ALLOCATION_CLIENT_SETTABLE: readonly AllocationStatus[] = [];
-
-// Gap-A transition table: like ALLOCATION_CLIENT_SETTABLE above, this has no
-// server caller since B3 — the client-settable lifecycle it modeled was
-// retired along with it. Kept for its own pre-B3 test suite only. The system
-// transitions Requested -> Allocated and Requested -> Rejected were always
-// applied DIRECTLY by the decision hook, never routed through this guard, so
-// they are intentionally absent here.
-const ALLOCATION_TRANSITIONS: Readonly<Record<AllocationStatus, readonly AllocationStatus[]>> = {
-  Draft: ['Requested'],
-  Requested: ['Draft'],
-  Allocated: ['Requested'],
-  Rejected: ['Requested'],
-};
-
-export function isAllowedAllocationTransition(from: AllocationStatus, to: AllocationStatus): boolean {
-  if (from === to) return true;
-  return ALLOCATION_TRANSITIONS[from].includes(to);
-}
+// B3 REMOVALS. `ALLOCATION_CLIENT_SETTABLE`, `isAllowedAllocationTransition`
+// (with its ALLOCATION_TRANSITIONS table) and `assignmentAggregateHours` lived
+// here until B3 made `assignments.status` a DERIVED rollup of the month rows.
+// They had no runtime caller left, and their specs asserted a contract the
+// server no longer implements — a client-settable assignment lifecycle and an
+// assignment-level hour rollup — so they were deleted rather than left as
+// documentation of a retired design. Their replacements all live in
+// allocation-month.util: `deriveAssignmentStatus` and `monthlyAggregateHours`.
 
 /** Build the single approval step for an allocation: the resource's manager (resource-id), fallback role only. */
 export function allocationApproverStep(managerId: string | undefined): ApprovalStep {
   return managerId
     ? { role: 'resource-manager', status: 'Pending', approverId: managerId }
     : { role: 'resource-manager', status: 'Pending' };
-}
-
-/**
- * @deprecated B3 — superseded by `monthlyAggregateHours` (allocation-month.util),
- * which weighs each day by the status of ITS month. Kept for the gap-A unit
- * tests that document the pre-B3 rollup; no runtime caller remains.
- */
-export function assignmentAggregateHours(rows: Pick<Assignment, 'assignedHours' | 'status'>[]): { confirmed: number; planned: number } {
-  let confirmed = 0, planned = 0;
-  for (const a of rows) {
-    const h = Number.isFinite(a.assignedHours) ? a.assignedHours : 0;
-    if (a.status === 'Allocated') { confirmed += h; planned += h; }
-    else if (a.status === 'Requested') { planned += h; }
-  }
-  return { confirmed, planned };
 }
 
 /** Map an approval decision to the resulting assignment status. */

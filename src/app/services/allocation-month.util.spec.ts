@@ -1,6 +1,5 @@
 import {
   deriveAssignmentStatus,
-  isAllowedMonthTransition,
   monthRowId,
   monthlyAggregateHours,
   parseMonthRowId,
@@ -23,31 +22,6 @@ describe('monthRowId / parseMonthRowId', () => {
   it('rejects a composite id whose month is not YYYY-MM', () => {
     expect(parseMonthRowId('A12:2026-13')).toBeUndefined();
     expect(parseMonthRowId('A12:not-a-month')).toBeUndefined();
-  });
-});
-
-describe('isAllowedMonthTransition', () => {
-  it('allows the planner submit path', () => {
-    expect(isAllowedMonthTransition('Draft', 'Requested')).toBe(true);
-    expect(isAllowedMonthTransition('Rejected', 'Requested')).toBe(true);
-  });
-
-  it('allows the decision outcomes from Requested', () => {
-    expect(isAllowedMonthTransition('Requested', 'Allocated')).toBe(true);
-    expect(isAllowedMonthTransition('Requested', 'Rejected')).toBe(true);
-  });
-
-  it('allows forced re-approval of an approved month', () => {
-    expect(isAllowedMonthTransition('Allocated', 'Requested')).toBe(true);
-  });
-
-  it('rejects skipping the approval step', () => {
-    expect(isAllowedMonthTransition('Draft', 'Allocated')).toBe(false);
-    expect(isAllowedMonthTransition('Rejected', 'Allocated')).toBe(false);
-  });
-
-  it('treats a no-op transition as allowed', () => {
-    expect(isAllowedMonthTransition('Allocated', 'Allocated')).toBe(true);
   });
 });
 

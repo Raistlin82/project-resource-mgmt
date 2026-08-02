@@ -43,23 +43,21 @@ export function parseMonthRowId(id: string): { assignmentId: string; month: stri
   return { assignmentId, month };
 }
 
-/**
- * Client- and system-driven transitions of ONE month row. Draft/Rejected are
- * submitted for approval; a decision moves Requested to its outcome; editing an
- * approved month forces re-approval (B1's rule, now scoped to the month).
- */
-const MONTH_TRANSITIONS: Readonly<Record<MonthStatus, readonly MonthStatus[]>> = {
-  Draft: ['Requested'],
-  Requested: ['Allocated', 'Rejected', 'Draft'],
-  Allocated: ['Requested'],
-  Rejected: ['Requested'],
-};
-
-/** True iff a month row may move from `from` to `to`. A no-op is always allowed. */
-export function isAllowedMonthTransition(from: MonthStatus, to: MonthStatus): boolean {
-  if (from === to) return true;
-  return MONTH_TRANSITIONS[from].includes(to);
-}
+// REMOVED: `isAllowedMonthTransition` / MONTH_TRANSITIONS. The table had no
+// runtime caller, and the only place it could naturally live — the decision
+// hook's month-status write in `applyAllocationDecision` — must NEVER refuse a
+// transition: an approval that reports Approved while the governed month stays
+// Requested is precisely the divergence that hook exists to prevent, so a guard
+// there could only turn a committed decision into silent corruption. The two
+// callers that DO gate a transition already do so inline and for reasons the
+// table cannot express: `POST .../months/:month/submit` restricts the source to
+// Draft/Rejected (the table's Allocated -> Requested edge belongs to a different
+// caller, the allocation PUT's forced re-approval), and the legacy bare-refId
+// branch of `applyAllocationDecision` legitimately performs Allocated ->
+// Rejected, an edge the table forbade. Keeping a table that describes neither
+// the legal nor the enforced set would only invite a future author to wire in
+// the wrong guard. The rollup rule it shipped alongside — `deriveAssignmentStatus`
+// — is the part that is real, and stays.
 
 /**
  * Roll month statuses up into the assignment's DERIVED status. Precedence

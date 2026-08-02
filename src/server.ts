@@ -1519,8 +1519,7 @@ apiRouter.put('/assignments/:id', async (req, res) => {
   // are untouched — they carry no approval and nothing has been promised
   // about them. 'Rejected' rows are ALSO untouched, deliberately, and for a
   // different reason: a rejection is a closed conversation, not a live
-  // commitment — MONTH_TRANSITIONS (allocation-month.util) has no
-  // Rejected -> Allocated edge, and sweeping it in here would silently
+  // commitment, and sweeping it in here would silently
   // resubmit (or, on the self-managed branch, auto-approve) a month no
   // planner ever asked to reopen; any stale approvalId it carries is left
   // exactly as is, never withdrawn. Also deliberately absent: a
@@ -1844,11 +1843,11 @@ apiRouter.post('/assignments/:id/months/:month/submit', async (req, res) => {
 
   const row = await repos.assignmentMonths.get(monthRowId(assig.id, month));
   if (row === undefined) { res.status(404).json({ error: 'no allocation for this month' }); return; }
-  // ONLY Draft/Rejected may be voluntarily submitted. `isAllowedMonthTransition`
-  // is the wrong check here: its Allocated -> Requested entry exists for the
-  // DIFFERENT caller (the allocation PUT's day-edit forced-reapproval path),
-  // not for an explicit planner submit — an already-Requested OR already-
-  // Allocated month must be refused.
+  // ONLY Draft/Rejected may be voluntarily submitted. A generic month-transition
+  // table is the wrong check here: its Allocated -> Requested edge belongs to a
+  // DIFFERENT caller (the allocation PUT's day-edit forced-reapproval path), not
+  // to an explicit planner submit — an already-Requested OR already-Allocated
+  // month must be refused. Enforced inline for exactly that reason.
   if (row.status !== 'Draft' && row.status !== 'Rejected') {
     res.status(400).json({ error: `illegal month transition ${row.status} -> Requested` });
     return;
@@ -3493,8 +3492,11 @@ async function applyAllocationDecision(
     // branch, though the batch never reaches here (it resolves a month row
     // first, so its refIds are always composite).
     if (monthRows.length > 0 && !deferAggregates) await refreshDerivedAssignmentStatus(assig.id);
-    const settled = await repos.assignments.get(assig.id);
     try {
+      // Read INSIDE the best-effort block: it exists only to label the audit
+      // entry below, so it must never be the thing that 500s a decision that has
+      // already committed.
+      const settled = await repos.assignments.get(assig.id);
       // Aggregate recompute + the explicit audit entry are best-effort, same
       // discipline as the audit middleware ("audit is best-effort... failures
       // here never affect the already-sent response"): the decision AND the

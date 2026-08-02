@@ -69,6 +69,7 @@ import type {
   PlanningPeriod,
 } from '../app/services/api.service';
 import { distributeHoursOverWindow } from '../app/services/calendar.util';
+import { deriveAssignmentStatus, type MonthStatus } from '../app/services/allocation-month.util';
 
 // --- Core resources ---------------------------------------------------------
 
@@ -144,12 +145,20 @@ export const requests: ResourceRequest[] = [
 // incompatible with the type and broke `ng build`. Minimally remapped to
 // 'Allocated' here ONLY to unblock the build — the real hard/soft distinction
 // (and any richer seed migration) is Task 7's job, not this one.
-export const assignments: Assignment[] = [
-  { id: '1', requestId: '1', resourceId: '1', assignedHours: 20, status: 'Allocated', startDate: '2026-05-01', endDate: '2026-06-30', allocationPct: 60 },
-  { id: '2', requestId: '3', resourceId: '1', assignedHours: 24, status: 'Allocated', startDate: '2026-06-15', endDate: '2026-08-31', allocationPct: 70 },
-  { id: '3', requestId: '4', resourceId: '2', assignedHours: 30, status: 'Allocated', startDate: '2026-05-15', endDate: '2026-09-15', allocationPct: 100 },
-  { id: '4', requestId: '2', resourceId: '3', assignedHours: 8, status: 'Allocated', startDate: '2026-05-01', endDate: '2026-07-31', allocationPct: 50 },
-  { id: '5', requestId: '5', resourceId: '3', assignedHours: 10, status: 'Allocated', startDate: '2026-08-01', endDate: '2026-09-30', allocationPct: 50 },
+//
+// B3: `status` is NOT part of this literal. It is a DERIVED rollup of the
+// assignment's month rows (`deriveAssignmentStatus`), so hard-coding it here let
+// the seed contradict its own invariant from the very first boot: assignment '2'
+// shipped 'Allocated' while its 2:2026-08 month row is 'Requested', which the
+// rollup reads as 'Requested'. The exported `assignments` below is built from
+// this base once the month rows exist, so a fresh database is consistent by
+// construction and no hand-maintained pair can drift.
+const assignmentsBase: readonly Omit<Assignment, 'status'>[] = [
+  { id: '1', requestId: '1', resourceId: '1', assignedHours: 20, startDate: '2026-05-01', endDate: '2026-06-30', allocationPct: 60 },
+  { id: '2', requestId: '3', resourceId: '1', assignedHours: 24, startDate: '2026-06-15', endDate: '2026-08-31', allocationPct: 70 },
+  { id: '3', requestId: '4', resourceId: '2', assignedHours: 30, startDate: '2026-05-15', endDate: '2026-09-15', allocationPct: 100 },
+  { id: '4', requestId: '2', resourceId: '3', assignedHours: 8, startDate: '2026-05-01', endDate: '2026-07-31', allocationPct: 50 },
+  { id: '5', requestId: '5', resourceId: '3', assignedHours: 10, startDate: '2026-08-01', endDate: '2026-09-30', allocationPct: 50 },
 ];
 
 // --- Time-phased allocation (B1) config --------------------------------------
@@ -189,7 +198,7 @@ export const planningPeriods: PlanningPeriod[] = [
  * days — none of the seeded rows above hit that case.
  */
 function buildAssignmentDays(
-  rows: readonly Assignment[],
+  rows: readonly Omit<Assignment, 'status'>[],
   holidayRows: readonly Holiday[],
 ): AssignmentDay[] {
   const holidaySet = new Set(holidayRows.map((h) => h.id));
@@ -206,20 +215,21 @@ function buildAssignmentDays(
   return out;
 }
 
-export const assignmentDays: AssignmentDay[] = buildAssignmentDays(assignments, holidays);
+export const assignmentDays: AssignmentDay[] = buildAssignmentDays(assignmentsBase, holidays);
 
 /**
  * Per-month lifecycle rows (B3), derived — not hand-typed — from the seeded
  * assignmentDays so a month row exists for exactly the months each assignment
- * actually books. Every seeded assignment is 'Allocated', so its months are too;
- * ONE month of assignment '2' is left 'Requested' (governed by the seeded
- * approval AR4 below) to give the People Manager page and the smoke suite a
- * pending item to decide out of the box.
+ * actually books. Months are seeded 'Allocated' (booked, approved work); ONE
+ * month of assignment '2' is left 'Requested' (governed by the seeded approval
+ * AR4 below) to give the People Manager page and the smoke suite a pending item
+ * to decide out of the box — which is why assignment '2' then DERIVES to
+ * 'Requested' rather than 'Allocated'.
  */
 const PENDING_SEED_MONTH = { assignmentId: '2', month: '2026-08', approvalId: 'AR4' } as const;
 
 function buildAssignmentMonths(
-  rows: readonly Assignment[],
+  rows: readonly Omit<Assignment, 'status'>[],
   days: readonly AssignmentDay[],
 ): AssignmentMonth[] {
   const monthsByAssignment = new Map<string, Set<string>>();
@@ -244,7 +254,20 @@ function buildAssignmentMonths(
   return out;
 }
 
-export const assignmentMonths: AssignmentMonth[] = buildAssignmentMonths(assignments, assignmentDays);
+export const assignmentMonths: AssignmentMonth[] = buildAssignmentMonths(assignmentsBase, assignmentDays);
+
+/**
+ * The seeded assignments, with `status` DERIVED from the month rows above via
+ * the very same rollup the server applies (`refreshDerivedAssignmentStatus`), so
+ * a freshly seeded database already satisfies the B3 invariant instead of
+ * needing the first mutation to repair it.
+ */
+export const assignments: Assignment[] = assignmentsBase.map(a => ({
+  ...a,
+  status: deriveAssignmentStatus(
+    assignmentMonths.filter(m => m.assignmentId === a.id).map(m => m.status as MonthStatus),
+  ),
+}));
 
 export const timeEntries: TimeEntry[] = [
   { id: 'TE1', assignmentId: '1', requestId: '1', resourceId: '1', projectId: '1', date: '2026-04-06', hours: 8, status: 'Approved', notes: 'Backend integration', approvedBy: '1', approvedAt: '2026-04-07T09:00:00.000Z' },

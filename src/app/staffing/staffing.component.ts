@@ -450,7 +450,7 @@ export class StaffingComponent {
    * since creating the proposal no longer opens an approval on its own.
    */
   private assignmentResultMessage(a: Assignment): string {
-    const name = this.allResources().find(r => r.id === a.resourceId)?.name ?? 'Risorsa';
-    return `${name}: proposta salvata in bozza — invia il mese in approvazione dal calendario di allocazione`;
+    const name = this.allResources().find(r => r.id === a.resourceId)?.name ?? 'Resource';
+    return `${name}: proposal saved as a draft — submit the month for approval from the allocation calendar`;
   }
 }
