@@ -155,14 +155,14 @@ describe('allocation transition guard', () => {
     expect([...ALLOCATION_CLIENT_SETTABLE]).toEqual([]);
   });
 
-  it('allows client-settable moves: Draft<->Requested, Rejected->Requested, Allocated->Requested', () => {
+  it('documents the retired gap-A transitions it once gated: Draft<->Requested, Rejected->Requested, Allocated->Requested', () => {
     expect(isAllowedAllocationTransition('Draft', 'Requested')).toBe(true);
     expect(isAllowedAllocationTransition('Requested', 'Draft')).toBe(true);
     expect(isAllowedAllocationTransition('Rejected', 'Requested')).toBe(true);
-    // Allocated -> Requested is the manual re-request path (a later task relies on it).
+    // Allocated -> Requested was the gap-A manual re-request path.
     expect(isAllowedAllocationTransition('Allocated', 'Requested')).toBe(true);
   });
-  it('rejects client jumps straight to Allocated/Rejected', () => {
+  it('documents the retired gap-A rejection of jumps straight to Allocated/Rejected', () => {
     expect(isAllowedAllocationTransition('Draft', 'Allocated')).toBe(false);
     expect(isAllowedAllocationTransition('Requested', 'Rejected')).toBe(false);
   });

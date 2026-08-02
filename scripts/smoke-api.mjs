@@ -285,6 +285,12 @@ async function checkAllocationApproval() {
   const TARGET_REQUEST_ID = '4'; // Project Beta - Platform Migration (Consultant)
   const MONTH = '2026-07';
   const DAY = `${MONTH}-06`; // Monday
+  // The exact literal src/server.ts's POST/PUT /assignments guard responds
+  // with. Asserted verbatim below (not just the 400 status) so a future
+  // validation change that swaps in a different rejection reason — or that
+  // silently narrows the guard to only SOME status values — cannot pass this
+  // check by accident.
+  const STATUS_NOT_SETTABLE_ERROR = 'status is derived from the per-month allocation and cannot be set on an assignment';
 
   // 0) REGRESSION CLOSED (B3 carry-forward #1) — a client can no longer seed a
   // status on create/update; ANY explicit `status`, even a previously-legal
@@ -297,7 +303,7 @@ async function checkAllocationApproval() {
     });
     check(
       "POST /api/assignments with a client status (even 'Draft') is rejected (400, status is derived)",
-      forged.status === 400,
+      forged.status === 400 && forged.body?.error === STATUS_NOT_SETTABLE_ERROR,
       `status=${forged.status}, body=${JSON.stringify(forged.body)}`,
     );
   }
@@ -308,7 +314,7 @@ async function checkAllocationApproval() {
     });
     check(
       "PUT /api/assignments/:id with a client status is rejected (400, status is derived)",
-      forgedPut.status === 400,
+      forgedPut.status === 400 && forgedPut.body?.error === STATUS_NOT_SETTABLE_ERROR,
       `status=${forgedPut.status}, body=${JSON.stringify(forgedPut.body)}`,
     );
   }
@@ -454,6 +460,38 @@ async function checkAllocationApproval() {
       }
     }
   }
+}
+
+/**
+ * Regression guard for the Utilization view's two assignment-creation call
+ * sites (src/app/utilization/utilization.component.ts): `saveAssignment()`'s
+ * create branch and `pasteAssignment()`. Both used to send
+ * `{ requestId, resourceId, assignedHours, status: 'Draft' }` — a shape this
+ * task's server change now rejects with 400 ("status is derived..."), which
+ * is exactly how the Task-7 review caught two live UI flows breaking ("New
+ * assignment" / "Paste assignment" in Utilization both failing with the
+ * generic "Failed to create assignment." toast). Both call sites were fixed
+ * to drop `status` entirely, and now build the IDENTICAL payload shape:
+ * `{ requestId, resourceId, assignedHours }`. This check POSTs that exact
+ * shape (not the richer PROPOSER_HEADERS-driven shape exercised above) so a
+ * future regression in either call site is caught here, not by a user
+ * hitting a dead-end toast in the browser.
+ */
+async function checkUtilizationAssignmentPayload() {
+  // Deliberately the default RBAC_HEADERS (admin/resource '1') and NO headers
+  // override, since neither utilization.component.ts call site sends one —
+  // both rely on api.service.ts's default same-origin auth. requestId/
+  // resourceId '1' are seed rows that always exist.
+  const payload = { requestId: '1', resourceId: '1', assignedHours: 1 };
+  const created = await req('POST', '/assignments', { body: payload });
+  const ok = check(
+    "POST /api/assignments with the Utilization view's exact create/paste payload (no status) -> 200, derived 'Draft'",
+    created.status === 200 && Boolean(created.body) && typeof created.body.id === 'string' && created.body.status === 'Draft',
+    `status=${created.status}, body=${JSON.stringify(created.body)}`,
+  );
+  // Cleanup: this is a disposable assignment (no booked day rows, no window) —
+  // remove it so reruns never accumulate cruft in the demo dataset.
+  if (ok) await req('DELETE', `/assignments/${created.body.id}`);
 }
 
 /**
@@ -1002,6 +1040,15 @@ async function main() {
     await checkAllocationApproval();
   } catch (err) {
     console.log(`FAIL  allocation-approval flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the Utilization-payload
+  // regression guard never masks or blocks any of the other sections.
+  try {
+    await checkUtilizationAssignmentPayload();
+  } catch (err) {
+    console.log(`FAIL  utilization assignment-payload check — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

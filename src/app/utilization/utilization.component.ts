@@ -340,12 +340,11 @@ export class UtilizationComponent {
       const assignedHours = val.assignedHours || 0;
 
       if (this.editingAssignmentId()) {
-        // Edit path never re-sends `status`: once an assignment is Requested/
-        // Allocated/Rejected, status is server-owned (approval-decision hook or
-        // the auto-approve shortcut) — resending a stale value here could either
-        // 400 (server-controlled statuses aren't client-settable) or clobber a
-        // status the server since transitioned. The server still re-derives
-        // 'Requested' on a material edit to an Allocated assignment on its own.
+        // Edit path never sends `status` at all (B3): `assignments.status` is no
+        // longer client-settable in any form — the server rejects any request
+        // body that carries the key with 400, regardless of value. This PUT only
+        // patches requestId/resourceId/assignedHours; the server refreshes the
+        // derived status rollup on its own after the patch lands.
         const data: Partial<Assignment> = { requestId, resourceId, assignedHours };
         this.api.updateAssignment(this.editingAssignmentId()!, data).subscribe({
           next: () => {
@@ -355,11 +354,12 @@ export class UtilizationComponent {
           error: () => this.notifications.error('Failed to update assignment.')
         });
       } else {
-        // New assignments from this view default to 'Draft' (conservative) — the
-        // resource manager sends them for approval later from staffing / resource
-        // requests. 'hard-booked' predates the Assignment.status union and is now
-        // rejected (400) by the server's ALLOCATION_CLIENT_SETTABLE guard.
-        const data: Partial<Assignment> = { requestId, resourceId, assignedHours, status: 'Draft' };
+        // New assignments are always created 'Draft' by the server (B3):
+        // `status` is not client-settable at all any more, so it is never sent
+        // here — the server rejects the key outright (400) if it were. Sending
+        // the assignment for approval now happens per month, from the resource's
+        // allocation calendar, once hours are booked into an open month.
+        const data: Partial<Assignment> = { requestId, resourceId, assignedHours };
         this.api.createAssignment(data).subscribe({
           next: () => {
             this.dataResource.reload();
@@ -383,14 +383,15 @@ export class UtilizationComponent {
     const copied = this.copiedAssignment();
     const resId = this.selectedResource()?.id;
     if (copied && resId) {
-      // Always paste as a fresh 'Draft' — the source assignment's status (which
-      // may be 'Allocated'/'Rejected') is never carried over: the server only
-      // accepts 'Draft'/'Requested' on create.
+      // Always creates a fresh proposal — the source assignment's status (which
+      // may be 'Allocated'/'Rejected') is never carried over: `status` is not
+      // client-settable at all (B3), so it is never sent here (the server would
+      // 400 the request if it were), and the server always derives 'Draft' for
+      // a brand-new assignment (it has no month rows yet).
       const newAssignment: Partial<Assignment> = {
         requestId: copied.requestId,
         assignedHours: copied.assignedHours,
         resourceId: resId,
-        status: 'Draft'
       };
       this.api.createAssignment(newAssignment).subscribe({
         next: () => {

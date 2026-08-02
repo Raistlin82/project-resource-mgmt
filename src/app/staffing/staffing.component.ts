@@ -170,7 +170,7 @@ interface DimensionMeter {
                             </label>
                           </div>
                           <div class="flex items-center gap-2">
-                            <button (click)="confirmAssign(cand.resourceId)" [disabled]="assigning()" class="command-button flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">Crea proposta</button>
+                            <button (click)="confirmAssign(cand.resourceId)" [disabled]="assigning()" class="command-button flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">Create proposal</button>
                             <button type="button" (click)="cancelAssign()" aria-label="Cancel assignment" title="Cancel assignment" class="command-button secondary"><mat-icon class="text-[20px] w-[20px] h-[20px]">close</mat-icon></button>
                           </div>
                         </div>
@@ -442,15 +442,15 @@ export class StaffingComponent {
     }
   }
 
-  /** Human, status-aware confirmation for the created assignment (server-resolved status). */
+  /**
+   * Confirmation toast for the created proposal. `a.status` is always 'Draft'
+   * here (B3: status is server-derived and a brand-new assignment has no month
+   * rows yet, so create can never yield anything else) — no per-status lookup
+   * needed any more. Points the user at where the lifecycle continues next,
+   * since creating the proposal no longer opens an approval on its own.
+   */
   private assignmentResultMessage(a: Assignment): string {
     const name = this.allResources().find(r => r.id === a.resourceId)?.name ?? 'Risorsa';
-    const label: Record<Assignment['status'], string> = {
-      Draft: 'salvata in bozza',
-      Requested: 'inviata in approvazione',
-      Allocated: 'allocata',
-      Rejected: 'rifiutata',
-    };
-    return `${name}: allocazione ${label[a.status]}`;
+    return `${name}: proposta salvata in bozza — invia il mese in approvazione dal calendario di allocazione`;
   }
 }

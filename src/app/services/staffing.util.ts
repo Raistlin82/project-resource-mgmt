@@ -68,15 +68,20 @@ export type AllocationStatus = Assignment['status'];
 /**
  * B3: NOTHING is client-settable — `assignments.status` is derived from the
  * month rows (allocation-month.util `deriveAssignmentStatus`). The lifecycle is
- * driven exclusively by the per-month endpoints. Kept as an exported constant so
- * the handlers' guard reads the same way it did in gap A.
+ * driven exclusively by the per-month endpoints. No handler consults this
+ * constant any more (POST/PUT /assignments in src/server.ts reject any client
+ * `status` outright, via an inline literal check, not this list) — kept
+ * exported and empty so the gap-A test suite below, which documents the
+ * retired pre-B3 contract, still has something to assert against.
  */
 export const ALLOCATION_CLIENT_SETTABLE: readonly AllocationStatus[] = [];
 
-// CLIENT-SETTABLE transitions only. The system transitions Requested -> Allocated
-// and Requested -> Rejected are applied DIRECTLY by the decision hook (a later task)
-// and never routed through this guard, so they are intentionally absent here. This
-// keeps the table consistent with ALLOCATION_CLIENT_SETTABLE.
+// Gap-A transition table: like ALLOCATION_CLIENT_SETTABLE above, this has no
+// server caller since B3 — the client-settable lifecycle it modeled was
+// retired along with it. Kept for its own pre-B3 test suite only. The system
+// transitions Requested -> Allocated and Requested -> Rejected were always
+// applied DIRECTLY by the decision hook, never routed through this guard, so
+// they are intentionally absent here.
 const ALLOCATION_TRANSITIONS: Readonly<Record<AllocationStatus, readonly AllocationStatus[]>> = {
   Draft: ['Requested'],
   Requested: ['Draft'],
