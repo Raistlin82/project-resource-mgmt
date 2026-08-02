@@ -162,6 +162,14 @@ export interface AssignmentAllocation {
   from?: string;
   to?: string;
   contractHoursPerDay: number;
+  /**
+   * The resource's kind (C1), normalized (`kindOf`) server-side. Lets the
+   * calendar decide whether to offer the multi-FTE selector and widen the
+   * per-day capacity hint (`dailyCapFor`). Optional on the wire for backward
+   * compatibility with pre-C1 clients/fixtures — read it through `kindOf()`,
+   * which defaults an absent value to 'internal'.
+   */
+  resourceKind?: ResourceKind;
   /** Per-month lifecycle rows for the requested span (B3). */
   months?: AssignmentMonth[];
   days: AssignmentDay[];

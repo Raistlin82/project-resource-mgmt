@@ -1740,11 +1740,14 @@ apiRouter.get('/assignments/:id/allocation', async (req, res) => {
 
   const resource = await repos.resources.get(assig.resourceId);
   const contractHoursPerDay = resource?.contractHoursPerDay ?? await getHoursPerDay();
+  // C1: the calendar cannot decide whether to offer the multi-FTE selector (or
+  // widen its per-day capacity hint) without knowing the resource's kind.
+  const resourceKind = kindOf(resource);
 
   const months = (await repos.assignmentMonths.list())
     .filter(m => m.assignmentId === assig.id && (from === undefined || m.month >= from) && (to === undefined || m.month <= to))
     .sort((a, b) => a.month.localeCompare(b.month));
-  res.json({ assignmentId: assig.id, from, to, contractHoursPerDay, months, days });
+  res.json({ assignmentId: assig.id, from, to, contractHoursPerDay, resourceKind, months, days });
 });
 
 // WRITE: replace ONE month's per-day hours in a single call. Gates: open-month,

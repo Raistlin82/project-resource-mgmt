@@ -31,6 +31,8 @@ import {
   monthOf,
   monthlyTargetHours,
 } from '../services/calendar.util';
+import { dailyCapFor, isMultiFteEligible, kindOf } from '../services/resource-kind.util';
+import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
 
 /** The three collections the calendar loads together, keyed on the assignment. */
 interface CalendarData {
@@ -75,7 +77,7 @@ const EMPTY_DATA: CalendarData = {
 @Component({
   selector: 'app-allocation-calendar',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, FormsModule],
+  imports: [MatIconModule, FormsModule, ResourceKindBadgeComponent],
   host: { class: 'contents' },
   template: `
     <div class="command-card w-full max-w-5xl max-h-[92vh] overflow-hidden flex flex-col">
@@ -85,6 +87,7 @@ const EMPTY_DATA: CalendarData = {
           <p class="text-sm font-medium text-[var(--cc-muted)] mt-1.5 flex items-center gap-1.5">
             <mat-icon class="text-[16px] w-[16px] h-[16px]">calendar_month</mat-icon>
             {{ resourceName() || 'Resource' }}
+            <app-resource-kind-badge [kind]="resourceKind()" />
             <span class="text-ink-muted">•</span>
             <span class="font-mono tabular-nums">{{ contractHoursPerDay() }}h / day</span>
           </p>
@@ -131,13 +134,24 @@ const EMPTY_DATA: CalendarData = {
                 </div>
                 <div class="flex items-center gap-3">
                   <span class="text-xs font-semibold text-ink-secondary font-mono tabular-nums"
-                        [class.text-critical-text]="monthTotal(month) > monthTarget(month)">
+                        [class.text-critical-text]="tracksSaturation() && monthTotal(month) > monthTarget(month)">
                     {{ monthTotal(month) }}h / {{ monthTarget(month) }}h
                   </span>
                   @if (isOpen(month)) {
                     <div class="flex items-center gap-1.5">
                       <button type="button" (click)="fill(month, 1)" [attr.aria-label]="'100% allocation — ' + monthLabel(month)" class="command-button secondary text-xs px-3 py-1.5">100% allocation</button>
                       <button type="button" (click)="fill(month, 0.5)" [attr.aria-label]="'50% allocation — ' + monthLabel(month)" class="command-button secondary text-xs px-3 py-1.5">50%</button>
+                      @if (multiFteEligible()) {
+                        <select data-test="fte-select"
+                                [attr.aria-label]="'FTE allocation — ' + monthLabel(month)"
+                                (change)="onFteSelect(month, $event)"
+                                class="command-select text-xs py-1.5">
+                          <option value="" selected disabled>FTE…</option>
+                          @for (fte of FTE_OPTIONS; track fte) {
+                            <option [value]="fte">{{ fte }} FTE</option>
+                          }
+                        </select>
+                      }
                       <button type="button" (click)="clear(month)" [attr.aria-label]="'Clear — ' + monthLabel(month)" class="command-button secondary text-xs px-3 py-1.5">Clear</button>
                     </div>
                   }
@@ -298,6 +312,46 @@ export class AllocationCalendarComponent {
     const cap = this.data.value().allocation.contractHoursPerDay;
     return typeof cap === 'number' && Number.isFinite(cap) && cap > 0 ? cap : DEFAULT_CAP;
   });
+
+  /**
+   * Raw resource kind from the envelope (C1) — absent for a pre-C1 client/
+   * fixture. Consumed only through `kindOf()` below (never compared to
+   * directly), so an absent/unknown value safely resolves to 'internal'.
+   */
+  protected resourceKind = computed(() => this.data.value().allocation.resourceKind);
+
+  /** Normalized kind (`kindOf` defaults an absent/unknown value to 'internal'). */
+  protected kind = computed(() => kindOf({ kind: this.resourceKind() }));
+
+  /** True iff this resource may be planned beyond 1 FTE (dummy/subco) — gates
+   *  the FTE selector in the template. */
+  protected multiFteEligible = computed(() => isMultiFteEligible(this.kind()));
+
+  /**
+   * True iff the month header's total-vs-target comparison is a meaningful
+   * saturation judgement — 'internal' only, same split
+   * `AllocationApprovalsComponent.toCellVm` already uses for the equivalent
+   * misreport on the approvals dashboard (manual §4.3: dummy/subco have no
+   * capacity to saturate). `monthTarget()` stays the 1-FTE-equivalent base
+   * (there is no natural "target" for a placeholder planned at N FTE), so
+   * WITHOUT this gate a legitimate multi-FTE dummy/subco booking would tint
+   * the header's total red even though the per-day cells (via `dailyCap`)
+   * correctly show no over-capacity flag — the numbers are still shown
+   * plainly, just not judged.
+   */
+  protected tracksSaturation = computed(() => this.kind() === 'internal');
+
+  /**
+   * Effective daily hours ceiling for the per-day capacity hint (`over()`).
+   * C1 carry-forward: Task 4 widened the SERVER's daily cap for dummy/subco
+   * (`dailyCapFor`) so a multi-FTE booking is legal, but this component was
+   * still judging every day against the un-widened `contractHoursPerDay` — a
+   * legitimate 2.5-FTE dummy booking (20h/day on an 8h/day base) was flagged
+   * red as over-capacity in the very screen used to enter it. Only THIS hint
+   * is widened; `contractHoursPerDay` itself (and `fill`'s per-FTE unit)
+   * stays the 1-FTE base that `applyFte` multiplies.
+   */
+  protected dailyCap = computed(() => dailyCapFor(this.kind(), this.contractHoursPerDay()));
 
   private holidaysSet = computed(() => new Set(this.data.value().holidays.map(h => h.id)));
   private holidayNames = computed(() => new Map(this.data.value().holidays.map(h => [h.id, h.name])));
@@ -461,10 +515,24 @@ export class AllocationCalendarComponent {
     this.edited.update(map => ({ ...map, [month]: { ...(map[month] ?? {}), [date]: v } }));
   }
 
-  /** True iff this single day's hours exceed the daily cap (client hint only). */
+  /**
+   * Test seam: a month's pending per-day hour edits (date -> hours), as
+   * currently held in the `edited` edit-map signal — not necessarily saved
+   * yet. Exposed narrowly for the component spec rather than reaching into
+   * `edited` directly. Public (no access modifier) so the spec can call it,
+   * matching this codebase's convention for test-exposed members (e.g.
+   * `AllocationApprovalsComponent.selectedResourceIds`).
+   */
+  editedHours(month: string): Record<string, number> {
+    return this.edited()[month] ?? {};
+  }
+
+  /** True iff this single day's hours exceed the daily cap (client hint only).
+   *  Compares against `dailyCap()` (widened for dummy/subco), not
+   *  `contractHoursPerDay()` directly — see `dailyCap`'s doc comment. */
   protected over(month: string, date: string): boolean {
     const v = this.hoursFor(month, date);
-    return v > 0 && exceedsDailyCapacity(v, this.contractHoursPerDay());
+    return v > 0 && exceedsDailyCapacity(v, this.dailyCap());
   }
 
   protected monthTarget(month: string): number {
@@ -488,6 +556,31 @@ export class AllocationCalendarComponent {
       for (const cell of this.cellsByMonth()[month] ?? []) if (cell.working) next[cell.date] = hours;
       return { ...map, [month]: next };
     });
+  }
+
+  /** Manual's multi-FTE steps in usable increments (§3.2.3/§3.2.5) — offered
+   *  by the FTE `<select>` (dummy/subco only). */
+  protected readonly FTE_OPTIONS: readonly number[] = [1, 1.5, 2, 2.5, 3, 4, 5, 10, 20, 30];
+
+  /**
+   * Fill every working day of an open month with `fte` FTE-equivalent hours.
+   * Built on top of `fill` rather than duplicating its working-day walk: an
+   * FTE value beyond 1 is just a larger fraction of the same 1-FTE contracted-
+   * hours unit `fill(month, 1)` / `fill(month, 0.5)` already use (`fill`
+   * already computes `cap × fraction`, and a fraction > 1 is exactly what an
+   * FTE > 1 is). Dummy/subco only — gated in the template by
+   * `multiFteEligible()`; the server already accepts the result (Task 4's
+   * `dailyCapFor` cap). Public (no access modifier) so the component spec can
+   * call it directly, matching `editedHours` above.
+   */
+  applyFte(month: string, fte: number): void {
+    this.fill(month, fte);
+  }
+
+  /** `<select data-test="fte-select">`'s (change) handler. */
+  protected onFteSelect(month: string, event: Event): void {
+    const value = Number((event.target as HTMLSelectElement).value);
+    if (Number.isFinite(value) && value > 0) this.applyFte(month, value);
   }
 
   /** Zero every working day of an open month. */
