@@ -16,7 +16,7 @@ import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity, monthlyTar
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
-import { isResourceKind, RESOURCE_KINDS } from './app/services/resource-kind.util';
+import { isResourceKind, RESOURCE_KINDS, kindOf, dailyCapFor } from './app/services/resource-kind.util';
 import { maxIdSeq } from './server/id-seq.util';
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
@@ -1434,6 +1434,24 @@ apiRouter.put('/resources/:id', async (req, res) => {
   }
   const kindErr = await validateResourceKind(mergedKind, mergedVendorId);
   if (kindErr) { res.status(400).json({ error: kindErr }); return; }
+  // C1: narrowing a kind (dummy/subco -> internal) shrinks the daily ceiling by
+  // MULTI_FTE_MAX. Refuse if that would strand existing bookings above the new
+  // cap rather than silently leaving invalid allocations behind. baseCap is
+  // resolved exactly like the allocation handler's gate (stored
+  // contractHoursPerDay, guarded against 0/NaN/negative, else getHoursPerDay()).
+  const rawCap = existing.contractHoursPerDay;
+  const baseCap = (typeof rawCap === 'number' && Number.isFinite(rawCap) && rawCap > 0) ? rawCap : await getHoursPerDay();
+  const currentCap = dailyCapFor(kindOf(existing), baseCap);
+  const newCap = dailyCapFor(kindOf({ kind: mergedKind }), baseCap);
+  if (newCap < currentCap) {
+    const ids = new Set((await repos.assignments.list()).filter(a => a.resourceId === existing.id).map(a => a.id));
+    const byDate = sumHoursByDate((await repos.assignmentDays.list()).filter(d => ids.has(d.assignmentId)));
+    const offender = Object.keys(byDate).sort().find(day => exceedsDailyCapacity(byDate[day], newCap));
+    if (offender !== undefined) {
+      res.status(400).json({ error: `changing kind to ${mergedKind} would exceed the daily capacity on ${offender}` });
+      return;
+    }
+  }
   const updated = await repos.resources.update(req.params.id, body);
   const [resolved] = await resolveResourceRates([updated as Resource]);
   res.json(resolved);
@@ -1776,7 +1794,11 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   // hours; NaN would silently disable the check — `total > NaN + 1e-9` is always
   // false), so fall back to the configured hours/day.
   const rawCap = resource.contractHoursPerDay;
-  const cap = (typeof rawCap === 'number' && Number.isFinite(rawCap) && rawCap > 0) ? rawCap : await getHoursPerDay();
+  const baseCap = (typeof rawCap === 'number' && Number.isFinite(rawCap) && rawCap > 0) ? rawCap : await getHoursPerDay();
+  // C1: dummy and subco represent capacity that a single person does not cover,
+  // so their daily ceiling is MULTI_FTE_MAX times the one-FTE base. Internal
+  // resources keep the 1-FTE cap (manual §3.2.3).
+  const cap = dailyCapFor(kindOf(resource), baseCap);
   const requestedDates = new Set(Object.keys(daily));
   const capExceeded = (day: string): string => `daily capacity exceeded on ${day}`;
   const capacityOffender = async (): Promise<string | undefined> => {

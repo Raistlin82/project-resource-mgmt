@@ -1875,6 +1875,64 @@ async function checkResourceKinds() {
       unrelatedEdited.body?.vendorId === vendorId && unrelatedEdited.body?.capacity === 41,
       `status=${unrelatedEdited.status} kind=${unrelatedEdited.body?.kind} vendorId=${unrelatedEdited.body?.vendorId} capacity=${unrelatedEdited.body?.capacity}`);
   }
+
+  // --- Task 4: kind-aware daily cap + the kind-change guard -----------------
+  // 2026-08 is a seeded Open planning period; 2026-08-04 is a Tuesday (no
+  // seeded holiday falls in August), so it is a plain working day.
+  const OPEN_MONTH = '2026-08';
+  const WORKING_DAY = '2026-08-04';
+
+  // A dummy may carry more than one FTE per day; an internal resource may not.
+  const dummy = await req('POST', '/resources', { body: { ...base, name: 'C1 dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  // POST /resources responds 201 (see the comment above the first POST in
+  // this section) — asserted here rather than 200 to avoid a false FAIL.
+  const dummyOk = check('C1 dummy created', dummy.status === 201 && dummy.body?.kind === 'dummy', `status=${dummy.status} kind=${dummy.body?.kind}`);
+  if (!dummyOk) return;
+
+  // A request + an assignment for the dummy, and another pair reusing `plain`
+  // (created earlier in this section, kind still 'internal' — none of the
+  // PUTs above that touched it ever succeeded in changing its kind). Neither
+  // resource has any other booking, so both allocations land on a clean slate.
+  const dummyReq = await req('POST', '/requests', { body: { name: 'C1 dummy capacity request', requiredEffort: 1 } });
+  const internalReq = await req('POST', '/requests', { body: { name: 'C1 internal capacity request', requiredEffort: 1 } });
+  const reqsOk = check('C1 setup: requests created for the dummy/internal assignments',
+    dummyReq.status === 200 && typeof dummyReq.body?.id === 'string' &&
+    internalReq.status === 200 && typeof internalReq.body?.id === 'string',
+    `dummyReq status=${dummyReq.status} internalReq status=${internalReq.status}`);
+  if (!reqsOk) return;
+
+  const dummyAssignment = await req('POST', '/assignments', { body: { requestId: dummyReq.body.id, resourceId: dummy.body.id, assignedHours: 0 } });
+  const internalAssignment = await req('POST', '/assignments', { body: { requestId: internalReq.body.id, resourceId: plain.body.id, assignedHours: 0 } });
+  const assignmentsOk = check('C1 setup: assignments created for the dummy and the internal resource',
+    dummyAssignment.status === 200 && typeof dummyAssignment.body?.id === 'string' &&
+    internalAssignment.status === 200 && typeof internalAssignment.body?.id === 'string',
+    `dummy assignment status=${dummyAssignment.status} internal assignment status=${internalAssignment.status}`);
+  if (!assignmentsOk) return;
+  const dummyAssignmentId = dummyAssignment.body.id;
+  const internalAssignmentId = internalAssignment.body.id;
+
+  const overOneFte = await req('PUT', `/assignments/${dummyAssignmentId}/allocation`, {
+    body: { month: OPEN_MONTH, dailyHours: { [WORKING_DAY]: 20 } },
+  });
+  check('C1 a dummy accepts 2.5 FTE on a day', overOneFte.status === 200, `status=${overOneFte.status} err=${overOneFte.body?.error}`);
+
+  const internalOver = await req('PUT', `/assignments/${internalAssignmentId}/allocation`, {
+    body: { month: OPEN_MONTH, dailyHours: { [WORKING_DAY]: 20 } },
+  });
+  check('C1 an internal resource is still capped at 1 FTE', internalOver.status === 400 && /daily capacity/.test(internalOver.body?.error || ''), `status=${internalOver.status}`);
+
+  // Turning that dummy into an internal resource would break its own bookings.
+  const demote = await req('PUT', `/resources/${dummy.body.id}`, { body: { kind: 'internal' } });
+  check('C1 a kind change that breaks existing allocations is refused', demote.status === 400 && /exceed/i.test(demote.body?.error || ''), `status=${demote.status} err=${demote.body?.error}`);
+
+  // Zero the allocation, then assert the same change now succeeds.
+  const zeroed = await req('PUT', `/assignments/${dummyAssignmentId}/allocation`, {
+    body: { month: OPEN_MONTH, dailyHours: { [WORKING_DAY]: 0 } },
+  });
+  check('C1 setup: dummy allocation zeroed before retrying the demote', zeroed.status === 200, `status=${zeroed.status}`);
+
+  const demoteOk = await req('PUT', `/resources/${dummy.body.id}`, { body: { kind: 'internal' } });
+  check('C1 the same kind change succeeds once the allocation fits', demoteOk.status === 200 && demoteOk.body?.kind === 'internal', `status=${demoteOk.status}`);
 }
 
 async function main() {
