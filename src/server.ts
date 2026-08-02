@@ -11,7 +11,7 @@ import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
 import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours, decisionToAssignmentStatus, allocationApproverStep, isAllowedAllocationTransition, ALLOCATION_CLIENT_SETTABLE, type AllocationStatus } from './app/services/staffing.util';
-import { deriveAssignmentStatus, monthRowId, isAllowedMonthTransition, type MonthStatus } from './app/services/allocation-month.util';
+import { deriveAssignmentStatus, monthRowId, type MonthStatus } from './app/services/allocation-month.util';
 // `parseMonthRowId`/`monthlyAggregateHours` are unused until later B3 tasks (4-6, 8)
 // wire the decision hook and status-weighted aggregates onto month rows. Kept on
 // their OWN import line (not merged into the one above) so the unused-vars
@@ -269,10 +269,24 @@ const auditRepoBySegment = new Map<string, AuditReadable>([
   ['assignment-days', repos.assignmentDays], ['assignment-months', repos.assignmentMonths],
 ]);
 
-/** Find the current entity targeted by a `/collection/:id` request path. */
+/**
+ * Find the current entity targeted by a `/collection/:id` request path.
+ *
+ * Special-cases B3's nested per-month sub-resource shape
+ * `/assignments/:id/months/:month/...` (the `note` PUT — `submit` is a POST,
+ * which the audit middleware never before/after-snapshots): that handler
+ * never touches the parent assignment, so resolving `segments[1]` against
+ * `repos.assignments` (the generic path below) would diff an unchanged
+ * assignment against itself and silently produce an empty `changedKeys`,
+ * masking the actual mutation. Resolve against the assignmentMonths row
+ * (composite id) instead.
+ */
 async function findAuditEntity(path: string): Promise<Entity | undefined> {
   const segments = path.split('/').filter(Boolean);
   if (segments.length < 2) return undefined;
+  if (segments[0] === 'assignments' && segments[2] === 'months' && segments.length >= 4) {
+    return repos.assignmentMonths.get(monthRowId(segments[1], segments[3]));
+  }
   const repo = auditRepoBySegment.get(segments[0]);
   return repo ? repo.get(segments[1]) : undefined;
 }
@@ -1800,7 +1814,12 @@ apiRouter.post('/assignments/:id/months/:month/submit', async (req, res) => {
 
   const row = await repos.assignmentMonths.get(monthRowId(assig.id, month));
   if (row === undefined) { res.status(404).json({ error: 'no allocation for this month' }); return; }
-  if (!isAllowedMonthTransition(row.status as MonthStatus, 'Requested') || row.status === 'Requested') {
+  // ONLY Draft/Rejected may be voluntarily submitted. `isAllowedMonthTransition`
+  // is the wrong check here: its Allocated -> Requested entry exists for the
+  // DIFFERENT caller (the allocation PUT's day-edit forced-reapproval path),
+  // not for an explicit planner submit — an already-Requested OR already-
+  // Allocated month must be refused.
+  if (row.status !== 'Draft' && row.status !== 'Rejected') {
     res.status(400).json({ error: `illegal month transition ${row.status} -> Requested` });
     return;
   }
@@ -1810,13 +1829,22 @@ apiRouter.post('/assignments/:id/months/:month/submit', async (req, res) => {
 
   // Self-managed: approver and requester would be the same principal (SoD would
   // block the decision anyway), so the month is approved on the spot.
+  await withdrawAllocationApproval(row.approvalId, 'superseded');
   if (await autoApprovesAllocation(req, assig.resourceId)) {
-    await withdrawAllocationApproval(row.approvalId, 'superseded');
     await repos.assignmentMonths.update(row.id, {
-      status: 'Allocated', approvalId: undefined, ...(plannerNote !== undefined ? { plannerNote } : {}),
-    } as Partial<AssignmentMonth>);
+      // `null`, not `undefined`: Drizzle's `.set()` OMITS undefined-valued keys
+      // (see src/db/repository.ts's documented update() contract) but honors an
+      // explicit `null` as a real column clear, so `undefined` here would leave
+      // a stale approvalId on Postgres while the in-memory adapter clears it.
+      // `AssignmentMonth.approvalId` is typed `string | undefined` (never
+      // `null`) since every READ path normalizes a Postgres NULL back to
+      // `undefined` (`nullsToUndefined`) — so `null` only ever appears
+      // transiently in this WRITE-side patch. Cast through `unknown` (rather
+      // than widening the shared type for one call site) since `null` and
+      // `string | undefined` don't otherwise overlap for a direct assertion.
+      status: 'Allocated', approvalId: null, ...(plannerNote !== undefined ? { plannerNote } : {}),
+    } as unknown as Partial<AssignmentMonth>);
   } else {
-    await withdrawAllocationApproval(row.approvalId, 'superseded');
     const approvalId = await createAllocationApproval(req, assig, row.id);
     await repos.assignmentMonths.update(row.id, {
       status: 'Requested', approvalId, ...(plannerNote !== undefined ? { plannerNote } : {}),

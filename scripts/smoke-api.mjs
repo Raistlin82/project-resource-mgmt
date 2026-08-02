@@ -779,31 +779,42 @@ async function checkMonthlyApproval() {
   check('B3 edited month row gained an approvalId', typeof editedRow?.approvalId === 'string' && editedRow.approvalId.length > 0,
     `approvalId=${editedRow?.approvalId}`);
 
-  // Submit: assignment '1' spans 2026-05..2026-06. Its resource is '1' (Julie
-  // Armstrong), whose managerId is ALSO '1' — the SAME id as the default
-  // RBAC_HEADERS admin actor used everywhere else in this suite. Editing/
-  // submitting as that actor hits the self-managed auto-approval shortcut
-  // (straight to 'Allocated', no approval opened), which would defeat these
-  // checks' purpose. So: edit 2026-06 with the DEFAULT (self-managed) actor —
-  // that leaves the month's status untouched at 'Allocated' (the allocation
-  // PUT skips forced re-approval for a self-managed edit) — then submit as
-  // resource '2' (John Miller), who is NOT resource 1's manager, so the submit
-  // opens a REAL approval and moves the month to 'Requested'.
+  // Submit: the happy path must run against a genuinely 'Draft' month — no
+  // seeded month row is ever 'Draft' (buildAssignmentMonths marks every month
+  // 'Allocated' except the one seeded pending row on assignment '2'), so
+  // exercising submit against an edited-but-seeded 'Allocated' month would
+  // validate the wrong thing (submit is only a legal transition FROM
+  // Draft/Rejected; Allocated -> Requested happens only via the day-edit
+  // forced-reapproval path in the allocation PUT handler, a different caller).
+  // Assignment '1' spans 2026-05..2026-06 in the seed (both already
+  // 'Allocated'); 2026-07 is an OPEN planning period the assignment does not
+  // yet book, so a PUT there lazily creates a fresh 'Draft' row
+  // (ensureAssignmentMonth) to submit.
+  //
+  // Assignment 1's resource is '1' (Julie Armstrong), whose managerId is ALSO
+  // '1' — the SAME id as the default RBAC_HEADERS admin actor used everywhere
+  // else in this suite. Submitting as that actor hits the self-managed
+  // auto-approval shortcut (straight to 'Allocated', no approval opened),
+  // which would defeat these checks' purpose, so note/submit as resource '2'
+  // (John Miller), who is NOT resource 1's manager.
   const SUBMIT_HEADERS = { 'X-User-Id': '2', 'X-User-Role': 'pm' };
-  const alloc1 = await req('GET', '/assignments/1/allocation?from=2026-05&to=2026-06');
-  const june = (alloc1.body.days || []).find(d => d.date.startsWith('2026-06'));
-  if (june) {
-    await req('PUT', '/assignments/1/allocation', { body: { month: '2026-06', dailyHours: { [june.date]: 3 } } });
-  }
-  const noteRes = await req('PUT', '/assignments/1/months/2026-06/note', { headers: SUBMIT_HEADERS, body: { plannerNote: 'ramp-up month' } });
+  const draftPut = await req('PUT', '/assignments/1/allocation', { body: { month: '2026-07', dailyHours: { '2026-07-06': 1 } } });
+  check('B3 setup: PUT into an unbooked open month creates a Draft row', draftPut.status === 200, `status=${draftPut.status}`);
+
+  const noteRes = await req('PUT', '/assignments/1/months/2026-07/note', { headers: SUBMIT_HEADERS, body: { plannerNote: 'ramp-up month' } });
   check('B3 planner note saved', noteRes.status === 200 && noteRes.body?.plannerNote === 'ramp-up month', `status=${noteRes.status}`);
 
-  const submit = await req('POST', '/assignments/1/months/2026-06/submit', { headers: SUBMIT_HEADERS, body: {} });
-  check('B3 submit moves the month to Requested', submit.status === 200 && submit.body?.status === 'Requested', `status=${submit.status} row=${submit.body?.status}`);
+  const submit = await req('POST', '/assignments/1/months/2026-07/submit', { headers: SUBMIT_HEADERS, body: {} });
+  check('B3 submit moves a Draft month to Requested', submit.status === 200 && submit.body?.status === 'Requested', `status=${submit.status} row=${submit.body?.status}`);
   check('B3 submit opens an approval', typeof submit.body?.approvalId === 'string', `approvalId=${submit.body?.approvalId}`);
 
-  const resubmit = await req('POST', '/assignments/1/months/2026-06/submit', { headers: SUBMIT_HEADERS, body: {} });
-  check('B3 double submit is rejected', resubmit.status === 400, `status=${resubmit.status}`);
+  const resubmit = await req('POST', '/assignments/1/months/2026-07/submit', { headers: SUBMIT_HEADERS, body: {} });
+  check('B3 double submit (already Requested) is rejected', resubmit.status === 400, `status=${resubmit.status}`);
+
+  // 2026-05 is a seeded 'Allocated' month, untouched by anything above — an
+  // 'Allocated' month is NOT a valid submit source (see comment above).
+  const allocatedSubmit = await req('POST', '/assignments/1/months/2026-05/submit', { headers: SUBMIT_HEADERS, body: {} });
+  check('B3 submit on an already-Allocated month is rejected', allocatedSubmit.status === 400, `status=${allocatedSubmit.status}`);
 
   const closed = await req('POST', '/assignments/1/months/2026-03/submit', { headers: SUBMIT_HEADERS, body: {} });
   check('B3 submit on a non-open month is refused', closed.status === 403 || closed.status === 404, `status=${closed.status}`);
