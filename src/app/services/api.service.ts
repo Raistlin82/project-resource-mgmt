@@ -159,8 +159,10 @@ export interface AssignmentAllocation {
 
 /**
  * Response of `PUT /assignments/:id/allocation` (B1): the fresh assignment (whose
- * `status` may have been demoted to 'Requested' by the edit, triggering re-approval)
- * plus the just-replaced month and its persisted day rows.
+ * `status` is a DERIVED rollup of its months, B3 — editing an 'Allocated' month
+ * forces THAT month back to 'Requested' for re-approval, which may or may not
+ * change the rollup depending on the assignment's other months) plus the
+ * just-replaced month and its persisted day rows.
  */
 export interface AssignmentAllocationResult extends Assignment {
   month: string;

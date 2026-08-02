@@ -764,12 +764,20 @@ async function checkMonthlyApproval() {
     body: { month: target, dailyHours: { [day.date]: 2 } },
   });
   check('B3 month edit accepted', edit.status === 200, `status=${edit.status}`);
+  // The one new write this task adds to `assignments`: its `status` is now a
+  // DERIVED rollup of its months (refreshDerivedAssignmentStatus). With June
+  // demoted to 'Requested' and every other seeded month still 'Allocated',
+  // the rollup precedence (Requested > Rejected > Allocated > Draft) picks
+  // 'Requested' for the whole assignment.
+  check('B3 edit response derived assignment status is Requested', edit.body?.status === 'Requested', `status=${edit.body?.status}`);
 
   const after = await req('GET', '/assignments/3/allocation?from=2026-05&to=2026-09');
   const editedRow = after.body.months.find(m => m.month === target);
   const siblingRow = after.body.months.find(m => m.month === sibling.month);
   check('B3 edited month demoted to Requested', editedRow?.status === 'Requested', `status=${editedRow?.status}`);
   check('B3 sibling month stays Allocated', siblingRow?.status === 'Allocated', `status=${siblingRow?.status}`);
+  check('B3 edited month row gained an approvalId', typeof editedRow?.approvalId === 'string' && editedRow.approvalId.length > 0,
+    `approvalId=${editedRow?.approvalId}`);
 }
 
 async function main() {

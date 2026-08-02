@@ -11,12 +11,13 @@ import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
 import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, assignmentAggregateHours, decisionToAssignmentStatus, allocationApproverStep, isAllowedAllocationTransition, ALLOCATION_CLIENT_SETTABLE, type AllocationStatus } from './app/services/staffing.util';
+import { deriveAssignmentStatus, monthRowId, type MonthStatus } from './app/services/allocation-month.util';
 // `parseMonthRowId`/`monthlyAggregateHours` are unused until later B3 tasks (4-6, 8)
-// wire the decision hook and status-weighted aggregates onto month rows; imported
-// here so the whole B3 import surface lands in one place instead of churning this
-// line across several tasks.
+// wire the decision hook and status-weighted aggregates onto month rows. Kept on
+// their OWN import line (not merged into the one above) so the unused-vars
+// suppression below covers only these two names, not the three already in use.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-import { deriveAssignmentStatus, monthRowId, parseMonthRowId, monthlyAggregateHours, type MonthStatus } from './app/services/allocation-month.util';
+import { parseMonthRowId, monthlyAggregateHours } from './app/services/allocation-month.util';
 import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity } from './app/services/calendar.util';
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
@@ -1621,9 +1622,12 @@ apiRouter.get('/assignments/:id/allocation', async (req, res) => {
 // working-day, daily-capacity. Then (ordering is load-bearing, gap-A discipline):
 //   1. withLock('res:<id>'): TOCTOU capacity re-check → replace the month's day
 //      rows → write assignedHours = Σ of ALL remaining day rows.
-//   2. OUTSIDE any res:/req: lock: forced re-approval (approval-repo I/O + the
-//      status write) — never nested in an aggregate lock. Trigger = the prior
-//      status was 'Allocated' (the days changed by definition), NOT a delta.
+//   2. OUTSIDE any res:/req: lock: forced re-approval, SCOPED TO THE EDITED MONTH
+//      (approval-repo I/O + the month row's status write) — never nested in an
+//      aggregate lock. Trigger = the edited month's OWN prior status was
+//      'Allocated' (its days changed by definition), NOT a delta; sibling months
+//      are untouched. `assignments.status` is then recomputed as a DERIVED
+//      rollup of all its months (B3) — never written directly here.
 //   3. FINAL: recompute the status-aware resource/request aggregates AFTER the
 //      status change, so confirmed/planned totals reflect the new status.
 apiRouter.put('/assignments/:id/allocation', async (req, res) => {
