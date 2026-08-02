@@ -30,12 +30,23 @@ const ENVELOPE: CapacityMonthly = {
       },
     },
   ],
-  // C1: no dummy/subco in this fixture, so demandRows is empty and no month
-  // has uncovered demand — this test predates the rollup partition (B2).
-  demandRows: [],
+  // C1: a single dummy row — same monthly cells as an internal row, but an
+  // inert 'idle' band (never rendered) and its planned FTE lands only in
+  // `totals[month].demandFteUncovered`, never in the internal capacity/demand
+  // figures above.
+  demandRows: [
+    {
+      resourceId: 'd1',
+      resourceName: 'Dummy SAP',
+      monthly: {
+        '2026-07': { confirmedHours: 0, plannedHours: 320, targetHours: 160, fteConfirmed: 0, ftePlanned: 2.0, band: 'idle' },
+        '2026-08': { confirmedHours: 0, plannedHours: 160, targetHours: 160, fteConfirmed: 0, ftePlanned: 1.0, band: 'idle' },
+      },
+    },
+  ],
   totals: {
-    '2026-07': { demandFteConfirmed: 1.125, demandFtePlanned: 1.5, capacityFte: 2, resourceCount: 2, demandFteUncovered: 0 },
-    '2026-08': { demandFteConfirmed: 1.45, demandFtePlanned: 1.8, capacityFte: 2, resourceCount: 2, demandFteUncovered: 0 },
+    '2026-07': { demandFteConfirmed: 1.125, demandFtePlanned: 1.5, capacityFte: 2, resourceCount: 2, demandFteUncovered: 2.0 },
+    '2026-08': { demandFteConfirmed: 1.45, demandFtePlanned: 1.8, capacityFte: 2, resourceCount: 2, demandFteUncovered: 1.0 },
   },
 };
 
@@ -76,9 +87,13 @@ describe('CapacityComponent', () => {
     expect(getCapacityMonthly).toHaveBeenCalled();
 
     // The `over` cell: band conveyed by TEXT (not colour alone) + the critical
-    // tone token + the planned percentage.
-    const overCell = host.querySelector('[data-test="cell-r1-2026-07"]') as HTMLElement;
+    // tone token + the planned percentage. Every internal band cell also
+    // carries `data-test="band-cell"` (the marker a demand cell must NOT have —
+    // see the "no semaphore band" test below); the per-cell unique lookup here
+    // uses the sibling `data-cell` attribute instead.
+    const overCell = host.querySelector('[data-cell="r1-2026-07"]') as HTMLElement;
     expect(overCell).not.toBeNull();
+    expect(overCell.getAttribute('data-test')).toBe('band-cell');
     expect(overCell.getAttribute('data-band')).toBe('over');
     expect(overCell.className).toContain('bg-critical-tint');
     expect(overCell.textContent).toContain('125%');
@@ -87,7 +102,7 @@ describe('CapacityComponent', () => {
     expect(overCell.getAttribute('aria-label')).toMatch(/200|160/);
 
     // The idle cell is the neutral tone (distinct from the over cell).
-    const idleCell = host.querySelector('[data-test="cell-r2-2026-07"]') as HTMLElement;
+    const idleCell = host.querySelector('[data-cell="r2-2026-07"]') as HTMLElement;
     expect(idleCell.getAttribute('data-band')).toBe('idle');
     expect(idleCell.className).not.toContain('bg-critical-tint');
 
@@ -137,6 +152,19 @@ describe('CapacityComponent', () => {
     expect(getCapacityMonthly).not.toHaveBeenCalled();
     // Empty default until authReady flips true — no resource rows rendered.
     expect(host.textContent).not.toContain('Alice');
-    expect(host.querySelector('[data-test="cell-r1-2026-07"]')).toBeNull();
+    expect(host.querySelector('[data-cell="r1-2026-07"]')).toBeNull();
+  });
+
+  it('renders uncovered demand in its own section, without a semaphore band', async () => {
+    const { fixture } = setup(true);
+    await flush(fixture);
+
+    const host = fixture.nativeElement as HTMLElement;
+    const demand = host.querySelectorAll('[data-test="demand-row"]');
+    expect(demand.length).toBe(1);
+    expect(demand[0].textContent).toContain('Dummy SAP');
+    // A demand cell must not carry a band tint class — it has no capacity to saturate.
+    expect(demand[0].querySelector('[data-test="band-cell"]')).toBeNull();
+    expect(host.querySelector('[data-test="kpi-uncovered"]')?.textContent).toContain('2.0');
   });
 });

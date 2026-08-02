@@ -1934,6 +1934,22 @@ async function checkResourceKinds() {
   const demote = await req('PUT', `/resources/${dummy.body.id}`, { body: { kind: 'internal' } });
   check('C1 a kind change that breaks existing allocations is refused', demote.status === 400 && /exceed/i.test(demote.body?.error || ''), `status=${demote.status} err=${demote.body?.error}`);
 
+  // --- Task 6: the /capacity/monthly envelope partitions internal vs. demand.
+  // The demote above was refused, so the dummy is still 'dummy' and still
+  // carries its 20h/day booking on WORKING_DAY — checked HERE, before the
+  // zero-and-demote below removes it.
+  const cap = await req('GET', '/capacity/monthly');
+  check('C1 capacity envelope carries demandRows', Array.isArray(cap.body?.demandRows), `status=${cap.status}`);
+  const kindsInRows = (cap.body?.rows || []).map(r => r.resourceId);
+  const demandIds = (cap.body?.demandRows || []).map(r => r.resourceId);
+  check('C1 the dummy is in demandRows, not rows',
+    demandIds.includes(dummy.body.id) && !kindsInRows.includes(dummy.body.id),
+    `rows=${kindsInRows.length} demand=${demandIds.length}`);
+  const firstMonth = (cap.body?.months || [])[0];
+  check('C1 totals expose uncovered demand separately',
+    firstMonth !== undefined && typeof cap.body.totals[firstMonth]?.demandFteUncovered === 'number',
+    `totals=${JSON.stringify(cap.body?.totals?.[firstMonth])}`);
+
   // Zero the allocation, then assert the same change now succeeds.
   const zeroed = await req('PUT', `/assignments/${dummyAssignmentId}/allocation`, {
     body: { month: OPEN_MONTH, dailyHours: { [WORKING_DAY]: 0 } },

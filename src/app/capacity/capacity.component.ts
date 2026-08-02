@@ -72,6 +72,27 @@ interface RowVm {
   cells: CellVm[];
 }
 
+/**
+ * C1: one rendered demand-grid cell. Dummy/subco cells share the server's
+ * `CapacityCell` shape but never carry a band — no `meta`/`band` fields here,
+ * so the template has nothing to accidentally tint.
+ */
+interface DemandCellVm {
+  month: string;
+  /** False when the resource has no cell that month (inactive). */
+  present: boolean;
+  plannedFte: number;
+  plannedHours: number;
+  confirmedHours: number;
+  aria: string;
+}
+
+interface DemandRowVm {
+  resourceId: string;
+  resourceName: string;
+  cells: DemandCellVm[];
+}
+
 interface TotalsVm {
   month: string;
   confirmed: number;
@@ -150,7 +171,7 @@ function shiftMonth(month: string, delta: number): string {
 
       <!-- KPI strip — first month in the range. -->
       @if (firstMonth(); as fm) {
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
           <div class="command-kpi">
             <p class="command-kpi-label">Planned Demand — {{ monthLabel(fm) }}</p>
             <p class="command-kpi-value font-mono tabular-nums" data-test="kpi-planned">{{ kpiPlanned() | number:'1.1-1' }} <span class="text-base font-semibold text-ink-muted">FTE</span></p>
@@ -162,6 +183,10 @@ function shiftMonth(month: string, delta: number): string {
           <div class="command-kpi" [class.danger]="kpiOver() > 0">
             <p class="command-kpi-label">Overbooked Resources</p>
             <p class="command-kpi-value font-mono tabular-nums" [class.text-critical-text]="kpiOver() > 0" data-test="kpi-over">{{ kpiOver() }}</p>
+          </div>
+          <div class="command-kpi" [class.danger]="kpiUncovered() > 0">
+            <p class="command-kpi-label">Uncovered Demand — {{ monthLabel(fm) }}</p>
+            <p class="command-kpi-value font-mono tabular-nums" [class.text-critical-text]="kpiUncovered() > 0" data-test="kpi-uncovered">{{ kpiUncovered() | number:'1.1-1' }} <span class="text-base font-semibold text-ink-muted">FTE</span></p>
           </div>
         </div>
       }
@@ -199,7 +224,8 @@ function shiftMonth(month: string, delta: number): string {
                         <td class="px-2 py-2 align-top">
                           @if (c.present) {
                             <div class="rounded-lg ring-1 p-2 text-center {{ c.meta.cell }} {{ c.meta.ring }}"
-                                 [attr.data-test]="'cell-' + row.resourceId + '-' + c.month"
+                                 data-test="band-cell"
+                                 [attr.data-cell]="row.resourceId + '-' + c.month"
                                  [attr.data-band]="c.band"
                                  [attr.aria-label]="c.aria">
                               <div class="text-base font-bold font-mono tabular-nums {{ c.meta.text }}">{{ c.plannedPct | number:'1.0-0' }}%</div>
@@ -247,6 +273,62 @@ function shiftMonth(month: string, delta: number): string {
           </div>
         }
       </app-list-state>
+
+      <!-- Uncovered demand (C1): dummy/subco resources have no capacity of their
+           own, so they never appear in the grid above or its semaphore band —
+           this section shows what is booked against them instead, plainly, with
+           no band tint (mirrors how allocation-approvals.component.ts suppresses
+           the band for the same kinds). -->
+      @if (demandRows().length > 0) {
+        <div class="space-y-3">
+          <div>
+            <h2 class="text-lg font-bold text-ink">Uncovered demand</h2>
+            <p class="text-sm text-ink-secondary">Booked against dummy placeholders and subcontractors, which have no capacity of their own — this is demand waiting on real headcount, not the saturation of an existing resource.</p>
+          </div>
+          <div class="command-card overflow-hidden">
+            <div class="overflow-x-auto">
+              <table class="command-data-table">
+                <thead class="bg-surface-muted border-b border-line text-ink-muted">
+                  <tr>
+                    <th class="px-4 sm:px-6 py-4 font-semibold uppercase tracking-wider text-xs text-left sticky left-0 bg-surface-muted z-10">Resource</th>
+                    @for (m of months(); track m) {
+                      <th class="px-3 py-4 font-semibold uppercase tracking-wider text-xs text-center min-w-[7rem]">{{ monthLabel(m) }}</th>
+                    }
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-line">
+                  @for (row of demandRows(); track row.resourceId) {
+                    <tr class="hover:bg-surface-muted transition-colors" data-test="demand-row">
+                      <td class="px-4 sm:px-6 py-4 font-bold text-ink whitespace-nowrap sticky left-0 bg-surface z-10">{{ row.resourceName }}</td>
+                      @for (c of row.cells; track c.month) {
+                        <td class="px-2 py-2 align-top">
+                          @if (c.present) {
+                            <div class="rounded-lg ring-1 ring-line bg-surface-muted p-2 text-center" [attr.aria-label]="c.aria">
+                              <div class="text-base font-bold font-mono tabular-nums text-ink">{{ c.plannedFte | number:'1.1-1' }} <span class="text-[10px] font-semibold text-ink-muted">FTE</span></div>
+                              <div class="mt-1 text-[10px] font-mono tabular-nums text-ink-muted">
+                                {{ c.plannedHours | number:'1.0-0' }}h planned
+                                @if (c.confirmedHours > 0) {
+                                  ({{ c.confirmedHours | number:'1.0-0' }}h confirmed)
+                                }
+                              </div>
+                            </div>
+                          } @else {
+                            <div class="rounded-lg border border-dashed border-line bg-surface-muted p-2 text-center text-ink-muted"
+                                 [attr.aria-label]="row.resourceName + ' — ' + monthLabel(c.month) + ': not active'">
+                              <div class="text-sm font-mono tabular-nums">—</div>
+                              <div class="text-[10px] uppercase tracking-wide">n/a</div>
+                            </div>
+                          }
+                        </td>
+                      }
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      }
     </div>
   `,
 })
@@ -322,6 +404,18 @@ export class CapacityComponent {
     }));
   });
 
+  /** C1: dummy/subco rows — same monthly cells as `rows`, but rendered
+   *  without a semaphore band (see `toDemandCellVm`). */
+  protected demandRows = computed<DemandRowVm[]>(() => {
+    const value = this.capacityRes.value();
+    const months = value.months;
+    return value.demandRows.map((r) => ({
+      resourceId: r.resourceId,
+      resourceName: r.resourceName,
+      cells: months.map((m) => this.toDemandCellVm(r, m)),
+    }));
+  });
+
   /** Per-month totals row: confirmed/planned demand vs capacity FTE. */
   protected totalsRow = computed<TotalsVm[]>(() => {
     const value = this.capacityRes.value();
@@ -349,6 +443,11 @@ export class CapacityComponent {
     const fm = this.firstMonth();
     if (!fm) return 0;
     return this.capacityRes.value().rows.filter((r) => r.monthly[fm]?.band === 'over').length;
+  });
+  /** C1: planned FTE booked on dummy/subco for the first month — capacity that does not exist yet. */
+  protected kpiUncovered = computed(() => {
+    const fm = this.firstMonth();
+    return fm ? this.capacityRes.value().totals[fm]?.demandFteUncovered ?? 0 : 0;
   });
 
   /** Range-selector options: the loaded window padded by ±OPTION_PAD_MONTHS so the user can narrow OR extend. */
@@ -414,6 +513,28 @@ export class CapacityComponent {
       `${Math.round(cell.targetHours)}h target (${Math.round(plannedPct)}%), confirmed ${Math.round(cell.confirmedHours)}h ` +
       `(${Math.round(confirmedPct)}%). Utilisation band: ${meta.label}.`;
     return { month, present: true, band: cell.band, meta, plannedPct, confirmedPct, confirmedWidth, aria };
+  }
+
+  /**
+   * Build one demand-cell view model. C1: a dummy/subco has no capacity to
+   * saturate (manual §4.3, mirrors `AllocationApprovalsComponent.toCellVm`'s
+   * `tracksSaturation` gate) — the accessible name states the hours plainly
+   * and never announces a band, since the server's `band: 'idle'` on this
+   * cell is an inert placeholder, not a real judgement.
+   */
+  private toDemandCellVm(row: CapacityRow, month: string): DemandCellVm {
+    const cell = row.monthly[month];
+    if (!cell) {
+      return {
+        month, present: false, plannedFte: 0, plannedHours: 0, confirmedHours: 0,
+        aria: `${row.resourceName} — ${this.monthLabelLong(month)}: not active`,
+      };
+    }
+    const aria =
+      `${row.resourceName}, ${this.monthLabelLong(month)}: ${Math.round(cell.plannedHours)}h planned ` +
+      `(${cell.ftePlanned.toFixed(1)} FTE), ${Math.round(cell.confirmedHours)}h confirmed — ` +
+      `uncovered demand, no capacity of its own to band.`;
+    return { month, present: true, plannedFte: cell.ftePlanned, plannedHours: cell.plannedHours, confirmedHours: cell.confirmedHours, aria };
   }
 
   // --- export (SSR-safe; guarded on the browser) ---------------------------
