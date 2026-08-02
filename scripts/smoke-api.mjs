@@ -1627,17 +1627,39 @@ async function checkMonthlyApproval() {
  *    and the CONFIRMED hours (the request's `staffedEffort`, which sums only
  *    'Allocated' months) must fall by exactly the booked hours.
  *
- * 2026-11 is an Open planning period; 2026-11-04 is a Wednesday and is booked by
- * nothing else in this suite (checkMonthlyApproval uses 2026-11-03), so the
- * daily-capacity gate (8h/day for resource '1') is never in play.
+ * THE ASSIGNMENT DELIBERATELY CARRIES TWO MONTHS, because the interesting bug is
+ * about the one the sweep must NOT touch (re-review finding): a migrated
+ * assignment can hold a stranded month AND a later month the planner has since
+ * submitted through the normal B3 flow, which owns a live, still-Pending
+ * per-month approval. Sweeping that second row in would decouple it from its
+ * approval forever — Pending approval, terminal row status, month invisible in
+ * the 'Requested' feed. So:
+ *   MONTH_STRANDED (2026-11) — self-managed submit -> 'Allocated', NO approvalId.
+ *   MONTH_LIVE     (2026-12) — submitted by a NON-manager -> 'Requested' WITH a
+ *                              real approvalId and a Pending ApprovalRequest.
+ * After the legacy decision, MONTH_STRANDED must move and MONTH_LIVE must be
+ * untouched in every respect. The derived assignment status is then the rollup of
+ * {Rejected, Requested} = 'Requested' (Requested outranks Rejected), which is
+ * itself proof the live month survived.
+ *
+ * Both months are Open planning periods, and both days are free of every other
+ * booking in this suite for resource '1' (8h/day cap, so the capacity gate never
+ * fires): 2026-11-04 is a Wednesday (checkMonthlyApproval uses 2026-11-03) and
+ * 2026-12-02 is a Wednesday (it uses 2026-12-01; the 2026-12-25 holiday is
+ * avoided).
  */
 async function checkLegacyAllocationApproval() {
   const REQUESTER_HEADERS = { 'X-User-Id': '3', 'X-User-Role': 'pm' };
+  // pm '2' (John Miller, resource '2') is NOT resource 1's manager ('1'), so his
+  // submit opens a genuine Pending approval instead of self-approving.
+  const NON_MANAGER_HEADERS = { 'X-User-Id': '2', 'X-User-Role': 'pm' };
   const RESOURCE_ID = '1'; // Julie Armstrong — managerId '1' == the default admin actor
   const REQUEST_ID = '2';
   const MONTH = '2026-11';
   const DAY = `${MONTH}-04`;
   const HOURS = 4;
+  const MONTH_LIVE = '2026-12';
+  const DAY_LIVE = `${MONTH_LIVE}-02`;
 
   const created = await req('POST', '/assignments', { body: { requestId: REQUEST_ID, resourceId: RESOURCE_ID, assignedHours: 0 } });
   const createOk = check('B3 legacy setup: throwaway assignment created',
@@ -1656,6 +1678,17 @@ async function checkLegacyAllocationApproval() {
     submitted.status === 200 && submitted.body?.status === 'Allocated' && submitted.body?.approvalId === undefined,
     `status=${submitted.status} row=${submitted.body?.status} approvalId=${JSON.stringify(submitted.body?.approvalId)}`);
   if (!shapeOk) return;
+
+  // SECOND MONTH on the SAME assignment, with a governance story of its OWN: a
+  // live, still-Pending per-month approval. The legacy sweep must not touch it.
+  const bookedLive = await req('PUT', `/assignments/${assignmentId}/allocation`, { headers: NON_MANAGER_HEADERS, body: { month: MONTH_LIVE, dailyHours: { [DAY_LIVE]: 3 } } });
+  check('B3 legacy setup: second month booked', bookedLive.status === 200, `status=${bookedLive.status} body=${JSON.stringify(bookedLive.body)}`);
+  const submittedLive = await req('POST', `/assignments/${assignmentId}/months/${MONTH_LIVE}/submit`, { headers: NON_MANAGER_HEADERS, body: {} });
+  const liveOk = check('B3 legacy setup: second month is Requested under a LIVE pending approval',
+    submittedLive.status === 200 && submittedLive.body?.status === 'Requested' && typeof submittedLive.body?.approvalId === 'string',
+    `status=${submittedLive.status} row=${submittedLive.body?.status} approvalId=${submittedLive.body?.approvalId}`);
+  if (!liveOk) return;
+  const liveApprovalId = submittedLive.body.approvalId;
 
   const confirmedBefore = ((await req('GET', '/requests')).body || []).find(r => r.id === REQUEST_ID)?.staffedEffort;
   check('B3 legacy setup: the booked month counts toward confirmed hours',
@@ -1678,15 +1711,34 @@ async function checkLegacyAllocationApproval() {
   check('B3 legacy: the bare-refId approval can be decided',
     decided.status === 200 && decided.body?.status === 'Rejected', `status=${decided.status} ar=${decided.body?.status}`);
 
-  // THE REGRESSION: the month row must have moved with the decision.
-  const after = await req('GET', `/assignments/${assignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
-  const afterRow = (after.body?.months || [])[0];
-  check('B3 legacy: the decision moves the assignment\'s non-Draft month rows',
+  // THE REGRESSION: the STRANDED month row must have moved with the decision.
+  const after = await req('GET', `/assignments/${assignmentId}/allocation?from=${MONTH}&to=${MONTH_LIVE}`);
+  const afterRow = (after.body?.months || []).find(m => m.month === MONTH);
+  check('B3 legacy: the decision moves the STRANDED month row (non-Draft, no approvalId)',
     afterRow?.status === 'Rejected', `row=${JSON.stringify(afterRow)}`);
 
+  // THE RE-REVIEW FINDING: a sibling month that owns a LIVE pending approval is
+  // NOT swept along. Status, approvalId and the ApprovalRequest itself must all
+  // be exactly as they were — otherwise the row shows a terminal status while its
+  // approval stays Pending, and the month disappears from the approver's feed.
+  const liveRow = (after.body?.months || []).find(m => m.month === MONTH_LIVE);
+  check('B3 legacy: a sibling month with its OWN live approval is left untouched',
+    liveRow?.status === 'Requested' && liveRow?.approvalId === liveApprovalId,
+    `row=${JSON.stringify(liveRow)} expectedApprovalId=${liveApprovalId}`);
+  const liveAr = ((await req('GET', '/approval-requests')).body || []).find(a => a.id === liveApprovalId);
+  check('B3 legacy: that sibling\'s approval is still Pending and still decidable',
+    liveAr?.status === 'Pending' && liveAr?.refId === `${assignmentId}:${MONTH_LIVE}`,
+    `ar=${JSON.stringify(liveAr && { id: liveAr.id, status: liveAr.status, refId: liveAr.refId })}`);
+  const pendingFeed = await req('GET', `/allocation-approvals?from=${MONTH_LIVE}&to=${MONTH_LIVE}&status=Requested`);
+  check('B3 legacy: the untouched month is still listed in the pending approvals feed',
+    (pendingFeed.body?.rows || []).some(r => (r.items || []).some(i => i.assignmentMonthId === `${assignmentId}:${MONTH_LIVE}`)),
+    `rows=${JSON.stringify((pendingFeed.body?.rows || []).map(r => (r.items || []).map(i => i.assignmentMonthId)))}`);
+
+  // Rollup of {Rejected, Requested} is 'Requested' (Requested outranks Rejected)
+  // — which is itself proof the live month survived the sweep.
   const afterAssig = ((await req('GET', '/assignments')).body || []).find(a => a.id === assignmentId);
   check('B3 legacy: the derived assignment status agrees with its month rows',
-    afterAssig?.status === 'Rejected', `status=${afterAssig?.status}`);
+    afterAssig?.status === 'Requested', `status=${afterAssig?.status}`);
 
   const confirmedAfter = ((await req('GET', '/requests')).body || []).find(r => r.id === REQUEST_ID)?.staffedEffort;
   check('B3 legacy: confirmed hours drop by the rejected month\'s hours (the aggregates followed)',
@@ -1702,9 +1754,18 @@ async function checkLegacyAllocationApproval() {
     monthEntry.actorId === '1',
     `entry=${JSON.stringify(monthEntry && { path: monthEntry.path, before: monthEntry.before?.status, after: monthEntry.after?.status, actor: monthEntry.actorId })}`);
 
-  const assigEntry = (Array.isArray(logs) ? logs : []).find(e => e.path === `/assignments/${assignmentId}` && e.after?.status === 'Rejected');
-  check('B3 legacy: the assignment-level (legacy governed entity) audit entry is still written',
-    Boolean(assigEntry), `entry=${JSON.stringify(assigEntry && { path: assigEntry.path, after: assigEntry.after?.status })}`);
+  // ... and NO entry for the untouched sibling: no entry means no write, which is
+  // the strongest form of "left alone".
+  const liveEntry = (Array.isArray(logs) ? logs : []).find(e => e.path === `/assignment-months/${assignmentId}:${MONTH_LIVE}`);
+  check('B3 legacy: no audit entry is written for the untouched sibling month',
+    liveEntry === undefined, `entry=${JSON.stringify(liveEntry && { path: liveEntry.path, after: liveEntry.after?.status })}`);
+
+  // The assignment-level entry records the status the column SETTLED on — the
+  // derived rollup 'Requested', not the decision's raw 'Rejected'.
+  const assigEntry = (Array.isArray(logs) ? logs : []).find(e => e.path === `/assignments/${assignmentId}`);
+  check('B3 legacy: the assignment-level (legacy governed entity) audit entry records the SETTLED derived status',
+    Boolean(assigEntry) && assigEntry.after?.status === 'Requested',
+    `entry=${JSON.stringify(assigEntry && { path: assigEntry.path, after: assigEntry.after?.status })}`);
 
   // CLEANUP so re-runs against a persistent Postgres database start clean.
   await req('DELETE', `/assignments/${assignmentId}`);

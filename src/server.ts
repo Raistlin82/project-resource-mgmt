@@ -1772,7 +1772,23 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   // A still-'Requested' month keeps its pending approval (the approver re-reads
   // the days); Draft/Rejected have no approval effect. Months OTHER than the one
   // written are untouched — that is the whole point of B3.
-  if (priorMonthStatus === 'Allocated' && !(await autoApprovesAllocation(req, resource.id))) {
+  //
+  // SERIALIZED on `month:<rowId>`. read `approvalId` -> withdraw -> create ->
+  // write is a read-modify-write over one shared row, and re-reading alone only
+  // NARROWS the window: two near-simultaneous day-edits of the same Allocated
+  // month can still both read the same id, both open a fresh approval, and leave
+  // the loser's orphaned and Pending. The lock is the same `month:` namespace
+  // `ensureAssignmentMonth` uses, taken here sequentially (that call has long
+  // since returned), never nested.
+  //
+  // This does NOT break the handler's documented ordering: the rule is that
+  // STEP 2 runs outside any `res:`/`req:` lock — it must never hold an aggregate
+  // lock across approval I/O — and `month:` is a different namespace keyed on a
+  // single row. `month:` locks are taken in exactly two places (here and
+  // `ensureAssignmentMonth`), neither of which is nested inside a `res:`/`req:`/
+  // `approval:` section, so no lock cycle is reachable.
+  await withLock(`month:${monthRow.id}`, async () => {
+    if (priorMonthStatus !== 'Allocated' || await autoApprovesAllocation(req, resource.id)) return;
     // RE-READ the row here rather than reusing the `monthRow` snapshot taken
     // before STEP 1's lock: `approvalId` is shared mutable state, and STEP 1
     // spans several awaits during which a CONCURRENT edit of the same month may
@@ -1787,7 +1803,7 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
     await withdrawAllocationApproval(currentRow?.approvalId, 'superseded');
     const approvalId = await createAllocationApproval(req, assig, monthRow.id);
     await repos.assignmentMonths.update(monthRow.id, { status: 'Requested', approvalId });
-  }
+  });
   // The assignment's own status is a rollup of its months — recompute it last.
   await refreshDerivedAssignmentStatus(assig.id);
 
@@ -3365,12 +3381,31 @@ async function decideOneApproval(
     }
     const step = ar.steps[ar.currentStep];
     if (!step) return { status: 400, body: { error: 'No pending step to decide' } };
-    // STEP ENFORCEMENT: either the actor holds the ROLE the routing assigned to
-    // the CURRENT step (admin may decide any step), OR the step carries an
-    // explicit approverId (a manager, by resource-id — allocation requests) and
-    // the deciding actor IS that resource. Without this the coarse roleGate lets
-    // e.g. any resource-manager decide ANY manager's allocation, defeating the
-    // per-manager routing `allocationApproverStep` builds.
+    // STEP ENFORCEMENT — the actor may decide when EITHER holds:
+    //   roleMatch:    they hold the ROLE the routing assigned to the CURRENT
+    //                 step; 'admin' matches any step.
+    //   managerMatch: the step carries an explicit `approverId` (a manager, by
+    //                 RESOURCE id — that is how `allocationApproverStep` routes
+    //                 allocation requests) and the deciding actor IS that
+    //                 resource.
+    //
+    // READ THIS BEFORE "FIXING" IT. The two are a genuine OR, so for an
+    // ALLOCATION step — which `allocationApproverStep` always builds with
+    // `role: 'resource-manager'` — `roleMatch` alone admits ANY resource-manager,
+    // not only the one named by `approverId`. That is DELIBERATE, per the gap-A
+    // design spec §4.3: "un altro resource-manager, diverso dal proponente, può
+    // approvare" — a manager must not be a single point of failure for their own
+    // team's bookings. An earlier version of this comment claimed the block exists
+    // to stop "any resource-manager deciding ANY manager's allocation", which is
+    // the opposite of what the code does and of what was specified; do not
+    // tighten the code to match that wording without reopening the spec decision.
+    //
+    // What the block DOES buy: a role the routing did NOT assign gets in only by
+    // being the named approver. Concretely, a `delivery-executive` (who passes the
+    // coarse `/approval-requests` gate and sees the whole approval feed) can
+    // decide an allocation only for a resource they personally manage.
+    // Segregation of duties is enforced separately, above, and binds every role.
+    // `canDecideFor` in the approvals modal mirrors exactly this rule.
     const roleMatch = decidingRole === step.role || decidingRole === 'admin';
     const managerMatch = step.approverId !== undefined && deciderResourceId === step.approverId;
     if (!roleMatch && !managerMatch) {
@@ -3466,11 +3501,30 @@ async function applyAllocationDecision(
     // Nothing else could rescue them either: `submit` only accepts
     // Draft/Rejected and the allocation PUT's forced re-approval only fires from
     // 'Allocated', so a backfilled 'Requested' row with no approval was
-    // unreachable. Apply the outcome to every NON-'Draft' month row (a Draft
-    // month was never submitted, so no decision governs it), then re-derive the
-    // column so the stored status and the status-weighted aggregates agree.
+    // unreachable.
+    //
+    // SCOPE — `approvalId === undefined` is the load-bearing half of this guard,
+    // not a nicety. It is exactly the shape described above (the backfill never
+    // attaches one), and it is what keeps this legacy sweep off months that have
+    // a governance story of their OWN. One assignment can hold both: a stranded
+    // month from the migration AND a later month the planner has since submitted
+    // through the normal B3 flow, which carries a live, still-Pending
+    // per-month approval. Moving that second row here would decouple it from its
+    // approval forever — the approval stays Pending while the row already shows a
+    // terminal status, so the month drops out of the 'Requested' feed (invisible
+    // to whoever must decide it) and the aggregates count it as decided until the
+    // real decision lands and flips it back. The same guard is what stops an
+    // already-decided 'Rejected' month (a closed conversation, and one that kept
+    // the approvalId of the request that closed it) from being flipped back to
+    // 'Allocated'.
+    //
+    // 'Draft' is excluded for the separate reason that it was never submitted, so
+    // no decision governs it — a Draft row also has no approvalId, so both halves
+    // of the guard are needed. Then re-derive the column so the stored status and
+    // the status-weighted aggregates agree.
     const monthRows = (await repos.assignmentMonths.list()).filter(m => m.assignmentId === assig.id);
     for (const row of monthRows) {
+      if (row.approvalId !== undefined) continue;
       if (row.status === 'Draft' || row.status === newStatus) continue;
       // Not best-effort: this write IS the decision for that month, same rule as
       // the B3 branch below.
