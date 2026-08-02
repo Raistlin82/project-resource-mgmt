@@ -19,6 +19,7 @@ import {
   AllocationDecisionItem,
   ApiService,
 } from '../services/api.service';
+import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 
 /** One rendered line: a project's (assignment, month) item, alongside the resource
@@ -47,12 +48,23 @@ interface Line {
  *
  * Server semantics this modal must respect (see decideAllocationMonths):
  * items are decided INDEPENDENTLY — a batch call can return a mix of decided
- * items and per-item errors and still be a 200. Only a month with a pending
- * approval is decidable, so non-'Requested' lines render with a disabled
- * checkbox. `decided` is emitted even when some items errored, because the
- * successful ones did land and the page's feed needs to reflect that; a
- * success toast fires only when the batch landed with NO errors (a partial
- * or total failure only toasts the first error, never both).
+ * items and per-item errors and still be a 200. `decided` is emitted even when
+ * some items errored, because the successful ones did land and the page's feed
+ * needs to reflect that; a success toast fires only when the batch landed with
+ * NO errors, and a failure reports HOW MANY items failed alongside the first
+ * message (reporting only the first silently hid the rest of a batch).
+ *
+ * A line is decidable only when ALL THREE hold — anything else renders with a
+ * disabled checkbox and a one-line reason (`blockedReason`) rather than
+ * pre-checking an action the server will refuse:
+ *   1. its month is 'Requested';
+ *   2. it carries an `approvalId` — a month whose lifecycle row says
+ *      'Requested' but has no pending approval (the shape a pre-B3 database's
+ *      `backfillAssignmentMonths` leaves behind) is not decidable here;
+ *   3. the current principal passes the server's per-step check (`canDecideFor`).
+ * Segregation of duties is the one refusal the client CANNOT predict (the
+ * approval's requester is not in the feed), which is why the batch error
+ * summary still has to be honest.
  *
  * Single-mode-only UX: when a decision leaves nothing further to act on for
  * the resource(s) currently loaded (no rows at all, or no row has a
@@ -131,12 +143,22 @@ interface Line {
           <div class="flex items-center gap-3">
             <input type="checkbox" class="command-checkbox"
                    [checked]="checked().has(line.item.assignmentMonthId)"
-                   [disabled]="!decidable(line.item)"
+                   [disabled]="!decidable(line)"
                    (change)="toggleChecked(line.item.assignmentMonthId)"
                    [attr.aria-label]="'Select ' + projectLabel(line.item)">
             <span class="font-semibold text-ink flex-1">{{ projectLabel(line.item) }}</span>
             <span class="font-mono tabular-nums text-sm text-ink-secondary">{{ line.item.hours | number:'1.0-1' }}h</span>
             <span class="command-status uppercase" [class]="statusClass(line.item.status)">{{ line.item.status }}</span>
+            <!-- "Correct the hours": the approver's third power alongside
+                 approve/reject (spec §3.5). Deep-links into the SAME allocation
+                 calendar the staffing page opens, focused on this month. -->
+            <button type="button" data-test="open-calendar"
+                    (click)="openCalendar.emit({ assignmentId: line.item.assignmentId, resourceName: line.row.resourceName, month: selectedMonth() })"
+                    class="p-1.5 rounded-full text-ink-muted hover:text-ink-secondary hover:bg-surface-muted transition-colors"
+                    title="Open the allocation calendar to correct the hours"
+                    [attr.aria-label]="'Open the allocation calendar for ' + projectLabel(line.item)">
+              <mat-icon class="text-[18px] w-[18px] h-[18px]">calendar_month</mat-icon>
+            </button>
             <button type="button" (click)="toggleNotes(line.item.assignmentMonthId)"
                     class="p-1.5 rounded-full transition-colors"
                     [class.text-caution-text]="hasNote(line.item)"
@@ -147,6 +169,13 @@ interface Line {
               <mat-icon class="text-[18px] w-[18px] h-[18px]">sticky_note_2</mat-icon>
             </button>
           </div>
+          <!-- A pending line the current actor cannot act on says WHY, instead of
+               offering a checkbox whose decision the server would refuse. -->
+          @if (blockedReason(line); as reason) {
+            <p class="pl-9 text-xs font-medium text-caution-text flex items-center gap-1.5" data-test="line-blocked">
+              <mat-icon class="text-[14px] w-[14px] h-[14px] shrink-0">lock</mat-icon>{{ reason }}
+            </p>
+          }
           @if (notesExpanded(line.item.assignmentMonthId)) {
             <div class="pl-9 space-y-2">
               @if (line.item.plannerNote) {
@@ -187,6 +216,7 @@ interface Line {
 })
 export class ApprovalModalComponent {
   private api = inject(ApiService);
+  private auth = inject(AuthService);
   private notifications = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
@@ -204,6 +234,10 @@ export class ApprovalModalComponent {
   readonly decided = output<void>();
   /** Emitted when the user dismisses the modal without deciding anything. */
   readonly closed = output<void>();
+  /** Deep link to one line's allocation calendar, focused on the selected month
+   *  — the approver's "correct the hours" route. The HOST opens the calendar
+   *  (it owns the modal backdrop), exactly as the staffing page does. */
+  readonly openCalendar = output<{ assignmentId: string; resourceName: string; month: string }>();
 
   /**
    * Public: driven directly by the component spec. Defaults to the first
@@ -235,15 +269,29 @@ export class ApprovalModalComponent {
   });
 
   /**
-   * Public: the spec asserts on it directly. Checked assignmentMonthIds,
-   * defaulting to every PENDING ('Requested') line of the selected month — a
-   * linkedSignal so it rebuilds that default whenever the selected month (or
-   * the underlying rows, e.g. after a reload) changes, while still allowing
-   * the user to freely check/uncheck within the current month.
+   * The signed-in principal, read REACTIVELY (never snapshotted at field-init —
+   * see AuthService's note): until `authReady` flips true, `role()`/`userId()`
+   * are the anonymous defaults, so a captured value would judge every line
+   * against the wrong identity for the modal's whole life. `userId()` is a
+   * RESOURCE id, the same space `AllocationApprovalRow.managerId` lives in.
    */
-  checked = linkedSignal<Line[], Set<string>>({
-    source: () => this.lines(),
-    computation: (lines) => new Set(lines.filter(l => this.decidable(l.item)).map(l => l.item.assignmentMonthId)),
+  private principal = computed(() => ({
+    ready: this.auth.authReady(),
+    role: this.auth.role(),
+    resourceId: this.auth.userId(),
+  }));
+
+  /**
+   * Public: the spec asserts on it directly. Checked assignmentMonthIds,
+   * defaulting to every DECIDABLE line of the selected month — a linkedSignal
+   * so it rebuilds that default whenever the selected month, the underlying
+   * rows (e.g. after a reload) OR the principal (auth settling after a
+   * deep-link) changes, while still allowing the user to freely check/uncheck
+   * within the current month.
+   */
+  checked = linkedSignal<{ lines: Line[]; principal: unknown }, Set<string>>({
+    source: () => ({ lines: this.lines(), principal: this.principal() }),
+    computation: ({ lines }) => new Set(lines.filter(l => this.decidable(l)).map(l => l.item.assignmentMonthId)),
   });
 
   /** In-flight approver-note edits, keyed by assignmentMonthId, before a decision is sent. */
@@ -285,8 +333,44 @@ export class ApprovalModalComponent {
     return [...byResource.values()];
   });
 
-  protected decidable(item: AllocationApprovalItem): boolean {
-    return item.status === 'Requested';
+  /**
+   * Mirror of the server's per-step enforcement in `decideOneApproval`
+   * (src/server.ts): the actor may decide when their ROLE matches the step's
+   * role — every allocation step is built by `allocationApproverStep` with role
+   * 'resource-manager', and 'admin' matches ANY step — OR when they ARE the
+   * resource's manager (`step.approverId` is the resource's `managerId`,
+   * compared in resource-id space, exactly what `AuthService.userId()` returns).
+   *
+   * In practice this only ever blocks a `delivery-executive` who is not the
+   * resource's own manager: they pass the feed's READ rule and so see every
+   * resource in range, but the server refuses their decision per item.
+   *
+   * UX only, like the route guards — the server is the authority. It cannot
+   * predict segregation of duties (the approval's requester is not in the feed).
+   */
+  private canDecideFor(row: AllocationApprovalRow): boolean {
+    const { role, resourceId } = this.principal();
+    if (role === 'admin' || role === 'resource-manager') return true;
+    return row.managerId !== undefined && row.managerId === resourceId;
+  }
+
+  protected decidable(line: Line): boolean {
+    return line.item.status === 'Requested'
+      && !!line.item.approvalId
+      && this.canDecideFor(line.row);
+  }
+
+  /**
+   * Why a PENDING line cannot be decided here, or null when it can (or when it
+   * is not pending at all — the status chip already says so). Rendered inline so
+   * an un-actionable line is visibly un-actionable instead of failing silently
+   * on submit.
+   */
+  protected blockedReason(line: Line): string | null {
+    if (line.item.status !== 'Requested') return null;
+    if (!line.item.approvalId) return 'No pending approval on this month — it cannot be decided here.';
+    if (!this.canDecideFor(line.row)) return `Only ${line.row.resourceName}'s manager can decide this month.`;
+    return null;
   }
 
   protected projectLabel(item: AllocationApprovalItem): string {
@@ -346,10 +430,15 @@ export class ApprovalModalComponent {
   /**
    * Send every checked line as one batch call. Items are decided
    * INDEPENDENTLY server-side and the call is a 200 even when some items
-   * error — surface the FIRST error (if any) and still emit `decided`,
-   * because the successful items did land and the host's feed must reflect
-   * that rather than silently looking unchanged. A success toast fires only
-   * when NOTHING errored (a partial or total failure only toasts the error).
+   * error — report the failures and still emit `decided`, because the
+   * successful items did land and the host's feed must reflect that rather
+   * than silently looking unchanged. A success toast fires only when NOTHING
+   * errored (a partial or total failure only toasts the error).
+   *
+   * The error toast summarises the BATCH: with more than one failure it says
+   * how many of how many failed before quoting the first message. Quoting only
+   * the first message (the previous behaviour) reported one refusal out of N
+   * and left the user believing the rest had gone through.
    *
    * What happens next differs by mode:
    *  - multi: always advance to the next month or close on the last one
@@ -371,9 +460,12 @@ export class ApprovalModalComponent {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (res) => {
-          const failed = res.results.find(r => r.status === 'Error');
-          if (failed) {
-            this.notifications.error(failed.error ?? `Could not decide ${failed.assignmentMonthId}.`);
+          const failures = res.results.filter(r => r.status === 'Error');
+          if (failures.length > 0) {
+            const first = failures[0].error ?? `Could not decide ${failures[0].assignmentMonthId}.`;
+            this.notifications.error(failures.length === 1
+              ? first
+              : `${failures.length} of ${res.results.length} months could not be decided. First error: ${first}`);
           } else {
             this.notifications.success(decision === 'Approved' ? 'Month approved.' : 'Month rejected.');
           }
@@ -390,12 +482,12 @@ export class ApprovalModalComponent {
       });
   }
 
-  /** Single-mode close check: true once no row has a remaining decidable
-   *  ('Requested') item once `decidedIds` (this response's non-error results)
-   *  are accounted for — including the trivial case of no rows at all. */
+  /** Single-mode close check: true once no row has a remaining decidable item
+   *  once `decidedIds` (this response's non-error results) are accounted for —
+   *  including the trivial case of no rows at all. */
   private nothingLeftAfter(decidedIds: ReadonlySet<string>): boolean {
     return this.rows().every(row =>
-      row.items.every(item => decidedIds.has(item.assignmentMonthId) || !this.decidable(item)));
+      row.items.every(item => decidedIds.has(item.assignmentMonthId) || !this.decidable({ row, item })));
   }
 
   /** Multi-mode advance rule: move to the next month in `months()`, or emit

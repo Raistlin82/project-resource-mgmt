@@ -16,6 +16,7 @@ import { AuthService } from '../services/auth.service';
 import { ListStateComponent } from '../shared/list-state.component';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 import { ApprovalModalComponent } from './approval-modal.component';
+import { AllocationCalendarComponent } from '../allocation-calendar/allocation-calendar.component';
 import { monthsInRange, semaphoreBand, type SemaphoreBand } from '../services/capacity.util';
 
 /** Empty envelope used until auth settles (and as the resource default). */
@@ -100,7 +101,7 @@ function shiftMonth(month: string, delta: number): string {
 @Component({
   selector: 'app-allocation-approvals',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DecimalPipe, ListStateComponent, ModalDialogDirective, ApprovalModalComponent],
+  imports: [MatIconModule, DecimalPipe, ListStateComponent, ModalDialogDirective, ApprovalModalComponent, AllocationCalendarComponent],
   template: `
     <div class="command-page space-y-6">
       <div class="command-header">
@@ -158,7 +159,9 @@ function shiftMonth(month: string, delta: number): string {
           <p class="command-kpi-value font-mono tabular-nums" data-test="kpi-pending-resources">{{ pendingResourceCount() }}</p>
         </div>
         <div class="command-kpi">
-          <p class="command-kpi-label">Pending Months</p>
+          <!-- One (assignment, month) item, not one month: a resource with three
+               projects booked in September contributes three. -->
+          <p class="command-kpi-label">Pending Project-Months</p>
           <p class="command-kpi-value font-mono tabular-nums" data-test="kpi-pending-months">{{ pendingMonths() }}</p>
         </div>
       </div>
@@ -242,7 +245,7 @@ function shiftMonth(month: string, delta: number): string {
            standard modal backdrop + focus trap directive used across the app;
            the panel content lives in ApprovalModalComponent, which owns its
            own header/body/footer. -->
-      @if (modalResourceId() || multiMode()) {
+      @if ((modalResourceId() || multiMode()) && !calendarTarget()) {
         <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
              appModal ariaLabelledby="approvalModalTitle" (dismiss)="closeModal()">
           <app-approval-modal
@@ -250,7 +253,24 @@ function shiftMonth(month: string, delta: number): string {
             [months]="months()"
             [multi]="multiMode()"
             (decided)="reload()"
+            (openCalendar)="openCalendar($event)"
             (closed)="closeModal()" />
+        </div>
+      }
+
+      <!-- "Correct the hours" (spec §3.5): the approver's third power, reached
+           per line from the modal above. Same component and same modal shape the
+           staffing page uses — while it is open the approval modal is hidden, so
+           only one focus trap is ever active (ResourceRequestsComponent does the
+           same with its tracking modal). -->
+      @if (calendarTarget(); as target) {
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 sm:p-6"
+             appModal ariaLabelledby="allocCalTitle" (dismiss)="closeCalendar()">
+          <app-allocation-calendar
+            [assignmentId]="target.assignmentId"
+            [resourceName]="target.resourceName"
+            [focusMonth]="target.month"
+            (closed)="closeCalendar()" />
         </div>
       }
     </div>
@@ -389,6 +409,21 @@ export class AllocationApprovalsComponent {
 
   protected openMultiApprove(): void {
     this.multiMode.set(true);
+  }
+
+  /** The assignment/month whose allocation calendar is open on top of the modal. */
+  protected calendarTarget = signal<{ assignmentId: string; resourceName: string; month: string } | null>(null);
+
+  protected openCalendar(target: { assignmentId: string; resourceName: string; month: string }): void {
+    this.calendarTarget.set(target);
+  }
+
+  /** Closing the calendar reveals the approval modal again and reloads the feed:
+   *  the approver may have corrected the hours, which re-opens the month's
+   *  approval server-side, so the listed state would otherwise be stale. */
+  protected closeCalendar(): void {
+    this.calendarTarget.set(null);
+    this.reload();
   }
 
   // --- KPI strip -------------------------------------------------------

@@ -2,6 +2,8 @@ import {
   ChangeDetectionStrategy,
   Component,
   DestroyRef,
+  ElementRef,
+  afterRenderEffect,
   computed,
   inject,
   input,
@@ -107,7 +109,8 @@ const EMPTY_DATA: CalendarData = {
           </div>
         } @else {
           @for (month of months(); track month) {
-            <section class="command-card-muted p-5">
+            <section class="command-card-muted p-5" [attr.data-month]="month"
+                     [class.ring-2]="month === focusMonth()" [class.ring-accent]="month === focusMonth()">
               <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
                 <div class="flex items-center gap-3">
                   <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] capitalize">{{ monthLabel(month) }}</h3>
@@ -118,6 +121,12 @@ const EMPTY_DATA: CalendarData = {
                     <span class="command-status uppercase" [class]="monthStatusClass(status)">
                       {{ status }}
                     </span>
+                  }
+                  <!-- The caller's focus month (a deep link from the approvals
+                       modal). Labelled, not just ringed — the ring alone would be
+                       colour-only information (WCAG 1.4.1). -->
+                  @if (month === focusMonth()) {
+                    <span class="command-status uppercase neutral" data-test="focused-month">In review</span>
                   }
                 </div>
                 <div class="flex items-center gap-3">
@@ -237,8 +246,37 @@ export class AllocationCalendarComponent {
   readonly assignmentId = input.required<string>();
   /** Resource display name for the header (optional). */
   readonly resourceName = input<string>('');
+  /**
+   * Optional 'YYYY-MM' the caller wants the user to land on — the approvals
+   * modal's "correct the hours" deep link. Purely presentational: that month's
+   * section is labelled and scrolled into view; every open month stays editable
+   * exactly as before, and an unknown/absent value changes nothing.
+   */
+  readonly focusMonth = input<string>('');
   /** Emitted when the user dismisses the calendar. */
   readonly closed = output<void>();
+
+  private hostEl = inject<ElementRef<HTMLElement>>(ElementRef);
+  /** The focus month already scrolled to, so a later render (e.g. editing a day)
+   *  never yanks the viewport back. */
+  private scrolledTo = '';
+
+  constructor() {
+    // Bring the deep link's month into view once its section has ACTUALLY
+    // rendered — the sections only exist after the async load resolves, so this
+    // cannot be a one-shot afterNextRender. `afterRenderEffect` re-runs on the
+    // signals it reads and never runs on the server, so this stays SSR-safe.
+    afterRenderEffect(() => {
+      const month = this.focusMonth();
+      // Read reactively so the effect re-runs when the load resolves.
+      const known = this.months().includes(month);
+      if (!month || !known || month === this.scrolledTo) return;
+      const el = this.hostEl.nativeElement.querySelector(`[data-month="${month}"]`);
+      if (!el) return;
+      this.scrolledTo = month;
+      el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    });
+  }
 
   // Principal-gated reads (allocation/planning-periods) 401 until the OIDC bootstrap
   // settles — key the load on authReady AND the assignment id so it fires with a

@@ -10,12 +10,12 @@ const FEED: AllocationApprovalFeed = {
   months: ['2026-09'],
   rows: [
     {
-      resourceId: 'r1', resourceName: 'Ada', contractHoursPerDay: 8,
+      resourceId: 'r1', resourceName: 'Ada', managerId: 'm1', contractHoursPerDay: 8,
       targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 88 },
-      items: [{ assignmentMonthId: 'A1:2026-09', assignmentId: 'A1', month: '2026-09', status: 'Requested', requestId: '1', projectName: 'Apollo', hours: 88 }],
+      items: [{ assignmentMonthId: 'A1:2026-09', assignmentId: 'A1', month: '2026-09', status: 'Requested', requestId: '1', projectName: 'Apollo', hours: 88, approvalId: 'AR1' }],
     },
     {
-      resourceId: 'r2', resourceName: 'Bob', contractHoursPerDay: 8,
+      resourceId: 'r2', resourceName: 'Bob', managerId: 'm1', contractHoursPerDay: 8,
       targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 176 },
       items: [{ assignmentMonthId: 'A2:2026-09', assignmentId: 'A2', month: '2026-09', status: 'Allocated', requestId: '2', projectName: 'Gemini', hours: 176 }],
     },
@@ -25,7 +25,13 @@ const FEED: AllocationApprovalFeed = {
 function setup(ready: boolean) {
   const getAllocationApprovals = vi.fn(() => of(FEED));
   const apiStub = { getAllocationApprovals } as unknown as ApiService;
-  const authStub = { authReady: signal(ready), isAuthenticated: signal(ready) } as unknown as AuthService;
+  // `role`/`userId` are read by the embedded ApprovalModalComponent's
+  // decidability check; an admin can decide any step, so the modal cases below
+  // exercise the modal itself rather than the gate.
+  const authStub = {
+    authReady: signal(ready), isAuthenticated: signal(ready),
+    role: signal('admin'), userId: signal('m1'),
+  } as unknown as AuthService;
 
   TestBed.configureTestingModule({
     imports: [AllocationApprovalsComponent],
