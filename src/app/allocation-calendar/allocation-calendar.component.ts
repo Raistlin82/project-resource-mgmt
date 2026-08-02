@@ -304,6 +304,23 @@ export class AllocationCalendarComponent {
     },
   });
 
+  /**
+   * Per-month lifecycle rows (B3), keyed by month — deliberately a SEPARATE
+   * linkedSignal from `data`, not a plain read of `data.value().allocation.months`.
+   * `linkedSignal.computation` always re-runs in FULL whenever `source()` is
+   * merely marked dirty (it diffs the computed OUTPUT, never the source value —
+   * see Angular's `LinkedSignalNode.producerRecomputeValue`), so patching a row
+   * through `data.update()`, even leaving `allocation.days`'s array reference
+   * untouched, would still force `edited` above to rebuild from scratch and
+   * wipe every OTHER open month's unsaved hour edits. Keeping this map on its
+   * own signal means `patchMonthRow` never touches `data` at all, so `edited`
+   * is only ever rebuilt on a genuine full (re)load.
+   */
+  protected monthRows = linkedSignal<AssignmentMonth[], Record<string, AssignmentMonth>>({
+    source: () => this.data.value().allocation.months ?? [],
+    computation: (months) => Object.fromEntries(months.map(m => [m.month, m])),
+  });
+
   /** Which month is currently being saved (disables its Save button); null when idle. */
   protected savingMonth = signal<string | null>(null);
   /** Which month is currently being submitted for approval; null when idle. */
@@ -316,8 +333,7 @@ export class AllocationCalendarComponent {
   }
 
   /** Lifecycle row of a month, when the assignment has one (created on first save). */
-  protected monthRow = (month: string): AssignmentMonth | undefined =>
-    this.data.value().allocation.months?.find(m => m.month === month);
+  protected monthRow = (month: string): AssignmentMonth | undefined => this.monthRows()[month];
 
   protected monthStatus = (month: string): AssignmentMonth['status'] | undefined => this.monthRow(month)?.status;
 
@@ -352,7 +368,12 @@ export class AllocationCalendarComponent {
 
   /** Persist the planner note on blur — only when the month row already exists
    *  (the server 404s otherwise, mirroring the RPT rule that a note can only be
-   *  saved once the month has been drafted) and only when it actually changed. */
+   *  saved once the month has been drafted) and only when it actually changed.
+   *  The endpoint returns the updated row directly, so it is patched straight
+   *  into `monthRows` (see patchMonthRow) rather than a full `data.reload()`,
+   *  which would flash the whole calendar back to its loading placeholder and
+   *  wipe any unsaved hour edits in OTHER open months — the same concern
+   *  `saveMonth` documents below. */
   protected savePlannerNote(month: string): void {
     const row = this.monthRow(month);
     const draft = this.plannerNoteDraft(month);
@@ -360,7 +381,7 @@ export class AllocationCalendarComponent {
     this.api.setAssignmentMonthNote(this.assignmentId(), month, draft)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: () => this.data.reload(),
+        next: updated => this.patchMonthRow(updated),
         error: () => { /* the global error interceptor surfaces the message */ },
       });
   }
@@ -370,7 +391,9 @@ export class AllocationCalendarComponent {
    * 'Requested' (a manager approval was created) or 'Allocated' (the proposer IS
    * the resource's manager, so the request is auto-approved on the spot) — the
    * success message reflects whichever actually came back rather than assuming
-   * 'Requested', so it never claims a pending approval that didn't happen.
+   * 'Requested', so it never claims a pending approval that didn't happen. Like
+   * savePlannerNote, the response IS the updated row, so it is patched directly
+   * into `monthRows` — no full `data.reload()` (see saveMonth's doc comment for why).
    */
   protected submitMonth(month: string): void {
     if (this.submittingMonth() !== null) return;
@@ -385,7 +408,7 @@ export class AllocationCalendarComponent {
             row.status === 'Allocated' ? `${label} allocated (self-managed, no approval needed).` : `${label} submitted for approval.`,
             'success',
           );
-          this.data.reload();
+          this.patchMonthRow(row);
         },
         error: () => this.submittingMonth.set(null),
       });
@@ -483,12 +506,12 @@ export class AllocationCalendarComponent {
   }
 
   /**
-   * Patch a single month's lifecycle row (status/notes) into `data` from a
-   * narrow-range re-read, WITHOUT touching `allocation.days` — kept as the
-   * exact same array reference so the `edited` linkedSignal's source does not
-   * change identity and every other month's unsaved edits survive untouched.
-   * Best-effort: on failure the badge simply stays as it was until the next
-   * full reload (submit/note-save already reload the whole calendar).
+   * saveAssignmentAllocation's response carries only the ASSIGNMENT's derived
+   * rollup, not the saved month's own lifecycle row, so — unlike submitMonth /
+   * savePlannerNote, which already get the fresh row back directly — a save
+   * needs its own narrow re-read to learn it (e.g. the lazily-created Draft row
+   * on a month's first booking). Best-effort: on failure the badge simply stays
+   * as it was until the next patch.
    */
   private refreshMonthRow(month: string): void {
     this.api.getAssignmentAllocation(this.assignmentId(), month, month)
@@ -496,17 +519,23 @@ export class AllocationCalendarComponent {
       .subscribe({
         next: fresh => {
           const row = fresh.months?.find(m => m.month === month);
-          if (!row) return;
-          this.data.update(d => ({
-            ...d,
-            allocation: {
-              ...d.allocation,
-              months: [...(d.allocation.months ?? []).filter(m => m.month !== month), row],
-            },
-          }));
+          if (row) this.patchMonthRow(row);
         },
         error: () => { /* best-effort refresh; the badge just stays stale until the next reload */ },
       });
+  }
+
+  /**
+   * Merge one fresh month row into `monthRows` — NOT into `data` (see
+   * `monthRows`'s doc comment for why: touching `data` at all, even leaving
+   * `allocation.days` untouched, would force `edited` to rebuild from scratch
+   * and wipe every other open month's unsaved hour edits). This is the ONLY
+   * way this component updates a month's lifecycle state; it never calls a
+   * full `data.reload()`, which would additionally flash the whole calendar
+   * back to its loading placeholder.
+   */
+  private patchMonthRow(row: AssignmentMonth): void {
+    this.monthRows.update(map => ({ ...map, [row.month]: row }));
   }
 
   private saveMessage(month: string, status: string): string {
