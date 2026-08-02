@@ -2,7 +2,7 @@ import { Injector, PLATFORM_ID, runInInjectionContext, signal } from '@angular/c
 import { TestBed } from '@angular/core/testing';
 import { provideRouter, Router, UrlTree, GuardResult } from '@angular/router';
 import { isObservable, firstValueFrom, Observable } from 'rxjs';
-import { roleGuard, capacityGuard, CAPACITY_ROLES } from './role.guard';
+import { roleGuard, capacityGuard, CAPACITY_ROLES, allocationApprovalsGuard, ALLOCATION_APPROVAL_ROLES } from './role.guard';
 import { AuthService } from '../services/auth.service';
 import { UserRole } from '../services/api.service';
 
@@ -137,6 +137,41 @@ describe('capacityGuard role parity', () => {
   for (const role of DENIED) {
     it(`denies ${role} (redirects home)`, async () => {
       expect(await decide(role)).toBeInstanceOf(UrlTree);
+    });
+  }
+});
+
+describe('allocationApprovalsGuard role parity', () => {
+  // The approver-grade roles the /allocation-approvals page is restricted to
+  // (B3). The nav entry in app.ts gates on this SAME exported
+  // ALLOCATION_APPROVAL_ROLES const, so pinning it here catches a drift on
+  // EITHER side (guard or nav) — in particular, that 'pm' (a staffing role
+  // allowed into /capacity) is correctly EXCLUDED here.
+  const ALLOWED: UserRole[] = ['resource-manager', 'delivery-executive', 'admin'];
+  const DENIED: UserRole[] = ['employee', 'pm', 'finance', 'sales'];
+
+  it('ALLOCATION_APPROVAL_ROLES is exactly the approver-grade set (shared by allocationApprovalsGuard AND the nav gate)', () => {
+    expect([...ALLOCATION_APPROVAL_ROLES].sort()).toEqual([...ALLOWED].sort());
+  });
+
+  /** Evaluate allocationApprovalsGuard in the browser for a single role, after authReady settles. */
+  async function decideAllocationApprovals(role: UserRole): Promise<GuardResult> {
+    const auth = new RoleAuth(role);
+    const injector = configure('browser', auth as unknown as FakeAuth);
+    const result = runInInjectionContext(injector, () => allocationApprovalsGuard({} as never, []));
+    auth._ready.set(true);
+    return firstValueFrom(result as Observable<GuardResult>);
+  }
+
+  for (const role of ALLOWED) {
+    it(`allows ${role}`, async () => {
+      expect(await decideAllocationApprovals(role)).toBe(true);
+    });
+  }
+
+  for (const role of DENIED) {
+    it(`denies ${role} (redirects home)`, async () => {
+      expect(await decideAllocationApprovals(role)).toBeInstanceOf(UrlTree);
     });
   }
 });

@@ -24,7 +24,7 @@ import {
 import { AuthService } from './services/auth.service';
 import { NotificationService } from './services/notification.service';
 import { ThemeService } from './services/theme.service';
-import { CAPACITY_ROLES } from './guards/role.guard';
+import { ALLOCATION_APPROVAL_ROLES, CAPACITY_ROLES } from './guards/role.guard';
 
 type NavBadge = 'requests' | 'risks' | 'changes' | 'overbooked';
 
@@ -407,6 +407,7 @@ export class App {
         { label: 'What-if', icon: 'tune', route: '/what-if' },
         { label: 'Utilization', icon: 'bar_chart', route: '/utilization', badge: 'overbooked' },
         { label: 'Capacity', icon: 'calendar_view_month', route: '/capacity' },
+        { label: 'Allocation Approvals', icon: 'fact_check', route: '/allocation-approvals' },
         { label: 'Reporting', icon: 'insights', route: '/reporting', badge: 'risks' },
       ],
     },
@@ -445,6 +446,10 @@ export class App {
     // CAPACITY_ROLES) — a dedicated local so it can never desync from the route
     // gate, and stays independent of the (semantically different) approvals gate.
     const canViewCapacity = this.auth.hasAnyRole([...CAPACITY_ROLES]);
+    // Allocation Approvals nav visibility uses the SAME role set as
+    // allocationApprovalsGuard (imported ALLOCATION_APPROVAL_ROLES) — a
+    // dedicated local so it can never desync from the route gate.
+    const canViewAllocationApprovals = this.auth.hasAnyRole([...ALLOCATION_APPROVAL_ROLES]);
     // Resources (people lifecycle) mirrors its roleGuard — visible only to the
     // roles that own resource master data (resource-manager/delivery-executive/admin).
     const canManageResources = this.auth.hasAnyRole(['resource-manager', 'delivery-executive', 'admin']);
@@ -478,6 +483,7 @@ export class App {
           // Analytics links stay open to any verified actor.
           const items = group.items.filter(item => {
             if (item.route === '/capacity') return canViewCapacity;
+            if (item.route === '/allocation-approvals') return canViewAllocationApprovals;
             return true;
           });
           return { label: group.label, items };

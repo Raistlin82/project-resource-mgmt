@@ -1,5 +1,5 @@
 import { Routes } from '@angular/router';
-import { capacityGuard, commercialGuard, financeGuard, roleGuard } from './guards/role.guard';
+import { allocationApprovalsGuard, capacityGuard, commercialGuard, financeGuard, roleGuard } from './guards/role.guard';
 
 export const routes: Routes = [
   // Resource Management
@@ -37,6 +37,7 @@ export const routes: Routes = [
   // Reporting
   { path: 'reporting', title: 'Reporting', loadComponent: () => import('./reporting/reporting').then(m => m.Reporting) },
   { path: 'capacity', title: 'Capacity', canMatch: [capacityGuard], loadComponent: () => import('./capacity/capacity.component').then(m => m.CapacityComponent) },
+  { path: 'allocation-approvals', title: 'Allocation Approvals', canMatch: [allocationApprovalsGuard], loadComponent: () => import('./allocation-approvals/allocation-approvals.component').then(m => m.AllocationApprovalsComponent) },
 
   // Configuration
   { path: 'config/language', title: 'Default Language', loadComponent: () => import('./configuration/set-default-language.component').then(m => m.SetDefaultLanguageComponent) },
