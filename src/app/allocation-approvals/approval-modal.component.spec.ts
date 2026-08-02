@@ -11,7 +11,7 @@ import { NotificationService } from '../services/notification.service';
  *  month with no approval, or a resource this actor does not manage, is not
  *  decidable), so every fixture carries them exactly as the feed does. */
 const ROW: AllocationApprovalRow = {
-  resourceId: 'r1', resourceName: 'Ada', managerId: 'm1', contractHoursPerDay: 8,
+  resourceId: 'r1', resourceName: 'Ada', managerId: 'm1', kind: 'internal', contractHoursPerDay: 8,
   targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 120 },
   items: [
     { assignmentMonthId: 'A1:2026-09', assignmentId: 'A1', month: '2026-09', status: 'Requested', requestId: '1', projectName: 'Apollo', hours: 80, plannerNote: 'kickoff', approvalId: 'AR1' },
@@ -22,7 +22,7 @@ const ROW: AllocationApprovalRow = {
 /** One resource, TWO pending projects in the same month — needed to exercise a
  *  mixed decided/error batch response (ROW above has only one decidable item). */
 const ROW_TWO_PENDING: AllocationApprovalRow = {
-  resourceId: 'r1', resourceName: 'Ada', managerId: 'm1', contractHoursPerDay: 8,
+  resourceId: 'r1', resourceName: 'Ada', managerId: 'm1', kind: 'internal', contractHoursPerDay: 8,
   targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 120 },
   items: [
     { assignmentMonthId: 'A1:2026-09', assignmentId: 'A1', month: '2026-09', status: 'Requested', requestId: '1', projectName: 'Apollo', hours: 80, approvalId: 'AR1' },
@@ -32,7 +32,7 @@ const ROW_TWO_PENDING: AllocationApprovalRow = {
 
 /** A second resource with its own pending item — used for multi-resource setup. */
 const ROW_2: AllocationApprovalRow = {
-  resourceId: 'r2', resourceName: 'Bob', managerId: 'm2', contractHoursPerDay: 8,
+  resourceId: 'r2', resourceName: 'Bob', managerId: 'm2', kind: 'internal', contractHoursPerDay: 8,
   targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 80 },
   items: [
     { assignmentMonthId: 'B1:2026-09', assignmentId: 'B1', month: '2026-09', status: 'Requested', requestId: '4', projectName: 'Zeus', hours: 80, approvalId: 'AR4' },

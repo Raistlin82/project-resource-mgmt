@@ -1220,6 +1220,17 @@ async function getHoursPerDay(): Promise<number> {
   const n = row ? Number((row as { value?: unknown }).value) : NaN;
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_HOURS_PER_DAY;
 }
+/**
+ * C1: the 1-FTE-equivalent cap BEFORE the kind multiplier (`dailyCapFor`) is
+ * applied — the stored `contractHoursPerDay` when it's a usable value
+ * (finite, > 0), else the configured hours/day. Shared by the allocation
+ * daily-capacity gate and the resources kind-change guard so the two
+ * resolutions can never drift apart.
+ */
+async function resolveBaseCap(resource: { contractHoursPerDay?: number }): Promise<number> {
+  const raw = resource.contractHoursPerDay;
+  return (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) ? raw : await getHoursPerDay();
+}
 function pickRateCard(cards: RateCard[], role: string | undefined, organization: string | undefined): RateCard | undefined {
   if (!role) return undefined;
   const forRole = cards.filter(c => c.role === role && (c.currency ?? RATE_BASE_CURRENCY) === RATE_BASE_CURRENCY);
@@ -1437,23 +1448,31 @@ apiRouter.put('/resources/:id', async (req, res) => {
   // C1: narrowing a kind (dummy/subco -> internal) shrinks the daily ceiling by
   // MULTI_FTE_MAX. Refuse if that would strand existing bookings above the new
   // cap rather than silently leaving invalid allocations behind. baseCap is
-  // resolved exactly like the allocation handler's gate (stored
-  // contractHoursPerDay, guarded against 0/NaN/negative, else getHoursPerDay()).
-  const rawCap = existing.contractHoursPerDay;
-  const baseCap = (typeof rawCap === 'number' && Number.isFinite(rawCap) && rawCap > 0) ? rawCap : await getHoursPerDay();
+  // resolved exactly like the allocation handler's gate (resolveBaseCap:
+  // stored contractHoursPerDay, guarded against 0/NaN/negative, else
+  // getHoursPerDay()).
+  // TOCTOU: a concurrent PUT .../allocation could book hours onto this very
+  // resource between reading its assignment days and writing the narrowed
+  // kind, so the re-check AND the write happen inside the SAME res: lock —
+  // the same discipline the allocation handler's own res: critical section
+  // (below) uses for exactly this reason.
+  const baseCap = await resolveBaseCap(existing);
   const currentCap = dailyCapFor(kindOf(existing), baseCap);
   const newCap = dailyCapFor(kindOf({ kind: mergedKind }), baseCap);
-  if (newCap < currentCap) {
-    const ids = new Set((await repos.assignments.list()).filter(a => a.resourceId === existing.id).map(a => a.id));
-    const byDate = sumHoursByDate((await repos.assignmentDays.list()).filter(d => ids.has(d.assignmentId)));
-    const offender = Object.keys(byDate).sort().find(day => exceedsDailyCapacity(byDate[day], newCap));
-    if (offender !== undefined) {
-      res.status(400).json({ error: `changing kind to ${mergedKind} would exceed the daily capacity on ${offender}` });
-      return;
+  const locked = await withLock(`res:${existing.id}`, async (): Promise<{ offender?: string; updated?: Resource }> => {
+    if (newCap < currentCap) {
+      const ids = new Set((await repos.assignments.list()).filter(a => a.resourceId === existing.id).map(a => a.id));
+      const byDate = sumHoursByDate((await repos.assignmentDays.list()).filter(d => ids.has(d.assignmentId)));
+      const offender = Object.keys(byDate).sort().find(day => exceedsDailyCapacity(byDate[day], newCap));
+      if (offender !== undefined) return { offender };
     }
+    return { updated: await repos.resources.update(req.params.id, body) };
+  });
+  if (locked.offender !== undefined) {
+    res.status(400).json({ error: `changing kind to ${mergedKind} would exceed the daily capacity on ${locked.offender}` });
+    return;
   }
-  const updated = await repos.resources.update(req.params.id, body);
-  const [resolved] = await resolveResourceRates([updated as Resource]);
+  const [resolved] = await resolveResourceRates([locked.updated as Resource]);
   res.json(resolved);
 });
 
@@ -1788,13 +1807,13 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
 
   // Daily-capacity gate. assignmentDays carry assignmentId (not resourceId), so
   // gather this resource's OTHER assignment ids, sum their day-hours on the
-  // affected dates, and check other+new against the effective per-day cap. Guard
-  // the cap exactly like getHoursPerDay does: a stored contractHoursPerDay of
-  // 0 / NaN / negative is NOT a usable cap (0 would reject every booking with
-  // hours; NaN would silently disable the check — `total > NaN + 1e-9` is always
-  // false), so fall back to the configured hours/day.
-  const rawCap = resource.contractHoursPerDay;
-  const baseCap = (typeof rawCap === 'number' && Number.isFinite(rawCap) && rawCap > 0) ? rawCap : await getHoursPerDay();
+  // affected dates, and check other+new against the effective per-day cap.
+  // resolveBaseCap guards the cap exactly like getHoursPerDay does: a stored
+  // contractHoursPerDay of 0 / NaN / negative is NOT a usable cap (0 would
+  // reject every booking with hours; NaN would silently disable the check —
+  // `total > NaN + 1e-9` is always false), so it falls back to the configured
+  // hours/day.
+  const baseCap = await resolveBaseCap(resource);
   // C1: dummy and subco represent capacity that a single person does not cover,
   // so their daily ceiling is MULTI_FTE_MAX times the one-FTE base. Internal
   // resources keep the 1-FTE cap (manual §3.2.3).
@@ -2165,6 +2184,10 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
         ? resource.contractHoursPerDay : hoursPerDay;
       row = {
         resourceId: resource.id, resourceName: resource.name, managerId: resource.managerId,
+        // C1: normalized so the UI can gate the saturation band/percentage off
+        // for dummy/subco rows (manual §4.3 — they have no capacity to
+        // saturate) without guessing at an absent/unrecognized value itself.
+        kind: kindOf(resource),
         contractHoursPerDay: cap,
         targetHours: Object.fromEntries(months.map(mo => [mo, monthlyTargetHours(cap, mo, holidays)])),
         totalHours: { ...(totalsByResource.get(resource.id) ?? Object.fromEntries(months.map(mo => [mo, 0]))) },

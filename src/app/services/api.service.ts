@@ -207,6 +207,13 @@ export interface AllocationApprovalRow {
   resourceId: string;
   resourceName: string;
   managerId?: string;
+  /**
+   * C1: the resource's kind, normalized (`kindOf`) server-side — never absent.
+   * A dummy/subco row has no capacity to saturate (manual §4.3), so the UI
+   * must skip the saturation band/percentage for any kind other than
+   * 'internal' and show the hours plainly instead.
+   */
+  kind: ResourceKind;
   contractHoursPerDay: number;
   targetHours: Record<string, number>;
   totalHours: Record<string, number>;

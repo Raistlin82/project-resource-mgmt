@@ -1916,6 +1916,15 @@ async function checkResourceKinds() {
   });
   check('C1 a dummy accepts 2.5 FTE on a day', overOneFte.status === 200, `status=${overOneFte.status} err=${overOneFte.body?.error}`);
 
+  // The approval feed must surface the dummy's kind on its row (Task 4 review
+  // finding): the page needs it to skip the saturation band/percentage for a
+  // resource that has no capacity to saturate (spec §4.3).
+  const feedWithDummy = await req('GET', `/allocation-approvals?from=${OPEN_MONTH}&to=${OPEN_MONTH}&status=all`);
+  const dummyRow = (feedWithDummy.body?.rows || []).find(r => r.resourceId === dummy.body.id);
+  check('C1 the allocation-approvals feed row for the dummy carries kind=dummy',
+    feedWithDummy.status === 200 && dummyRow?.kind === 'dummy',
+    `status=${feedWithDummy.status} row=${JSON.stringify(dummyRow)}`);
+
   const internalOver = await req('PUT', `/assignments/${internalAssignmentId}/allocation`, {
     body: { month: OPEN_MONTH, dailyHours: { [WORKING_DAY]: 20 } },
   });
