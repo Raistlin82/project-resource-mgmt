@@ -1802,6 +1802,79 @@ async function checkResourceKinds() {
 
   const plain = await req('POST', '/resources', { body: { ...base, name: 'C1 plain resource' } });
   check('C1 an omitted kind defaults to internal', plain.status === 201 && plain.body?.kind === 'internal', `kind=${plain.body?.kind}`);
+
+  // An empty-string vendorId is accepted (same as omitted) but must never be
+  // PERSISTED literally — it must normalize to absent on both create and update.
+  const emptyVendorCreate = await req('POST', '/resources', { body: { ...base, name: 'C1 empty vendorId is absent', vendorId: '' } });
+  check('C1 an empty-string vendorId on create is normalized to absent, not literal ""',
+    emptyVendorCreate.status === 201 && !('vendorId' in (emptyVendorCreate.body || {})),
+    `status=${emptyVendorCreate.status} vendorId=${JSON.stringify(emptyVendorCreate.body?.vendorId)}`);
+
+  const emptyVendorPut = await req('PUT', `/resources/${plain.body.id}`, { body: { vendorId: '' } });
+  check('C1 an empty-string vendorId on PUT is normalized to absent, not literal ""',
+    emptyVendorPut.status === 200 && !('vendorId' in (emptyVendorPut.body || {})),
+    `status=${emptyVendorPut.status} vendorId=${JSON.stringify(emptyVendorPut.body?.vendorId)}`);
+
+  // --- PUT: the merged-state validation and the vendor-clear-on-demote path.
+  // Everything above is POST-only; none of it would fail if the entire
+  // merged-state block in src/server.ts's PUT /resources/:id handler were
+  // deleted. This is the trickiest part of the task and the ground Task 4's
+  // kind-change guard builds on directly, so it gets its own checks.
+  const vendorId2 = (vendors.body || [])[1]?.id;
+  check('C1 a second vendor exists to test a vendor-to-vendor move', typeof vendorId2 === 'string', `vendors=${vendors.body?.length}`);
+
+  // A kind-only PUT to 'subco' on a vendor-less row must be rejected — the
+  // MERGED state (new kind + the row's existing, absent vendor) is invalid.
+  const putKindToSubcoNoVendor = await req('PUT', `/resources/${plain.body.id}`, { body: { kind: 'subco' } });
+  check('C1 PUT kind-only to subco on a vendor-less row is rejected', putKindToSubcoNoVendor.status === 400, `status=${putKindToSubcoNoVendor.status}`);
+
+  // A vendorId-only PUT on a row whose (unchanged) kind isn't subco must be
+  // rejected — the MERGED state (the row's existing 'internal' kind + the
+  // new vendor) is invalid.
+  const putVendorOnlyNonSubco = await req('PUT', `/resources/${plain.body.id}`, { body: { vendorId } });
+  check('C1 PUT vendorId-only on a non-subco row is rejected', putVendorOnlyNonSubco.status === 400, `status=${putVendorOnlyNonSubco.status}`);
+
+  if (vendorId2) {
+    // A subco moved to a different valid vendor: the new vendor is stored.
+    const subcoToRevendor = await req('POST', '/resources', { body: { ...base, name: 'C1 subco to revendor', kind: 'subco', vendorId } });
+    const revendorSetupOk = check('C1 PUT setup: subco-to-revendor fixture created',
+      subcoToRevendor.status === 201 && subcoToRevendor.body?.kind === 'subco', `status=${subcoToRevendor.status}`);
+    if (revendorSetupOk) {
+      const revendored = await req('PUT', `/resources/${subcoToRevendor.body.id}`, { body: { vendorId: vendorId2 } });
+      check('C1 PUT vendorId-only moves a subco to a different valid vendor',
+        revendored.status === 200 && revendored.body?.kind === 'subco' && revendored.body?.vendorId === vendorId2,
+        `status=${revendored.status} kind=${revendored.body?.kind} vendorId=${revendored.body?.vendorId}`);
+    }
+  }
+
+  // A subco moved to another kind: the stale vendor must be CLEARED (absent
+  // from the JSON entirely) — never left stale, and never a literal `null`
+  // surviving the round trip (that would be a different bug: nullsToUndefined
+  // / the in-memory null-strip both exist precisely to prevent this).
+  const subcoToDemote = await req('POST', '/resources', { body: { ...base, name: 'C1 subco to demote', kind: 'subco', vendorId } });
+  const demoteSetupOk = check('C1 PUT setup: subco-to-demote fixture created',
+    subcoToDemote.status === 201 && subcoToDemote.body?.kind === 'subco', `status=${subcoToDemote.status}`);
+  if (demoteSetupOk) {
+    const demoted = await req('PUT', `/resources/${subcoToDemote.body.id}`, { body: { kind: 'internal' } });
+    check('C1 PUT kind-only away from subco succeeds', demoted.status === 200 && demoted.body?.kind === 'internal',
+      `status=${demoted.status} kind=${demoted.body?.kind}`);
+    const afterDemote = await req('GET', `/resources/${subcoToDemote.body.id}`);
+    check('C1 the cleared vendor is ABSENT (not stale, not a literal null)',
+      afterDemote.status === 200 && !('vendorId' in (afterDemote.body || {})),
+      `vendorId=${JSON.stringify(afterDemote.body?.vendorId)} hasKey=${afterDemote.body ? 'vendorId' in afterDemote.body : 'n/a'}`);
+  }
+
+  // An unrelated-field PUT on a genuine subco must leave kind and vendor untouched.
+  const subcoUnrelated = await req('POST', '/resources', { body: { ...base, name: 'C1 subco unrelated edit', kind: 'subco', vendorId } });
+  const unrelatedSetupOk = check('C1 PUT setup: subco-unrelated-edit fixture created',
+    subcoUnrelated.status === 201 && subcoUnrelated.body?.kind === 'subco', `status=${subcoUnrelated.status}`);
+  if (unrelatedSetupOk) {
+    const unrelatedEdited = await req('PUT', `/resources/${subcoUnrelated.body.id}`, { body: { capacity: 41 } });
+    check('C1 an unrelated-field PUT on a subco leaves kind and vendor unchanged',
+      unrelatedEdited.status === 200 && unrelatedEdited.body?.kind === 'subco' &&
+      unrelatedEdited.body?.vendorId === vendorId && unrelatedEdited.body?.capacity === 41,
+      `status=${unrelatedEdited.status} kind=${unrelatedEdited.body?.kind} vendorId=${unrelatedEdited.body?.vendorId} capacity=${unrelatedEdited.body?.capacity}`);
+  }
 }
 
 async function main() {

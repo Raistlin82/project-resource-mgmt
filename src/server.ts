@@ -1350,6 +1350,15 @@ apiRouter.post('/resources', async (req, res) => {
   const kindErr = await validateResourceKind(body.kind, body.vendorId);
   if (kindErr) { res.status(400).json({ error: kindErr }); return; }
   if (body.kind === undefined) body.kind = 'internal';
+  // A non-subco '' vendorId already passed validation (validateResourceKind
+  // treats '' like absent) but must never be PERSISTED as a literal empty
+  // string — normalize to undefined so the field is genuinely absent. Use
+  // undefined (not null) here: the in-memory adapter's create() has no
+  // null-stripping step (that only exists on update()), so a literal null
+  // would leak into every later read of this row, unlike Postgres where
+  // nullsToUndefined() would mask it — undefined is the one value both
+  // adapters agree means "don't set this column" on create.
+  if (body.vendorId === '') body.vendorId = undefined;
   const item = {
     skills: [], projectRoles: [], externalExperience: [],
     ...body,
@@ -1410,6 +1419,12 @@ apiRouter.put('/resources/:id', async (req, res) => {
   // with an explicit null (which means "clear to absent" on both adapters)
   // rather than rejected or silently carried forward — a PUT that moves a
   // resource away from being a subco must not leave an orphaned vendor behind.
+  // An empty-string vendorId is a clear request, exactly like an explicit
+  // null (same '' === clear convention as applyRateOverrides above) — never
+  // persist a literal ''. Normalize before computing the merge so it's
+  // treated as "supplied" (a real clear), not silently dropped back to the
+  // stale existing value the way `'' ?? existing.vendorId` would.
+  if (body.vendorId === '') body.vendorId = null as unknown as undefined;
   const mergedKind = body.kind ?? existing.kind;
   const vendorSupplied = body.vendorId !== undefined;
   let mergedVendorId: string | null | undefined = vendorSupplied ? body.vendorId : existing.vendorId;
