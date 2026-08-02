@@ -495,6 +495,138 @@ async function checkUtilizationAssignmentPayload() {
 }
 
 /**
+ * Regression guard for the retarget-propagation fix in `PUT /assignments/:id`
+ * (src/server.ts): retargeting an assignment's `resourceId` must re-baseline
+ * every NON-DRAFT month row's governance against the NEW resource — withdraw
+ * any pending approval (it names the OLD resource's manager as approver) and
+ * open a fresh one routed to the NEW resource's manager (or auto-approve if
+ * the proposer IS the new resource's manager). Before this fix,
+ * `refreshDerivedAssignmentStatus` only re-rolled the derived status from the
+ * EXISTING month rows; a retargeted month kept reading its old status, booked
+ * against the new resource, still governed (if any) by an approval naming
+ * the OLD resource's manager as the empowered approver.
+ *
+ * SEED CHOICE — a resource pair with DIFFERENT managers, and a caller who is
+ * the manager of NEITHER, so both the initial submit and the retarget open a
+ * genuine Pending approval rather than tripping the self-managed shortcut:
+ *   OLD_RESOURCE_ID '2' (John Miller) — managerId '1' (Julie Armstrong).
+ *   NEW_RESOURCE_ID '3' (Alice Smith) — managerId '2' (John Miller).
+ *   CALLER_HEADERS  X-User-Id '3' / X-User-Role 'pm' -> seed user '3' (Alice
+ *     Smith), which actorResourceId() maps to resource-id '3'. Alice is NOT
+ *     resource 2's manager ('1' != '3'), so the initial submit is a real
+ *     approval, not self-managed; `autoApprovesAllocation` for the retarget
+ *     compares the proposer against resource 3's OWN managerId ('2'), which
+ *     also != '3' (Alice is not her own manager), so the retarget is a real
+ *     approval too, not an auto-approve just because the proposer happens to
+ *     BE the resource being staffed.
+ */
+async function checkResourceRetargetPropagation() {
+  const CALLER_HEADERS = { 'X-User-Id': '3', 'X-User-Role': 'pm' };
+  const OLD_RESOURCE_ID = '2'; // John Miller — managerId '1'
+  const NEW_RESOURCE_ID = '3'; // Alice Smith — managerId '2'
+  const REQUEST_ID = '2'; // Project Beta - UI (any existing request; no role-match validation on assign)
+  const MONTH = '2026-06';
+  const DAY = `${MONTH}-09`; // Tuesday
+
+  // SETUP 1 — create a throwaway assignment against the OLD resource (no
+  // status; server derives 'Draft').
+  const created = await req('POST', '/assignments', {
+    headers: CALLER_HEADERS,
+    body: { requestId: REQUEST_ID, resourceId: OLD_RESOURCE_ID, assignedHours: 0 },
+  });
+  const createOk = check(
+    'retarget-propagation setup: POST /api/assignments (no status) -> 200',
+    created.status === 200 && Boolean(created.body) && typeof created.body.id === 'string',
+    `status=${created.status}`,
+  );
+  if (!createOk) return;
+  const assignmentId = created.body.id;
+
+  // SETUP 2 — book one working day, lazily opening a 'Draft' month row.
+  const alloc = await req('PUT', `/assignments/${assignmentId}/allocation`, {
+    headers: CALLER_HEADERS,
+    body: { month: MONTH, dailyHours: { [DAY]: 1 } },
+  });
+  check('retarget-propagation setup: PUT .../allocation opens a Draft month row -> 200', alloc.status === 200, `status=${alloc.status}, body=${JSON.stringify(alloc.body)}`);
+
+  // SETUP 3 — submit the month. Non-self-managing proposer -> a genuine
+  // Pending approval opens, routed to the OLD resource's manager ('1').
+  const submitted = await req('POST', `/assignments/${assignmentId}/months/${MONTH}/submit`, {
+    headers: CALLER_HEADERS,
+    body: {},
+  });
+  const submitOk = check(
+    "retarget-propagation setup: submit -> 200, status 'Requested' + a real approvalId (not self-managed)",
+    submitted.status === 200 && submitted.body?.status === 'Requested' && typeof submitted.body?.approvalId === 'string' && submitted.body.approvalId.length > 0,
+    `status=${submitted.status}, monthStatus=${submitted.body?.status}, approvalId=${submitted.body?.approvalId}`,
+  );
+  if (!submitOk) return;
+  const oldApprovalId = submitted.body.approvalId;
+
+  // SETUP 4 — confirm the OLD approval really is routed to resource 2's
+  // manager ('1') BEFORE retargeting, so the "before" half of this test is
+  // trustworthy (not just an accident of the fixture).
+  {
+    const { body: arList } = await req('GET', '/approval-requests', { headers: CALLER_HEADERS });
+    const oldAr = Array.isArray(arList) ? arList.find((a) => a.id === oldApprovalId) : undefined;
+    check(
+      "retarget-propagation setup: OLD approval's pending step approverId is resource 2's manager ('1')",
+      Boolean(oldAr) && oldAr.status === 'Pending' && oldAr.steps?.[oldAr.currentStep]?.approverId === '1',
+      `ar=${JSON.stringify(oldAr)}`,
+    );
+  }
+
+  // RETARGET — PUT /assignments/:id { resourceId: NEW_RESOURCE_ID }.
+  const retargeted = await req('PUT', `/assignments/${assignmentId}`, {
+    headers: CALLER_HEADERS,
+    body: { resourceId: NEW_RESOURCE_ID },
+  });
+  check(`PUT /api/assignments/${assignmentId} {resourceId:'${NEW_RESOURCE_ID}'} -> 200`, retargeted.status === 200, `status=${retargeted.status}, body=${JSON.stringify(retargeted.body)}`);
+
+  const after = await req('GET', `/assignments/${assignmentId}/allocation?from=${MONTH}&to=${MONTH}`, { headers: CALLER_HEADERS });
+  const monthRow = Array.isArray(after.body?.months) ? after.body.months.find((m) => m.month === MONTH) : undefined;
+
+  // (a) the month row came back as 'Requested'.
+  check(
+    'B3 retarget: month row is Requested again, re-baselined under the new resource',
+    monthRow?.status === 'Requested',
+    `status=${monthRow?.status}`,
+  );
+  // (b) it carries a NEW approvalId, different from the old one.
+  check(
+    'B3 retarget: month row carries a NEW approvalId, different from the old one',
+    typeof monthRow?.approvalId === 'string' && monthRow.approvalId.length > 0 && monthRow.approvalId !== oldApprovalId,
+    `newApprovalId=${monthRow?.approvalId}, oldApprovalId=${oldApprovalId}`,
+  );
+  const newApprovalId = monthRow?.approvalId;
+
+  {
+    const { body: arList } = await req('GET', '/approval-requests', { headers: CALLER_HEADERS });
+    // (c) the old approval is no longer Pending.
+    const oldAr = Array.isArray(arList) ? arList.find((a) => a.id === oldApprovalId) : undefined;
+    check(
+      'B3 retarget: the OLD approval is no longer Pending (withdrawn)',
+      Boolean(oldAr) && oldAr.status !== 'Pending',
+      oldAr ? `status=${oldAr.status}` : 'missing',
+    );
+    // (d) the new approval's pending step is routed to the NEW resource's
+    // manager (resource 3's managerId '2'), never the old resource's manager.
+    const newAr = Array.isArray(arList) ? arList.find((a) => a.id === newApprovalId) : undefined;
+    check(
+      "B3 retarget: the NEW approval's pending step approverId is the NEW resource's manager ('2')",
+      Boolean(newAr) && newAr.status === 'Pending' && newAr.steps?.[newAr.currentStep]?.approverId === '2',
+      newAr ? `ar=${JSON.stringify(newAr)}` : `missing id=${newApprovalId}`,
+    );
+  }
+
+  // Cleanup: disposable throwaway assignment — delete it so reruns never
+  // accumulate cruft (and incidentally re-proves the DELETE fix withdraws the
+  // now-Pending NEW approval too).
+  const del = await req('DELETE', `/assignments/${assignmentId}`, { headers: CALLER_HEADERS });
+  check(`DELETE /api/assignments/${assignmentId} (retarget-propagation cleanup) -> 204`, del.status === 204, `status=${del.status}`);
+}
+
+/**
  * Step 4: TIME-PHASED ALLOCATION flow (src/server.ts PUT /planning-periods/:id,
  * GET/PUT /assignments/:id/allocation — B1, Tasks 5-6).
  *
@@ -1049,6 +1181,15 @@ async function main() {
     await checkUtilizationAssignmentPayload();
   } catch (err) {
     console.log(`FAIL  utilization assignment-payload check — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the retarget-propagation
+  // regression guard never masks or blocks any of the other sections.
+  try {
+    await checkResourceRetargetPropagation();
+  } catch (err) {
+    console.log(`FAIL  resource retarget-propagation check — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 
