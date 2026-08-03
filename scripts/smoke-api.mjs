@@ -50,25 +50,48 @@ function check(name, ok, detail = '') {
   return ok;
 }
 
-/** Fetch JSON, returning { status, body, raw }. Never throws on HTTP status. */
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Fetch JSON, returning { status, body, raw }. Never throws on HTTP status.
+ *
+ * RETRIES A 429. The API applies a 300-req/min-per-client rate limit (src/server.ts,
+ * `rateLimit(300, 60_000)`) and this suite is well past that in a single 60s
+ * window, so without a backoff a growing suite starts reporting phantom failures
+ * for every check after the ceiling — the exact way a red gate gets mistaken for a
+ * product bug. The retry is SAFE because the limiter is `apiRouter.use(...)`
+ * middleware: a 429 is rejected before any handler runs, so the request had no
+ * side effect and re-sending it is not a duplicate mutation. Waits out the rest of
+ * the window (buckets are fixed-window, keyed on the client ip).
+ */
 async function req(method, path, { headers, body } = {}) {
-  const res = await fetch(`${API}${path}`, {
-    method,
-    headers: {
-      ...RBAC_HEADERS,
-      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      ...headers,
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let json;
-  try {
-    json = text ? JSON.parse(text) : undefined;
-  } catch {
-    json = undefined;
+  const RETRY_MS = 5_000;
+  const MAX_WAIT_MS = 70_000; // one full window plus slack
+  let waited = 0;
+  for (;;) {
+    const res = await fetch(`${API}${path}`, {
+      method,
+      headers: {
+        ...RBAC_HEADERS,
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        ...headers,
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const text = await res.text();
+    let json;
+    try {
+      json = text ? JSON.parse(text) : undefined;
+    } catch {
+      json = undefined;
+    }
+    if (res.status !== 429 || waited >= MAX_WAIT_MS) {
+      return { status: res.status, body: json, raw: text };
+    }
+    if (waited === 0) console.log(`INFO  rate limit reached — waiting out the window before retrying ${method} ${path}`);
+    await sleep(RETRY_MS);
+    waited += RETRY_MS;
   }
-  return { status: res.status, body: json, raw: text };
 }
 
 /** SMOKE_CREATE_ONLY: just POST a cost-center and print the created id+segment. */
