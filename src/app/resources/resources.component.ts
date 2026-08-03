@@ -16,7 +16,7 @@ import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 import { ListStateComponent } from '../shared/list-state.component';
 import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
-import { RESOURCE_KINDS, RESOURCE_KIND_LABELS, kindOf, type ResourceKind } from '../services/resource-kind.util';
+import { RESOURCE_KINDS, RESOURCE_KIND_LABELS, countsTowardInternalCapacity, kindOf, type ResourceKind } from '../services/resource-kind.util';
 
 /** Today as an ISO 'YYYY-MM-DD' string, used for status derivation + the terminate default. */
 function todayIso(): string {
@@ -491,10 +491,15 @@ export class ResourcesComponent {
   // PEOPLE MANAGER (allocation-approval workflow): managerId points at another
   // resource. The dropdown offers only ACTIVE resources (terminated excluded) and
   // never the resource being edited (nobody manages themselves). Sorted by name.
+  // C1: nor a dummy or a subco — a placeholder is nobody, and an external
+  // collaborator is not in the internal reporting line. Both would otherwise be
+  // offered as People Managers and would then appear as the approver on the
+  // allocation-approval feed. Same `countsTowardInternalCapacity` split the
+  // capacity rollup and the portfolio KPIs use.
   managerOptions = computed<Resource[]>(() => {
     const editingId = this.editingId();
     return this.resources()
-      .filter(r => !this.isTerminated(r) && r.id !== editingId)
+      .filter(r => !this.isTerminated(r) && r.id !== editingId && countsTowardInternalCapacity(kindOf(r)))
       .sort((a, b) => a.name.localeCompare(b.name));
   });
   // ORPHAN VALUE: when editing, a stored managerId that isn't in the active option

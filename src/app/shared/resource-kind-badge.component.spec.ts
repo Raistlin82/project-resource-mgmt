@@ -18,11 +18,12 @@ describe('ResourceKindBadgeComponent', () => {
     return fixture;
   }
 
-  it('labels an internal resource plainly (no amber tone)', () => {
+  it('renders nothing for an internal resource', () => {
+    // The badge marks the EXCEPTION. A pill on every row carries no signal, and
+    // the point of it is to stop someone picking a placeholder by mistake.
     const fixture = setup('internal');
-    const span = fixture.nativeElement.querySelector('span');
-    expect(span.textContent.trim()).toBe('Internal');
-    expect(span.classList.contains('amber')).toBe(false);
+    expect(fixture.nativeElement.querySelector('span')).toBeNull();
+    expect(fixture.nativeElement.textContent.trim()).toBe('');
   });
 
   it('labels a dummy as a placeholder, amber-toned', () => {
@@ -39,9 +40,18 @@ describe('ResourceKindBadgeComponent', () => {
     expect(span.classList.contains('amber')).toBe(true);
   });
 
-  it('defaults an absent/unknown kind to internal (defensive kindOf)', () => {
-    const fixture = setup(undefined);
-    const span = fixture.nativeElement.querySelector('span');
-    expect(span.textContent.trim()).toBe('Internal');
+  it('treats an absent/unknown kind as internal, so it renders nothing (defensive kindOf)', () => {
+    expect(setup(undefined).nativeElement.querySelector('span')).toBeNull();
+    expect(setup('contractor').nativeElement.querySelector('span')).toBeNull();
+  });
+
+  it('does not leave a phantom flex item behind when it renders nothing', () => {
+    // Every call site puts the badge in a flex row with a gap; a host element
+    // that renders nothing would still be a flex item and leave a stray gap
+    // after the name. `display: contents` is what prevents that.
+    const fixture = setup('internal');
+    const host = fixture.nativeElement.querySelector('app-resource-kind-badge') as HTMLElement;
+    expect(host).not.toBeNull();
+    expect(getComputedStyle(host).display).toBe('contents');
   });
 });

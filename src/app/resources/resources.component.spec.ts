@@ -150,12 +150,17 @@ describe('ResourcesComponent', () => {
     expect(host.querySelector('[data-test="res-vendor"]')).toBeNull();
   });
 
-  it('renders a kind badge per resource and the kind filter isolates one kind', async () => {
+  it('badges only the non-internal resources and lets the kind filter isolate one kind', async () => {
     const { fixture } = setup();
     await flush(fixture);
 
     const host = fixture.nativeElement as HTMLElement;
-    expect(host.textContent).toContain('Subcontractor');
+    const tbody = host.querySelector('tbody') as HTMLElement;
+    expect(tbody.textContent).toContain('Subcontractor');
+    // The badge marks the exception; internal rows carry no pill at all.
+    // (The kind FILTER still offers "Internal" — that's a different control.)
+    expect(tbody.textContent).not.toContain('Internal');
+    expect(tbody.querySelectorAll('.command-status.amber').length).toBe(1);
 
     fixture.componentInstance.kindFilter.set('subco');
     fixture.detectChanges();
@@ -164,5 +169,21 @@ describe('ResourcesComponent', () => {
     const rows = host.querySelectorAll('tbody tr');
     expect(rows.length).toBe(1);
     expect(rows[0].textContent).toContain('External Co');
+  });
+
+  it('offers only internal resources as People Managers', async () => {
+    // C1: a dummy is nobody and a subco is outside the internal reporting line;
+    // either would otherwise show up as the approver on the allocation feed.
+    const { fixture } = setup();
+    await flush(fixture);
+
+    fixture.componentInstance.openForm(RESOURCES.find(r => r.id === '1')!);
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.managerOptions().map(r => r.id)).toEqual(['2']);
+
+    const host = fixture.nativeElement as HTMLElement;
+    const options = Array.from(host.querySelectorAll('#res-manager option')).map(o => o.textContent?.trim());
+    expect(options).not.toContain('External Co');
   });
 });

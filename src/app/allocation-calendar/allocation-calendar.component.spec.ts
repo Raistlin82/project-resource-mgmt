@@ -5,7 +5,7 @@ import { AllocationCalendarComponent } from './allocation-calendar.component';
 import { ApiService, AssignmentAllocation, Holiday, PlanningPeriod } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
-import type { ResourceKind } from '../services/resource-kind.util';
+import { MULTI_FTE_MAX, type ResourceKind } from '../services/resource-kind.util';
 
 /** One open month ('2026-09'), no pre-existing day rows, 8h/day contracted —
  *  same shape for every kind; only `resourceKind` varies per test. */
@@ -119,5 +119,47 @@ describe('AllocationCalendarComponent', () => {
     const totals = Array.from(host.querySelectorAll('span')).filter(s => s.textContent?.includes(' / ') && s.textContent?.includes('h'));
     expect(totals.length).toBeGreaterThan(0);
     expect(totals.some(s => s.classList.contains('text-critical-text'))).toBe(false);
+  });
+
+  it('re-applies the same FTE step after a Clear, because the select snaps back to its placeholder', async () => {
+    // The select is a one-shot action, not a bound value. Left showing "2.5 FTE"
+    // after a pick, the browser fires no `change` when 2.5 is chosen again, and
+    // "Clear, then re-apply 2.5 FTE" silently does nothing.
+    const { fixture } = setup('dummy');
+    await flush(fixture);
+
+    const host = fixture.nativeElement as HTMLElement;
+    const select = host.querySelector('[data-test="fte-select"]') as HTMLSelectElement;
+    expect(select).not.toBeNull();
+
+    const pick = (fte: string) => {
+      select.value = fte;
+      select.dispatchEvent(new Event('change'));
+      fixture.detectChanges();
+    };
+
+    pick('2.5');
+    expect(new Set(Object.values(fixture.componentInstance.editedHours('2026-09')))).toEqual(new Set([20]));
+    // Snapped back, so the next identical pick is a real change event.
+    expect(select.value).toBe('');
+
+    fixture.componentInstance['clear']('2026-09');
+    fixture.detectChanges();
+    expect(new Set(Object.values(fixture.componentInstance.editedHours('2026-09')))).toEqual(new Set([0]));
+
+    pick('2.5');
+    expect(new Set(Object.values(fixture.componentInstance.editedHours('2026-09')))).toEqual(new Set([20]));
+  });
+
+  it('caps the FTE options at MULTI_FTE_MAX', async () => {
+    const { fixture } = setup('dummy');
+    await flush(fixture);
+
+    const host = fixture.nativeElement as HTMLElement;
+    const values = Array.from(host.querySelectorAll('[data-test="fte-select"] option'))
+      .map(o => (o as HTMLOptionElement).value)
+      .filter(v => v !== '');
+    expect(values.at(-1)).toBe(String(MULTI_FTE_MAX));
+    expect(values.every(v => Number(v) > 0 && Number(v) <= MULTI_FTE_MAX)).toBe(true);
   });
 });

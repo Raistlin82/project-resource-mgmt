@@ -178,7 +178,7 @@ interface RequestsData {
                         @if (getPlannedStaffingPercentage(req) > getStaffingPercentage(req)) {
                           <span class="text-[10px] font-medium text-caution-text flex items-center gap-1">
                             <mat-icon class="text-[12px] w-[12px] h-[12px]">hourglass_empty</mat-icon>
-                            {{ req.staffedEffortPlanned }}h pianificati (in approvazione)
+                            {{ req.staffedEffortPlanned }}h planned (pending approval)
                           </span>
                         }
                       </div>
@@ -691,8 +691,8 @@ export class ResourceRequestsComponent {
   staffingBarLabel(req: ResourceRequest): string {
     const confirmed = req.staffedEffort ?? 0;
     const planned = req.staffedEffortPlanned ?? confirmed;
-    const base = `${confirmed}h confermati su ${req.requiredEffort}h`;
-    return planned > confirmed ? `${base}; ${planned}h pianificati (in approvazione)` : base;
+    const base = `${confirmed}h confirmed of ${req.requiredEffort}h`;
+    return planned > confirmed ? `${base}; ${planned}h planned (pending approval)` : base;
   }
 
   /** Diagonal hatch marking the planned-but-not-yet-confirmed portion of the bar. */

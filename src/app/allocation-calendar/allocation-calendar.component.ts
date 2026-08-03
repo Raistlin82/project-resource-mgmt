@@ -31,7 +31,7 @@ import {
   monthOf,
   monthlyTargetHours,
 } from '../services/calendar.util';
-import { dailyCapFor, isMultiFteEligible, kindOf } from '../services/resource-kind.util';
+import { MULTI_FTE_MAX, dailyCapFor, isMultiFteEligible, kindOf } from '../services/resource-kind.util';
 import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
 
 /** The three collections the calendar loads together, keyed on the assignment. */
@@ -558,9 +558,19 @@ export class AllocationCalendarComponent {
     });
   }
 
-  /** Manual's multi-FTE steps in usable increments (§3.2.3/§3.2.5) — offered
-   *  by the FTE `<select>` (dummy/subco only). */
-  protected readonly FTE_OPTIONS: readonly number[] = [1, 1.5, 2, 2.5, 3, 4, 5, 10, 20, 30];
+  /**
+   * Steps offered by the FTE `<select>` (dummy/subco only).
+   *
+   * A CURATED subset of the manual's range (§3.2.3/§3.2.5), not the whole of
+   * it: the fine 0,5 grain is kept where planning actually lands (1 → 3) and
+   * thins out above it, so the list stays scannable instead of running to
+   * ~60 entries. A deliberate deviation — the manual also lists 3,5 and 7 —
+   * and it costs nothing, because the per-day cells below stay editable and
+   * accept any value the server's cap allows. The ceiling is derived from
+   * MULTI_FTE_MAX rather than repeated, so raising the domain constant can
+   * never leave this list quietly short of it.
+   */
+  protected readonly FTE_OPTIONS: readonly number[] = [1, 1.5, 2, 2.5, 3, 4, 5, 10, 20, MULTI_FTE_MAX];
 
   /**
    * Fill every working day of an open month with `fte` FTE-equivalent hours.
@@ -577,9 +587,18 @@ export class AllocationCalendarComponent {
     this.fill(month, fte);
   }
 
-  /** `<select data-test="fte-select">`'s (change) handler. */
+  /**
+   * `<select data-test="fte-select">`'s (change) handler.
+   *
+   * The control is a one-shot ACTION, not a bound value, so it is snapped back
+   * to its "FTE…" placeholder after firing. Left showing the last pick, the
+   * browser emits no `change` when the same option is chosen again, and
+   * "Clear, then re-apply 2.5 FTE" would silently do nothing.
+   */
   protected onFteSelect(month: string, event: Event): void {
-    const value = Number((event.target as HTMLSelectElement).value);
+    const select = event.target as HTMLSelectElement;
+    const value = Number(select.value);
+    select.value = '';
     if (Number.isFinite(value) && value > 0) this.applyFte(month, value);
   }
 
