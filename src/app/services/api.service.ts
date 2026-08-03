@@ -149,6 +149,21 @@ export interface AssignmentMonth {
   plannerNote?: string;
   /** Note written by the approver (People Manager) on the decision. */
   approverNote?: string;
+  /**
+   * C2 — the dummy month this month's hours came from, while a substitution is
+   * pending. Transient: written when the hours are transferred, cleared when the
+   * decision resolves (a rejection returns them all, an approval returns only
+   * what the approver trimmed). A month without it is an ordinary month.
+   */
+  replacedFromAssignmentMonthId?: string;
+  /**
+   * C2 — how many hours that substitution moved. NOT derivable at decision time:
+   * the approver may have trimmed the month before approving, so the original
+   * figure is no longer readable anywhere, and the give-back is
+   * `replacedHours - hoursStillOnTheMonth`. Written and cleared together with
+   * the back-link above.
+   */
+  replacedHours?: number;
 }
 
 /**
