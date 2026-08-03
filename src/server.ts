@@ -18,7 +18,7 @@ import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { isResourceKind, RESOURCE_KINDS, kindOf, dailyCapFor } from './app/services/resource-kind.util';
-import { ORG_LEVELS, wouldCycleInOrgTree, type OrgLevel } from './app/services/org-scope.util';
+import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, type OrgLevel } from './app/services/org-scope.util';
 import { maxIdSeq } from './server/id-seq.util';
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
@@ -1444,6 +1444,13 @@ apiRouter.get('/resources/:id', async (req, res) => {
 // utilization starts at 0 (derived server-side from assignments), id is server-set.
 apiRouter.post('/resources', async (req, res) => {
   const body = pick<Resource>(req.body, RESOURCE_FIELDS);
+  // D — hoisted so the cycle guard below can check a client-supplied
+  // managerId against THIS resource's own about-to-be-assigned id, before it
+  // exists anywhere else. Harmless to generate ahead of validation: newId()
+  // only advances a counter (no persistence side effect), so a rejected POST
+  // just leaves a gap in the sequence like any other validation failure
+  // already does.
+  const id = newId();
   // Phase E: map costRateOverride/billRateOverride onto the cost_rate/bill_rate
   // columns ('' / absent = inherit the role's rate card on read).
   const rateErr = applyRateOverrides(body, req.body);
@@ -1477,6 +1484,33 @@ apiRouter.post('/resources', async (req, res) => {
   // resource-organizations. Optional; only supplied values are checked.
   const catalogErr = await validateResourceCatalogRefs(body);
   if (catalogErr) { res.status(400).json({ error: catalogErr }); return; }
+  // D — same guard as PUT (see its comment there for the full rationale).
+  // Applied here too because this handler DOES accept managerId (it's in
+  // RESOURCE_FIELDS, picked into `body` above) — so the "only if that handler
+  // accepts managerId" condition is met. The obvious argument for skipping it
+  // — a brand-new resource has no reports yet, so the only reachable cycle
+  // would be naming itself, which it cannot do because its id doesn't exist
+  // yet — does NOT hold here: `id` above is generated from `newId()`
+  // (`${++idSeq}`), a plain sequential counter, not a client-supplied value,
+  // but a PREDICTABLE one. A client who has just observed the current max id
+  // via GET /resources could correctly guess this one and supply it as
+  // managerId in THIS SAME request, authoring an immediate self-managed cycle
+  // the instant the row is created. `all` below intentionally does NOT
+  // include the not-yet-created row, so no OTHER resource can reference an id
+  // that doesn't exist yet — this can only ever catch that one self-reference
+  // case, never a multi-hop cycle. '' and a literal null cannot close a cycle
+  // either way (no manager, no chain) — collapsed to `undefined` for this
+  // check only; unlike the PUT handler this does NOT normalize how either
+  // value is persisted below (that gap pre-dates this task and is out of its
+  // scope — see the task report).
+  if (body.managerId !== undefined) {
+    const effectiveManagerId = (body.managerId === '' || body.managerId === null) ? undefined : body.managerId;
+    const all = await repos.resources.list();
+    if (wouldCycleInOrgChart(id, effectiveManagerId, all)) {
+      res.status(400).json({ error: 'managerId would close a cycle in the org chart' });
+      return;
+    }
+  }
   // C1: kind must be one of the known values, and only a subco may carry a
   // vendorId (and must carry one). Pin the default so downstream reads never
   // see kind absent.
@@ -1497,7 +1531,7 @@ apiRouter.post('/resources', async (req, res) => {
   const item = {
     skills: [], projectRoles: [], externalExperience: [],
     ...body,
-    id: newId(),
+    id, // D — hoisted above (see comment there); NOT a fresh newId() call.
     utilization: 0,
   } as Resource;
   const created = await repos.resources.create(item);
@@ -1550,6 +1584,45 @@ apiRouter.put('/resources/:id', async (req, res) => {
   // REFERENCE-DATA INTEGRITY (Phase F2): validate any supplied location/organization.
   const catalogErr = await validateResourceCatalogRefs(body);
   if (catalogErr) { res.status(400).json({ error: catalogErr }); return; }
+  // D — a cycle in the org chart would make every scope computation for these
+  // people meaningless (org-scope.util's scopeOf/reportsClosure), and
+  // `managerId` is a free field of the resource form — one careless edit away
+  // from closing one. The read side is separately cycle-safe (every
+  // traversal there carries its own visited set), so this guard exists only
+  // to stop NEW cycles from being written, not to protect reads from ones
+  // that already exist (seeded resource '1' already self-manages — see
+  // src/db/seed.ts — and reads of it are unaffected either way).
+  //
+  // THREE managerId INPUTS, three different meanings — pick() forwards an
+  // explicit JSON null unchanged (it only filters `undefined`), so all three
+  // must be told apart, same lesson as the D task 3 name/level guard:
+  //   - absent -> leave the manager untouched, no cycle check runs.
+  //   - ''     -> the established clear-to-absent sentinel (the UI has no way
+  //               to author a literal null). Normalized to a real `null`
+  //               below so it clears identically on both adapters
+  //               (src/db/repository.ts: an explicit null in an update patch
+  //               clears a nullable column, undefined leaves it untouched) —
+  //               the same translation already done for vendorId a few lines
+  //               below and the org-tree node's own managerId (PUT
+  //               /resource-organizations/:id, further down this file).
+  //   - null   -> managerId is a NULLABLE column (no notNull guard, unlike
+  //               task 3's name/level), so — unlike those fields — a literal
+  //               null here is already a legitimate "clear to absent" with no
+  //               help needed. Treated exactly like '' for this check: neither
+  //               can ever close a cycle (a cleared manager has no manager to
+  //               loop back through).
+  // Not run inside `res:<id>` lock: the cycle question only depends on the
+  // manager chain as it stands right now, and the actual write below is still
+  // serialized under that lock like every other field on this row.
+  if (body.managerId !== undefined) {
+    if (body.managerId === '') body.managerId = null as unknown as undefined;
+    const effectiveManagerId = body.managerId === null ? undefined : body.managerId;
+    const all = await repos.resources.list();
+    if (wouldCycleInOrgChart(req.params.id, effectiveManagerId, all)) {
+      res.status(400).json({ error: 'managerId would close a cycle in the org chart' });
+      return;
+    }
+  }
   // C1: validate the MERGED kind/vendorId state, not the body in isolation —
   // a partial PUT that changes only one of the two fields must still produce
   // a coherent pair (e.g. a kind-only PUT to 'subco' is rejected when the

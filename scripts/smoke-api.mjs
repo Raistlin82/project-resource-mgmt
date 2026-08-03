@@ -3558,6 +3558,140 @@ async function checkOrgTreeIntegrity() {
   }
 }
 
+/**
+ * D task 4 — refuse a `Resource.managerId` assignment that would close a
+ * cycle in the ORG CHART (distinct from the ORG TREE cycle guard exercised
+ * above — see org-scope.util's module doc for the two axes). Uses
+ * `wouldCycleInOrgChart` (src/app/services/org-scope.util.ts), which is
+ * already unit-tested directly; this is the live-API wiring.
+ *
+ * Leans on the SEEDED chain 3 -> 2 -> 1: Alice Smith ('3') has managerId '2'
+ * (John Miller), who has managerId '1' (Julie Armstrong). Resource '1' ALSO
+ * seeds with managerId '1' — a pre-existing self-loop already in the seed
+ * data (see src/db/seed.ts), not something this test introduces. That is
+ * exactly the "cycle-safe on data that already contains a loop" case the
+ * read side (org-scope.util) is documented to tolerate; this guard's job is
+ * only to refuse NEW writes that would (re)create a cycle, not to repair
+ * that pre-existing one.
+ *
+ * MUST RUN LAST in main(): check 3 below permanently clears resource '1's
+ * managerId for the rest of THIS server process — and, per the guard being
+ * proven here, it can never be set back to '1' again afterward (that would
+ * itself be the self-management cycle check 1 refuses). Nothing earlier in
+ * this file may run after this function within the same process without
+ * seeing resource '1' as manager-less; per the suite's own restart
+ * discipline (see the file header) that is expected, not a bug.
+ */
+async function checkResourceManagerCycle() {
+  const RESOURCE_1 = '1'; // Julie Armstrong — seeded managerId '1' (self), see note above.
+  const RESOURCE_2 = '2'; // John Miller — seeded managerId '1'.
+  const RESOURCE_3 = '3'; // Alice Smith — seeded managerId '2'.
+
+  // Setup/precondition: confirm the chain this whole function leans on is
+  // still what the seed data promises, so a failure below points at the
+  // guard, not at drifted seed data.
+  {
+    const { status, body } = await req('GET', `/resources/${RESOURCE_3}`);
+    check(
+      "setup: seeded resource '3' (Alice Smith) has managerId '2' (John Miller), as this section assumes",
+      status === 200 && body?.managerId === RESOURCE_2,
+      `status=${status}, managerId=${JSON.stringify(body?.managerId)}`,
+    );
+  }
+
+  // 1) Self-management -> 400 mentioning a cycle. Pre-implementation this is
+  // ACCEPTED (200) — today nothing stops a resource naming itself its own
+  // manager (resource '1' already has exactly this in the seed, per the note
+  // above; this PUT would just be a same-value write).
+  {
+    const self = await req('PUT', `/resources/${RESOURCE_1}`, {
+      headers: RBAC_HEADERS,
+      body: { managerId: RESOURCE_1 },
+    });
+    check(
+      "PUT /api/resources/1 {managerId:'1'} (itself) -> 400, mentions a cycle",
+      self.status === 400 && typeof self.body?.error === 'string' && /cycle/i.test(self.body.error),
+      `status=${self.status}, body=${JSON.stringify(self.body)}`,
+    );
+  }
+
+  // 2) A longer cycle: seeded 3 -> 2 -> 1, closed by making '1' report to
+  // '3' (1 -> 3 -> 2 -> 1). Pre-implementation this is ALSO accepted (200) —
+  // nothing today walks the manager chain before writing it.
+  {
+    const closeLoop = await req('PUT', `/resources/${RESOURCE_1}`, {
+      headers: RBAC_HEADERS,
+      body: { managerId: RESOURCE_3 },
+    });
+    check(
+      "PUT /api/resources/1 {managerId:'3'} -> 400 (would close 1 -> 3 -> 2 -> 1)",
+      closeLoop.status === 400,
+      `status=${closeLoop.status}, body=${JSON.stringify(closeLoop.body)}`,
+    );
+    // Not just the status — confirm resource 1's managerId genuinely never
+    // changed (same discipline as the org-tree null-name guard above).
+    const { status, body } = await req('GET', `/resources/${RESOURCE_1}`);
+    check(
+      "GET /api/resources/1 shows managerId UNCHANGED ('1') after the refused PUT",
+      status === 200 && body?.managerId === RESOURCE_1,
+      `status=${status}, managerId=${JSON.stringify(body?.managerId)}`,
+    );
+  }
+
+  // 3) THE CLEAR-TO-ABSENT SEAM for the Resource entity's OWN managerId
+  // (distinct from the org-tree NODE's managerId proven in check 9b above) —
+  // '' must clear a REAL managerId to absent, identically on both adapters,
+  // and must NEVER be refused as a cycle (a cleared manager has no manager
+  // to close a loop with). The precondition (a REAL managerId '1') is
+  // guaranteed by checks 1-2 above never having mutated it. This is expected
+  // to ALREADY PASS pre-implementation (no cycle-guard code path can reject
+  // it), unlike checks 1-2 — its job is to prove the new guard doesn't
+  // regress the clear-to-absent write once it exists, not to prove new
+  // rejection behavior.
+  {
+    const cleared = await req('PUT', `/resources/${RESOURCE_1}`, {
+      headers: RBAC_HEADERS,
+      body: { managerId: '' },
+    });
+    check(
+      "PUT /api/resources/1 {managerId:''} -> 200, clears a REAL managerId to absent",
+      cleared.status === 200 && cleared.body !== undefined && !('managerId' in cleared.body),
+      `status=${cleared.status}, body=${JSON.stringify(cleared.body)}`,
+    );
+    // Re-confirm via a FRESH GET, not just the PUT's own echoed response —
+    // the point of this seam is that it persists identically on both adapters.
+    const reread = await req('GET', `/resources/${RESOURCE_1}`);
+    check(
+      'GET /api/resources/1 reflects managerId absent on re-read',
+      reread.status === 200 && !('managerId' in (reread.body || {})),
+      `status=${reread.status}, body=${JSON.stringify(reread.body)}`,
+    );
+  }
+
+  // 4) REGRESSION GUARD, not part of the task-4 brief's three required
+  // checks: proves the guard does not misfire on an ordinary create. A
+  // brand-new resource has no reports yet (POST's `all` never includes the
+  // not-yet-created row — see the guard's own comment in src/server.ts), so
+  // a real, pre-existing managerId can never close a cycle here; this must
+  // stay 201 both before and after implementation.
+  {
+    const ok = await req('POST', '/resources', {
+      headers: RBAC_HEADERS,
+      body: {
+        name: 'D Smoke Manager-Cycle Regression', role: 'Developer', kind: 'internal',
+        skills: [], projectRoles: [], externalExperience: [], utilization: 0,
+        capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8,
+        managerId: RESOURCE_2,
+      },
+    });
+    check(
+      "POST /api/resources {managerId:'2'} (an ordinary, real manager on a brand-new resource) -> 201, not blocked by the cycle guard",
+      ok.status === 201 && ok.body?.managerId === RESOURCE_2,
+      `status=${ok.status}, body=${JSON.stringify(ok.body)}`,
+    );
+  }
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -3664,6 +3798,17 @@ async function main() {
     await checkOrgTreeIntegrity();
   } catch (err) {
     console.log(`FAIL  org-tree integrity flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the D resource-manager-
+  // cycle flow never masks or blocks any of the prior section results. MUST
+  // run LAST (see the function's doc comment) — it permanently clears
+  // resource '1's managerId for the rest of this server process.
+  try {
+    await checkResourceManagerCycle();
+  } catch (err) {
+    console.log(`FAIL  resource-manager-cycle flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 
