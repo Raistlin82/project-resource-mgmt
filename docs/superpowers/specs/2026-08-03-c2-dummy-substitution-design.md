@@ -42,14 +42,17 @@ Questa non è una complicazione aggiunta: è la sostituzione parziale del manual
 
 Nessuna tabella nuova. Il trasferimento agisce sulle strutture di B1/B3 (`assignmentDays`, `assignmentMonths`).
 
-Due colonne su `assignmentMonths`:
+Tre colonne su `assignmentMonths`:
 
 ```
 replacedFromAssignmentMonthId  text (nullable)   -- riferimento SOFT, non FK
 replacedDays                   jsonb (nullable)  -- mappa { 'YYYY-MM-DD': ore } di ciò che la sostituzione ha spostato
+replacedBaselineDays           jsonb (nullable)  -- mappa { 'YYYY-MM-DD': ore } di ciò che la persona TENEVA GIÀ su quelle date
 ```
 
 `replacedDays` è necessaria e non derivabile: all'approvazione bisogna restituire al dummy ciò che l'approvatore ha **tagliato**, ma l'approvatore può aver ridotto (o azzerato) le ore nel frattempo, quindi le cifre originali non sono più leggibili da nessuna parte. Senza questo campo la restituzione dovrebbe indovinare — e una restituzione sbagliata inventa o distrugge ore prenotate.
+
+`replacedBaselineDays` copre **le stesse date** e registra quante ore la persona teneva già su quel giorno, **su quello stesso incarico**, immediatamente prima del trasferimento. Serve perché un giorno può portare **entrambe le cose**: una sostituzione su un mese che aveva già ore lo *retrocede*, non lo sostituisce, e dopo il trasferimento la riga-giorno è un unico numero fuso. Senza la baseline la restituzione addebita al prestito anche le ore proprie: tagliando il giorno condiviso fino a lasciare esattamente il lavoro suo, torna al dummy solo una parte del prestito e il resto del fabbisogno prenotato **svanisce**; sul rifiuto, specularmente, vengono cancellate ore che erano sempre state sue. Tutta l'aritmetica deriva da un'unica quantità, `loanRemaining = max(0, tenute − baseline)`: le ore pari o inferiori alla baseline sono intoccabili. Le tre colonne nascono e muoiono nella stessa `update()`, quindi non possono divergere.
 
 Ed è una **mappa per giorno, non un totale** — questa è la parte che costa se si sbaglia. Un totale unico obbligherebbe a spalmare la restituzione sui giorni che la persona *si trova* a tenere al momento della decisione, ma il mese di una persona mescola legittimamente ore trasferite e ore proprie: una sostituzione su un mese che già aveva ore lo **retrocede**, non lo sostituisce. Con un totale, un rifiuto su un mese misto toglie alla persona lavoro suo e lo accredita a giorni del dummy che non hanno mai ceduto un'ora — i totali del mese tornano, ogni cifra giornaliera è sbagliata. Con la mappa la restituzione è decisa giorno per giorno e il vincolo «mai più di quanto quel giorno aveva ceduto» è **strutturale**, non un controllo a parte. Le due colonne nascono e muoiono insieme.
 
@@ -81,6 +84,7 @@ La **restituzione** vive nello stesso file, come funzione pura a sé — è arit
 ```ts
 planGiveBack(
   replacedDays: Readonly<Record<string, number>>,
+  replacedBaselineDays: Readonly<Record<string, number>>,
   targetHeldByDate: Readonly<Record<string, number>>,
   decided: 'Approved' | 'Rejected',
   dummyBookedByDate: Readonly<Record<string, number>>,
@@ -89,7 +93,7 @@ planGiveBack(
      giveBackHours: number; shortfallHours: number }
 ```
 
-Itera **solo i giorni presenti nella mappa** (gli altri non vengono mai sfiorati, ed è così che il lavoro proprio della persona è intoccabile per costruzione): rifiuto → `giveBack = replacedDays[g]`; approvazione → `giveBack = replacedDays[g] − min(replacedDays[g], oreTenute[g])`, cioè zero sui giorni in cui l'approvatore ha lasciato tutto. `giveBack` è poi limitato dal tetto giornaliero del dummy (`cap −` quanto la **risorsa** dummy tiene già quel giorno su **tutti** i suoi incarichi, la stessa aggregazione del gate di scrittura) e ciò che non entra finisce in `shortfallHours`, che il chiamante logga: nessuna ora si perde in silenzio, e la persona perde esattamente quanto il dummy riceve. `targetHours` è la nuova quantità sui giorni della persona (`0` = riga da cancellare) e resta **vuota sull'approvazione**, dove ciò che tiene *è* l'allocazione approvata.
+Itera **solo i giorni presenti nella mappa** (gli altri non vengono mai sfiorati, ed è così che il lavoro proprio della persona su *altri* giorni è intoccabile per costruzione), e su ciascuno lavora sul solo **prestito ancora in piedi**, `loanRemaining = max(0, oreTenute[g] − baseline[g])`: rifiuto → `giveBack = replacedDays[g]` (mappa intera), ma la riga della persona scende **solo di `min(restituito, loanRemaining)`**, mai sotto la sua baseline; approvazione → `giveBack = replacedDays[g] − min(replacedDays[g], loanRemaining)`, cioè zero sui giorni in cui l'approvatore ha lasciato tutto il prestito. `giveBack` è poi limitato dal tetto giornaliero del dummy (`cap −` quanto la **risorsa** dummy tiene già quel giorno su **tutti** i suoi incarichi, la stessa aggregazione del gate di scrittura) e ciò che non entra finisce in `shortfallHours`, che il chiamante logga: nessuna ora si perde in silenzio, e la persona perde esattamente quanto il dummy riceve. `targetHours` è la nuova quantità sui giorni della persona (`0` = riga da cancellare) e resta **vuota sull'approvazione**, dove ciò che tiene *è* l'allocazione approvata.
 
 Un cap non utilizzabile (0, NaN, negativo) restituisce **tutto**: l'inverso deliberato della convenzione di `planSubstitution`. Rifiutare di muovere ore verso una risorsa di cui non si conosce il limite è il lato sicuro quando si **prenota** lavoro nuovo; qui le ore erano già del dummy, e rifiutare distruggerebbe fabbisogno prenotato invece di evitare di crearne.
 
@@ -107,7 +111,7 @@ Rifiuta con **400**: se la riga non appartiene a una risorsa `kind='dummy'`; se 
 
 1. Raccogli le ore/giorno del dummy per quel mese e le ore già prenotate dal target su quei giorni, **su tutti i suoi incarichi**.
 2. `planSubstitution(...)` con il tetto del target (`dailyCapFor('internal', base)`, quindi 1 FTE).
-3. Trova l'incarico del target sulla **stessa richiesta**; crealo se non esiste (nasce `Draft`, senza stato client-settable: C1/B3 lo vietano).
+3. Trova l'incarico del target sulla **stessa richiesta**; crealo se non esiste (nasce `Draft`, senza stato client-settable: C1/B3 lo vietano). Un incarico creato **così** riceve anche la propria finestra (`startDate`/`endDate` = il mese sostituito, esteso mese per mese sotto «tutti i mesi rimanenti») e un `allocationPct` derivato dalle ore effettivamente trasferite sulla capacità della finestra (`planSubstitutionBooking`, la stessa base mensile di `capacity.util`). Senza di essi `schedule.util` legge la finestra della **richiesta** e assume `allocationPct = 100`: poche ore su un mese diventerebbero una prenotazione a tempo pieno lunga quanto la commessa, con conflitti inventati per mesi. Un incarico creato dal planner ha già la sua finestra e **non** va sovrascritto.
 4. Somma le ore trasferite ai giorni del target; sottraile ai giorni del dummy (una riga che va a zero si cancella, come già fa l'endpoint di allocazione).
 5. Ricalcola `assignedHours` e lo stato derivato di **entrambi** gli incarichi.
 6. La riga mensile del target diventa `Requested` con una nuova approvazione verso il suo manager, e porta `replacedFromAssignmentMonthId`. **Eccezione self-managed:** se chi sostituisce è il manager del target, il mese va direttamente `Allocated` (scorciatoia del gap A, già usata da B3) — e allora **il legame si chiude subito**, `replacedFromAssignmentMonthId` non viene scritto: non ci sarà nessuna decisione futura, quindi non c'è nulla da restituire e un legame lasciato aperto resterebbe tale per sempre.
@@ -135,7 +139,9 @@ L'hook post-decisione di B3 guadagna **un ramo, senza toccare quelli esistenti**
 
 L'aritmetica è tutta in `planGiveBack` (§4); il ramo nell'hook fa solo l'I/O intorno.
 
-In entrambi i casi `replacedFromAssignmentMonthId` e `replacedDays` vengono azzerati **in un `finally`**, quindi anche se il trasferimento fallisce a metà: un mese deciso che resta collegato sembra una sostituzione pendente, e una decisione successiva (o un retry) restituirebbe le stesse ore due volte. Se la riga del dummy nel frattempo non esiste più (incarico cancellato), la restituzione è un no-op registrato, non un errore: la decisione non deve fallire per questo.
+Se la restituzione riporta ore su un mese del dummy in stato **`Rejected`**, quel mese viene **riaperto** a `Requested` con una nuova approvazione: `capacity.util` classifica le righe-giorno per lo stato del loro mese e le bande contano solo `Requested`/`Allocated`, quindi il fabbisogno restituito su una riga rifiutata peserebbe **zero** su `/capacity/monthly`, su `demandFteUncovered` e sul semaforo B2 — presente a database e sul calendario, invisibile proprio dove il buco deve vedersi. `Draft` resta `Draft`: non contava nemmeno prima della sostituzione, e promuoverlo equivarrebbe a inviare in approvazione un mese che nessun planner ha mai inviato.
+
+In entrambi i casi `replacedFromAssignmentMonthId`, `replacedDays` e `replacedBaselineDays` vengono azzerati **in un `finally`**, quindi anche se il trasferimento fallisce a metà: un mese deciso che resta collegato sembra una sostituzione pendente, e una decisione successiva (o un retry) restituirebbe le stesse ore due volte. Se la riga del dummy nel frattempo non esiste più (incarico cancellato), la restituzione è un no-op registrato, non un errore: la decisione non deve fallire per questo.
 
 **Gap noto:** la restituzione non produce una voce di audit propria. Come il trasferimento, muove righe-giorno attraverso il repository e non via HTTP, quindi il middleware di audit non la vede; a registro resta la transizione di stato del mese. Vale per entrambi i lati della sostituzione, non solo per la restituzione, e va colmato per entrambi insieme.
 
@@ -171,5 +177,5 @@ La sostituzione è un'azione da approvatore: **`resource-manager`, `delivery-exe
 - **Una sostituzione parziale lascia il dummy con ore sparse** su giorni diversi: è corretto, ma la UI deve renderlo leggibile, altrimenti chi opera non capisce quanto resta da coprire.
 - **L'approvatore può modificare le ore** del mese subentrato prima di approvare: la differenza torna al dummy, **giorno per giorno** (§5.6). Se invece le **aumenta** oltre il trasferito, su quel giorno non viene sottratto nulla a nessuno — è un'allocazione nuova, non parte della sostituzione, e va trattata come tale. Il conto è per giorno e non sul totale del mese: un mese con un giorno tagliato e un altro gonfiato restituisce il taglio e lascia stare l'aggiunta, mentre sul totale i due si annullerebbero a vicenda e il dummy non rivedrebbe mai le sue ore.
 - **Punto cieco noto della regola per giorno: lo *spostamento* di ore, non il taglio.** Se prima di approvare l'approvatore **sposta** le ore su un altro giorno invece di ridurle (stesso totale, data nuova), il giorno di origine risulta a zero e quello di destinazione non è nella mappa: la mappa **intera** torna al dummy mentre la persona tiene le ore ricollocate, e la richiesta mostra il doppio del fabbisogno. Il verso dell'errore è quello sicuro — **gonfia, non distrugge**, ed è visibile sul calendario del dummy — ma resta un gap noto, non un comportamento voluto.
-- **Gap noto: una seconda sostituzione su un mese già collegato sovrascrive il primo legame.** Il mese della persona porta **un solo** `replacedFromAssignmentMonthId` e **una sola** `replacedDays`: se sullo stesso mese della stessa persona subentra un secondo dummy mentre il primo è ancora pendente, la seconda scrittura rimpiazza la prima e alla decisione tornano solo le ore del secondo dummy. Il primo dummy non le rivede.
+- **Gap noto: una seconda sostituzione su un mese già collegato sovrascrive il primo legame.** Il mese della persona porta **un solo** `replacedFromAssignmentMonthId`, **una sola** `replacedDays` e **una sola** `replacedBaselineDays`: se sullo stesso mese della stessa persona subentra un secondo dummy mentre il primo è ancora pendente, la seconda scrittura rimpiazza la prima e alla decisione tornano solo le ore del secondo dummy. Il primo dummy non le rivede.
 - **Lezione di C1 da applicare qui**: prima di chiudere il blocco, fare il grep di ogni consumatore di `assignmentDays`/`assignmentMonths` e decidere superficie per superficie se la sostituzione lo tocca. In C1 quattro schermate hanno conservato il vecchio comportamento perché nessun task le possedeva.

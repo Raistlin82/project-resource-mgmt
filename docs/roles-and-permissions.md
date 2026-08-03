@@ -372,10 +372,16 @@ month goes straight to `Allocated` with no approval opened.
 so demand is never double-counted) but reversible until the decision: the
 person's month row carries a transient back-link to the dummy month
 (`replacedFromAssignmentMonthId`) plus the per-day map of what moved
-(`replacedDays`). The decision closes the link — a rejection returns every
-transferred hour, an approval returns only what the approver trimmed. See
+(`replacedDays`) and, over the same dates, what she already held before it
+(`replacedBaselineDays` — a date can carry both, and the split is not
+reconstructable afterwards). The decision closes the link: a rejection returns
+every transferred hour, an approval returns only what the approver trimmed off the
+**loan**, and neither branch may ever reduce her below her own baseline. A
+give-back that restores hours onto a `Rejected` placeholder month reopens it to
+`Requested` with a fresh approval, so the restored demand still counts on
+`/capacity/monthly`. See
 [`docs/architecture/03-backend-and-data.md`](architecture/03-backend-and-data.md)
-for the two columns and why the back-link is not a foreign key.
+for the three columns and why the back-link is not a foreign key.
 
 **Audit.** The substitution POST records the ordinary
 method/path/status/actor entry, but **no** before/after diff (the middleware only
