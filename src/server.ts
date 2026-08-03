@@ -1016,6 +1016,15 @@ async function validateResourceCatalogRefs(body: { location?: unknown; organizat
  * service-organizations catalog (by id). Both optional; only supplied values checked.
  */
 async function validateResourceOrgRefs(body: { costCenters?: unknown; serviceOrganizationId?: unknown }): Promise<string | null> {
+  // REVIEW ROUND 3 NOTE: the `!== null` below only skips THIS function's
+  // array-shape/reference check when `costCenters` is null — it does NOT mean
+  // `null` is an accepted value for `costCenters`. `costCenters` is a
+  // `notNull()` column and `validateOrgTreeNode`'s REQUIRED_ORG_FIELDS loop
+  // unconditionally rejects an explicit `null` for it (both POST and PUT call
+  // that validator in the same request), so `null` never actually reaches
+  // `update()`/`create()`. This clause is left as-is functionally — changing
+  // it is unnecessary now that rejection happens elsewhere — but do not read
+  // it as evidence `costCenters: null` is a supported value.
   if (body.costCenters !== undefined && body.costCenters !== null) {
     if (!Array.isArray(body.costCenters)) return 'costCenters must be an array of cost-center ids';
     if (body.costCenters.length > 0) {
@@ -1036,6 +1045,18 @@ async function validateResourceOrgRefs(body: { costCenters?: unknown; serviceOrg
 }
 
 /**
+ * REVIEW ROUND 3 — every `notNull()` column on `resource_organizations`
+ * (`src/db/schema.ts`), declared ONCE so the required-field null-rejection in
+ * `validateOrgTreeNode` below covers the class, not a hand-picked subset.
+ * Round 2 fixed exactly `level` and `name`, having missed that `description`
+ * and `costCenters` are equally `notNull` and sit in the SAME `pick()`
+ * allow-lists, open to the identical primitive — the next `notNull` column
+ * added to this catalog is covered the day it is added here, not the next
+ * time someone finds a fifth case of the same bug.
+ */
+const REQUIRED_ORG_FIELDS = ['name', 'description', 'costCenters', 'level'] as const;
+
+/**
  * D — org-tree integrity for a `/resource-organizations` body (design spec §2.1,
  * §2.4). Returns a 400-suitable message, or null when the body is acceptable.
  *
@@ -1054,32 +1075,38 @@ async function validateOrgTreeNode(
   const nodes = all.map(n => ({ id: n.id, name: n.name, level: n.level, parentId: n.parentId, managerId: n.managerId }));
   const existing = ctx?.id === undefined ? undefined : all.find(n => n.id === ctx.id);
 
-  // REVIEW ROUND 2 (critical) — `level` and `name` are `notNull()` columns, and
-  // `pick()` copies an explicit JSON `null` straight through (it only filters
-  // `undefined`). A naive `body.level ?? existing?.level` cannot tell "the
-  // client didn't touch this field" from "the client sent null": `??` treats
-  // both as nullish and falls back to the EXISTING value for every check
-  // below, so validation sees a perfectly consistent row and passes — while
-  // `body.level`/`body.name` STILL carry a literal `null` into the object
-  // handed to the repo. In-memory `update()` then DELETES the key outright
-  // (repository.ts's explicit-null-clears rule); Postgres issues `SET name =
-  // NULL` and raises an unmapped NOT NULL violation (SQLSTATE 23502) as an
-  // opaque 500 — the two adapters silently disagree (200 vs 500), and either
-  // way the row is corrupted. Worse for `name` on POST specifically: `null ??
-  // existing?.name` with no `existing` resolves to `undefined`, so the
-  // uniqueness check below is skipped entirely and `create()` (no
-  // null-stripping at all) persists a literal `name: null`. And the
-  // corruption can be CHAINED to defeat the delete guard: mask a childless-
-  // but-referenced node's name to `undefined`, then `DELETE` — the guard's
-  // `resources.some(r => r.organization === node.name)` no longer matches the
-  // resource that used to reference it by its real name.
+  // REVIEW ROUND 2/3 (critical) — every REQUIRED_ORG_FIELDS column is
+  // `notNull()`, and `pick()` copies an explicit JSON `null` straight through
+  // (it only filters `undefined`). A naive `body.level ?? existing?.level`
+  // (and the equivalent for `name`) cannot tell "the client didn't touch this
+  // field" from "the client sent null": `??` treats both as nullish and falls
+  // back to the EXISTING value for every check below, so validation sees a
+  // perfectly consistent row and passes — while the body's own field STILL
+  // carries a literal `null` into the object handed to the repo. In-memory
+  // `update()` then DELETES the key outright (repository.ts's
+  // explicit-null-clears rule); Postgres issues `SET <col> = NULL` and raises
+  // an unmapped NOT NULL violation (SQLSTATE 23502) as an opaque 500 — the two
+  // adapters silently disagree (200 vs 500), and either way the row is
+  // corrupted. Worse on POST: a `null` for a field with no `existing` fallback
+  // resolves to `undefined` (skipping any check keyed on it, e.g. `name`'s
+  // uniqueness check below), and the trailing `...body` spread in the POST
+  // handler means an explicit `{costCenters: null}` OVERRIDES that handler's
+  // own `costCenters: []` default — `create()` does no null-stripping at all,
+  // so a literal `null` lands straight in the persisted row. And the `name`
+  // corruption specifically can be CHAINED to defeat the delete guard: mask a
+  // childless-but-referenced node's name to `undefined`, then `DELETE` — the
+  // guard's `resources.some(r => r.organization === node.name)` no longer
+  // matches the resource that used to reference it by its real name.
   //
   // This is a DIFFERENT rule from the nullable `parentId`/`managerId`, where
-  // `''`/`null` legitimately mean "clear to absent" — `level` and `name` have
-  // no "absent" state to clear TO, so an explicit `null` here is simply
-  // invalid input, rejected before it ever reaches the `??` fallbacks below.
-  if (body.level === null) return 'level is required and cannot be cleared';
-  if (body.name === null) return 'name is required and cannot be cleared';
+  // `''`/`null` legitimately mean "clear to absent" — every REQUIRED_ORG_FIELDS
+  // column has no "absent" state to clear TO, so an explicit `null` for any of
+  // them is simply invalid input, rejected in one loop before anything below
+  // (the `??` fallbacks, `validateResourceOrgRefs`'s costCenters shape check,
+  // the POST handler's spread) ever sees it.
+  for (const field of REQUIRED_ORG_FIELDS) {
+    if (body[field] === null) return `${field} is required and cannot be cleared`;
+  }
 
   const level = (body.level ?? existing?.level) as OrgLevel | undefined;
   if (level !== undefined && !ORG_LEVELS.includes(level)) {

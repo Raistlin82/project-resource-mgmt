@@ -3450,6 +3450,112 @@ async function checkOrgTreeIntegrity() {
       `status=${r13c.status}, body=${JSON.stringify(r13c.body)}`,
     );
   }
+
+  // 14) REVIEW ROUND 3 — the required-field null-rejection covers the WHOLE
+  // class of notNull columns (name, description, costCenters, level), not
+  // just the two round 2 found. {description: null} on PUT -> 400, same
+  // primitive as the round-2 name bug: description has no "absent" state to
+  // clear to, so an explicit null is invalid input, not a clear-to-absent.
+  {
+    const throwaway14 = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Null-Description Guard', description: 'x', level: 'capability' },
+    });
+    const ok14 = check(
+      'null-description guard setup: a fresh throwaway node is created',
+      throwaway14.status === 200 && typeof throwaway14.body?.id === 'string',
+      `status=${throwaway14.status}, body=${JSON.stringify(throwaway14.body)}`,
+    );
+    if (ok14) {
+      const id14 = throwaway14.body.id;
+      const masked14 = await req('PUT', `/resource-organizations/${id14}`, {
+        headers: RBAC_HEADERS,
+        body: { description: null },
+      });
+      check(
+        `PUT /api/resource-organizations/${id14} {description: null} -> 400 (rejected, notNull column)`,
+        masked14.status === 400,
+        `status=${masked14.status}, body=${JSON.stringify(masked14.body)}`,
+      );
+      const { status: s14, body: b14 } = await req('GET', '/resource-organizations');
+      const node14 = Array.isArray(b14) ? b14.find((n) => n.id === id14) : undefined;
+      check(
+        "GET /api/resource-organizations shows the throwaway node's description UNCHANGED after the rejected PUT",
+        s14 === 200 && node14?.description === 'x',
+        node14 ? `description=${JSON.stringify(node14.description)}` : `status=${s14}, missing`,
+      );
+      const cleanup14 = await req('DELETE', `/resource-organizations/${id14}`, { headers: RBAC_HEADERS });
+      check(`null-description guard cleanup: DELETE /api/resource-organizations/${id14} -> 204`, cleanup14.status === 204, `status=${cleanup14.status}`);
+    }
+  }
+
+  // 15) {costCenters: null} on PUT -> 400. Additionally notable because
+  // validateResourceOrgRefs's OWN `!== null` clause explicitly treats null as
+  // acceptable for ITS check (see the comment there) — it is the required-
+  // field loop in validateOrgTreeNode, called right after in the same
+  // request, that actually stops a null costCenters from reaching the repo.
+  {
+    const throwaway15 = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Null-CostCenters Guard', description: 'x', level: 'capability', costCenters: ['CC-9001'] },
+    });
+    const ok15 = check(
+      'null-costCenters guard setup: a fresh throwaway node is created (with a real costCenters entry)',
+      throwaway15.status === 200 && typeof throwaway15.body?.id === 'string' && Array.isArray(throwaway15.body?.costCenters) && throwaway15.body.costCenters.includes('CC-9001'),
+      `status=${throwaway15.status}, body=${JSON.stringify(throwaway15.body)}`,
+    );
+    if (ok15) {
+      const id15 = throwaway15.body.id;
+      const masked15 = await req('PUT', `/resource-organizations/${id15}`, {
+        headers: RBAC_HEADERS,
+        body: { costCenters: null },
+      });
+      check(
+        `PUT /api/resource-organizations/${id15} {costCenters: null} -> 400 (rejected, notNull column)`,
+        masked15.status === 400,
+        `status=${masked15.status}, body=${JSON.stringify(masked15.body)}`,
+      );
+      const { status: s15, body: b15 } = await req('GET', '/resource-organizations');
+      const node15 = Array.isArray(b15) ? b15.find((n) => n.id === id15) : undefined;
+      check(
+        "GET /api/resource-organizations shows the throwaway node's costCenters UNCHANGED after the rejected PUT",
+        s15 === 200 && Array.isArray(node15?.costCenters) && node15.costCenters.includes('CC-9001'),
+        node15 ? `costCenters=${JSON.stringify(node15.costCenters)}` : `status=${s15}, missing`,
+      );
+      const cleanup15 = await req('DELETE', `/resource-organizations/${id15}`, { headers: RBAC_HEADERS });
+      check(`null-costCenters guard cleanup: DELETE /api/resource-organizations/${id15} -> 204`, cleanup15.status === 204, `status=${cleanup15.status}`);
+    }
+  }
+
+  // 16) THE POST-SPECIFIC HALF — {costCenters: null} on POST -> 400, not a
+  // persisted null. Before this round, the POST handler's
+  // `{ costCenters: [], ...body }` spread meant an explicit
+  // `costCenters: null` OVERRODE the `[]` default (the trailing spread always
+  // wins), landing a literal null straight in the created row — no row
+  // should be created at all now.
+  {
+    const rejectedPost = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Null-CostCenters POST Guard', description: 'x', level: 'capability', costCenters: null },
+    });
+    check(
+      'POST /api/resource-organizations {costCenters: null} -> 400 (rejected, not persisted via the spread)',
+      rejectedPost.status === 400,
+      `status=${rejectedPost.status}, body=${JSON.stringify(rejectedPost.body)}`,
+    );
+    // Confirm no row leaked under that name (not just the status code) — and
+    // clean it up if it did (only reachable pre-fix, on a red run).
+    const { status: s16, body: b16 } = await req('GET', '/resource-organizations');
+    const leaked = Array.isArray(b16) ? b16.find((n) => n.name === 'D Smoke Null-CostCenters POST Guard') : undefined;
+    check(
+      'GET /api/resource-organizations confirms no row was created for the rejected POST',
+      s16 === 200 && leaked === undefined,
+      leaked ? `leaked row=${JSON.stringify(leaked)}` : 'none found (correct)',
+    );
+    if (leaked !== undefined) {
+      await req('DELETE', `/resource-organizations/${leaked.id}`, { headers: RBAC_HEADERS });
+    }
+  }
 }
 
 async function main() {
