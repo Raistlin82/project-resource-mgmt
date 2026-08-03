@@ -92,7 +92,9 @@ Nuovo `src/app/services/resource-kind.util.ts` (SSR-safe, nessun orologio), acca
 ### 4.4 Invarianti che NON cambiano
 
 - Il **feed di approvazione** (`/allocation-approvals`) continua a includere i dummy: nel manuale il People Manager li vede e li decide, ed è il punto in cui C2 innesterà la sostituzione.
-- L'**utilization scalare legacy** (`resources.utilization`) continuerà a valere 250% su un dummy a 2,5 FTE. È coerente — quel dummy è saturo due volte e mezzo — non alimenta i KPI aggregati (che passano dal rollup) e non viene toccata.
+- L'**utilization scalare legacy** (`resources.utilization`) non viene toccata. La decisione resta questa, ma la motivazione va corretta su due punti — è il campo che C2 leggerà, quindi conta che il paragrafo dica il vero:
+  - **Non** vale 250% su un dummy a 2,5 FTE: `clampUtil` (`src/server.ts`) limita lo scalare a `[0, 100]`, quindi un dummy a 2,5 FTE legge esattamente 100%, indistinguibile da un interno saturo. Lo scalare **non sa esprimere** il multi-FTE; l'unica lettura fedele del carico di un dummy è il rollup mensile (`/capacity/monthly`, `demandRows` + `demandFteUncovered`).
+  - **Non** è vero che «non alimenta i KPI aggregati»: `/reporting` lo legge direttamente per la tile *Avg Resource Utilization* e per il grafico per-persona. Quei due aggregati sono quindi filtrati con `countsTowardInternalCapacity` come il rollup (senza il filtro, i dummy seminati a `utilization: 0` dimezzavano la media di portafoglio). La regola generale è: **ogni aggregato di capacità interna filtra per kind, ovunque legga i dati** — non è una proprietà che il rollup garantisce per conto degli altri.
 - RBAC invariata: le mutazioni `/resources` sono già gated a `resource-manager, delivery-executive, admin`.
 
 ### 4.5 Seed
