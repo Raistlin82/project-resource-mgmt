@@ -1484,59 +1484,79 @@ apiRouter.post('/resources', async (req, res) => {
   // resource-organizations. Optional; only supplied values are checked.
   const catalogErr = await validateResourceCatalogRefs(body);
   if (catalogErr) { res.status(400).json({ error: catalogErr }); return; }
-  // D — same guard as PUT (see its comment there for the full rationale).
-  // Applied here too because this handler DOES accept managerId (it's in
-  // RESOURCE_FIELDS, picked into `body` above) — so the "only if that handler
-  // accepts managerId" condition is met. The obvious argument for skipping it
-  // — a brand-new resource has no reports yet, so the only reachable cycle
-  // would be naming itself, which it cannot do because its id doesn't exist
-  // yet — does NOT hold here: `id` above is generated from `newId()`
-  // (`${++idSeq}`), a plain sequential counter, not a client-supplied value,
-  // but a PREDICTABLE one. A client who has just observed the current max id
-  // via GET /resources could correctly guess this one and supply it as
-  // managerId in THIS SAME request, authoring an immediate self-managed cycle
-  // the instant the row is created. `all` below intentionally does NOT
-  // include the not-yet-created row, so no OTHER resource can reference an id
-  // that doesn't exist yet — this can only ever catch that one self-reference
-  // case, never a multi-hop cycle. '' and a literal null cannot close a cycle
-  // either way (no manager, no chain) — collapsed to `undefined` for this
-  // check only; unlike the PUT handler this does NOT normalize how either
-  // value is persisted below (that gap pre-dates this task and is out of its
-  // scope — see the task report).
-  if (body.managerId !== undefined) {
-    const effectiveManagerId = (body.managerId === '' || body.managerId === null) ? undefined : body.managerId;
-    const all = await repos.resources.list();
-    if (wouldCycleInOrgChart(id, effectiveManagerId, all)) {
-      res.status(400).json({ error: 'managerId would close a cycle in the org chart' });
-      return;
-    }
-  }
-  // C1: kind must be one of the known values, and only a subco may carry a
-  // vendorId (and must carry one). Pin the default so downstream reads never
-  // see kind absent.
-  const kindErr = await validateResourceKind(body.kind, body.vendorId);
-  if (kindErr) { res.status(400).json({ error: kindErr }); return; }
-  if (body.kind === undefined) body.kind = 'internal';
-  // A non-subco '' or null vendorId already passed validation
-  // (validateResourceKind treats both like absent) but must never be PERSISTED
-  // verbatim — normalize to undefined so the field is genuinely absent. Use
-  // undefined (not null) here: the in-memory adapter's create() has no
-  // null-stripping step (that only exists on update()), so a literal null
-  // would leak into every later read of this row, unlike Postgres where the
-  // column is NULL and nullsToUndefined() hands it back absent — undefined is
-  // the one value both adapters agree means "don't set this column" on create.
-  // `pick()` copies an explicit null straight through, so it has to be caught
-  // here alongside '': this normalization IS the adapter parity.
-  if (body.vendorId === '' || body.vendorId === null) body.vendorId = undefined;
-  const item = {
-    skills: [], projectRoles: [], externalExperience: [],
-    ...body,
-    id, // D — hoisted above (see comment there); NOT a fresh newId() call.
-    utilization: 0,
-  } as Resource;
-  const created = await repos.resources.create(item);
+  // D — the tail of this handler (kind/vendorId validation + defaulting, item
+  // construction, and the actual `create()`) is IDENTICAL whether or not
+  // `managerId` is being set. Factored into a closure so it can run either
+  // directly (no manager is being set — the common case, no extra locking
+  // cost) or nested inside the 'org-chart' lock below (one IS being set) —
+  // same pattern as the PUT handler's `finishPut`.
+  const finishPost = async (): Promise<{ status?: number; error?: string; created?: Resource }> => {
+    // C1: kind must be one of the known values, and only a subco may carry a
+    // vendorId (and must carry one). Pin the default so downstream reads never
+    // see kind absent.
+    const kindErr = await validateResourceKind(body.kind, body.vendorId);
+    if (kindErr) return { status: 400, error: kindErr };
+    if (body.kind === undefined) body.kind = 'internal';
+    // A non-subco '' or null vendorId already passed validation
+    // (validateResourceKind treats both like absent) but must never be PERSISTED
+    // verbatim — normalize to undefined so the field is genuinely absent. Use
+    // undefined (not null) here: the in-memory adapter's create() has no
+    // null-stripping step (that only exists on update()), so a literal null
+    // would leak into every later read of this row, unlike Postgres where the
+    // column is NULL and nullsToUndefined() hands it back absent — undefined is
+    // the one value both adapters agree means "don't set this column" on create.
+    // `pick()` copies an explicit null straight through, so it has to be caught
+    // here alongside '': this normalization IS the adapter parity.
+    if (body.vendorId === '' || body.vendorId === null) body.vendorId = undefined;
+    // D (review round 1) — the SAME normalization for managerId, and NOT an
+    // edge case: the resources form's `save()`
+    // (src/app/resources/resources.component.ts ~line 709) sends
+    // `managerId: raw.managerId ?? ''` on EVERY create, so an ordinary
+    // "onboard someone with no People Manager" is the common path, not a rare
+    // one. Left unnormalized, '' would persist as a literal empty string
+    // (same in-memory create()-has-no-null-stripping reasoning as vendorId
+    // above) — and `reportsClosure`/`scopedApproversOf`
+    // (src/app/services/org-scope.util.ts) both gate on `managerId ===
+    // undefined`, so a stored '' silently slips past them, seeding a phantom
+    // key in the closure map instead of being ignored. `undefined`, not
+    // `null`, for the identical adapter-parity reason as vendorId.
+    if (body.managerId === '' || body.managerId === null) body.managerId = undefined;
+    const item = {
+      skills: [], projectRoles: [], externalExperience: [],
+      ...body,
+      id, // D — hoisted above (see comment there); NOT a fresh newId() call.
+      utilization: 0,
+    } as Resource;
+    return { created: await repos.resources.create(item) };
+  };
+  // D (review round 1, CRITICAL) — see the matching comment at the PUT
+  // handler's `org-chart` lock for the full rationale (two concurrent writers
+  // racing the SAME read-check-write can each pass a check that reasons from
+  // a stale snapshot). The scenario here is narrower than PUT-vs-PUT — a
+  // brand-new resource still cannot be named by any OTHER concurrent writer
+  // (its id doesn't exist until `create()` runs, inside this very lock), so
+  // the only thing a race could still slip past is two POSTs mutually
+  // guessing each other's about-to-be-assigned id — but the lock is taken
+  // unconditionally here anyway, for the same reason the ruling gave for
+  // PUT: it is a single global key, reassignments (including onboarding with
+  // a manager) are rare/human-scale, and reasoning about ONE consistent rule
+  // ("any mutation of the manager chain is serialized under 'org-chart'") is
+  // worth more than reasoning about which handler's race is "narrow enough"
+  // to skip it. Only paid when a manager is actually being set — a POST
+  // with no managerId never touches this lock at all.
+  const result = body.managerId !== undefined
+    ? await withLock('org-chart', async (): Promise<{ status?: number; error?: string; created?: Resource }> => {
+        const effectiveManagerId = (body.managerId === '' || body.managerId === null) ? undefined : body.managerId;
+        const all = await repos.resources.list();
+        if (wouldCycleInOrgChart(id, effectiveManagerId, all)) {
+          return { status: 400, error: 'managerId would close a cycle in the org chart' };
+        }
+        return finishPost();
+      })
+    : await finishPost();
+  if (result.error !== undefined) { res.status(result.status ?? 400).json({ error: result.error }); return; }
   // Resolve effective rates so the create response matches the GET shape (Phase E).
-  const [resolved] = await resolveResourceRates([created]);
+  const [resolved] = await resolveResourceRates([result.created as Resource]);
   res.status(201).json(resolved);
 });
 apiRouter.put('/resources/:id', async (req, res) => {
@@ -1611,48 +1631,46 @@ apiRouter.put('/resources/:id', async (req, res) => {
   //               help needed. Treated exactly like '' for this check: neither
   //               can ever close a cycle (a cleared manager has no manager to
   //               loop back through).
-  // Not run inside `res:<id>` lock: the cycle question only depends on the
-  // manager chain as it stands right now, and the actual write below is still
-  // serialized under that lock like every other field on this row.
-  if (body.managerId !== undefined) {
-    if (body.managerId === '') body.managerId = null as unknown as undefined;
-    const effectiveManagerId = body.managerId === null ? undefined : body.managerId;
-    const all = await repos.resources.list();
-    if (wouldCycleInOrgChart(req.params.id, effectiveManagerId, all)) {
-      res.status(400).json({ error: 'managerId would close a cycle in the org chart' });
-      return;
-    }
-  }
-  // C1: validate the MERGED kind/vendorId state, not the body in isolation —
-  // a partial PUT that changes only one of the two fields must still produce
-  // a coherent pair (e.g. a kind-only PUT to 'subco' is rejected when the
-  // stored row has no vendor, and a vendorId-only PUT is rejected when the
-  // stored kind isn't 'subco'). When the effective kind is no longer 'subco'
-  // and the caller did not touch vendorId, the stale stored vendor is cleared
-  // with an explicit null (which means "clear to absent" on both adapters)
-  // rather than rejected or silently carried forward — a PUT that moves a
-  // resource away from being a subco must not leave an orphaned vendor behind.
-  // An empty-string vendorId is a clear request, exactly like an explicit
-  // null (same '' === clear convention as applyRateOverrides above) — never
-  // persist a literal ''. Normalize before computing the merge so it's
-  // treated as "supplied" (a real clear), not silently dropped back to the
-  // stale stored value the way `'' ?? current.vendorId` would.
   //
-  // Then: narrowing a kind (dummy/subco -> internal) shrinks the daily ceiling
-  // by MULTI_FTE_MAX. Refuse if that would strand existing bookings above the
-  // new cap rather than silently leaving invalid allocations behind. baseCap is
-  // resolved exactly like the allocation handler's gate (resolveBaseCap: stored
-  // contractHoursPerDay, guarded against 0/NaN/negative, else getHoursPerDay()).
-  //
-  // TOCTOU: ALL of it — the read of the stored row, the merge, both caps, the
-  // assignment-day re-check and the write — happens inside ONE res: lock, the
-  // same discipline the allocation handler's own res: critical section (below)
-  // uses. Two concurrent PUTs that each read the pre-state would otherwise
-  // reason from the same snapshot and could persist exactly the incoherent
-  // kind/vendor pair (or the over-cap narrowing) this block exists to prevent;
-  // a concurrent PUT .../allocation could equally book hours in between. The
-  // section acquires no other lock, so it cannot deadlock.
-  const locked = await withLock(`res:${req.params.id}`, async (): Promise<{ status?: number; error?: string; updated?: Resource }> => {
+  // D (review round 1, CRITICAL) — see the `org-chart` lock acquisition below
+  // for why the read-check-write cannot be split from the write anymore: two
+  // concurrent PUTs (A -> B and B -> A) each reading the pre-race chain would
+  // both pass this check and commit under DIFFERENT `res:<id>` keys (`res:A`,
+  // `res:B`, which never contend), writing the exact cycle this guard exists
+  // to refuse. The tail of this handler (kind/vendorId validation, the daily-
+  // cap TOCTOU, and the actual write) is IDENTICAL whether or not `managerId`
+  // is being touched — factored into `finishPut` so it can run either
+  // directly (no manager change — the common case, no extra locking cost) or
+  // nested inside `org-chart` below (one IS being attempted).
+  const finishPut = (): Promise<{ status?: number; error?: string; updated?: Resource }> => withLock(`res:${req.params.id}`, async () => {
+    // C1: validate the MERGED kind/vendorId state, not the body in isolation —
+    // a partial PUT that changes only one of the two fields must still produce
+    // a coherent pair (e.g. a kind-only PUT to 'subco' is rejected when the
+    // stored row has no vendor, and a vendorId-only PUT is rejected when the
+    // stored kind isn't 'subco'). When the effective kind is no longer 'subco'
+    // and the caller did not touch vendorId, the stale stored vendor is cleared
+    // with an explicit null (which means "clear to absent" on both adapters)
+    // rather than rejected or silently carried forward — a PUT that moves a
+    // resource away from being a subco must not leave an orphaned vendor behind.
+    // An empty-string vendorId is a clear request, exactly like an explicit
+    // null (same '' === clear convention as applyRateOverrides above) — never
+    // persist a literal ''. Normalize before computing the merge so it's
+    // treated as "supplied" (a real clear), not silently dropped back to the
+    // stale stored value the way `'' ?? current.vendorId` would.
+    //
+    // Then: narrowing a kind (dummy/subco -> internal) shrinks the daily ceiling
+    // by MULTI_FTE_MAX. Refuse if that would strand existing bookings above the
+    // new cap rather than silently leaving invalid allocations behind. baseCap is
+    // resolved exactly like the allocation handler's gate (resolveBaseCap: stored
+    // contractHoursPerDay, guarded against 0/NaN/negative, else getHoursPerDay()).
+    //
+    // TOCTOU: ALL of it — the read of the stored row, the merge, both caps, the
+    // assignment-day re-check and the write — happens inside ONE res: lock, the
+    // same discipline the allocation handler's own res: critical section (below)
+    // uses. Two concurrent PUTs that each read the pre-state would otherwise
+    // reason from the same snapshot and could persist exactly the incoherent
+    // kind/vendor pair (or the over-cap narrowing) this block exists to prevent;
+    // a concurrent PUT .../allocation could equally book hours in between.
     const current = await repos.resources.get(req.params.id);
     if (current === undefined) return { status: 404, error: 'Not found' };
     if (body.vendorId === '') body.vendorId = null as unknown as undefined;
@@ -1679,6 +1697,49 @@ apiRouter.put('/resources/:id', async (req, res) => {
     }
     return { updated: await repos.resources.update(req.params.id, body) };
   });
+  // D (review round 1, CRITICAL) — a SINGLE global lock key, not a per-pair
+  // `withLock` (the pattern used elsewhere in this file for exactly-two-known-
+  // resources operations, e.g. the retarget handler below): three or more
+  // concurrent PUTs can compose an arbitrarily long cycle (A -> B, B -> C,
+  // C -> A), and no pair of per-target locks serializes that — only a single
+  // key that EVERY manager-chain mutation contends on does. Cheap in
+  // practice: manager reassignments are rare, human-scale operations (a
+  // reorg, an onboarding), so serializing all of them costs nothing real.
+  //
+  // LOCK ORDER, stated explicitly because `withLock` is not re-entrant and
+  // this handler already takes `res:<id>` inside `finishPut`: `org-chart` is
+  // acquired OUTERMOST here, `res:<id>` nested inside it (via `finishPut()`
+  // called from within this callback) — never the reverse. No `res:` lock is
+  // held at the point `org-chart` is acquired (this call site is the entire
+  // body of the handler from the top; nothing above it takes a lock). As long
+  // as no code path anywhere in this file acquires `org-chart` from INSIDE a
+  // `res:` section, this ordering is globally deadlock-free — confirmed by
+  // inspection: `org-chart` is acquired at exactly two call sites in this
+  // file (here and the POST handler above), both at the top level of their
+  // handler, neither nested inside any other `withLock` callback.
+  //
+  // Freshly re-reads the resource list INSIDE this lock (not the stale one a
+  // caller might have read earlier) — that fresh read is what makes the fix
+  // correct: whichever request's critical section runs first commits its
+  // write before the next one's `list()` call executes, so the second
+  // request's check always reasons about the FIRST request's already-applied
+  // change, closing the race the finding described. See the task report for
+  // why this is asserted correct by construction rather than by a timing-
+  // based test (the smoke suite is a single sequential client and cannot
+  // express real concurrency; `withLock` itself is a private, non-exported
+  // closure in this file with no existing unit coverage at any other call
+  // site either).
+  const locked = body.managerId !== undefined
+    ? await withLock('org-chart', async (): Promise<{ status?: number; error?: string; updated?: Resource }> => {
+        if (body.managerId === '') body.managerId = null as unknown as undefined;
+        const effectiveManagerId = body.managerId === null ? undefined : body.managerId;
+        const all = await repos.resources.list();
+        if (wouldCycleInOrgChart(req.params.id, effectiveManagerId, all)) {
+          return { status: 400, error: 'managerId would close a cycle in the org chart' };
+        }
+        return finishPut();
+      })
+    : await finishPut();
   if (locked.error !== undefined) { res.status(locked.status ?? 400).json({ error: locked.error }); return; }
   const [resolved] = await resolveResourceRates([locked.updated as Resource]);
   res.json(resolved);
