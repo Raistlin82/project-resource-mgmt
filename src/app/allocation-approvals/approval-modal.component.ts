@@ -311,7 +311,7 @@ interface Line {
                   <div class="command-card-muted p-3 text-sm space-y-2" data-test="substitute-summary">
                     <p>Hand <span class="font-semibold">{{ projectLabel(target.item) }}</span> — <span class="font-semibold">{{ monthLabelLong(target.item.month) }}</span> to <span class="font-semibold">{{ person.name }}</span>.</p>
                     <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
-                      <input type="checkbox" class="command-checkbox"
+                      <input type="checkbox" class="command-checkbox" data-test="substitute-apply-remaining"
                              [checked]="applyToRemaining()" (change)="applyToRemaining.set(!applyToRemaining())">
                       Apply to all remaining months
                     </label>

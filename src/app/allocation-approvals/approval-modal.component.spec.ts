@@ -471,15 +471,38 @@ describe('ApprovalModalComponent — Substitute (C2)', () => {
     // one dummy line, decide or cancel, then open Substitute on a DIFFERENT
     // line and find the checkbox silently pre-checked, applying a transfer
     // across months the operator never opted into for THAT line.
+    //
+    // Driven through the RENDERED checkbox, not just the signal: the one bug
+    // this feature actually shipped (the org `<select>`'s `[value]` binding —
+    // see the earlier test's comment) was precisely a correct signal with a
+    // DOM that never followed it, so asserting on the signal alone would not
+    // have caught that class of bug here either.
     const ROW_DUMMY_TWO_PENDING: AllocationApprovalRow = { ...ROW_TWO_PENDING, kind: 'dummy' };
     const { fixture } = setup({ rows: [ROW_DUMMY_TWO_PENDING] });
     await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
 
-    fixture.componentInstance.openSubstitute(ROW_TWO_PENDING.items[0]); // Apollo (A1)
-    fixture.componentInstance.applyToRemaining.set(true);
+    // Line A (Apollo/A1): pick a candidate so the checkbox actually renders
+    // (it's gated by `@if (chosenTarget(); as person)`), then CHECK it via a
+    // real click on the rendered element.
+    fixture.componentInstance.openSubstitute(ROW_TWO_PENDING.items[0]);
+    fixture.componentInstance.chooseTarget('r9');
+    fixture.detectChanges();
+    const checkboxA = host.querySelector<HTMLInputElement>('[data-test="substitute-apply-remaining"]')!;
+    expect(checkboxA.checked).toBe(false); // sanity: starts unchecked
+    checkboxA.click();
+    fixture.detectChanges();
+    expect(checkboxA.checked).toBe(true);
     expect(fixture.componentInstance.applyToRemaining()).toBe(true);
 
-    fixture.componentInstance.openSubstitute(ROW_TWO_PENDING.items[1]); // Mercury (A3) — a DIFFERENT line
+    // Line B (Mercury/A3) — a DIFFERENT line, same modal session. Pick a
+    // candidate again so the checkbox re-renders, then read ITS live state.
+    fixture.componentInstance.openSubstitute(ROW_TWO_PENDING.items[1]);
+    fixture.componentInstance.chooseTarget('r9');
+    fixture.detectChanges();
+
+    const checkboxB = host.querySelector<HTMLInputElement>('[data-test="substitute-apply-remaining"]')!;
+    expect(checkboxB.checked).toBe(false);
     expect(fixture.componentInstance.applyToRemaining()).toBe(false);
   });
 });
