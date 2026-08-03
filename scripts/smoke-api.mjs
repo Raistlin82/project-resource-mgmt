@@ -2571,6 +2571,95 @@ async function checkDummySubstitution() {
       (zeroPerson.body.days || []).length === 0 && !('replacedDays' in ((zeroPerson.body.months || [])[0] ?? {})),
       `days=${JSON.stringify(zeroPerson.body.days)} month=${JSON.stringify((zeroPerson.body.months || [])[0])}`);
   }
+
+  // --- THE TWO WAYS A SUBSTITUTION CAN END WITHOUT A DECISION -----------------
+  //
+  // Both of these end the substitution through a handler that predates C2, so
+  // neither goes anywhere near the decision hook. Booked demand left the dummy;
+  // if these paths do not hand it back, it is destroyed with no record anywhere.
+  //
+  // (1) SELF-MANAGED RETARGET. `PUT /assignments/:id` changing resourceId
+  //     re-baselines every live month row. On the self-managed branch that lands
+  //     'Allocated' with NO approval — an IMPLICIT approval, since no decision
+  //     will ever follow — so it must give back exactly what an explicit approval
+  //     would: whatever the person no longer covers.
+  //
+  //     The fixture TRIMS before retargeting on purpose. Without a trim the
+  //     give-back owes nothing, and a wrong fix that merely cleared the two
+  //     columns would look identical to the right one. With a trim, only a real
+  //     give-back puts the 3h back on the dummy.
+  const retargetFixture = await giveBackFixture('retarget self-managed');
+  if (retargetFixture) {
+    // A third internal resource whose manager IS the acting principal: the suite
+    // calls as X-User-Id '1', which `actorResourceId` maps to resource '1', so
+    // `autoApprovesAllocation` is true for this resource and the retarget takes
+    // the self-managed branch.
+    const standIn = await req('POST', '/resources', {
+      body: { ...base, name: 'C2 retarget stand-in (self-managed)', kind: 'internal', contractHoursPerDay: 8, managerId: '1' },
+    });
+    const standInOk = check('C2 retarget setup: a self-managed stand-in resource exists',
+      standIn.status === 201 && typeof standIn.body?.id === 'string', `status=${standIn.status}`);
+
+    if (standInOk) {
+      // 8h transferred -> trimmed to 5h. The month is still 'Requested', so the
+      // edit keeps both its pending approval and its back-link.
+      const trim = await req('PUT', `/assignments/${retargetFixture.personAssignmentId}/allocation`, {
+        body: { month: MONTH, dailyHours: { [DAY]: 5 } },
+      });
+      check('C2 retarget setup: the substituted month is trimmed 8h -> 5h before the retarget',
+        trim.status === 200, `status=${trim.status} err=${trim.body?.error}`);
+
+      const retarget = await req('PUT', `/assignments/${retargetFixture.personAssignmentId}`, {
+        body: { resourceId: standIn.body.id },
+      });
+      check('C2 a substituted assignment can be retargeted', retarget.status === 200,
+        `status=${retarget.status} err=${retarget.body?.error}`);
+
+      const retMonth = (await req('GET', `/assignments/${retargetFixture.personAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`)).body;
+      const retRow = (retMonth.months || [])[0];
+      check('C2 a self-managed retarget lands the substituted month Allocated with no approval',
+        retRow?.status === 'Allocated' && !('approvalId' in (retRow ?? {})),
+        `month=${JSON.stringify(retRow)}`);
+      // The regression this exists for: an implicit approval that leaves the link
+      // in place is a substitution nothing will ever close.
+      check('C2 a self-managed retarget leaves NO dangling substitution back-link',
+        retRow !== undefined && !('replacedFromAssignmentMonthId' in retRow) && !('replacedDays' in retRow),
+        `month=${JSON.stringify(retRow)}`);
+      check('C2 the retargeted stand-in keeps exactly the trimmed allocation',
+        (retMonth.days || []).find(d => d.date === DAY)?.hours === 5,
+        `hours=${(retMonth.days || []).find(d => d.date === DAY)?.hours}`);
+
+      // 8h remained on the dummy + the 3h the stand-in no longer covers = 11h.
+      const retDummy = await req('GET', `/assignments/${retargetFixture.dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+      check('C2 a self-managed retarget hands back exactly what the person no longer covers',
+        (retDummy.body.days || []).find(d => d.date === DAY)?.hours === 11,
+        `hours=${(retDummy.body.days || []).find(d => d.date === DAY)?.hours}`);
+    }
+  }
+
+  // (2) DELETING THE TARGET'S ASSIGNMENT. The assignment disappears, so the
+  //     person covers nothing — a rejection in every respect that matters, so
+  //     EVERY recorded hour goes home. The inverse case (deleting the DUMMY's
+  //     assignment) was already handled: the give-back finds the linked row gone
+  //     and logs a no-op, which is exactly why the back-link is not an FK.
+  const deleteFixture = await giveBackFixture('delete target');
+  if (deleteFixture) {
+    const del = await req('DELETE', `/assignments/${deleteFixture.personAssignmentId}`);
+    check('C2 the substituted assignment can be deleted', del.status === 204, `status=${del.status}`);
+    // Proves the delete PROCEEDED rather than being refused — a 409 "pending
+    // substitution" would also leave the dummy whole, for the wrong reason.
+    const gone = await req('GET', `/assignments/${deleteFixture.personAssignmentId}/allocation`);
+    check('C2 the deleted assignment really is gone', gone.status === 404, `status=${gone.status}`);
+
+    const delDummy = await req('GET', `/assignments/${deleteFixture.dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    check('C2 deleting the target assignment returns every transferred hour to the dummy',
+      (delDummy.body.days || []).find(d => d.date === DAY)?.hours === 16,
+      `hours=${(delDummy.body.days || []).find(d => d.date === DAY)?.hours}`);
+    const delDummyAssig = await req('GET', '/assignments');
+    const restored = (delDummyAssig.body || []).find(a => a.id === deleteFixture.dummyAssignmentId);
+    check('C2 the dummy assignment-s assignedHours is restored by the delete give-back',
+      restored?.assignedHours === 16, `assignedHours=${restored?.assignedHours}`);
+  }
 }
 
 async function main() {

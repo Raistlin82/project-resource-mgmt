@@ -1663,6 +1663,41 @@ apiRouter.put('/assignments/:id', async (req, res) => {
         // adapters (Task 4's seam fix) — see the submit handler above for the
         // full rationale on this cast.
         await repos.assignmentMonths.update(row.id, { status: 'Allocated', approvalId: null as unknown as undefined });
+        // C2 — THE SELF-MANAGED BRANCH IS AN IMPLICIT APPROVAL, so it owes the
+        // same give-back an explicit one does. The month lands 'Allocated' with
+        // NO approval, which means no decision will ever follow to close a
+        // substitution this row is still carrying: without this, the back-link
+        // dangles forever (the calendar keeps claiming "taken over from a
+        // placeholder" on a month that is not pending anything) and, worse, any
+        // hours the new assignee does NOT cover stay quietly off the dummy —
+        // booked demand destroyed with no record. Clearing the two columns alone
+        // would fix the cosmetic half and keep the silent loss, so reuse
+        // `returnHoursToDummy` (which closes the link itself, in its own
+        // `finally`) rather than reimplementing the per-day arithmetic.
+        //
+        // 'Approved', not 'Rejected': the retarget confirms the work, it does not
+        // refuse it. Per day that means `moved - min(moved, held)` goes home — the
+        // part the assignee no longer covers because the month was trimmed — and
+        // `planGiveBack` leaves her own rows untouched (`targetHours` is empty on
+        // an approval, since what she holds IS the allocation).
+        //
+        // `mergedAssig`, NOT `oldAssig`: the day rows travel with the assignment,
+        // so the `res:` lock must name the NEW resource. Both `res:` locks are
+        // acquired inside `returnHoursToDummy`, in lexicographic id order; this
+        // loop holds NO lock of its own (see the block comment above — approval
+        // I/O and month-row writes only), so the non-re-entrant `withLock` has
+        // nothing to nest inside and cannot wedge a `res:` key.
+        //
+        // BEST-EFFORT and logged, exactly as in `applyAllocationDecision`: the
+        // retarget above has already committed, so a give-back failure must never
+        // turn it into a 500 — but it must never vanish silently either.
+        if (row.replacedFromAssignmentMonthId !== undefined) {
+          try {
+            await returnHoursToDummy(row, mergedAssig, 'Approved');
+          } catch (err) {
+            console.error(`PUT /assignments/${oldAssig.id}: substitution give-back failed for month ${row.id} on retarget:`, err);
+          }
+        }
       } else {
         const approvalId = await createAllocationApproval(req, mergedAssig, row.id);
         await repos.assignmentMonths.update(row.id, { status: 'Requested', approvalId } as Partial<AssignmentMonth>);
@@ -1701,6 +1736,40 @@ apiRouter.delete('/assignments/:id', async (req, res) => {
   // Supersede any pending approval BEFORE removing the assignment (outside the
   // res:/req: locks) so a deleted assignment never leaves an orphaned approval.
   await withdrawAllocationApproval(oldAssig.approvalId, 'assignment deleted');
+
+  // C2 — SEND A PENDING SUBSTITUTION'S HOURS HOME BEFORE THIS DELETE DESTROYS
+  // THEM. Those hours were taken off a DUMMY and are only on loan to this
+  // assignment until its month is decided; the delete means no decision will ever
+  // come and the assignee covers nothing, which is a REJECTION in every respect
+  // that matters — so every recorded hour goes back, per day, not just the part a
+  // trim released. Before C2 a delete could only ever destroy hours booked on the
+  // assignment being deleted; without this it silently destroys another
+  // resource's booked demand, and the request's staffed effort drops with no
+  // record anywhere of where the hours went.
+  //
+  // The INVERSE case is already handled and stays that way: deleting the DUMMY's
+  // assignment removes the linked month row, and the give-back on the person's
+  // eventual decision finds it gone and logs a no-op — which is exactly why
+  // `replacedFromAssignmentMonthId` is a soft reference and not a self-FK.
+  //
+  // ORDERING is load-bearing: this runs BEFORE the day rows and month rows below
+  // are removed, so `planGiveBack` reads what is genuinely still held and the
+  // link-clearing write lands on a row that still exists. Lock discipline matches
+  // the retarget branch — `returnHoursToDummy` takes both `res:` locks itself, in
+  // lexicographic id order, and this handler holds none until the aggregate
+  // recomputes at the very end. Best-effort per month and logged: the delete must
+  // still proceed (a wedged assignment nobody can remove would be worse), but a
+  // failed give-back must leave a trace.
+  const linkedMonths = (await repos.assignmentMonths.list())
+    .filter(m => m.assignmentId === oldAssig.id && m.replacedFromAssignmentMonthId !== undefined);
+  for (const row of linkedMonths) {
+    try {
+      await returnHoursToDummy(row, oldAssig, 'Rejected');
+    } catch (err) {
+      console.error(`DELETE /assignments/${oldAssig.id}: substitution give-back failed for month ${row.id}:`, err);
+    }
+  }
+
   // B1 (dev↔prod parity): assignment_days → assignments is ON DELETE no action,
   // so drop THIS assignment's per-day rows FIRST — otherwise Postgres rejects the
   // parent delete with an FK violation (→ 409) and the in-memory adapter would
