@@ -31,7 +31,7 @@ export interface Resource {
   billRate?: number;
   /**
    * Per-resource MANUAL OVERRIDE of the role's rate card, in **€/DAY**. `null`/
-   * `undefined` = inherit the card default. The form binds the Cost-rate (€/gg)
+   * `undefined` = inherit the card default. The form binds the Cost-rate (€/day)
    * input here; the server maps it onto the resources.cost_rate column. Phase E.
    */
   costRateOverride?: number | null;
