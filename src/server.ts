@@ -4672,6 +4672,21 @@ async function decideOneApproval(
       }
     }
     if (!scopeMatch && !managerMatch) {
+      // TWO DISTINCT REFUSALS, worded apart on purpose. Reaching here with
+      // `roleMatch` true can only be the SCOPE branch above (`scopeMatch` starts
+      // as `roleMatch` and nothing else lowers it), and for that actor the
+      // role/step wording would be a lie: they DO hold the step's role, and were
+      // refused because the resource is not theirs to decide. A 403 that
+      // misdescribes its own reason costs the next person an afternoon.
+      //
+      // Neither message names the target resource, its managers or its org node.
+      // The actor has just failed an authorization check on this very resource,
+      // so telling them who WOULD have been competent would leak org structure
+      // to exactly the wrong person. The competent approver is discoverable
+      // through the feed, which is scoped in its own right.
+      if (roleMatch) {
+        return { status: 403, body: { error: 'Actor does not manage this resource and cannot decide its allocation' } };
+      }
       return { status: 403, body: { error: `Actor cannot decide a step assigned to ${step.approverId ?? step.role}` } };
     }
     const decidedAt = new Date().toISOString();

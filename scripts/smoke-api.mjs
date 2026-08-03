@@ -1282,26 +1282,43 @@ async function checkMonthlyApproval() {
   check('B3 submit on a non-open month is refused', closed.status === 403 || closed.status === 404, `status=${closed.status}`);
 
   // Self-managed submit-clear path: exercise it directly instead of routing
-  // around it. Assignment 1's resource is '1' (Julie Armstrong), whose
-  // managerId is ALSO '1' — the default RBAC_HEADERS admin actor — so
-  // submitting as the DEFAULT actor hits the self-managed auto-approval
-  // shortcut (straight to 'Allocated', approvalId cleared, no approval
-  // opened). 2026-09 is an OPEN period neither of assignment 1's assignments
-  // books (assignment 1 ends 2026-06-30; assignment 2, also resource 1, ends
-  // 2026-08-31), so a PUT there is guaranteed conflict-free and creates a
-  // fresh Draft row to submit. This is the regression coverage for the
-  // self-managed branch's `approvalId: null` clear: it must leave the field
-  // ABSENT in the response (both adapters), never a literal `null`.
-  const selfManagedPut = await req('PUT', '/assignments/1/allocation', { body: { month: '2026-09', dailyHours: { '2026-09-07': 1 } } });
-  check('B3 self-managed setup: PUT into an unbooked open month creates a Draft row', selfManagedPut.status === 200, `status=${selfManagedPut.status}`);
+  // around it. The shortcut fires when the PROPOSER IS THE RESOURCE'S MANAGER
+  // (`autoApprovesAllocation`): resource '2' (John Miller) has managerId '1',
+  // which is the default RBAC_HEADERS actor's resource-id, so submitting as the
+  // DEFAULT actor lands the month straight on 'Allocated' with `approvalId`
+  // cleared and no approval opened. This is the regression coverage for that
+  // branch's `approvalId: null` clear: it must leave the field ABSENT in the
+  // response (both adapters), never a literal `null`.
+  //
+  // D — THIS FIXTURE WAS RE-ACTORED, and the assertions below are untouched. It
+  // used to run on assignment 1 (resource '1', Julie Armstrong) as the default
+  // actor, which only worked because the seed had Julie as HER OWN manager
+  // (`managerId: '1'`) — a self-cycle that Task 4 now refuses on write and that
+  // Task 5 removed from the seed. The rule under test is "the proposer is the
+  // resource's manager", so the fixture now uses a REAL manager/report pair
+  // instead of a degenerate self-loop. Same idiom as the totals fixture further
+  // down this function, which already relies on '1' being resource 2's manager.
+  //
+  // A throwaway assignment keeps this clear of every seeded booking, and
+  // 2026-09-23 (a Wednesday, Open period) is past the end of resource '2's only
+  // seeded booking (assignment 3, whose days stop at 2026-09-15) and is used by
+  // nothing else in this suite, so the daily-capacity gate never fires.
+  const selfManagedCreate = await req('POST', '/assignments', { body: { requestId: '4', resourceId: '2', assignedHours: 0 } });
+  const selfManagedCreateOk = check('B3 self-managed setup: throwaway assignment created for a resource whose manager IS the acting principal',
+    selfManagedCreate.status === 200 && typeof selfManagedCreate.body?.id === 'string', `status=${selfManagedCreate.status}`);
+  if (selfManagedCreateOk) {
+    const selfManagedAssignmentId = selfManagedCreate.body.id;
+    const selfManagedPut = await req('PUT', `/assignments/${selfManagedAssignmentId}/allocation`, { body: { month: '2026-09', dailyHours: { '2026-09-23': 1 } } });
+    check('B3 self-managed setup: PUT into an unbooked open month creates a Draft row', selfManagedPut.status === 200, `status=${selfManagedPut.status}`);
 
-  const selfManagedSubmit = await req('POST', '/assignments/1/months/2026-09/submit', { body: {} });
-  check('B3 self-managed submit auto-approves to Allocated', selfManagedSubmit.status === 200 && selfManagedSubmit.body?.status === 'Allocated',
-    `status=${selfManagedSubmit.status} row=${selfManagedSubmit.body?.status}`);
-  check('B3 self-managed submit clears approvalId to absent, not null',
-    selfManagedSubmit.body !== null && typeof selfManagedSubmit.body === 'object' &&
-    !Object.prototype.hasOwnProperty.call(selfManagedSubmit.body, 'approvalId') && selfManagedSubmit.body.approvalId === undefined,
-    `approvalId=${JSON.stringify(selfManagedSubmit.body?.approvalId)} hasOwn=${Object.prototype.hasOwnProperty.call(selfManagedSubmit.body ?? {}, 'approvalId')}`);
+    const selfManagedSubmit = await req('POST', `/assignments/${selfManagedAssignmentId}/months/2026-09/submit`, { body: {} });
+    check('B3 self-managed submit auto-approves to Allocated', selfManagedSubmit.status === 200 && selfManagedSubmit.body?.status === 'Allocated',
+      `status=${selfManagedSubmit.status} row=${selfManagedSubmit.body?.status}`);
+    check('B3 self-managed submit clears approvalId to absent, not null',
+      selfManagedSubmit.body !== null && typeof selfManagedSubmit.body === 'object' &&
+      !Object.prototype.hasOwnProperty.call(selfManagedSubmit.body, 'approvalId') && selfManagedSubmit.body.approvalId === undefined,
+      `approvalId=${JSON.stringify(selfManagedSubmit.body?.approvalId)} hasOwn=${Object.prototype.hasOwnProperty.call(selfManagedSubmit.body ?? {}, 'approvalId')}`);
+  }
 
   // --- BATCH DECIDE (Task 5) -------------------------------------------------
   // "Approva Mese" / "Approva e Prosegui": decide N month rows in ONE call,
@@ -1400,16 +1417,26 @@ async function checkMonthlyApproval() {
   // STEP ENFORCEMENT through the batch — the filter the coarse
   // '/allocation-approvals' role gate relies on. pm '2' (John Miller, resource
   // '2') passes that gate and is NOT the requester ('3'), so SoD lets him
-  // through; he is refused by the per-step check instead, because the step is
-  // routed to resource 1's manager, approverId '1'. Without this the coarse
-  // gate would let any pm decide any manager's allocation.
+  // through; he is refused by the per-step check instead. Without this the
+  // coarse gate would let any pm decide any manager's allocation.
+  //
+  // D — THE EXPECTED MESSAGE CHANGED WITH THE SEED, not with the rule. This row
+  // belongs to assignment 1, i.e. resource '1' (Julie Armstrong), who is the top
+  // of the org chart and now correctly has NO `managerId` (Task 5 removed the
+  // seed's self-cycle). `allocationApproverStep(undefined)` therefore routes the
+  // step by ROLE alone, so the refusal names the role rather than a named
+  // approver id. Still the role/step refusal — a 'pm' holds neither
+  // 'resource-manager' nor the named-approver position — and still asserted
+  // verbatim. The named-approver form of this message (`...assigned to 2`) is
+  // pinned in checkScopedAllocationDecision, on Alice's step, which really does
+  // carry an approverId.
   const wrongApprover = await req('POST', '/allocation-approvals/decide', {
     body: { items: [{ assignmentMonthId: BATCH_ROW_ID, decision: 'Approved' }] },
     headers: { 'X-User-Id': '2', 'X-User-Role': 'pm' },
   });
   const wrongApproverResult = (wrongApprover.body?.results || [])[0];
   check('B3 batch enforces per-step approver routing (non-requester, non-manager is refused)',
-    wrongApprover.status === 200 && wrongApproverResult?.status === 'Error' && /cannot decide a step assigned to 1/.test(String(wrongApproverResult?.error)),
+    wrongApprover.status === 200 && wrongApproverResult?.status === 'Error' && /cannot decide a step assigned to resource-manager/.test(String(wrongApproverResult?.error)),
     `result=${JSON.stringify(wrongApproverResult)}`);
 
   // The SAME id twice in one batch: decided once, the duplicate reported as
@@ -1636,8 +1663,14 @@ async function checkMonthlyApproval() {
  *  - The stranded shape is "a NON-Draft month row carrying NO approvalId". The
  *    self-managed submit shortcut produces exactly that live: submitting a month
  *    as the resource's OWN manager lands it 'Allocated' with `approvalId`
- *    cleared. Resource '1' (Julie Armstrong) has managerId '1', which is the
+ *    cleared. Resource '2' (John Miller) has managerId '1', which is the
  *    default admin actor this suite runs as.
+ *
+ *    D — RE-ACTORED FROM RESOURCE '1' TO '2', assertions untouched. This fixture
+ *    used to use resource '1' (Julie Armstrong), which only produced the
+ *    stranded shape because the seed had her as her OWN manager — the self-cycle
+ *    Task 4 refuses on write and Task 5 removed from the seed. Resource '2' is a
+ *    genuine report of '1', so the shortcut fires for the real reason.
  *  - A bare-`refId` approval can only be created through `POST
  *    /approval-requests` (the B3 endpoints always open month-scoped ones). That
  *    route is gated to the approver-grade roles (pm / resource-manager /
@@ -1666,17 +1699,21 @@ async function checkMonthlyApproval() {
  * itself proof the live month survived.
  *
  * Both months are Open planning periods, and both days are free of every other
- * booking in this suite for resource '1' (8h/day cap, so the capacity gate never
- * fires): 2026-11-04 is a Wednesday (checkMonthlyApproval uses 2026-11-03) and
- * 2026-12-02 is a Wednesday (it uses 2026-12-01; the 2026-12-25 holiday is
+ * booking in this suite for resource '2' (8h/day cap, so the capacity gate never
+ * fires — resource '2's only seeded booking, assignment 3, stops at 2026-09-15):
+ * 2026-11-04 is a Wednesday (checkMonthlyApproval uses 2026-11-03 and
+ * checkScopedAllocationDecision 2026-11-03, both on other resources) and
+ * 2026-12-02 is a Wednesday (they use 2026-12-01; the 2026-12-25 holiday is
  * avoided).
  */
 async function checkLegacyAllocationApproval() {
   const REQUESTER_HEADERS = { 'X-User-Id': '3', 'X-User-Role': 'pm' };
-  // pm '2' (John Miller, resource '2') is NOT resource 1's manager ('1'), so his
-  // submit opens a genuine Pending approval instead of self-approving.
+  // pm '2' maps to resource '2' — the resource ITSELF, which is not its own
+  // manager ('1' is), so this submit opens a genuine Pending approval instead of
+  // self-approving. That the shortcut needs the MANAGER specifically, not merely
+  // a related party, is part of what this fixture demonstrates.
   const NON_MANAGER_HEADERS = { 'X-User-Id': '2', 'X-User-Role': 'pm' };
-  const RESOURCE_ID = '1'; // Julie Armstrong — managerId '1' == the default admin actor
+  const RESOURCE_ID = '2'; // John Miller — managerId '1' == the default admin actor
   const REQUEST_ID = '2';
   const MONTH = '2026-11';
   const DAY = `${MONTH}-04`;
@@ -3604,6 +3641,9 @@ async function checkScopedAllocationDecision() {
   // Maps to no user row, so `actorResourceId` falls back to the raw id: a
   // resource-manager who manages nobody and no node — the "stranger" of §3.5.
   const STRANGER = { 'X-User-Id': '99', 'X-User-Role': 'resource-manager' };
+  // A role NO allocation step is ever routed to: refused for a different reason
+  // than scope, and must keep saying so.
+  const OTHER_ROLE = { 'X-User-Id': '98', 'X-User-Role': 'pm' };
   const ADMIN = { 'X-User-Id': '9', 'X-User-Role': 'admin' };
 
   const ALICE = '3';
@@ -3621,10 +3661,20 @@ async function checkScopedAllocationDecision() {
   // --- Preconditions --------------------------------------------------------
   {
     const alice = await req('GET', `/resources/${ALICE}`);
+    const john = await req('GET', '/resources/2');
     check(
-      "D5 setup: resource '3' (Alice) has managerId '2' — her scoped approvers are {'2','1'}",
-      alice.status === 200 && alice.body?.managerId === '2',
-      `status=${alice.status}, managerId=${JSON.stringify(alice.body?.managerId)}`,
+      "D5 setup: the seeded chain 3 -> 2 -> 1 is intact (Alice's managerId is '2', John's is '1') — her scoped approvers are {'2','1'}",
+      alice.status === 200 && alice.body?.managerId === '2' && john.status === 200 && john.body?.managerId === '1',
+      `alice=${JSON.stringify(alice.body?.managerId)}, john=${JSON.stringify(john.body?.managerId)}`,
+    );
+    // The top of the chain, asserted as data: Julie has NO manager of her own
+    // (Task 5 removed the seed's self-cycle), which is what makes the transitive
+    // walk above terminate at her rather than at the traversal's `visited` set.
+    const julie = await req('GET', '/resources/1');
+    check(
+      "D5 setup: resource '1' (Julie) is the top of the chain — no managerId at all, not a self-loop",
+      julie.status === 200 && julie.body?.managerId === undefined,
+      `status=${julie.status}, managerId=${JSON.stringify(julie.body?.managerId)}`,
     );
     const dummyEng = await req('GET', `/resources/${DUMMY_ENGINEERING}`);
     check(
@@ -3702,13 +3752,20 @@ async function checkScopedAllocationDecision() {
     return ok ? submitted.body.approvalId : undefined;
   }
 
-  /** Decide `approvalId` as `headers` and assert the HTTP status. */
-  async function decideAs(name, approvalId, headers, expected) {
+  /**
+   * Decide `approvalId` as `headers` and assert the HTTP status — and, when
+   * `errorRe` is given, the refusal MESSAGE too. The two 403s this rule can
+   * produce are worded differently on purpose (out-of-scope vs a role the step
+   * was never routed to), so asserting only the status would let the server
+   * report the wrong reason and still pass.
+   */
+  async function decideAs(name, approvalId, headers, expected, errorRe) {
     if (approvalId === undefined) { check(name, false, 'no approval id (setup failed above)'); return; }
     const decided = await req('PUT', `/approval-requests/${approvalId}/decision`, {
       headers, body: { decision: 'Approved', note: 'D5 smoke' },
     });
-    check(name, decided.status === expected, `status=${decided.status}, body=${JSON.stringify(decided.body)}`);
+    const messageOk = errorRe === undefined || errorRe.test(String(decided.body?.error));
+    check(name, decided.status === expected && messageOk, `status=${decided.status}, body=${JSON.stringify(decided.body)}`);
   }
 
   // --- Alice ('3'): a real org-chart chain, 3 -> 2 -> 1 ---------------------
@@ -3725,10 +3782,23 @@ async function checkScopedAllocationDecision() {
       "D5 a transitive manager decides in scope (Alice/'3' decided by '1', not the named approver) -> 200",
       await openApproval(aliceAssignment, MONTHS.b), MANAGER_1, 200,
     );
-    // THE BREAKING CHANGE (§3.5): passes today via the role fallback, must not.
+    // ONE approval, TWO refusals — a refused decision leaves the request
+    // Pending, so the same month proves both messages against the same step.
+    const strangerApprovalId = await openApproval(aliceAssignment, MONTHS.c);
+    // (a) The UNCHANGED role/step refusal, on a step that really does carry an
+    // `approverId`: a 'pm' holds neither 'resource-manager' nor the named
+    // position, so the message names the approver — nothing to do with scope.
     await decideAs(
-      "D5 a stranger resource-manager is refused (Alice/'3' decided by '99') -> 403",
-      await openApproval(aliceAssignment, MONTHS.c), STRANGER, 403,
+      "D5 a role the step was never routed to is refused with the role/step message (Alice/'3' decided by a pm) -> 403",
+      strangerApprovalId, OTHER_ROLE, 403, /cannot decide a step assigned to 2/,
+    );
+    // (b) THE BREAKING CHANGE (§3.5): passes today via the role fallback, must
+    // not — and must say WHY. The actor DOES hold 'resource-manager', so the
+    // message above would misdescribe this refusal; it must not name the
+    // resource or its managers either.
+    await decideAs(
+      "D5 a stranger resource-manager is refused with the SCOPE message (Alice/'3' decided by '99') -> 403",
+      strangerApprovalId, STRANGER, 403, /does not manage this resource/,
     );
   }
 
@@ -3744,8 +3814,8 @@ async function checkScopedAllocationDecision() {
     // A REAL seeded resource-manager who manages neither the dummy nor any
     // node above it. Passes today via the role fallback, must not.
     await decideAs(
-      "D5 a resource-manager outside the node's scope is refused (dummy '4' decided by '2') -> 403",
-      await openApproval(dummyEngAssignment, MONTHS.b), MANAGER_2, 403,
+      "D5 a resource-manager outside the node's scope is refused with the SCOPE message (dummy '4' decided by '2') -> 403",
+      await openApproval(dummyEngAssignment, MONTHS.b), MANAGER_2, 403, /does not manage this resource/,
     );
     // §3.3: `admin` is a global role and is never scoped.
     await decideAs(
@@ -3796,24 +3866,26 @@ async function checkScopedAllocationDecision() {
  * already unit-tested directly; this is the live-API wiring.
  *
  * Leans on the SEEDED chain 3 -> 2 -> 1: Alice Smith ('3') has managerId '2'
- * (John Miller), who has managerId '1' (Julie Armstrong). Resource '1' ALSO
- * seeds with managerId '1' — a pre-existing self-loop already in the seed
- * data (see src/db/seed.ts), not something this test introduces. That is
- * exactly the "cycle-safe on data that already contains a loop" case the
- * read side (org-scope.util) is documented to tolerate; this guard's job is
- * only to refuse NEW writes that would (re)create a cycle, not to repair
- * that pre-existing one.
+ * (John Miller), who has managerId '1' (Julie Armstrong). Resource '1' is the
+ * TOP and has no managerId at all.
  *
- * MUST RUN LAST in main(): check 3 below permanently clears resource '1's
- * managerId for the rest of THIS server process — and, per the guard being
- * proven here, it can never be set back to '1' again afterward (that would
- * itself be the self-management cycle check 1 refuses). Nothing earlier in
- * this file may run after this function within the same process without
- * seeing resource '1' as manager-less; per the suite's own restart
- * discipline (see the file header) that is expected, not a bug.
+ * HISTORY (Task 5): resource '1' used to seed with `managerId: '1'` — herself,
+ * a self-loop shipped as demo data, i.e. exactly the write check 1 below
+ * refuses. It was removed from the seed rather than tolerated: "the read side
+ * survives a cycle in the data" is proven by unit tests over synthetic input
+ * (org-scope.util.spec), and a fixture that can only be produced by illegal
+ * data is a fixture that stops meaning anything the day the data is fixed.
+ * Checks 2 and 3 below were re-actored accordingly, with their assertions
+ * intact.
+ *
+ * MUST RUN LAST in main(): check 3 below permanently clears resource '3's
+ * managerId for the rest of THIS server process, which breaks the 3 -> 2 -> 1
+ * chain every earlier section reads. Nothing in this file may run after this
+ * function within the same process; per the suite's own restart discipline
+ * (see the file header) that is expected, not a bug.
  */
 async function checkResourceManagerCycle() {
-  const RESOURCE_1 = '1'; // Julie Armstrong — seeded managerId '1' (self), see note above.
+  const RESOURCE_1 = '1'; // Julie Armstrong — the TOP of the chain, no managerId.
   const RESOURCE_2 = '2'; // John Miller — seeded managerId '1'.
   const RESOURCE_3 = '3'; // Alice Smith — seeded managerId '2'.
 
@@ -3827,12 +3899,18 @@ async function checkResourceManagerCycle() {
       status === 200 && body?.managerId === RESOURCE_2,
       `status=${status}, managerId=${JSON.stringify(body?.managerId)}`,
     );
+    const top = await req('GET', `/resources/${RESOURCE_1}`);
+    check(
+      "setup: seeded resource '1' (Julie Armstrong) is the TOP of the chain and has NO managerId",
+      top.status === 200 && top.body?.managerId === undefined,
+      `status=${top.status}, managerId=${JSON.stringify(top.body?.managerId)}`,
+    );
   }
 
-  // 1) Self-management -> 400 mentioning a cycle. Pre-implementation this is
-  // ACCEPTED (200) — today nothing stops a resource naming itself its own
-  // manager (resource '1' already has exactly this in the seed, per the note
-  // above; this PUT would just be a same-value write).
+  // 1) Self-management -> 400 mentioning a cycle. Pre-implementation this was
+  // ACCEPTED (200) — nothing stopped a resource naming itself its own manager,
+  // which is how the seed came to carry exactly this shape on resource '1'
+  // until Task 5 removed it (see the note above).
   {
     const self = await req('PUT', `/resources/${RESOURCE_1}`, {
       headers: RBAC_HEADERS,
@@ -3861,12 +3939,37 @@ async function checkResourceManagerCycle() {
       closeLoop.status === 400 && typeof closeLoop.body?.error === 'string' && /cycle/i.test(closeLoop.body.error),
       `status=${closeLoop.status}, body=${JSON.stringify(closeLoop.body)}`,
     );
-    // Not just the status — confirm resource 1's managerId genuinely never
-    // changed (same discipline as the org-tree null-name guard above).
+    // Not just the status — confirm the refused PUT wrote NOTHING. Resource '1'
+    // is the top of the chain, so "nothing" means still no managerId at all.
     const { status, body } = await req('GET', `/resources/${RESOURCE_1}`);
     check(
-      "GET /api/resources/1 shows managerId UNCHANGED ('1') after the refused PUT",
-      status === 200 && body?.managerId === RESOURCE_1,
+      'GET /api/resources/1 still has NO managerId after the refused PUT (the refusal wrote nothing)',
+      status === 200 && body?.managerId === undefined,
+      `status=${status}, managerId=${JSON.stringify(body?.managerId)}`,
+    );
+  }
+
+  // 2b) THE SAME "a refusal writes nothing" PROOF, on a resource that carries a
+  // REAL managerId — so the witness is a value that survived, not an absence
+  // that would look identical whether the guard wrote or not. This is what
+  // check 2's re-read used to give while resource '1' still carried the seed's
+  // self-loop; with that gone, the observable-unchanged case needs a resource
+  // that genuinely has a manager. Alice ('3') self-targeting is refused by the
+  // same guard, and her seeded managerId '2' must be exactly as it was.
+  {
+    const selfAlice = await req('PUT', `/resources/${RESOURCE_3}`, {
+      headers: RBAC_HEADERS,
+      body: { managerId: RESOURCE_3 },
+    });
+    check(
+      "PUT /api/resources/3 {managerId:'3'} (itself) -> 400, mentions a cycle",
+      selfAlice.status === 400 && typeof selfAlice.body?.error === 'string' && /cycle/i.test(selfAlice.body.error),
+      `status=${selfAlice.status}, body=${JSON.stringify(selfAlice.body)}`,
+    );
+    const { status, body } = await req('GET', `/resources/${RESOURCE_3}`);
+    check(
+      "GET /api/resources/3 shows managerId UNCHANGED ('2') after the refused PUT",
+      status === 200 && body?.managerId === RESOURCE_2,
       `status=${status}, managerId=${JSON.stringify(body?.managerId)}`,
     );
   }
@@ -3875,27 +3978,33 @@ async function checkResourceManagerCycle() {
   // (distinct from the org-tree NODE's managerId proven in check 9b above) —
   // '' must clear a REAL managerId to absent, identically on both adapters,
   // and must NEVER be refused as a cycle (a cleared manager has no manager
-  // to close a loop with). The precondition (a REAL managerId '1') is
-  // guaranteed by checks 1-2 above never having mutated it. This is expected
-  // to ALREADY PASS pre-implementation (no cycle-guard code path can reject
-  // it), unlike checks 1-2 — its job is to prove the new guard doesn't
-  // regress the clear-to-absent write once it exists, not to prove new
-  // rejection behavior.
+  // to close a loop with). This is expected to ALREADY PASS pre-implementation
+  // (no cycle-guard code path can reject it), unlike checks 1-2 — its job is to
+  // prove the new guard doesn't regress the clear-to-absent write once it
+  // exists, not to prove new rejection behavior.
+  //
+  // Runs on Alice ('3'), whose seeded managerId '2' is a REAL value: the
+  // assertion folds in that precondition, so "cleared" cannot pass on a field
+  // that was empty to begin with. It used to run on resource '1', which only had
+  // a value to clear because of the seed's self-loop — clearing an already-absent
+  // field would still have returned 200 and asserted nothing. Sequenced AFTER
+  // every cycle check above, since it breaks the 3 -> 2 -> 1 chain those use.
   {
-    const cleared = await req('PUT', `/resources/${RESOURCE_1}`, {
+    const before = await req('GET', `/resources/${RESOURCE_3}`);
+    const cleared = await req('PUT', `/resources/${RESOURCE_3}`, {
       headers: RBAC_HEADERS,
       body: { managerId: '' },
     });
     check(
-      "PUT /api/resources/1 {managerId:''} -> 200, clears a REAL managerId to absent",
-      cleared.status === 200 && cleared.body !== undefined && !('managerId' in cleared.body),
-      `status=${cleared.status}, body=${JSON.stringify(cleared.body)}`,
+      "PUT /api/resources/3 {managerId:''} -> 200, clears a REAL managerId to absent",
+      before.body?.managerId === RESOURCE_2 && cleared.status === 200 && cleared.body !== undefined && !('managerId' in cleared.body),
+      `preManagerId=${JSON.stringify(before.body?.managerId)}, status=${cleared.status}, body=${JSON.stringify(cleared.body)}`,
     );
     // Re-confirm via a FRESH GET, not just the PUT's own echoed response —
     // the point of this seam is that it persists identically on both adapters.
-    const reread = await req('GET', `/resources/${RESOURCE_1}`);
+    const reread = await req('GET', `/resources/${RESOURCE_3}`);
     check(
-      'GET /api/resources/1 reflects managerId absent on re-read',
+      'GET /api/resources/3 reflects managerId absent on re-read',
       reread.status === 200 && !('managerId' in (reread.body || {})),
       `status=${reread.status}, body=${JSON.stringify(reread.body)}`,
     );
@@ -4152,7 +4261,7 @@ async function main() {
 
   // Own try/catch: guarded so an unexpected error in the D scoped-decision
   // flow never masks or blocks any of the prior section results. Runs BEFORE
-  // checkResourceManagerCycle, which permanently clears resource '1's
+  // checkResourceManagerCycle, which permanently clears resource '3's
   // managerId — this section reads the seeded 3 -> 2 -> 1 chain.
   try {
     await checkScopedAllocationDecision();
@@ -4164,7 +4273,8 @@ async function main() {
   // Own try/catch: guarded so an unexpected error in the D resource-manager-
   // cycle flow never masks or blocks any of the prior section results. MUST
   // run LAST (see the function's doc comment) — it permanently clears
-  // resource '1's managerId for the rest of this server process.
+  // resource '3's managerId for the rest of this server process, breaking the
+  // seeded 3 -> 2 -> 1 chain that earlier sections read.
   try {
     await checkResourceManagerCycle();
   } catch (err) {

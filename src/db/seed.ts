@@ -93,11 +93,30 @@ export const resources: Resource[] = [
   // Postgres applies the column's DEFAULT 'internal' on insert and serves the
   // field back, while the in-memory adapter stores exactly what it was given and
   // serves no `kind` at all. Same seed, two different JSON shapes.
+  // D — JULIE HAS NO `managerId`, DELIBERATELY AND BY ABSENCE. She is the top of
+  // the seeded org chart (3 -> 2 -> 1) and the manager of nodes '2'
+  // (Engineering) and '5' (Platform). She used to carry `managerId: '1'` —
+  // herself — which was a SELF-CYCLE in the org chart: precisely the write that
+  // `wouldCycleInOrgChart` now refuses on both POST and PUT /resources, shipped
+  // as demo data. The field is ABSENT rather than `''`: '' is normalized to
+  // absent on every write path for exactly this reason, and a stored '' would
+  // seed a phantom key in `reportsClosure`/`scopedApproversOf`, which gate on
+  // `=== undefined`.
+  //
+  // Authorization consequence, stated rather than left to be inferred:
+  // `scopedApproversOf('1', ...)` returns `{ managerIds: ∅, roleFallback: true }`
+  // — the org chart offers nobody above her, and the only node manager above her
+  // is herself (removed, since nobody may approve their own allocation). So any
+  // `resource-manager` may decide Julie's allocations. That is CORRECT for the
+  // top of a hierarchy and is the §3.4 rule-3 last resort, not the old flat
+  // fallback; it was already the outcome before this change (the self-loop was
+  // stopped by the traversal's `visited` set), so removing the field fixes the
+  // DATA without changing who can decide.
   { id: '1', name: 'Julie Armstrong', role: 'Developer', kind: 'internal',
     skills: [{ name: 'Java', level: 3 }, { name: 'Spring', level: 2 }],
     projectRoles: ['Senior Developer', 'Backend Engineer'],
     externalExperience: [{ projectName: 'E-commerce Migration', company: 'TechCorp', role: 'Java Developer', startDate: '2020-01-01', endDate: '2022-12-31', comment: 'Migrated legacy system to Spring Boot.' }],
-    profilePicture: '', resume: '', utilization: 95, utilizationPlanned: 95, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York', costRate: 600, billRate: 1120, hireDate: '2019-03-04', contractHoursPerDay: 8 },
+    profilePicture: '', resume: '', utilization: 95, utilizationPlanned: 95, capacity: 40, organization: 'Engineering', location: 'New York', costRate: 600, billRate: 1120, hireDate: '2019-03-04', contractHoursPerDay: 8 },
   { id: '2', name: 'John Miller', role: 'Consultant', kind: 'internal',
     skills: [{ name: 'Project Management', level: 2 }], projectRoles: ['Business Consultant'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 90, utilizationPlanned: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London', costRate: 720, billRate: 1440, hireDate: '2021-09-13', contractHoursPerDay: 8 },
