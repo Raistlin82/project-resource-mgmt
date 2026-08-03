@@ -2088,7 +2088,8 @@ async function checkDummySubstitution() {
   check('C2 a saturated target transfers nothing but does not error',
     saturated.status === 200 && (saturated.body.outcomes || [])[0]?.transferredHours === 0,
     `status=${saturated.status} outcome=${JSON.stringify(saturated.body?.outcomes?.[0])}`);
-  check('C2 a saturated substitution explains why', typeof (saturated.body?.outcomes || [])[0]?.skipped === 'string',
+  check('C2 a saturated substitution explains why (distinct from an empty dummy month)',
+    (saturated.body?.outcomes || [])[0]?.skipped === 'the target has no capacity left in this month',
     `skipped=${(saturated.body?.outcomes || [])[0]?.skipped}`);
 
   // --- demotedExistingWork: approve the person's first month, then substitute
@@ -2145,6 +2146,43 @@ async function checkDummySubstitution() {
         check('C2 the self-managed month carries no dangling back-link or approval',
           selfPersonMonth !== undefined && !('replacedFromAssignmentMonthId' in selfPersonMonth) && !('approvalId' in selfPersonMonth),
           `month=${JSON.stringify(selfPersonMonth)}`);
+      }
+    }
+  }
+
+  // --- Review fix verification: an EMPTY dummy month (no hours booked at all)
+  // gets its OWN zero-transfer reason, distinct from "target saturated" above,
+  // and a zero-transfer attempt never creates a phantom Draft assignment for
+  // the target (the lock-ordering/phantom-assignment review findings).
+  const emptyDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 empty dummy (no hours booked)', kind: 'dummy', contractHoursPerDay: 8 } });
+  const phantomTarget = await req('POST', '/resources', { body: { ...base, name: 'C2 phantom-check target', kind: 'internal', contractHoursPerDay: 8 } });
+  const emptySetupOk = check('C2 setup: empty-dummy/phantom-target resources created',
+    emptyDummy.status === 201 && phantomTarget.status === 201,
+    `emptyDummy=${emptyDummy.status} phantomTarget=${phantomTarget.status}`);
+  if (emptySetupOk) {
+    const emptyRequest = await req('POST', '/requests', { body: { name: 'C2 empty-dummy request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+    const emptyReqOk = check('C2 setup: empty-dummy request created', emptyRequest.status === 200 && typeof emptyRequest.body?.id === 'string', `status=${emptyRequest.status}`);
+    if (emptyReqOk) {
+      const emptyAssignment = await req('POST', '/assignments', { body: { requestId: emptyRequest.body.id, resourceId: emptyDummy.body.id, assignedHours: 0 } });
+      const emptyAssignOk = check('C2 setup: empty-dummy assignment created', emptyAssignment.status === 200 && typeof emptyAssignment.body?.id === 'string', `status=${emptyAssignment.status}`);
+      if (emptyAssignOk) {
+        // A 0h PUT still lazily creates the month row (Draft, via ensureAssignmentMonth)
+        // without creating any day row — exactly "a dummy month with no hours booked".
+        const emptyZeroPut = await req('PUT', `/assignments/${emptyAssignment.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 0 } } });
+        check('C2 setup: empty-dummy month row exists with no day rows', emptyZeroPut.status === 200, `status=${emptyZeroPut.status}`);
+        const emptyDummyMonthId = `${emptyAssignment.body.id}:${MONTH}`;
+
+        const emptySub = await req('POST', `/assignment-months/${emptyDummyMonthId}/substitute`, { body: { targetResourceId: phantomTarget.body.id } });
+        const emptyOutcome = (emptySub.body?.outcomes || [])[0];
+        check('C2 an empty dummy month gets its own zero-transfer reason',
+          emptySub.status === 200 && emptyOutcome?.transferredHours === 0 &&
+          emptyOutcome?.skipped === 'the dummy has no hours booked in this month',
+          `status=${emptySub.status} outcome=${JSON.stringify(emptyOutcome)}`);
+
+        const afterAssignments = await req('GET', '/assignments');
+        const phantom = (afterAssignments.body || []).find(a => a.resourceId === phantomTarget.body.id);
+        check('C2 a zero-transfer substitution creates no phantom assignment for the target',
+          phantom === undefined, `phantom=${JSON.stringify(phantom)}`);
       }
     }
   }

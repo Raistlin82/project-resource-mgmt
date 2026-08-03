@@ -1998,38 +1998,59 @@ async function transferDummyMonth(
   // target is validated `internal` by the caller.
   const cap = dailyCapFor(kindOf(target), targetBaseCap);
 
-  // The target's assignment on the SAME request; created if absent. Created
-  // 'Draft': status is derived, never client-set (C1/B3).
-  const assignments = await repos.assignments.list();
-  let targetAssig = assignments.find(a => a.resourceId === target.id && a.requestId === dummyAssig.requestId);
-  if (targetAssig === undefined) {
-    targetAssig = await repos.assignments.create({
-      id: newId(), requestId: dummyAssig.requestId, resourceId: target.id,
-      assignedHours: 0, status: 'Draft',
-    } as Assignment);
-  }
-
   const [firstId, secondId] = [dummyAssig.resourceId, target.id].sort();
-  const plan = await withLock(`res:${firstId}`, () => withLock(`res:${secondId}`, async (): Promise<SubstitutionPlan> => {
+  const { plan, targetAssig: lockedTargetAssig } = await withLock(`res:${firstId}`, () => withLock(`res:${secondId}`, async (): Promise<{ plan: SubstitutionPlan; targetAssig?: Assignment }> => {
+    // The target's assignment on the SAME request — resolved (never yet
+    // CREATED) here, INSIDE both locks. Review finding (Task 3, Important #1):
+    // reading the assignment list and finding-or-creating this row BEFORE the
+    // lock let two concurrent substitutions targeting the same brand-new
+    // person both miss the `find`, both `create` a row for the same
+    // (resourceId, requestId) pair, and then each compute `targetBooked` from
+    // its own now-stale snapshot — invisible to the other's writes, so both
+    // could independently fill the person's day past their daily cap despite
+    // the locks. Both `res:` locks are held from here on, so this read (and
+    // the eventual create, below) is now inside the exact critical section
+    // that must serialize it.
+    const assignments = await repos.assignments.list();
+    const existingTargetAssig = assignments.find(a => a.resourceId === target.id && a.requestId === dummyAssig.requestId);
+
     const allDays = await repos.assignmentDays.list();
     const dummyDays = allDays.filter(d => d.assignmentId === dummyAssig.id && monthOf(d.date) === month);
     const dummyByDate = sumHoursByDate(dummyDays);
 
-    // What the target already holds on those days, across ALL their assignments.
-    const targetIds = new Set(assignments.filter(a => a.resourceId === target.id).map(a => a.id).concat(targetAssig!.id));
+    // What the target already holds on those days, across ALL their
+    // assignments (a not-yet-created candidate assignment contributes no
+    // rows of its own, so it needn't be in this set).
+    const targetIds = new Set(assignments.filter(a => a.resourceId === target.id).map(a => a.id));
+    if (existingTargetAssig) targetIds.add(existingTargetAssig.id);
     const targetBooked = sumHoursByDate(allDays.filter(d => targetIds.has(d.assignmentId) && dummyByDate[d.date] !== undefined));
 
     const p = planSubstitution(dummyByDate, targetBooked, cap);
+
+    if (Object.keys(p.transfer).length === 0) {
+      // Nothing to write: don't create a phantom 'Draft' assignment for the
+      // target (review finding, Minor #2) and don't recompute anything —
+      // the target's day rows (and a legacy assignedHours total with no day
+      // rows at all, if that's what this assignment is) are left untouched.
+      return { plan: p, targetAssig: existingTargetAssig };
+    }
+
+    // Created ONLY NOW that something is actually moving onto it. 'Draft':
+    // status is derived, never client-set (C1/B3).
+    const targetAssig = existingTargetAssig ?? await repos.assignments.create({
+      id: newId(), requestId: dummyAssig.requestId, resourceId: target.id,
+      assignedHours: 0, status: 'Draft',
+    } as Assignment);
 
     for (const [date, hours] of Object.entries(p.transfer)) {
       // Add to the target (merging with anything already booked that day on THIS
       // assignment), then reduce the dummy — a day that reaches zero is removed,
       // the same rule the allocation endpoint applies.
-      const targetDayId = `${targetAssig!.id}:${date}`;
+      const targetDayId = `${targetAssig.id}:${date}`;
       const existing = await repos.assignmentDays.get(targetDayId);
       const merged = Math.round(((existing?.hours ?? 0) + hours) * 100) / 100;
       if (existing) await repos.assignmentDays.update(targetDayId, { hours: merged });
-      else await repos.assignmentDays.create({ id: targetDayId, assignmentId: targetAssig!.id, date, hours: merged } as AssignmentDay);
+      else await repos.assignmentDays.create({ id: targetDayId, assignmentId: targetAssig.id, date, hours: merged } as AssignmentDay);
 
       const dummyDayId = `${dummyAssig.id}:${date}`;
       const left = p.remaining[date] ?? 0;
@@ -2037,14 +2058,32 @@ async function transferDummyMonth(
       else await repos.assignmentDays.remove(dummyDayId);
     }
 
+    // recomputeAssignedHours is called only now that `p.transfer` is known
+    // non-empty (review finding, Important #2): calling it unconditionally
+    // rewrote BOTH assignments' assignedHours to the sum of their (unchanged)
+    // day rows even on a zero-transfer attempt — silently zeroing a LEGACY
+    // assignment that carries an assignedHours total with no day rows at all
+    // (the exact case recomputeAssignedHours's own doc comment calls out).
     await recomputeAssignedHours(dummyAssig.id);
-    await recomputeAssignedHours(targetAssig!.id);
-    return p;
+    await recomputeAssignedHours(targetAssig.id);
+    return { plan: p, targetAssig };
   }));
 
   if (plan.transferredHours === 0) {
-    return { month, transferredHours: 0, remainingHours: plan.remainingHours, skipped: 'the target has no capacity left in this month' };
+    // Distinguish "nothing to move" from "no room to move it into": a dummy
+    // month with no bookable hours (no day rows, or all zero/negative) leaves
+    // BOTH transferredHours and remainingHours at 0; a saturated target still
+    // has remainingHours > 0 (review finding, Minor #1).
+    const reason = plan.remainingHours === 0
+      ? 'the dummy has no hours booked in this month'
+      : 'the target has no capacity left in this month';
+    return { month, transferredHours: 0, remainingHours: plan.remainingHours, skipped: reason };
   }
+
+  // transferredHours > 0 guarantees the locked section resolved (found or
+  // created) the target's assignment — see the `if (Object.keys(p.transfer)…)`
+  // early return above, the only path that leaves it undefined.
+  const targetAssig = lockedTargetAssig!;
 
   // OUTSIDE both locks: the month row, its approval and the notes.
   const targetRow = await ensureAssignmentMonth(targetAssig.id, month);
