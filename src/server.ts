@@ -2136,6 +2136,43 @@ async function transferDummyMonth(
   };
 }
 
+/** Best-effort current sum of the dummy's day-row hours in `month` — used to
+ * report an honest `remainingHours` after a transfer attempt throws. Reflects
+ * whatever state genuinely exists right now (some day rows may already have
+ * moved before the failure), not a guess about how far the interrupted
+ * attempt got. */
+async function dummyMonthHours(assignmentId: string, month: string): Promise<number> {
+  const total = (await repos.assignmentDays.list())
+    .filter(d => d.assignmentId === assignmentId && monthOf(d.date) === month)
+    .reduce((s, d) => s + (Number.isFinite(d.hours) ? d.hours : 0), 0);
+  return Math.round(total * 100) / 100;
+}
+
+/**
+ * Converts a thrown error from one month's `transferDummyMonth` attempt into
+ * a SKIPPED outcome instead of letting it propagate. Load-bearing under
+ * `applyToRemainingMonths`: without this, a failure on month 2 of 5 would
+ * throw the whole request, discarding the 1 outcome already collected in
+ * memory even though ITS mutations (day rows moved, an approval possibly
+ * opened) already committed and are not undone by the throw. Applied to the
+ * primary month too — same failure mode, smaller blast radius (one month
+ * instead of N), and costs nothing extra now that this helper exists.
+ *
+ * The raw error is logged server-side (it may carry internal repo/DB detail)
+ * but never echoed to the client — this endpoint is RBAC-gated to
+ * resource-manager/delivery-executive/admin, not a debug console, so the
+ * wire message stays generic, same discipline as the rest of this file's
+ * `pick()`/mass-assignment boundary.
+ */
+async function failedMonthOutcome(err: unknown, assignmentId: string, month: string): Promise<SubstitutionMonthOutcome> {
+  console.error(`substitute: transfer failed for assignment ${assignmentId}, month ${month}:`, err);
+  const remainingHours = await dummyMonthHours(assignmentId, month).catch(() => 0);
+  return {
+    month, transferredHours: 0, remainingHours,
+    skipped: 'the transfer for this month failed unexpectedly — check its current allocation directly',
+  };
+}
+
 // C2 — hand a dummy's month to a real person. `:id` is the DUMMY's month row.
 apiRouter.post('/assignment-months/:id/substitute', async (req, res) => {
   const dummyRow = await repos.assignmentMonths.get(req.params.id);
@@ -2163,7 +2200,12 @@ apiRouter.post('/assignment-months/:id/substitute', async (req, res) => {
   if (period?.status !== 'Open') { res.status(403).json({ error: 'month is not open for planning' }); return; }
 
   const targetBaseCap = await resolveBaseCap(target);
-  const outcomes: SubstitutionMonthOutcome[] = [await transferDummyMonth(req, dummyRow, dummyAssig, target, targetBaseCap)];
+  const outcomes: SubstitutionMonthOutcome[] = [];
+  try {
+    outcomes.push(await transferDummyMonth(req, dummyRow, dummyAssig, target, targetBaseCap));
+  } catch (err) {
+    outcomes.push(await failedMonthOutcome(err, dummyAssig.id, dummyRow.month));
+  }
 
   // C2/Task 4 — "apply to all remaining months": a dummy typically spans
   // several months, and repeating this search-and-confirm for each one is
@@ -2200,7 +2242,11 @@ apiRouter.post('/assignment-months/:id/substitute', async (req, res) => {
         continue;
       }
 
-      outcomes.push(await transferDummyMonth(req, row, dummyAssig, target, targetBaseCap));
+      try {
+        outcomes.push(await transferDummyMonth(req, row, dummyAssig, target, targetBaseCap));
+      } catch (err) {
+        outcomes.push(await failedMonthOutcome(err, dummyAssig.id, row.month));
+      }
     }
   }
 

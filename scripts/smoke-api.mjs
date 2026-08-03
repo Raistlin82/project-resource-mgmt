@@ -2316,6 +2316,40 @@ async function checkDummySubstitution() {
       }
     }
   }
+
+  // --- applyToRemainingMonths with NO later months at all: a dummy booked in
+  // only ONE month must still return exactly that one outcome — `laterRows`
+  // is empty, so the loop body never runs. Correct by inspection already
+  // (an empty `laterRows` array trivially skips the `for`), but untested
+  // until now.
+  const soloDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 solo-month dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  const soloPerson = await req('POST', '/resources', { body: { ...base, name: 'C2 solo-month person', kind: 'internal', contractHoursPerDay: 8 } });
+  const soloSetupOk = check('C2 solo-month setup: dummy/person resources created',
+    soloDummy.status === 201 && soloPerson.status === 201,
+    `dummy=${soloDummy.status} person=${soloPerson.status}`);
+  if (soloSetupOk) {
+    const soloRequest = await req('POST', '/requests', { body: { name: 'C2 solo-month request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+    const soloReqOk = check('C2 solo-month setup: request created', soloRequest.status === 200 && typeof soloRequest.body?.id === 'string', `status=${soloRequest.status}`);
+    if (soloReqOk) {
+      const soloAssignment = await req('POST', '/assignments', { body: { requestId: soloRequest.body.id, resourceId: soloDummy.body.id, assignedHours: 0 } });
+      const soloAssignOk = check('C2 solo-month setup: dummy assignment created', soloAssignment.status === 200 && typeof soloAssignment.body?.id === 'string', `status=${soloAssignment.status}`);
+      if (soloAssignOk) {
+        const soloAssignmentId = soloAssignment.body.id;
+        const soloBooked = await req('PUT', `/assignments/${soloAssignmentId}/allocation`, { body: { month: REMAINING_M1, dailyHours: { [REMAINING_DAY1]: 8 } } });
+        check('C2 solo-month setup: dummy booked in exactly one month', soloBooked.status === 200, `status=${soloBooked.status} err=${soloBooked.body?.error}`);
+
+        const soloMonthId = `${soloAssignmentId}:${REMAINING_M1}`;
+        const soloSub = await req('POST', `/assignment-months/${soloMonthId}/substitute`, {
+          body: { targetResourceId: soloPerson.body.id, applyToRemainingMonths: true },
+        });
+        check('C2 applyToRemainingMonths with no later months is accepted', soloSub.status === 200, `status=${soloSub.status} err=${soloSub.body?.error}`);
+        const soloOutcomes = soloSub.body?.outcomes || [];
+        check('C2 applyToRemainingMonths with no later months returns exactly ONE outcome (no phantom entries)',
+          soloOutcomes.length === 1 && soloOutcomes[0]?.month === REMAINING_M1 && soloOutcomes[0]?.transferredHours === 8,
+          `outcomes=${JSON.stringify(soloOutcomes)}`);
+      }
+    }
+  }
 }
 
 async function main() {
