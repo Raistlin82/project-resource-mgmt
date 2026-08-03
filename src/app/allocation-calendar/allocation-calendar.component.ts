@@ -131,6 +131,14 @@ const EMPTY_DATA: CalendarData = {
                   @if (month === focusMonth()) {
                     <span class="command-status uppercase neutral" data-test="focused-month">In review</span>
                   }
+                  <!-- C2: this month's hours arrived from a dummy substitution while it is
+                       still pending decision (the back-link is cleared once the month is
+                       decided — see AssignmentMonth.replacedFromAssignmentMonthId). A text
+                       label, not colour alone (WCAG 1.4.1), reusing the same command-status
+                       badge idiom as the "In review" chip above. -->
+                  @if (monthRow(month)?.replacedFromAssignmentMonthId) {
+                    <span class="command-status uppercase neutral" data-test="substituted-month">Taken over from a placeholder</span>
+                  }
                 </div>
                 <div class="flex items-center gap-3">
                   <span class="text-xs font-semibold text-ink-secondary font-mono tabular-nums"

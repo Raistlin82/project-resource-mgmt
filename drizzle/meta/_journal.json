@@ -85,6 +85,27 @@
       "when": 1785704168109,
       "tag": "0011_illegal_korg",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1785741345769,
+      "tag": "0012_groovy_magik",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1785749151545,
+      "tag": "0013_c2_replaced_days",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1785767629373,
+      "tag": "0014_c2_replaced_baseline_days",
+      "breakpoints": true
     }
   ]
 }

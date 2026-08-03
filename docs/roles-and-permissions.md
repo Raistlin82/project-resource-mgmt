@@ -172,6 +172,7 @@ A role not in the matched rule's list gets **403**. Path tests use `startsWith`
 | `/planning-periods` | `admin` only |
 | `/approval-requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/allocation-approvals` (B3 batch month decisions, `POST /allocation-approvals/decide`) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/assignment-months` (C2 dummy substitution, `POST /assignment-months/:id/substitute`) | `resource-manager`, `delivery-executive`, `admin` |
 | `/integrations` | `finance`, `delivery-executive`, `admin` |
 
 **Open mutations (no rule):** collections not matched above are open to any
@@ -186,6 +187,15 @@ base currency `EUR` is fixed at rate 1).
 > computed rollup — `GET /capacity/monthly` — with no write endpoint at all). The
 > mutation `/resources` rule is *narrower* than its read rule — `pm`/`finance` may
 > *read* resources (margin/staffing need-to-know) but not rewrite cost/bill rates.
+>
+> `/assignment-months` is the **inverse** case: a mutation rule with **no** read
+> rule, because the prefix mounts exactly one route and it is a POST
+> (`POST /assignment-months/:id/substitute`, C2). Month rows are never *read*
+> through this prefix — they are served inside
+> `GET /assignments/:id/allocation` and `GET /allocation-approvals`, each gated by
+> its own rule. Its rule is also deliberately **narrower** than `/assignments`:
+> `pm` may book a dummy's hours but may not hand them to a person (see
+> [C2 substitution](#c2-substituting-a-dummy-with-a-real-person) below).
 
 ---
 
@@ -322,6 +332,63 @@ see [Server endpoint RBAC](#server-endpoint-rbac)):
   applied directly to the assignment's `status` so nothing already in flight
   is orphaned. Either way the resource/request staffing aggregates are
   recomputed afterwards.
+
+### C2 — substituting a dummy with a real person
+
+**`POST /assignment-months/:id/substitute`** — `:id` is the **dummy's** month
+row. Body `{ targetResourceId, applyToRemainingMonths?: boolean }`. It moves that
+month's booked hours to a real person, day by day, capped by what the person can
+actually absorb (`min(dummy hours, their remaining daily capacity)`); whatever
+does not fit **stays on the dummy** for a second person.
+
+**Rule:** `resource-manager`, `delivery-executive`, `admin` — matched by
+`p.startsWith('/assignment-months')`, its own rule, **not** the `/assignments`
+one. Substituting is an *approver* action (the same roles that decide
+allocations), so the gate is deliberately **narrower** than the rule that lets a
+planner book the dummy's hours in the first place: **`pm` gets 403**, before the
+handler runs and therefore without leaving any state behind. The smoke suite
+asserts that negative (`checkDummySubstitution`) so the rule cannot drift away
+from this table silently.
+
+Validation, in the handler on top of RBAC:
+
+- **404** when the month row does not exist.
+- **400** when the row does not belong to a `kind='dummy'` resource, when
+  `targetResourceId` is missing, unknown, not `internal`, terminated, or is the
+  dummy itself, or when the row references a missing assignment.
+- **403** when the month's planning period is not `Open` — a substitution moves
+  hours, so B1's open-month gate applies exactly as it does to a day-row edit.
+- **200 with `transferredHours: 0`** and a human-readable `skipped` reason when
+  the target has no room left (or the dummy has no hours booked). That is an
+  outcome, not an error: it says another person is needed.
+
+**No new approval role.** The person's month lands `Requested` with an ordinary
+single-step `Allocation` approval routed to **her own** People Manager — the same
+approval object, routing and SoD as a B3 submit. The self-managed shortcut above
+applies unchanged: when the substituting actor *is* the target's manager, the
+month goes straight to `Allocated` with no approval opened.
+
+**Reversibility.** The transfer is immediate (the hours leave the dummy at once,
+so demand is never double-counted) but reversible until the decision: the
+person's month row carries a transient back-link to the dummy month
+(`replacedFromAssignmentMonthId`) plus the per-day map of what moved
+(`replacedDays`) and, over the same dates, what she already held before it
+(`replacedBaselineDays` — a date can carry both, and the split is not
+reconstructable afterwards). The decision closes the link: a rejection returns
+every transferred hour, an approval returns only what the approver trimmed off the
+**loan**, and neither branch may ever reduce her below her own baseline. A
+give-back that restores hours onto a `Rejected` placeholder month reopens it to
+`Requested` with a fresh approval, so the restored demand still counts on
+`/capacity/monthly`. See
+[`docs/architecture/03-backend-and-data.md`](architecture/03-backend-and-data.md)
+for the three columns and why the back-link is not a foreign key.
+
+**Audit.** The substitution POST records the ordinary
+method/path/status/actor entry, but **no** before/after diff (the middleware only
+snapshots for PUT/DELETE), and the give-back — which runs inside the decision
+hook rather than as its own request — records none of its own beyond the month's
+status transition. Neither side records *which day rows moved*. Known gap, open
+for both sides together.
 
 ---
 

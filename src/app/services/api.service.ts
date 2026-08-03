@@ -149,6 +149,39 @@ export interface AssignmentMonth {
   plannerNote?: string;
   /** Note written by the approver (People Manager) on the decision. */
   approverNote?: string;
+  /**
+   * C2 — the dummy month this month's hours came from, while a substitution is
+   * pending. Transient: written when the hours are transferred, cleared when the
+   * decision resolves (a rejection returns them all, an approval returns only
+   * what the approver trimmed). A month without it is an ordinary month.
+   */
+  replacedFromAssignmentMonthId?: string;
+  /**
+   * C2 — WHICH days that substitution moved, and how many hours from each
+   * (`{ 'YYYY-MM-DD': hours }`, days that moved nothing absent).
+   *
+   * NOT derivable at decision time, and a per-day map rather than a total on
+   * purpose: the approver may trim or zero the month before approving, so the
+   * original figures are no longer readable anywhere, and the give-back must be
+   * decided DAY BY DAY (`moved[date] - min(moved[date], stillHeld[date])`). A
+   * single total would have to be spread over the days she happens to hold at
+   * decision time, which silently moves her own unrelated work onto the dummy —
+   * see `planGiveBack`. Written and cleared together with the back-link above.
+   */
+  replacedDays?: Record<string, number>;
+  /**
+   * C2 — what she ALREADY held on each of those dates, on this assignment,
+   * immediately before the transfer (`{ 'YYYY-MM-DD': hours }`, same dates as
+   * `replacedDays`).
+   *
+   * The give-back needs the day's hours split into "hers" and "on loan", and a date
+   * can legitimately carry both (a substitution onto a month she already had hours
+   * in DEMOTES it — `demotedExistingWork`). That split is NOT reconstructable from
+   * what she happens to hold at decision time, so the transfer records it: without
+   * it, trimming a shared day charges her own hours against the loan and destroys
+   * booked demand. Written and cleared together with the two fields above.
+   */
+  replacedBaselineDays?: Record<string, number>;
 }
 
 /**
@@ -247,6 +280,33 @@ export interface AllocationDecisionResult {
   assignmentMonthId: string;
   status: string;
   error?: string;
+}
+
+/**
+ * C2 — the outcome of transferring ONE dummy month to a real person, via
+ * `POST /assignment-months/:id/substitute`. Transferring 0 hours is a
+ * legitimate outcome (the target had no room left that month), not an error —
+ * `skipped` carries a human-readable reason for it (or for a month whose
+ * planning period was not Open, under `applyToRemainingMonths`).
+ */
+export interface SubstitutionMonthOutcome {
+  month: string;
+  transferredHours: number;
+  remainingHours: number;
+  /** Composite `<assignmentId>:<month>` of the target's month row, absent when nothing transferred. */
+  targetAssignmentMonthId?: string;
+  status?: AssignmentMonth['status'];
+  skipped?: string;
+  /** True when the transfer demoted work the target already had approved that month. */
+  demotedExistingWork?: boolean;
+}
+
+/** Response of `POST /assignment-months/:id/substitute` (C2): one outcome per
+ *  month transferred — a single entry unless `applyToRemainingMonths` was set. */
+export interface SubstitutionResult {
+  targetResourceId: string;
+  targetResourceName: string;
+  outcomes: SubstitutionMonthOutcome[];
 }
 
 /**
@@ -887,6 +947,15 @@ export class ApiService {
   /** Decide N month rows in one call ("Approva Mese" / "Approva e Prosegui"). */
   decideAllocationMonths(items: AllocationDecisionItem[]): Observable<{ results: AllocationDecisionResult[] }> {
     return this.http.post<{ results: AllocationDecisionResult[] }>(`${this.baseUrl}/allocation-approvals/decide`, { items });
+  }
+
+  /**
+   * C2 — hand a dummy's month to a real person, capped by what they can absorb
+   * each day. `assignmentMonthId` is the DUMMY's month row. `applyToRemainingMonths`
+   * repeats the transfer across the dummy's later months in the same request/chain.
+   */
+  substituteDummyMonth(assignmentMonthId: string, targetResourceId: string, applyToRemainingMonths?: boolean): Observable<SubstitutionResult> {
+    return this.http.post<SubstitutionResult>(`${this.baseUrl}/assignment-months/${assignmentMonthId}/substitute`, { targetResourceId, applyToRemainingMonths });
   }
 
   // --- Monthly FTE capacity (B2) ---

@@ -354,3 +354,48 @@ describe('schedule.util buildSchedule — same-day edge & lane grouping', () => 
     expect(model.conflicts[0].resourceId).toBe('R1');
   });
 });
+
+// C2 — the six-month phantom conflict. An assignment created by a dummy
+// substitution used to be written with neither a window nor an allocationPct, so
+// `resolveWindow` fell back to the REQUEST's dates and `allocationPct` defaulted to
+// 100: a few hours transferred into ONE month rendered as a full-time booking across
+// the whole request, and the sweep then flagged it AND the person's real booking as
+// conflicting for every month of it. The substitution now writes the substituted
+// month as the window and the transferred FTE as the pct
+// (`planSubstitutionBooking`); this pins that the phantom conflict is gone.
+describe('schedule.util buildSchedule — a substitution-created booking', () => {
+  const SIX_MONTH_REQUEST = { startDate: '2026-09-01', endDate: '2027-02-28' };
+
+  it('would conflict for the whole request window with no dates and no pct (the defect)', () => {
+    const model = buildSchedule(
+      [resource('R1')],
+      [
+        assignment('A_OWN', { requestId: 'REQ_OWN', resourceId: 'R1', startDate: '2026-11-01', endDate: '2026-11-30', allocationPct: 100 }),
+        assignment('A_SUB', { requestId: 'REQ_SUB', resourceId: 'R1' }), // no window, no pct
+      ],
+      [request('REQ_OWN', { startDate: '2026-11-01', endDate: '2026-11-30' }), request('REQ_SUB', SIX_MONTH_REQUEST)],
+    );
+    const lane = laneOf(model, 'R1');
+    expect(lane.hasConflict).toBe(true);
+    expect(lane.peakAllocationPct).toBe(200);
+    expect(lane.bookings.every(b => b.conflict)).toBe(true);
+  });
+
+  it('does not conflict once it carries the substituted month and the transferred FTE', () => {
+    // 40h transferred into 2026-09 against a 176h month => 22.73%.
+    const model = buildSchedule(
+      [resource('R1')],
+      [
+        assignment('A_OWN', { requestId: 'REQ_OWN', resourceId: 'R1', startDate: '2026-11-01', endDate: '2026-11-30', allocationPct: 100 }),
+        assignment('A_SUB', { requestId: 'REQ_SUB', resourceId: 'R1', startDate: '2026-09-01', endDate: '2026-09-30', allocationPct: 22.73 }),
+      ],
+      [request('REQ_OWN', { startDate: '2026-11-01', endDate: '2026-11-30' }), request('REQ_SUB', SIX_MONTH_REQUEST)],
+    );
+    const lane = laneOf(model, 'R1');
+    expect(lane.hasConflict).toBe(false);
+    expect(model.conflicts).toEqual([]);
+    expect(lane.bookings.every(b => !b.conflict)).toBe(true);
+    // The bar stops at the substituted month instead of running to 2027-02.
+    expect(lane.bookings.find(b => b.assignmentId === 'A_SUB')?.endDate).toBe('2026-09-30');
+  });
+});

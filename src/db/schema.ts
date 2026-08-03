@@ -229,6 +229,26 @@ export const assignmentMonths = pgTable(
     approvalId: text('approval_id'),
     plannerNote: text('planner_note'),
     approverNote: text('approver_note'),
+    // C2: back-link to the dummy month a substitution took these hours from, and
+    // the PER-DAY map of what it moved (`{ 'YYYY-MM-DD': hours }`). Both nullable
+    // and transient — written together at transfer time, cleared together when the
+    // decision resolves. Plain `text`, NOT a `.references()` self-FK: the dummy
+    // month it points at is legitimately deleted while this row lives on (deleting
+    // a dummy's assignment removes its month rows), and that must not cascade into
+    // a person's month or fail her decision — a missing dummy row makes the
+    // give-back a recorded no-op. `replaced_days` is a MAP, not a total, because
+    // the give-back is decided day by day: see `planGiveBack`.
+    //
+    // `replaced_baseline_days` is the SECOND half of that map: what the person
+    // already held on each of those dates, ON THIS ASSIGNMENT, immediately before
+    // the transfer. Without it the give-back cannot tell her own hours from the
+    // loaned ones on a date carrying BOTH (the `demotedExistingWork` case) and
+    // silently destroys booked hours — see `planGiveBack`'s doc comment. All three
+    // columns are written in one patch and cleared in one patch, so they cannot
+    // drift apart.
+    replacedFromAssignmentMonthId: text('replaced_from_assignment_month_id'),
+    replacedDays: jsonb('replaced_days').$type<Record<string, number>>(),
+    replacedBaselineDays: jsonb('replaced_baseline_days').$type<Record<string, number>>(),
   },
   (t) => [
     index('assignment_months_assignment_id_idx').on(t.assignmentId),

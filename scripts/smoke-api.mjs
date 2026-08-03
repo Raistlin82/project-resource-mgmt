@@ -50,25 +50,48 @@ function check(name, ok, detail = '') {
   return ok;
 }
 
-/** Fetch JSON, returning { status, body, raw }. Never throws on HTTP status. */
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Fetch JSON, returning { status, body, raw }. Never throws on HTTP status.
+ *
+ * RETRIES A 429. The API applies a 300-req/min-per-client rate limit (src/server.ts,
+ * `rateLimit(300, 60_000)`) and this suite is well past that in a single 60s
+ * window, so without a backoff a growing suite starts reporting phantom failures
+ * for every check after the ceiling — the exact way a red gate gets mistaken for a
+ * product bug. The retry is SAFE because the limiter is `apiRouter.use(...)`
+ * middleware: a 429 is rejected before any handler runs, so the request had no
+ * side effect and re-sending it is not a duplicate mutation. Waits out the rest of
+ * the window (buckets are fixed-window, keyed on the client ip).
+ */
 async function req(method, path, { headers, body } = {}) {
-  const res = await fetch(`${API}${path}`, {
-    method,
-    headers: {
-      ...RBAC_HEADERS,
-      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      ...headers,
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let json;
-  try {
-    json = text ? JSON.parse(text) : undefined;
-  } catch {
-    json = undefined;
+  const RETRY_MS = 5_000;
+  const MAX_WAIT_MS = 70_000; // one full window plus slack
+  let waited = 0;
+  for (;;) {
+    const res = await fetch(`${API}${path}`, {
+      method,
+      headers: {
+        ...RBAC_HEADERS,
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        ...headers,
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const text = await res.text();
+    let json;
+    try {
+      json = text ? JSON.parse(text) : undefined;
+    } catch {
+      json = undefined;
+    }
+    if (res.status !== 429 || waited >= MAX_WAIT_MS) {
+      return { status: res.status, body: json, raw: text };
+    }
+    if (waited === 0) console.log(`INFO  rate limit reached — waiting out the window before retrying ${method} ${path}`);
+    await sleep(RETRY_MS);
+    waited += RETRY_MS;
   }
-  return { status: res.status, body: json, raw: text };
 }
 
 /** SMOKE_CREATE_ONLY: just POST a cost-center and print the created id+segment. */
@@ -1990,6 +2013,942 @@ async function checkResourceKinds() {
   check('C1 the same kind change succeeds once the allocation fits', demoteOk.status === 200 && demoteOk.body?.kind === 'internal', `status=${demoteOk.status}`);
 }
 
+/**
+ * C2 — handing a dummy's hours to a real person. The transfer is capped by what
+ * that person can absorb, so a multi-FTE dummy needs more than one substitution.
+ */
+async function checkDummySubstitution() {
+  const MONTH = '2026-04';
+  const DAY = `${MONTH}-07`; // Tuesday
+  const DAY2 = `${MONTH}-08`; // Wednesday — a second day, for the demoted-existing-work case
+
+  const base = { role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, hireDate: '2026-01-01' };
+
+  // Fixtures: a dummy booked at 2 FTE on one working day of an open month, an
+  // internal person free that day, a second dummy of a non-internal kind (to
+  // prove a non-internal target is refused), a plain internal resource booked
+  // on its OWN request (to prove a non-dummy month is refused — kept separate
+  // from `person` so its booking never eats into the target's daily room), and
+  // a THIRD dummy on the SAME request as the first, for the
+  // demoted-existing-work case.
+  const dummy = await req('POST', '/resources', { body: { ...base, name: 'C2 dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  const person = await req('POST', '/resources', { body: { ...base, name: 'C2 person', kind: 'internal', contractHoursPerDay: 8 } });
+  const otherDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 other dummy (bad target)', kind: 'dummy', contractHoursPerDay: 8 } });
+  const plainInternal = await req('POST', '/resources', { body: { ...base, name: 'C2 plain internal (non-dummy month)', kind: 'internal', contractHoursPerDay: 8 } });
+  const dummy2 = await req('POST', '/resources', { body: { ...base, name: 'C2 second dummy (demotes existing work)', kind: 'dummy', contractHoursPerDay: 8 } });
+  const setupOk = check('C2 setup: dummy/person/other-dummy/plain-internal/dummy2 resources created',
+    dummy.status === 201 && person.status === 201 && otherDummy.status === 201 && plainInternal.status === 201 && dummy2.status === 201,
+    `dummy=${dummy.status} person=${person.status} other=${otherDummy.status} plain=${plainInternal.status} dummy2=${dummy2.status}`);
+  if (!setupOk) return;
+  const personId = person.body.id;
+  const otherDummyId = otherDummy.body.id;
+
+  const request = await req('POST', '/requests', { body: { name: 'C2 substitution request', requiredRole: 'Developer', requiredEffort: 2, skills: [] } });
+  const plainRequest = await req('POST', '/requests', { body: { name: 'C2 non-dummy month request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+  const reqsOk = check('C2 setup: requests created',
+    request.status === 200 && typeof request.body?.id === 'string' &&
+    plainRequest.status === 200 && typeof plainRequest.body?.id === 'string',
+    `request=${request.status} plainRequest=${plainRequest.status}`);
+  if (!reqsOk) return;
+
+  // The dummy's assignment (2 FTE) and the second dummy's assignment share
+  // `request` — that is what lets the demoted-existing-work substitution below
+  // land on the SAME target assignment the first substitution created. The
+  // plain-internal fixture is deliberately on its OWN, unrelated request.
+  const dummyAssignment = await req('POST', '/assignments', { body: { requestId: request.body.id, resourceId: dummy.body.id, assignedHours: 0 } });
+  const plainAssignment = await req('POST', '/assignments', { body: { requestId: plainRequest.body.id, resourceId: plainInternal.body.id, assignedHours: 0 } });
+  const dummy2Assignment = await req('POST', '/assignments', { body: { requestId: request.body.id, resourceId: dummy2.body.id, assignedHours: 0 } });
+  const assignmentsOk = check('C2 setup: assignments created (dummy, plain internal, second dummy)',
+    dummyAssignment.status === 200 && typeof dummyAssignment.body?.id === 'string' &&
+    plainAssignment.status === 200 && typeof plainAssignment.body?.id === 'string' &&
+    dummy2Assignment.status === 200 && typeof dummy2Assignment.body?.id === 'string',
+    `dummy=${dummyAssignment.status} plain=${plainAssignment.status} dummy2=${dummy2Assignment.status}`);
+  if (!assignmentsOk) return;
+  const dummyAssignmentId = dummyAssignment.body.id;
+  const dummy2AssignmentId = dummy2Assignment.body.id;
+
+  // Book the dummy at 2 FTE (16h) on DAY.
+  const booked = await req('PUT', `/assignments/${dummyAssignmentId}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 16 } } });
+  check('C2 setup: dummy booked at 2 FTE', booked.status === 200, `status=${booked.status} err=${booked.body?.error}`);
+  const dummyMonthId = `${dummyAssignmentId}:${MONTH}`;
+
+  // A non-dummy month row, to prove the 'only a dummy month can be substituted' guard.
+  const plainBooked = await req('PUT', `/assignments/${plainAssignment.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 1 } } });
+  check('C2 setup: plain internal resource booked (non-dummy month fixture)', plainBooked.status === 200, `status=${plainBooked.status}`);
+  const internalMonthId = `${plainAssignment.body.id}:${MONTH}`;
+
+  // Book the second dummy at 4h on a DIFFERENT day, for the demoted-existing-work case below.
+  const dummy2Booked = await req('PUT', `/assignments/${dummy2AssignmentId}/allocation`, { body: { month: MONTH, dailyHours: { [DAY2]: 4 } } });
+  check('C2 setup: second dummy booked on a different day', dummy2Booked.status === 200, `status=${dummy2Booked.status} err=${dummy2Booked.body?.error}`);
+  const dummy2MonthId = `${dummy2AssignmentId}:${MONTH}`;
+
+  const sub = await req('POST', `/assignment-months/${dummyMonthId}/substitute`, {
+    body: { targetResourceId: personId },
+  });
+  check('C2 substitution accepted', sub.status === 200, `status=${sub.status} err=${sub.body?.error}`);
+  const outcome = (sub.body?.outcomes || [])[0];
+  check('C2 the person absorbs one FTE', outcome?.transferredHours === 8, `transferred=${outcome?.transferredHours}`);
+  check('C2 the rest stays on the dummy', outcome?.remainingHours === 8, `remaining=${outcome?.remainingHours}`);
+  check('C2 no existing work was demoted on a fresh month', !outcome?.demotedExistingWork, `demoted=${outcome?.demotedExistingWork}`);
+
+  const dummyAfter = await req('GET', `/assignments/${dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+  const dummyDay = (dummyAfter.body.days || []).find(d => d.date === DAY);
+  check('C2 the dummy day is reduced, not cleared', dummyDay?.hours === 8, `hours=${dummyDay?.hours}`);
+
+  const personAssignmentId = outcome?.targetAssignmentMonthId?.split(':')[0];
+  const personAlloc = await req('GET', `/assignments/${personAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+  const personMonth = (personAlloc.body.months || [])[0];
+  check('C2 the person-s month awaits approval', personMonth?.status === 'Requested', `status=${personMonth?.status}`);
+  check('C2 the month is linked back to the dummy', personMonth?.replacedFromAssignmentMonthId === dummyMonthId, `link=${personMonth?.replacedFromAssignmentMonthId}`);
+
+  const notDummy = await req('POST', `/assignment-months/${internalMonthId}/substitute`, { body: { targetResourceId: personId } });
+  check('C2 substituting a non-dummy month is refused', notDummy.status === 400, `status=${notDummy.status}`);
+
+  const badTarget = await req('POST', `/assignment-months/${dummyMonthId}/substitute`, { body: { targetResourceId: otherDummyId } });
+  check('C2 a non-internal target is refused', badTarget.status === 400, `status=${badTarget.status}`);
+
+  // RBAC (spec §5.7): substituting is an APPROVER action, gated to
+  // resource-manager/delivery-executive/admin by the '/assignment-months'
+  // mutation rule. 'pm' is the interesting negative — a planner may mutate
+  // '/assignments' (and therefore book the dummy's hours in the first place) but
+  // must NOT be able to hand them to a person. Asserted here so the rule
+  // transcribed in docs/roles-and-permissions.md cannot silently drift: roleGate
+  // rejects before the handler runs, so this leaves no state behind.
+  const asPlanner = await req('POST', `/assignment-months/${dummyMonthId}/substitute`, {
+    headers: { 'X-User-Id': '3', 'X-User-Role': 'pm' },
+    body: { targetResourceId: personId },
+  });
+  check("C2 substituting as 'pm' is refused by RBAC", asPlanner.status === 403,
+    `status=${asPlanner.status} body=${JSON.stringify(asPlanner.body)}`);
+
+  const saturated = await req('POST', `/assignment-months/${dummyMonthId}/substitute`, { body: { targetResourceId: personId } });
+  check('C2 a saturated target transfers nothing but does not error',
+    saturated.status === 200 && (saturated.body.outcomes || [])[0]?.transferredHours === 0,
+    `status=${saturated.status} outcome=${JSON.stringify(saturated.body?.outcomes?.[0])}`);
+  check('C2 a saturated substitution explains why (distinct from an empty dummy month)',
+    (saturated.body?.outcomes || [])[0]?.skipped === 'the target has no capacity left in this month',
+    `skipped=${(saturated.body?.outcomes || [])[0]?.skipped}`);
+
+  // --- demotedExistingWork: approve the person's first month, then substitute
+  // MORE hours (a different day, same request -> same target assignment) onto
+  // it. The added work must demote the month back to Requested, and the
+  // outcome must say so — the operator must not discover this after the fact.
+  const DECIDER_HEADERS = { 'X-User-Id': '9', 'X-User-Role': 'admin' };
+  const approveFirst = await req('POST', '/allocation-approvals/decide', {
+    headers: DECIDER_HEADERS,
+    body: { items: [{ assignmentMonthId: outcome?.targetAssignmentMonthId, decision: 'Approved', note: 'looks good' }] },
+  });
+  check('C2 setup: the person-s first month is approved', (approveFirst.body?.results || [])[0]?.status === 'Approved',
+    `result=${JSON.stringify(approveFirst.body?.results)}`);
+  const allocatedCheck = await req('GET', `/assignments/${personAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+  check('C2 setup: the person-s month is now Allocated', (allocatedCheck.body.months || [])[0]?.status === 'Allocated',
+    `status=${(allocatedCheck.body.months || [])[0]?.status}`);
+
+  const secondSub = await req('POST', `/assignment-months/${dummy2MonthId}/substitute`, { body: { targetResourceId: personId } });
+  check('C2 second substitution accepted', secondSub.status === 200, `status=${secondSub.status} err=${secondSub.body?.error}`);
+  const secondOutcome = (secondSub.body?.outcomes || [])[0];
+  check('C2 the second transfer lands on the SAME target month', secondOutcome?.targetAssignmentMonthId === outcome?.targetAssignmentMonthId,
+    `target=${secondOutcome?.targetAssignmentMonthId} expected=${outcome?.targetAssignmentMonthId}`);
+  check('C2 the previously-approved month is demoted back to Requested',
+    secondOutcome?.status === 'Requested' && secondOutcome?.demotedExistingWork === true,
+    `status=${secondOutcome?.status} demoted=${secondOutcome?.demotedExistingWork}`);
+
+  // --- self-managed substitution: the target's manager IS the acting identity
+  // (the suite's default X-User-Id: 1), so the transfer auto-approves straight
+  // to Allocated with no back-link left dangling.
+  const selfManagedPerson = await req('POST', '/resources', { body: { ...base, name: 'C2 self-managed person', kind: 'internal', contractHoursPerDay: 8, managerId: '1' } });
+  const selfManagedDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 self-managed dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  const selfSetupOk = check('C2 setup: self-managed person/dummy resources created',
+    selfManagedPerson.status === 201 && selfManagedDummy.status === 201,
+    `person=${selfManagedPerson.status} dummy=${selfManagedDummy.status}`);
+  if (selfSetupOk) {
+    const selfRequest = await req('POST', '/requests', { body: { name: 'C2 self-managed request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+    const selfReqOk = check('C2 setup: self-managed request created', selfRequest.status === 200 && typeof selfRequest.body?.id === 'string', `status=${selfRequest.status}`);
+    if (selfReqOk) {
+      const selfAssignment = await req('POST', '/assignments', { body: { requestId: selfRequest.body.id, resourceId: selfManagedDummy.body.id, assignedHours: 0 } });
+      const selfAssignOk = check('C2 setup: self-managed dummy assignment created', selfAssignment.status === 200 && typeof selfAssignment.body?.id === 'string', `status=${selfAssignment.status}`);
+      if (selfAssignOk) {
+        const selfBooked = await req('PUT', `/assignments/${selfAssignment.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 4 } } });
+        check('C2 setup: self-managed dummy booked', selfBooked.status === 200, `status=${selfBooked.status} err=${selfBooked.body?.error}`);
+        const selfDummyMonthId = `${selfAssignment.body.id}:${MONTH}`;
+
+        const selfSub = await req('POST', `/assignment-months/${selfDummyMonthId}/substitute`, { body: { targetResourceId: selfManagedPerson.body.id } });
+        const selfOutcome = (selfSub.body?.outcomes || [])[0];
+        check('C2 a self-managed substitution lands Allocated directly',
+          selfSub.status === 200 && selfOutcome?.status === 'Allocated', `status=${selfSub.status} outcome=${JSON.stringify(selfOutcome)}`);
+
+        const selfPersonAssignmentId = selfOutcome?.targetAssignmentMonthId?.split(':')[0];
+        const selfPersonAlloc = await req('GET', `/assignments/${selfPersonAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+        const selfPersonMonth = (selfPersonAlloc.body.months || [])[0];
+        check('C2 the self-managed month carries no dangling back-link or approval',
+          selfPersonMonth !== undefined && !('replacedFromAssignmentMonthId' in selfPersonMonth) && !('approvalId' in selfPersonMonth),
+          `month=${JSON.stringify(selfPersonMonth)}`);
+      }
+    }
+  }
+
+  // --- Review fix verification: an EMPTY dummy month (no hours booked at all)
+  // gets its OWN zero-transfer reason, distinct from "target saturated" above,
+  // and a zero-transfer attempt never creates a phantom Draft assignment for
+  // the target (the lock-ordering/phantom-assignment review findings).
+  const emptyDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 empty dummy (no hours booked)', kind: 'dummy', contractHoursPerDay: 8 } });
+  const phantomTarget = await req('POST', '/resources', { body: { ...base, name: 'C2 phantom-check target', kind: 'internal', contractHoursPerDay: 8 } });
+  const emptySetupOk = check('C2 setup: empty-dummy/phantom-target resources created',
+    emptyDummy.status === 201 && phantomTarget.status === 201,
+    `emptyDummy=${emptyDummy.status} phantomTarget=${phantomTarget.status}`);
+  if (emptySetupOk) {
+    const emptyRequest = await req('POST', '/requests', { body: { name: 'C2 empty-dummy request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+    const emptyReqOk = check('C2 setup: empty-dummy request created', emptyRequest.status === 200 && typeof emptyRequest.body?.id === 'string', `status=${emptyRequest.status}`);
+    if (emptyReqOk) {
+      const emptyAssignment = await req('POST', '/assignments', { body: { requestId: emptyRequest.body.id, resourceId: emptyDummy.body.id, assignedHours: 0 } });
+      const emptyAssignOk = check('C2 setup: empty-dummy assignment created', emptyAssignment.status === 200 && typeof emptyAssignment.body?.id === 'string', `status=${emptyAssignment.status}`);
+      if (emptyAssignOk) {
+        // A 0h PUT still lazily creates the month row (Draft, via ensureAssignmentMonth)
+        // without creating any day row — exactly "a dummy month with no hours booked".
+        const emptyZeroPut = await req('PUT', `/assignments/${emptyAssignment.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 0 } } });
+        check('C2 setup: empty-dummy month row exists with no day rows', emptyZeroPut.status === 200, `status=${emptyZeroPut.status}`);
+        const emptyDummyMonthId = `${emptyAssignment.body.id}:${MONTH}`;
+
+        const emptySub = await req('POST', `/assignment-months/${emptyDummyMonthId}/substitute`, { body: { targetResourceId: phantomTarget.body.id } });
+        const emptyOutcome = (emptySub.body?.outcomes || [])[0];
+        check('C2 an empty dummy month gets its own zero-transfer reason',
+          emptySub.status === 200 && emptyOutcome?.transferredHours === 0 &&
+          emptyOutcome?.skipped === 'the dummy has no hours booked in this month',
+          `status=${emptySub.status} outcome=${JSON.stringify(emptyOutcome)}`);
+
+        const afterAssignments = await req('GET', '/assignments');
+        const phantom = (afterAssignments.body || []).find(a => a.resourceId === phantomTarget.body.id);
+        check('C2 a zero-transfer substitution creates no phantom assignment for the target',
+          phantom === undefined, `phantom=${JSON.stringify(phantom)}`);
+      }
+    }
+  }
+
+  // --- applyToRemainingMonths (Task 4): a dummy booked across THREE
+  // consecutive OPEN months, substituted from the FIRST with
+  // `applyToRemainingMonths: true`, must return one outcome PER MONTH — not
+  // just the primary one — each landing on its own target month row, and the
+  // dummy's LATER months (2nd/3rd) must be reduced too, not just the first.
+  const REMAINING_M1 = '2026-05', REMAINING_M2 = '2026-06', REMAINING_M3 = '2026-07';
+  const REMAINING_DAY1 = `${REMAINING_M1}-05`; // Tuesday
+  const REMAINING_DAY2 = `${REMAINING_M2}-01`; // Monday
+  const REMAINING_DAY3 = `${REMAINING_M3}-06`; // Monday
+
+  const remDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 remaining-months dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  const remPerson = await req('POST', '/resources', { body: { ...base, name: 'C2 remaining-months person', kind: 'internal', contractHoursPerDay: 8 } });
+  const remSetupOk = check('C2 remaining-months setup: dummy/person resources created',
+    remDummy.status === 201 && remPerson.status === 201,
+    `dummy=${remDummy.status} person=${remPerson.status}`);
+  if (remSetupOk) {
+    const remRequest = await req('POST', '/requests', { body: { name: 'C2 remaining-months request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+    const remReqOk = check('C2 remaining-months setup: request created', remRequest.status === 200 && typeof remRequest.body?.id === 'string', `status=${remRequest.status}`);
+    if (remReqOk) {
+      const remAssignment = await req('POST', '/assignments', { body: { requestId: remRequest.body.id, resourceId: remDummy.body.id, assignedHours: 0 } });
+      const remAssignOk = check('C2 remaining-months setup: dummy assignment created', remAssignment.status === 200 && typeof remAssignment.body?.id === 'string', `status=${remAssignment.status}`);
+      if (remAssignOk) {
+        const remAssignmentId = remAssignment.body.id;
+        const remBook1 = await req('PUT', `/assignments/${remAssignmentId}/allocation`, { body: { month: REMAINING_M1, dailyHours: { [REMAINING_DAY1]: 8 } } });
+        const remBook2 = await req('PUT', `/assignments/${remAssignmentId}/allocation`, { body: { month: REMAINING_M2, dailyHours: { [REMAINING_DAY2]: 8 } } });
+        const remBook3 = await req('PUT', `/assignments/${remAssignmentId}/allocation`, { body: { month: REMAINING_M3, dailyHours: { [REMAINING_DAY3]: 8 } } });
+        const remBookedOk = check('C2 remaining-months setup: dummy booked at 1 FTE across three consecutive months',
+          remBook1.status === 200 && remBook2.status === 200 && remBook3.status === 200,
+          `m1=${remBook1.status} m2=${remBook2.status} m3=${remBook3.status}`);
+        if (remBookedOk) {
+          const remDummyMonth1Id = `${remAssignmentId}:${REMAINING_M1}`;
+
+          const remSub = await req('POST', `/assignment-months/${remDummyMonth1Id}/substitute`, {
+            body: { targetResourceId: remPerson.body.id, applyToRemainingMonths: true },
+          });
+          check('C2 applyToRemainingMonths accepted', remSub.status === 200, `status=${remSub.status} err=${remSub.body?.error}`);
+          const remOutcomes = remSub.body?.outcomes || [];
+          check('C2 applyToRemainingMonths returns one outcome per month (3)', remOutcomes.length === 3,
+            `count=${remOutcomes.length} outcomes=${JSON.stringify(remOutcomes)}`);
+          check('C2 applyToRemainingMonths outcomes are in ascending month order',
+            remOutcomes.map(o => o.month).join(',') === [REMAINING_M1, REMAINING_M2, REMAINING_M3].join(','),
+            `months=${remOutcomes.map(o => o.month).join(',')}`);
+          check('C2 applyToRemainingMonths fully absorbs each month (1 FTE dummy, 1 FTE-capable person)',
+            remOutcomes.every(o => o.transferredHours === 8 && o.remainingHours === 0),
+            `outcomes=${JSON.stringify(remOutcomes)}`);
+          const remTargetAssignmentIds = new Set(remOutcomes.map(o => o.targetAssignmentMonthId?.split(':')[0]));
+          check('C2 applyToRemainingMonths lands every month on its OWN target month row, all on the SAME target assignment',
+            remOutcomes.every(o => typeof o.targetAssignmentMonthId === 'string') &&
+            new Set(remOutcomes.map(o => o.targetAssignmentMonthId)).size === 3 &&
+            remTargetAssignmentIds.size === 1,
+            `outcomes=${JSON.stringify(remOutcomes)}`);
+
+          // The dummy's LATER months (2nd and 3rd) must be reduced too, not
+          // just the primary one that the pre-Task-4 handler already covered.
+          const remDummyAfter = await req('GET', `/assignments/${remAssignmentId}/allocation?from=${REMAINING_M1}&to=${REMAINING_M3}`);
+          const remDummyDays = remDummyAfter.body?.days || [];
+          check('C2 applyToRemainingMonths clears the dummy-s days in ALL three months',
+            [REMAINING_DAY1, REMAINING_DAY2, REMAINING_DAY3].every(d => (remDummyDays.find(x => x.date === d)?.hours ?? 0) === 0),
+            `days=${JSON.stringify(remDummyDays)}`);
+        }
+      }
+    }
+  }
+
+  // --- applyToRemainingMonths + a CLOSED later month: the closed month must
+  // be skipped WITH A REASON, but the months after it must still transfer —
+  // one closed month must never abort the ones that follow.
+  const CLOSED_M1 = '2026-08', CLOSED_M2 = '2026-09', CLOSED_M3 = '2026-10';
+  const CLOSED_DAY1 = `${CLOSED_M1}-03`; // Monday
+  const CLOSED_DAY2 = `${CLOSED_M2}-01`; // Tuesday
+  const CLOSED_DAY3 = `${CLOSED_M3}-05`; // Monday
+
+  const closedDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 closed-month dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  const closedPerson = await req('POST', '/resources', { body: { ...base, name: 'C2 closed-month person', kind: 'internal', contractHoursPerDay: 8 } });
+  const closedSetupOk = check('C2 closed-month setup: dummy/person resources created',
+    closedDummy.status === 201 && closedPerson.status === 201,
+    `dummy=${closedDummy.status} person=${closedPerson.status}`);
+  if (closedSetupOk) {
+    const closedRequest = await req('POST', '/requests', { body: { name: 'C2 closed-month request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+    const closedReqOk = check('C2 closed-month setup: request created', closedRequest.status === 200 && typeof closedRequest.body?.id === 'string', `status=${closedRequest.status}`);
+    if (closedReqOk) {
+      const closedAssignment = await req('POST', '/assignments', { body: { requestId: closedRequest.body.id, resourceId: closedDummy.body.id, assignedHours: 0 } });
+      const closedAssignOk = check('C2 closed-month setup: dummy assignment created', closedAssignment.status === 200 && typeof closedAssignment.body?.id === 'string', `status=${closedAssignment.status}`);
+      if (closedAssignOk) {
+        const closedAssignmentId = closedAssignment.body.id;
+        const closedBook1 = await req('PUT', `/assignments/${closedAssignmentId}/allocation`, { body: { month: CLOSED_M1, dailyHours: { [CLOSED_DAY1]: 8 } } });
+        const closedBook2 = await req('PUT', `/assignments/${closedAssignmentId}/allocation`, { body: { month: CLOSED_M2, dailyHours: { [CLOSED_DAY2]: 8 } } });
+        const closedBook3 = await req('PUT', `/assignments/${closedAssignmentId}/allocation`, { body: { month: CLOSED_M3, dailyHours: { [CLOSED_DAY3]: 8 } } });
+        const closedBookedOk = check('C2 closed-month setup: dummy booked at 1 FTE across three consecutive months',
+          closedBook1.status === 200 && closedBook2.status === 200 && closedBook3.status === 200,
+          `m1=${closedBook1.status} m2=${closedBook2.status} m3=${closedBook3.status}`);
+        if (closedBookedOk) {
+          const closePeriod = await req('PUT', `/planning-periods/${CLOSED_M2}`, { body: { status: 'Closed' } });
+          check('C2 closed-month setup: middle month closed for planning', closePeriod.status === 200, `status=${closePeriod.status}`);
+
+          const closedDummyMonth1Id = `${closedAssignmentId}:${CLOSED_M1}`;
+          const closedSub = await req('POST', `/assignment-months/${closedDummyMonth1Id}/substitute`, {
+            body: { targetResourceId: closedPerson.body.id, applyToRemainingMonths: true },
+          });
+          check('C2 applyToRemainingMonths with a closed later month is still accepted', closedSub.status === 200,
+            `status=${closedSub.status} err=${closedSub.body?.error}`);
+          const closedOutcomes = closedSub.body?.outcomes || [];
+          check('C2 applyToRemainingMonths still returns one outcome per month even when one is closed',
+            closedOutcomes.length === 3, `count=${closedOutcomes.length} outcomes=${JSON.stringify(closedOutcomes)}`);
+
+          const [closedOutcome1, closedOutcome2, closedOutcome3] = closedOutcomes;
+          check('C2 the open first month still transfers',
+            closedOutcome1?.month === CLOSED_M1 && closedOutcome1?.transferredHours === 8 && closedOutcome1?.remainingHours === 0,
+            `outcome=${JSON.stringify(closedOutcome1)}`);
+          check('C2 the closed month is skipped with a reason, not transferred',
+            closedOutcome2?.month === CLOSED_M2 && closedOutcome2?.transferredHours === 0 &&
+            typeof closedOutcome2?.skipped === 'string' && closedOutcome2.skipped.length > 0,
+            `outcome=${JSON.stringify(closedOutcome2)}`);
+          check('C2 the month AFTER the closed one still transfers (one closed month does not abort the rest)',
+            closedOutcome3?.month === CLOSED_M3 && closedOutcome3?.transferredHours === 8 && closedOutcome3?.remainingHours === 0,
+            `outcome=${JSON.stringify(closedOutcome3)}`);
+
+          // The closed month's dummy hours must be left exactly as they were.
+          const closedDummyAfter = await req('GET', `/assignments/${closedAssignmentId}/allocation?from=${CLOSED_M2}&to=${CLOSED_M2}`);
+          const closedDummyDay = (closedDummyAfter.body?.days || []).find(d => d.date === CLOSED_DAY2);
+          check('C2 the closed month-s dummy hours are untouched',
+            closedDummyDay?.hours === 8, `hours=${closedDummyDay?.hours}`);
+
+          const reopenPeriod = await req('PUT', `/planning-periods/${CLOSED_M2}`, { body: { status: 'Open' } });
+          check('C2 closed-month teardown: middle month reopened for planning', reopenPeriod.status === 200, `status=${reopenPeriod.status}`);
+        }
+      }
+    }
+  }
+
+  // --- applyToRemainingMonths with NO later months at all: a dummy booked in
+  // only ONE month must still return exactly that one outcome — `laterRows`
+  // is empty, so the loop body never runs. Correct by inspection already
+  // (an empty `laterRows` array trivially skips the `for`), but untested
+  // until now.
+  const soloDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 solo-month dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  const soloPerson = await req('POST', '/resources', { body: { ...base, name: 'C2 solo-month person', kind: 'internal', contractHoursPerDay: 8 } });
+  const soloSetupOk = check('C2 solo-month setup: dummy/person resources created',
+    soloDummy.status === 201 && soloPerson.status === 201,
+    `dummy=${soloDummy.status} person=${soloPerson.status}`);
+  if (soloSetupOk) {
+    const soloRequest = await req('POST', '/requests', { body: { name: 'C2 solo-month request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+    const soloReqOk = check('C2 solo-month setup: request created', soloRequest.status === 200 && typeof soloRequest.body?.id === 'string', `status=${soloRequest.status}`);
+    if (soloReqOk) {
+      const soloAssignment = await req('POST', '/assignments', { body: { requestId: soloRequest.body.id, resourceId: soloDummy.body.id, assignedHours: 0 } });
+      const soloAssignOk = check('C2 solo-month setup: dummy assignment created', soloAssignment.status === 200 && typeof soloAssignment.body?.id === 'string', `status=${soloAssignment.status}`);
+      if (soloAssignOk) {
+        const soloAssignmentId = soloAssignment.body.id;
+        const soloBooked = await req('PUT', `/assignments/${soloAssignmentId}/allocation`, { body: { month: REMAINING_M1, dailyHours: { [REMAINING_DAY1]: 8 } } });
+        check('C2 solo-month setup: dummy booked in exactly one month', soloBooked.status === 200, `status=${soloBooked.status} err=${soloBooked.body?.error}`);
+
+        const soloMonthId = `${soloAssignmentId}:${REMAINING_M1}`;
+        const soloSub = await req('POST', `/assignment-months/${soloMonthId}/substitute`, {
+          body: { targetResourceId: soloPerson.body.id, applyToRemainingMonths: true },
+        });
+        check('C2 applyToRemainingMonths with no later months is accepted', soloSub.status === 200, `status=${soloSub.status} err=${soloSub.body?.error}`);
+        const soloOutcomes = soloSub.body?.outcomes || [];
+        check('C2 applyToRemainingMonths with no later months returns exactly ONE outcome (no phantom entries)',
+          soloOutcomes.length === 1 && soloOutcomes[0]?.month === REMAINING_M1 && soloOutcomes[0]?.transferredHours === 8,
+          `outcomes=${JSON.stringify(soloOutcomes)}`);
+      }
+    }
+  }
+
+  // --- GIVE-BACK ON DECISION (Task 5). A substituted month carries the hours
+  // AND a link to the dummy month they came from; the decision closes that link:
+  //   (1) a REJECTION hands every transferred hour back and leaves the person
+  //       holding nothing — she never took the work;
+  //   (2) an APPROVAL hands back only what the approver TRIMMED before
+  //       approving, and leaves her the approved remainder.
+  // Each scenario runs on its OWN fixtures: the pair at the top of this section
+  // has since been approved, demoted and re-substituted, so its back-link no
+  // longer points where these checks need it to.
+  //
+  // The decision is taken by a DIFFERENT principal than the one that requested
+  // the substitution (the suite default, X-User-Id 1) — Segregation of Duties
+  // forbids deciding your own item.
+  const GIVE_BACK_DECIDER = { 'X-User-Id': '9', 'X-User-Role': 'admin' };
+
+  /**
+   * A fresh dummy booked at 2 FTE on DAY plus a free person, substituted once:
+   * 8h move to the person (her 1-FTE ceiling), 8h stay on the dummy, and her
+   * month awaits approval carrying the back-link. Returns undefined (having
+   * already recorded the failing check) when any setup step fails.
+   */
+  async function giveBackFixture(label) {
+    const gbDummy = await req('POST', '/resources', { body: { ...base, name: `C2 ${label} dummy`, kind: 'dummy', contractHoursPerDay: 8 } });
+    const gbPerson = await req('POST', '/resources', { body: { ...base, name: `C2 ${label} person`, kind: 'internal', contractHoursPerDay: 8 } });
+    if (!check(`C2 ${label} setup: dummy/person resources created`,
+      gbDummy.status === 201 && gbPerson.status === 201,
+      `dummy=${gbDummy.status} person=${gbPerson.status}`)) return undefined;
+
+    const gbRequest = await req('POST', '/requests', { body: { name: `C2 ${label} request`, requiredRole: 'Developer', requiredEffort: 2, skills: [] } });
+    if (!check(`C2 ${label} setup: request created`,
+      gbRequest.status === 200 && typeof gbRequest.body?.id === 'string', `status=${gbRequest.status}`)) return undefined;
+
+    const gbAssignment = await req('POST', '/assignments', { body: { requestId: gbRequest.body.id, resourceId: gbDummy.body.id, assignedHours: 0 } });
+    if (!check(`C2 ${label} setup: dummy assignment created`,
+      gbAssignment.status === 200 && typeof gbAssignment.body?.id === 'string', `status=${gbAssignment.status}`)) return undefined;
+
+    const gbBooked = await req('PUT', `/assignments/${gbAssignment.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 16 } } });
+    if (!check(`C2 ${label} setup: dummy booked at 2 FTE`,
+      gbBooked.status === 200, `status=${gbBooked.status} err=${gbBooked.body?.error}`)) return undefined;
+
+    const gbSub = await req('POST', `/assignment-months/${gbAssignment.body.id}:${MONTH}/substitute`, {
+      body: { targetResourceId: gbPerson.body.id },
+    });
+    const gbOutcome = (gbSub.body?.outcomes || [])[0];
+    const gbTargetMonthId = typeof gbOutcome?.targetAssignmentMonthId === 'string' ? gbOutcome.targetAssignmentMonthId : '';
+    if (!check(`C2 ${label} setup: one FTE moved to the person, her month awaits approval`,
+      gbSub.status === 200 && gbOutcome?.transferredHours === 8 && gbOutcome?.status === 'Requested' && gbTargetMonthId !== '',
+      `status=${gbSub.status} outcome=${JSON.stringify(gbOutcome)}`)) return undefined;
+
+    return {
+      dummyAssignmentId: gbAssignment.body.id,
+      personAssignmentId: gbTargetMonthId.split(':')[0],
+      substitutedMonthId: gbTargetMonthId,
+    };
+  }
+
+  const rejFixture = await giveBackFixture('give-back rejection');
+  if (rejFixture) {
+    const dec = await req('POST', '/allocation-approvals/decide', {
+      headers: GIVE_BACK_DECIDER,
+      body: { items: [{ assignmentMonthId: rejFixture.substitutedMonthId, decision: 'Rejected', note: 'not available after all' }] },
+    });
+    check('C2 rejection decided', (dec.body?.results || [])[0]?.status === 'Rejected', `res=${JSON.stringify(dec.body?.results)}`);
+
+    const dummyBack = await req('GET', `/assignments/${rejFixture.dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    check('C2 the dummy is whole again after a rejection',
+      (dummyBack.body.days || []).find(d => d.date === DAY)?.hours === 16,
+      `hours=${(dummyBack.body.days || []).find(d => d.date === DAY)?.hours}`);
+
+    const personBack = await req('GET', `/assignments/${rejFixture.personAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    check('C2 the person keeps nothing from a rejected substitution',
+      (personBack.body.days || []).every(d => d.date !== DAY), 'the day is still booked on the person');
+    const rejMonth = (personBack.body.months || [])[0];
+    check('C2 the rejected month is Rejected', rejMonth?.status === 'Rejected', `status=${rejMonth?.status}`);
+    check('C2 the back-link AND the recorded hours are cleared by the decision',
+      rejMonth !== undefined && !('replacedFromAssignmentMonthId' in rejMonth) && !('replacedDays' in rejMonth),
+      `month=${JSON.stringify(rejMonth)}`);
+
+    // Derived state: the dummy's assignedHours must follow its day rows back up
+    // (there is no GET /assignments/:id — the list is the only read).
+    const allAssignments = await req('GET', '/assignments');
+    const dummyAssig = (allAssignments.body || []).find(a => a.id === rejFixture.dummyAssignmentId);
+    check('C2 the dummy assignment-s assignedHours is restored with its days',
+      dummyAssig?.assignedHours === 16, `assignedHours=${dummyAssig?.assignedHours}`);
+  }
+
+  const trimFixture = await giveBackFixture('give-back trimmed approval');
+  if (trimFixture) {
+    // The approver CORRECTS the month before approving it (a first-class
+    // approver power): 8h transferred -> 5h kept. The month is still
+    // 'Requested', so the edit keeps its pending approval and its back-link.
+    const trim = await req('PUT', `/assignments/${trimFixture.personAssignmentId}/allocation`, {
+      body: { month: MONTH, dailyHours: { [DAY]: 5 } },
+    });
+    check('C2 the substituted month can be trimmed before approval', trim.status === 200, `status=${trim.status} err=${trim.body?.error}`);
+
+    const dec = await req('POST', '/allocation-approvals/decide', {
+      headers: GIVE_BACK_DECIDER,
+      body: { items: [{ assignmentMonthId: trimFixture.substitutedMonthId, decision: 'Approved', note: '5h is all she can take' }] },
+    });
+    check('C2 trimmed approval decided', (dec.body?.results || [])[0]?.status === 'Approved', `res=${JSON.stringify(dec.body?.results)}`);
+
+    const personKept = await req('GET', `/assignments/${trimFixture.personAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    check('C2 the person keeps exactly the approved remainder',
+      (personKept.body.days || []).find(d => d.date === DAY)?.hours === 5,
+      `hours=${(personKept.body.days || []).find(d => d.date === DAY)?.hours}`);
+    const trimMonth = (personKept.body.months || [])[0];
+    check('C2 the trimmed month is Allocated', trimMonth?.status === 'Allocated', `status=${trimMonth?.status}`);
+    check('C2 an approved substitution also clears the back-link and the recorded hours',
+      trimMonth !== undefined && !('replacedFromAssignmentMonthId' in trimMonth) && !('replacedDays' in trimMonth),
+      `month=${JSON.stringify(trimMonth)}`);
+
+    // 16h were booked, 8 moved, the approver cut 3 of them: 8 never left the
+    // dummy + 3 came back = 11, and 5 + 11 == the original 16 (no hour is
+    // created or destroyed by the give-back).
+    const dummyBack = await req('GET', `/assignments/${trimFixture.dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    check('C2 an approval gives back exactly the trimmed difference, no more',
+      (dummyBack.body.days || []).find(d => d.date === DAY)?.hours === 11,
+      `hours=${(dummyBack.body.days || []).find(d => d.date === DAY)?.hours}`);
+  }
+
+  // --- MIXED OWN + TRANSFERRED HOURS ON THE SAME MONTH, THEN REJECTED. The
+  // regression guard for the give-back's hardest shape, and the one every
+  // single-day fixture above is blind to: the dummy is booked on TWO days and the
+  // person ALREADY holds a full day of her own work on the first, so the transfer
+  // can only move the second. The rejection must return that second day and leave
+  // the first — on BOTH resources — exactly as it was. Distributing the returned
+  // hours by what she merely *holds* would strip her own work and credit it to a
+  // dummy day that never gave up an hour.
+  const mixDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 mixed-days dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  const mixPerson = await req('POST', '/resources', { body: { ...base, name: 'C2 mixed-days person', kind: 'internal', contractHoursPerDay: 8 } });
+  const mixSetupOk = check('C2 mixed-days setup: dummy/person resources created',
+    mixDummy.status === 201 && mixPerson.status === 201, `dummy=${mixDummy.status} person=${mixPerson.status}`);
+  if (mixSetupOk) {
+    const mixRequest = await req('POST', '/requests', { body: { name: 'C2 mixed-days request', requiredRole: 'Developer', requiredEffort: 2, skills: [] } });
+    const mixDummyAssig = await req('POST', '/assignments', { body: { requestId: mixRequest.body?.id, resourceId: mixDummy.body.id, assignedHours: 0 } });
+    const mixPersonAssig = await req('POST', '/assignments', { body: { requestId: mixRequest.body?.id, resourceId: mixPerson.body.id, assignedHours: 0 } });
+    const mixFixtureOk = check('C2 mixed-days setup: request and both assignments created',
+      mixRequest.status === 200 && mixDummyAssig.status === 200 && mixPersonAssig.status === 200,
+      `request=${mixRequest.status} dummy=${mixDummyAssig.status} person=${mixPersonAssig.status}`);
+    if (mixFixtureOk) {
+      // The dummy carries one FTE on each of two days; the person is already full
+      // on the FIRST of them with work of her own.
+      const mixDummyBooked = await req('PUT', `/assignments/${mixDummyAssig.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 8, [DAY2]: 8 } } });
+      const mixOwnBooked = await req('PUT', `/assignments/${mixPersonAssig.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 8 } } });
+      const mixBookedOk = check('C2 mixed-days setup: dummy on two days, person already full on the first',
+        mixDummyBooked.status === 200 && mixOwnBooked.status === 200,
+        `dummy=${mixDummyBooked.status} own=${mixOwnBooked.status} err=${mixDummyBooked.body?.error || mixOwnBooked.body?.error}`);
+      if (mixBookedOk) {
+        const mixSub = await req('POST', `/assignment-months/${mixDummyAssig.body.id}:${MONTH}/substitute`, {
+          body: { targetResourceId: mixPerson.body.id },
+        });
+        const mixOutcome = (mixSub.body?.outcomes || [])[0];
+        check('C2 mixed-days: only the day she has room on transfers',
+          mixSub.status === 200 && mixOutcome?.transferredHours === 8 && mixOutcome?.remainingHours === 8,
+          `status=${mixSub.status} outcome=${JSON.stringify(mixOutcome)}`);
+
+        const mixDec = await req('POST', '/allocation-approvals/decide', {
+          headers: GIVE_BACK_DECIDER,
+          body: { items: [{ assignmentMonthId: mixOutcome?.targetAssignmentMonthId, decision: 'Rejected', note: 'no' }] },
+        });
+        check('C2 mixed-days rejection decided', (mixDec.body?.results || [])[0]?.status === 'Rejected', `res=${JSON.stringify(mixDec.body?.results)}`);
+
+        const mixDummyAfter = await req('GET', `/assignments/${mixDummyAssig.body.id}/allocation?from=${MONTH}&to=${MONTH}`);
+        const mixDummyDays = mixDummyAfter.body?.days || [];
+        check('C2 mixed-days: the dummy day the substitution never touched is left alone',
+          mixDummyDays.find(d => d.date === DAY)?.hours === 8, `hours=${mixDummyDays.find(d => d.date === DAY)?.hours}`);
+        check('C2 mixed-days: the transferred day comes back whole to the dummy',
+          mixDummyDays.find(d => d.date === DAY2)?.hours === 8, `hours=${mixDummyDays.find(d => d.date === DAY2)?.hours}`);
+
+        const mixPersonAfter = await req('GET', `/assignments/${mixPersonAssig.body.id}/allocation?from=${MONTH}&to=${MONTH}`);
+        const mixPersonDays = mixPersonAfter.body?.days || [];
+        check('C2 mixed-days: her OWN work on the untouched day survives the rejection',
+          mixPersonDays.find(d => d.date === DAY)?.hours === 8, `hours=${mixPersonDays.find(d => d.date === DAY)?.hours}`);
+        check('C2 mixed-days: she keeps nothing of the rejected transfer',
+          mixPersonDays.every(d => d.date !== DAY2), `days=${JSON.stringify(mixPersonDays)}`);
+      }
+    }
+  }
+
+  // --- ZERO-THEN-APPROVE. Zeroing the allocation and approving it is how the
+  // source tool expresses a refusal, so the transferred hours must go back to the
+  // days they came from — not vanish because the person's month no longer records
+  // where they landed.
+  const zeroFixture = await giveBackFixture('give-back zeroed approval');
+  if (zeroFixture) {
+    const zeroed = await req('PUT', `/assignments/${zeroFixture.personAssignmentId}/allocation`, {
+      body: { month: MONTH, dailyHours: { [DAY]: 0 } },
+    });
+    check('C2 the substituted month can be zeroed before approval', zeroed.status === 200, `status=${zeroed.status} err=${zeroed.body?.error}`);
+
+    const zeroDec = await req('POST', '/allocation-approvals/decide', {
+      headers: GIVE_BACK_DECIDER,
+      body: { items: [{ assignmentMonthId: zeroFixture.substitutedMonthId, decision: 'Approved', note: 'nothing left to approve' }] },
+    });
+    check('C2 zeroed approval decided', (zeroDec.body?.results || [])[0]?.status === 'Approved', `res=${JSON.stringify(zeroDec.body?.results)}`);
+
+    const zeroDummy = await req('GET', `/assignments/${zeroFixture.dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    check('C2 zeroing the month and approving returns the whole transfer, no hour vanishes',
+      (zeroDummy.body.days || []).find(d => d.date === DAY)?.hours === 16,
+      `hours=${(zeroDummy.body.days || []).find(d => d.date === DAY)?.hours}`);
+    const zeroPerson = await req('GET', `/assignments/${zeroFixture.personAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    check('C2 the zeroed month stays empty and carries no back-link',
+      (zeroPerson.body.days || []).length === 0 && !('replacedDays' in ((zeroPerson.body.months || [])[0] ?? {})),
+      `days=${JSON.stringify(zeroPerson.body.days)} month=${JSON.stringify((zeroPerson.body.months || [])[0])}`);
+  }
+
+  // --- THE TWO WAYS A SUBSTITUTION CAN END WITHOUT A DECISION -----------------
+  //
+  // Both of these end the substitution through a handler that predates C2, so
+  // neither goes anywhere near the decision hook. Booked demand left the dummy;
+  // if these paths do not hand it back, it is destroyed with no record anywhere.
+  //
+  // (1) SELF-MANAGED RETARGET. `PUT /assignments/:id` changing resourceId
+  //     re-baselines every live month row. On the self-managed branch that lands
+  //     'Allocated' with NO approval — an IMPLICIT approval, since no decision
+  //     will ever follow — so it must give back exactly what an explicit approval
+  //     would: whatever the person no longer covers.
+  //
+  //     The fixture TRIMS before retargeting on purpose. Without a trim the
+  //     give-back owes nothing, and a wrong fix that merely cleared the two
+  //     columns would look identical to the right one. With a trim, only a real
+  //     give-back puts the 3h back on the dummy.
+  const retargetFixture = await giveBackFixture('retarget self-managed');
+  if (retargetFixture) {
+    // A third internal resource whose manager IS the acting principal: the suite
+    // calls as X-User-Id '1', which `actorResourceId` maps to resource '1', so
+    // `autoApprovesAllocation` is true for this resource and the retarget takes
+    // the self-managed branch.
+    const standIn = await req('POST', '/resources', {
+      body: { ...base, name: 'C2 retarget stand-in (self-managed)', kind: 'internal', contractHoursPerDay: 8, managerId: '1' },
+    });
+    const standInOk = check('C2 retarget setup: a self-managed stand-in resource exists',
+      standIn.status === 201 && typeof standIn.body?.id === 'string', `status=${standIn.status}`);
+
+    if (standInOk) {
+      // 8h transferred -> trimmed to 5h. The month is still 'Requested', so the
+      // edit keeps both its pending approval and its back-link.
+      const trim = await req('PUT', `/assignments/${retargetFixture.personAssignmentId}/allocation`, {
+        body: { month: MONTH, dailyHours: { [DAY]: 5 } },
+      });
+      check('C2 retarget setup: the substituted month is trimmed 8h -> 5h before the retarget',
+        trim.status === 200, `status=${trim.status} err=${trim.body?.error}`);
+
+      const retarget = await req('PUT', `/assignments/${retargetFixture.personAssignmentId}`, {
+        body: { resourceId: standIn.body.id },
+      });
+      check('C2 a substituted assignment can be retargeted', retarget.status === 200,
+        `status=${retarget.status} err=${retarget.body?.error}`);
+
+      const retMonth = (await req('GET', `/assignments/${retargetFixture.personAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`)).body;
+      const retRow = (retMonth.months || [])[0];
+      check('C2 a self-managed retarget lands the substituted month Allocated with no approval',
+        retRow?.status === 'Allocated' && !('approvalId' in (retRow ?? {})),
+        `month=${JSON.stringify(retRow)}`);
+      // The regression this exists for: an implicit approval that leaves the link
+      // in place is a substitution nothing will ever close.
+      check('C2 a self-managed retarget leaves NO dangling substitution back-link',
+        retRow !== undefined && !('replacedFromAssignmentMonthId' in retRow) && !('replacedDays' in retRow),
+        `month=${JSON.stringify(retRow)}`);
+      check('C2 the retargeted stand-in keeps exactly the trimmed allocation',
+        (retMonth.days || []).find(d => d.date === DAY)?.hours === 5,
+        `hours=${(retMonth.days || []).find(d => d.date === DAY)?.hours}`);
+
+      // 8h remained on the dummy + the 3h the stand-in no longer covers = 11h.
+      const retDummy = await req('GET', `/assignments/${retargetFixture.dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+      check('C2 a self-managed retarget hands back exactly what the person no longer covers',
+        (retDummy.body.days || []).find(d => d.date === DAY)?.hours === 11,
+        `hours=${(retDummy.body.days || []).find(d => d.date === DAY)?.hours}`);
+
+      // IDEMPOTENCE, the sequential half. The give-back above closed the link, so
+      // ending the SAME month a second way must credit the dummy nothing further
+      // — 11h stays 11h, it does not become 14h. This is the reachable, ordered
+      // version of the concurrent double-give-back the in-lock re-read in
+      // `returnHoursToDummy`/`moveBack` guards; that interleaving itself cannot be
+      // forced through HTTP without a timing hack, so it is deliberately not
+      // simulated here.
+      const secondStandIn = await req('POST', '/resources', {
+        body: { ...base, name: 'C2 retarget second stand-in (self-managed)', kind: 'internal', contractHoursPerDay: 8, managerId: '1' },
+      });
+      if (check('C2 retarget setup: a second self-managed stand-in exists',
+        secondStandIn.status === 201 && typeof secondStandIn.body?.id === 'string', `status=${secondStandIn.status}`)) {
+        const reRetarget = await req('PUT', `/assignments/${retargetFixture.personAssignmentId}`, {
+          body: { resourceId: secondStandIn.body.id },
+        });
+        check('C2 an already-given-back month can be retargeted again', reRetarget.status === 200,
+          `status=${reRetarget.status} err=${reRetarget.body?.error}`);
+        const twiceDummy = await req('GET', `/assignments/${retargetFixture.dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+        check('C2 a second retarget does NOT credit the dummy the same hours again',
+          (twiceDummy.body.days || []).find(d => d.date === DAY)?.hours === 11,
+          `hours=${(twiceDummy.body.days || []).find(d => d.date === DAY)?.hours}`);
+      }
+    }
+  }
+
+  // (2) DELETING THE TARGET'S ASSIGNMENT. The assignment disappears, so the
+  //     person covers nothing — a rejection in every respect that matters, so
+  //     EVERY recorded hour goes home. The inverse case (deleting the DUMMY's
+  //     assignment) was already handled: the give-back finds the linked row gone
+  //     and logs a no-op, which is exactly why the back-link is not an FK.
+  const deleteFixture = await giveBackFixture('delete target');
+  if (deleteFixture) {
+    const del = await req('DELETE', `/assignments/${deleteFixture.personAssignmentId}`);
+    check('C2 the substituted assignment can be deleted', del.status === 204, `status=${del.status}`);
+    // Proves the delete PROCEEDED rather than being refused — a 409 "pending
+    // substitution" would also leave the dummy whole, for the wrong reason.
+    const gone = await req('GET', `/assignments/${deleteFixture.personAssignmentId}/allocation`);
+    check('C2 the deleted assignment really is gone', gone.status === 404, `status=${gone.status}`);
+
+    const delDummy = await req('GET', `/assignments/${deleteFixture.dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    check('C2 deleting the target assignment returns every transferred hour to the dummy',
+      (delDummy.body.days || []).find(d => d.date === DAY)?.hours === 16,
+      `hours=${(delDummy.body.days || []).find(d => d.date === DAY)?.hours}`);
+    const delDummyAssig = await req('GET', '/assignments');
+    const restored = (delDummyAssig.body || []).find(a => a.id === deleteFixture.dummyAssignmentId);
+    check('C2 the dummy assignment-s assignedHours is restored by the delete give-back',
+      restored?.assignedHours === 16, `assignedHours=${restored?.assignedHours}`);
+  }
+
+  // --- HER OWN HOURS AND THE LOAN ON THE **SAME DAY** ------------------------
+  //
+  // The shape every fixture above is blind to. `mixed-days` puts her own work on
+  // a DIFFERENT day from the transfer, so the give-back's per-day arithmetic
+  // never has to separate "her own" from "on loan" WITHIN one date. Here it does:
+  // she already holds 3h of her own on DAY **on the same assignment**, the dummy
+  // lends 5 more (her day reaches her 8h cap), and the approver then trims that
+  // one day. What the day HOLDS is no longer decomposable after the fact, which
+  // is why the transfer records the pre-transfer baseline alongside the map.
+  //
+  // Conservation is the invariant under test on both branches: her own 3h plus
+  // the dummy's original 5h must still total 8h afterwards — no hour created, no
+  // hour destroyed.
+  async function sameDayFixture(label, ownHours, dummyHours) {
+    const sdDummy = await req('POST', '/resources', { body: { ...base, name: `C2 ${label} dummy`, kind: 'dummy', contractHoursPerDay: 8 } });
+    const sdPerson = await req('POST', '/resources', { body: { ...base, name: `C2 ${label} person`, kind: 'internal', contractHoursPerDay: 8 } });
+    if (!check(`C2 ${label} setup: dummy/person resources created`,
+      sdDummy.status === 201 && sdPerson.status === 201,
+      `dummy=${sdDummy.status} person=${sdPerson.status}`)) return undefined;
+
+    const sdRequest = await req('POST', '/requests', { body: { name: `C2 ${label} request`, requiredRole: 'Developer', requiredEffort: 2, skills: [] } });
+    // BOTH assignments on the SAME request: that is what makes the transfer land
+    // on the assignment she already has hours on, rather than on a new one.
+    const sdDummyAssig = await req('POST', '/assignments', { body: { requestId: sdRequest.body?.id, resourceId: sdDummy.body.id, assignedHours: 0 } });
+    const sdPersonAssig = await req('POST', '/assignments', { body: { requestId: sdRequest.body?.id, resourceId: sdPerson.body.id, assignedHours: 0 } });
+    if (!check(`C2 ${label} setup: request and both assignments created`,
+      sdRequest.status === 200 && sdDummyAssig.status === 200 && sdPersonAssig.status === 200,
+      `request=${sdRequest.status} dummy=${sdDummyAssig.status} person=${sdPersonAssig.status}`)) return undefined;
+
+    const sdDummyBooked = await req('PUT', `/assignments/${sdDummyAssig.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: dummyHours } } });
+    const sdOwnBooked = await req('PUT', `/assignments/${sdPersonAssig.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: ownHours } } });
+    if (!check(`C2 ${label} setup: dummy holds ${dummyHours}h and she holds ${ownHours}h of her own on the SAME day`,
+      sdDummyBooked.status === 200 && sdOwnBooked.status === 200,
+      `dummy=${sdDummyBooked.status} own=${sdOwnBooked.status} err=${sdDummyBooked.body?.error || sdOwnBooked.body?.error}`)) return undefined;
+
+    const sdSub = await req('POST', `/assignment-months/${sdDummyAssig.body.id}:${MONTH}/substitute`, {
+      body: { targetResourceId: sdPerson.body.id },
+    });
+    const sdOutcome = (sdSub.body?.outcomes || [])[0];
+    if (!check(`C2 ${label} setup: the loan lands on the day she already owns`,
+      sdSub.status === 200 && sdOutcome?.transferredHours === dummyHours &&
+      typeof sdOutcome?.targetAssignmentMonthId === 'string',
+      `status=${sdSub.status} outcome=${JSON.stringify(sdOutcome)}`)) return undefined;
+
+    const sdAfter = await req('GET', `/assignments/${sdPersonAssig.body.id}/allocation?from=${MONTH}&to=${MONTH}`);
+    check(`C2 ${label} setup: her day now carries her own hours PLUS the loan`,
+      (sdAfter.body?.days || []).find(d => d.date === DAY)?.hours === ownHours + dummyHours,
+      `hours=${(sdAfter.body?.days || []).find(d => d.date === DAY)?.hours}`);
+
+    return {
+      dummyAssignmentId: sdDummyAssig.body.id,
+      personAssignmentId: sdPersonAssig.body.id,
+      substitutedMonthId: sdOutcome.targetAssignmentMonthId,
+    };
+  }
+
+  // (a) APPROVAL, trimmed back to exactly her own baseline. Removing the loan and
+  //     nothing else must return the WHOLE loan. Charging all 8 held hours
+  //     against the 5 on loan returns only 2 and destroys 3h of booked demand.
+  const sameDayApprove = await sameDayFixture('same-day trimmed approval', 3, 5);
+  if (sameDayApprove) {
+    const trim = await req('PUT', `/assignments/${sameDayApprove.personAssignmentId}/allocation`, {
+      body: { month: MONTH, dailyHours: { [DAY]: 3 } },
+    });
+    check('C2 same-day: the approver can trim the loan back off the shared day', trim.status === 200,
+      `status=${trim.status} err=${trim.body?.error}`);
+
+    const dec = await req('POST', '/allocation-approvals/decide', {
+      headers: GIVE_BACK_DECIDER,
+      body: { items: [{ assignmentMonthId: sameDayApprove.substitutedMonthId, decision: 'Approved', note: 'she keeps only her own work' }] },
+    });
+    check('C2 same-day trimmed approval decided', (dec.body?.results || [])[0]?.status === 'Approved',
+      `res=${JSON.stringify(dec.body?.results)}`);
+
+    const sdDummyAfter = await req('GET', `/assignments/${sameDayApprove.dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    const sdPersonAfter = await req('GET', `/assignments/${sameDayApprove.personAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    const backOnDummy = (sdDummyAfter.body?.days || []).find(d => d.date === DAY)?.hours ?? 0;
+    const leftOnPerson = (sdPersonAfter.body?.days || []).find(d => d.date === DAY)?.hours ?? 0;
+    check('C2 same-day approval: trimming the loan off a shared day returns the WHOLE loan',
+      backOnDummy === 5, `dummy=${backOnDummy}`);
+    check('C2 same-day approval: she keeps exactly her own baseline',
+      leftOnPerson === 3, `person=${leftOnPerson}`);
+    check('C2 same-day approval: no hour is created or destroyed (3 own + 5 lent == 8)',
+      backOnDummy + leftOnPerson === 8, `dummy=${backOnDummy} person=${leftOnPerson}`);
+  }
+
+  // (b) REJECTION after a trim. The dummy is made whole with the FULL map
+  //     (spec §5.6), but her side may only lose what is still ON LOAN — her own
+  //     baseline can never be deleted with it.
+  const sameDayReject = await sameDayFixture('same-day trimmed rejection', 3, 5);
+  if (sameDayReject) {
+    const trim = await req('PUT', `/assignments/${sameDayReject.personAssignmentId}/allocation`, {
+      body: { month: MONTH, dailyHours: { [DAY]: 5 } },
+    });
+    check('C2 same-day rejection setup: the shared day is trimmed 8h -> 5h before the decision',
+      trim.status === 200, `status=${trim.status} err=${trim.body?.error}`);
+
+    const dec = await req('POST', '/allocation-approvals/decide', {
+      headers: GIVE_BACK_DECIDER,
+      body: { items: [{ assignmentMonthId: sameDayReject.substitutedMonthId, decision: 'Rejected', note: 'no' }] },
+    });
+    check('C2 same-day trimmed rejection decided', (dec.body?.results || [])[0]?.status === 'Rejected',
+      `res=${JSON.stringify(dec.body?.results)}`);
+
+    const sdDummyAfter = await req('GET', `/assignments/${sameDayReject.dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    const sdPersonAfter = await req('GET', `/assignments/${sameDayReject.personAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    const backOnDummy = (sdDummyAfter.body?.days || []).find(d => d.date === DAY)?.hours ?? 0;
+    const leftOnPerson = (sdPersonAfter.body?.days || []).find(d => d.date === DAY)?.hours ?? 0;
+    check('C2 same-day rejection: the dummy is made whole with the full recorded map',
+      backOnDummy === 5, `dummy=${backOnDummy}`);
+    check('C2 same-day rejection: her OWN hours on the shared day are NOT deleted with the loan',
+      leftOnPerson === 3, `person=${leftOnPerson}`);
+    check('C2 same-day rejection: no hour is created or destroyed (3 own + 5 lent == 8)',
+      backOnDummy + leftOnPerson === 8, `dummy=${backOnDummy} person=${leftOnPerson}`);
+  }
+
+  // --- THE CREATED ASSIGNMENT MUST NOT READ AS A FULL-TIME BOOKING -----------
+  //
+  // The substitution is the only writer that creates an assignment; every other
+  // path sends an explicit allocationPct. `schedule.util` defaults a missing
+  // allocationPct to 100 and falls back to the REQUEST's window, so a
+  // few-hours-in-one-month transfer used to appear as a 100% booking spanning the
+  // whole request — flagging conflicts for months on end. The created assignment
+  // therefore carries the substituted month as its own window and a pct derived
+  // from the hours actually transferred, on the same monthly basis the capacity
+  // rollup uses.
+  const winDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 window dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  const winPerson = await req('POST', '/resources', { body: { ...base, name: 'C2 window person', kind: 'internal', contractHoursPerDay: 8 } });
+  const winSetupOk = check('C2 window setup: dummy/person resources created',
+    winDummy.status === 201 && winPerson.status === 201, `dummy=${winDummy.status} person=${winPerson.status}`);
+  if (winSetupOk) {
+    // A request spanning SIX months — the window the old default fell back to.
+    const winRequest = await req('POST', '/requests', {
+      body: { name: 'C2 window request', requiredRole: 'Developer', requiredEffort: 1, skills: [], startDate: '2026-04-01', endDate: '2026-09-30' },
+    });
+    const winAssig = await req('POST', '/assignments', { body: { requestId: winRequest.body?.id, resourceId: winDummy.body.id, assignedHours: 0 } });
+    const winSetup2Ok = check('C2 window setup: six-month request and dummy assignment created',
+      winRequest.status === 200 && winAssig.status === 200, `request=${winRequest.status} assignment=${winAssig.status}`);
+    if (winSetup2Ok) {
+      const winBooked = await req('PUT', `/assignments/${winAssig.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 8 } } });
+      check('C2 window setup: one working day booked on the dummy', winBooked.status === 200, `status=${winBooked.status} err=${winBooked.body?.error}`);
+
+      const winSub = await req('POST', `/assignment-months/${winAssig.body.id}:${MONTH}/substitute`, {
+        body: { targetResourceId: winPerson.body.id },
+      });
+      const winOutcome = (winSub.body?.outcomes || [])[0];
+      const winCreatedId = winOutcome?.targetAssignmentMonthId?.split(':')[0];
+      check('C2 window: the substitution transferred the day and created her assignment',
+        winSub.status === 200 && winOutcome?.transferredHours === 8 && typeof winCreatedId === 'string',
+        `status=${winSub.status} outcome=${JSON.stringify(winOutcome)}`);
+
+      const winAssignments = await req('GET', '/assignments');
+      const winCreated = (winAssignments.body || []).find(a => a.id === winCreatedId);
+      check('C2 window: the created assignment is bounded by the SUBSTITUTED MONTH, not the request',
+        winCreated?.startDate === `${MONTH}-01` && winCreated?.endDate === `${MONTH}-30`,
+        `start=${winCreated?.startDate} end=${winCreated?.endDate}`);
+
+      // The expected pct comes from the capacity rollup's own monthly target for
+      // her — the same basis, read back from the server rather than hardcoded.
+      const winCap = await req('GET', `/capacity/monthly?from=${MONTH}&to=${MONTH}`);
+      const winTarget = (winCap.body?.rows || []).find(r => r.resourceId === winPerson.body.id)?.monthly?.[MONTH]?.targetHours;
+      const winExpected = typeof winTarget === 'number' && winTarget > 0 ? Math.round((8 / winTarget) * 10000) / 100 : undefined;
+      check('C2 window: allocationPct reflects the transferred hours, not a silent 100%',
+        winCreated?.allocationPct === winExpected && winCreated?.allocationPct < 100,
+        `pct=${winCreated?.allocationPct} expected=${winExpected} monthTarget=${winTarget}`);
+    }
+  }
+
+  // --- RESTORED HOURS MUST STILL COUNT ON THE CAPACITY DASHBOARD -------------
+  //
+  // The give-back re-creates day rows on the dummy's month row without looking at
+  // its status. `capacity.util` classifies by that status: 'Rejected' is in
+  // neither the planned nor the confirmed band, so demand restored onto a rejected
+  // placeholder month exists in storage and on the calendar but contributes ZERO
+  // to /capacity/monthly and to the B2 semaphore — the gap the feature exists to
+  // make visible becomes invisible. Sequence: the placeholder's own month is
+  // submitted and then REJECTED while the substitution is pending (the approver
+  // sees a placeholder now down to 8h), and only afterwards is her month rejected.
+  const bandDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 band dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  const bandPerson = await req('POST', '/resources', { body: { ...base, name: 'C2 band person', kind: 'internal', contractHoursPerDay: 8 } });
+  const bandSetupOk = check('C2 band setup: dummy/person resources created',
+    bandDummy.status === 201 && bandPerson.status === 201, `dummy=${bandDummy.status} person=${bandPerson.status}`);
+  if (bandSetupOk) {
+    const bandRequest = await req('POST', '/requests', { body: { name: 'C2 band request', requiredRole: 'Developer', requiredEffort: 2, skills: [] } });
+    const bandAssig = await req('POST', '/assignments', { body: { requestId: bandRequest.body?.id, resourceId: bandDummy.body.id, assignedHours: 0 } });
+    const bandSetup2Ok = check('C2 band setup: request and dummy assignment created',
+      bandRequest.status === 200 && bandAssig.status === 200, `request=${bandRequest.status} assignment=${bandAssig.status}`);
+    if (bandSetup2Ok) {
+      const bandDummyMonthId = `${bandAssig.body.id}:${MONTH}`;
+      const bandBooked = await req('PUT', `/assignments/${bandAssig.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 16 } } });
+      const bandSubmitted = await req('POST', `/assignments/${bandAssig.body.id}/months/${MONTH}/submit`, { body: {} });
+      const bandBookedOk = check('C2 band setup: the placeholder month is booked at 2 FTE and submitted for approval',
+        bandBooked.status === 200 && bandSubmitted.status === 200 && bandSubmitted.body?.status === 'Requested',
+        `booked=${bandBooked.status} submitted=${bandSubmitted.status}/${bandSubmitted.body?.status}`);
+      if (bandBookedOk) {
+        const bandSub = await req('POST', `/assignment-months/${bandDummyMonthId}/substitute`, {
+          body: { targetResourceId: bandPerson.body.id },
+        });
+        const bandOutcome = (bandSub.body?.outcomes || [])[0];
+        check('C2 band setup: one FTE moved to the person',
+          bandSub.status === 200 && bandOutcome?.transferredHours === 8 && typeof bandOutcome?.targetAssignmentMonthId === 'string',
+          `status=${bandSub.status} outcome=${JSON.stringify(bandOutcome)}`);
+
+        // The approver rejects the DRAINED placeholder month first.
+        const bandRejectDummy = await req('POST', '/allocation-approvals/decide', {
+          headers: GIVE_BACK_DECIDER,
+          body: { items: [{ assignmentMonthId: bandDummyMonthId, decision: 'Rejected', note: '8h left is not worth a placeholder' }] },
+        });
+        check('C2 band setup: the drained placeholder month is rejected',
+          (bandRejectDummy.body?.results || [])[0]?.status === 'Rejected', `res=${JSON.stringify(bandRejectDummy.body?.results)}`);
+
+        // ...and only then is her month rejected, sending the 8h back.
+        const bandRejectPerson = await req('POST', '/allocation-approvals/decide', {
+          headers: GIVE_BACK_DECIDER,
+          body: { items: [{ assignmentMonthId: bandOutcome?.targetAssignmentMonthId, decision: 'Rejected', note: 'not available' }] },
+        });
+        check('C2 band setup: her substituted month is rejected, sending the hours home',
+          (bandRejectPerson.body?.results || [])[0]?.status === 'Rejected', `res=${JSON.stringify(bandRejectPerson.body?.results)}`);
+
+        const bandDummyAfter = await req('GET', `/assignments/${bandAssig.body.id}/allocation?from=${MONTH}&to=${MONTH}`);
+        const bandDummyDay = (bandDummyAfter.body?.days || []).find(d => d.date === DAY)?.hours ?? 0;
+        const bandDummyRow = (bandDummyAfter.body?.months || [])[0];
+        check('C2 band: the restored hours are back on the placeholder-s day rows',
+          bandDummyDay === 16, `hours=${bandDummyDay}`);
+        check('C2 band: the re-opened placeholder month is back in a counted status, with an approval to decide',
+          bandDummyRow?.status === 'Requested' && typeof bandDummyRow?.approvalId === 'string',
+          `month=${JSON.stringify(bandDummyRow)}`);
+
+        // THE POINT: read the capacity surface, not the day rows.
+        const bandCap = await req('GET', `/capacity/monthly?from=${MONTH}&to=${MONTH}`);
+        const bandRow = (bandCap.body?.demandRows || []).find(r => r.resourceId === bandDummy.body.id);
+        check('C2 band: the restored placeholder demand is visible on /capacity/monthly',
+          bandRow?.monthly?.[MONTH]?.plannedHours === 16,
+          `planned=${bandRow?.monthly?.[MONTH]?.plannedHours} cell=${JSON.stringify(bandRow?.monthly?.[MONTH])}`);
+        check('C2 band: the restored demand counts as UNCOVERED demand in the totals',
+          (bandCap.body?.totals?.[MONTH]?.demandFteUncovered ?? 0) > 0,
+          `uncovered=${bandCap.body?.totals?.[MONTH]?.demandFteUncovered}`);
+      }
+    }
+  }
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -2078,6 +3037,15 @@ async function main() {
     await checkResourceKinds();
   } catch (err) {
     console.log(`FAIL  resource-kinds flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the C2 dummy-substitution
+  // flow never masks or blocks any of the prior section results.
+  try {
+    await checkDummySubstitution();
+  } catch (err) {
+    console.log(`FAIL  dummy-substitution flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

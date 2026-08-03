@@ -9,7 +9,8 @@ import {
   output,
   signal,
 } from '@angular/core';
-import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { of } from 'rxjs';
 import { DecimalPipe, NgTemplateOutlet } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
@@ -18,9 +19,21 @@ import {
   AllocationApprovalRow,
   AllocationDecisionItem,
   ApiService,
+  Resource,
+  SubstitutionMonthOutcome,
+  SubstitutionResult,
 } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
+import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
+import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
+
+/** Today as ISO 'YYYY-MM-DD' — matches ResourcesComponent.isTerminated's own
+ *  local helper exactly, so a candidate resource is filtered out here under
+ *  the SAME rule the People page shows it terminated under. */
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
 /** One rendered line: a project's (assignment, month) item, alongside the resource
  *  row it belongs to (needed once Task 12 renders more than one resource's rows). */
@@ -82,7 +95,7 @@ interface Line {
 @Component({
   selector: 'app-approval-modal',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, FormsModule, DecimalPipe, NgTemplateOutlet],
+  imports: [MatIconModule, FormsModule, DecimalPipe, NgTemplateOutlet, ResourceKindBadgeComponent],
   host: { class: 'contents' },
   template: `
     <div class="command-card w-full max-w-2xl max-h-[92vh] overflow-hidden flex flex-col">
@@ -159,6 +172,17 @@ interface Line {
                     [attr.aria-label]="'Open the allocation calendar for ' + projectLabel(line.item)">
               <mat-icon class="text-[18px] w-[18px] h-[18px]">calendar_month</mat-icon>
             </button>
+            <!-- Substitute (C2): only a dummy placeholder can be handed to a
+                 real person — an internal/subco line never offers this. -->
+            @if (line.row.kind === 'dummy') {
+              <button type="button" data-test="substitute"
+                      (click)="openSubstitute(line.item)"
+                      class="p-1.5 rounded-full text-ink-muted hover:text-ink-secondary hover:bg-surface-muted transition-colors"
+                      title="Substitute this dummy with a real person"
+                      [attr.aria-label]="'Substitute ' + projectLabel(line.item)">
+                <mat-icon class="text-[18px] w-[18px] h-[18px]">person_add</mat-icon>
+              </button>
+            }
             <button type="button" (click)="toggleNotes(line.item.assignmentMonthId)"
                     class="p-1.5 rounded-full transition-colors"
                     [class.text-caution-text]="hasNote(line.item)"
@@ -188,6 +212,114 @@ interface Line {
                           (ngModelChange)="setApproverNote(line.item.assignmentMonthId, $event)"
                           [attr.aria-label]="'Approver note for ' + projectLabel(line.item)"></textarea>
               </label>
+            </div>
+          }
+          <!-- Substitute panel (C2): opened per line via the button above. Only
+               ONE line's panel is ever open at once (substituteTarget is a
+               single signal, not a Set like the notes toggle) — heavier than a
+               note, and opening a second one mid-flow would abandon whatever
+               person/flag state was chosen for the first without saying so. -->
+          @if (substituteTargetFor(line); as target) {
+            <div class="pl-9 space-y-3 rounded-lg bg-surface-muted p-3" data-test="substitute-panel">
+              <div class="flex items-center gap-1.5 text-xs font-semibold text-ink-secondary flex-wrap">
+                <mat-icon class="text-[16px] w-[16px] h-[16px] text-ink-muted">swap_horiz</mat-icon>
+                <span>Substitute</span>
+                <span class="text-ink">{{ target.row.resourceName }}</span>
+                <app-resource-kind-badge [kind]="target.row.kind" />
+                <span class="text-ink-muted">on</span>
+                <span class="text-ink">{{ projectLabel(target.item) }}</span>
+                <span class="text-ink-muted">—</span>
+                <span class="text-ink">{{ monthLabelLong(target.item.month) }}</span>
+              </div>
+
+              @if (substitutionResult(); as result) {
+                <!-- Outcome (post-confirm): the server always returns 200 — a
+                     transferredHours of 0 or a skipped reason is NOT success,
+                     so it renders under its own red/amber tone, never green. -->
+                <div class="space-y-2">
+                  @for (outcome of result.outcomes; track outcome.month) {
+                    <div class="rounded-lg border border-line p-3" data-test="substitute-outcome">
+                      <div class="flex items-center justify-between gap-2">
+                        <span class="font-semibold text-ink text-sm">{{ monthLabel(outcome.month) }}</span>
+                        <span class="command-status uppercase" [class]="outcomeStatusClass(outcome)">{{ outcomeStatusLabel(outcome) }}</span>
+                      </div>
+                      @if (outcome.skipped) {
+                        <p class="text-xs text-ink-secondary mt-1" data-test="outcome-skipped">{{ outcome.skipped }}</p>
+                      } @else {
+                        <p class="text-xs text-ink-secondary mt-1" data-test="outcome-transferred">
+                          Moved {{ outcome.transferredHours | number:'1.0-1' }}h to {{ result.targetResourceName }}.
+                        </p>
+                      }
+                      @if (outcome.remainingHours > 0) {
+                        <p class="text-xs text-caution-text mt-1" data-test="outcome-remaining">
+                          {{ outcome.remainingHours | number:'1.0-1' }}h left on {{ target.row.resourceName }} — another person may be needed.
+                        </p>
+                      }
+                      @if (outcome.demotedExistingWork) {
+                        <p class="text-xs text-caution-text mt-1">This demoted work {{ result.targetResourceName }} already had approved that month.</p>
+                      }
+                    </div>
+                  }
+                  @if (result.outcomes.length === 0) {
+                    <p class="text-xs text-critical-text">Nothing was transferred.</p>
+                  }
+                  <button type="button" class="command-button secondary text-xs" (click)="closeSubstitute()">Done</button>
+                </div>
+              } @else {
+                <!-- Picker: internal, non-terminated resources only, filtered by
+                     name/role text and an organization select pre-set to the
+                     dummy's own organization (see defaultOrgFor) — always
+                     clearable via its "All organizations" option. -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <input type="text" [ngModel]="personFilter()" (ngModelChange)="personFilter.set($event)"
+                         placeholder="Search by name or role..." aria-label="Search candidate resources"
+                         data-test="substitute-search" class="command-input">
+                  <!-- No [value] binding on the SELECT itself — same fix as
+                       AllocationApprovalsComponent's From/To range selects
+                       (regression: a [value] applied before its @for's
+                       <option>s exist is silently dropped by the browser and
+                       never re-applied once they do, since the bound
+                       expression itself hasn't changed). [selected] on each
+                       OPTION is evaluated per-option and has no such race. -->
+                  <select (change)="onOrgFilterChange($event)"
+                          aria-label="Filter by organization" data-test="substitute-org-filter" class="command-select">
+                    <option value="" [selected]="orgFilter() === ''">All organizations</option>
+                    @for (org of candidateOrganizations(); track org) {
+                      <option [value]="org" [selected]="org === orgFilter()">{{ org }}</option>
+                    }
+                  </select>
+                </div>
+
+                <div class="max-h-40 overflow-y-auto divide-y divide-line rounded-lg border border-line">
+                  @for (cand of filteredCandidates(); track cand.id) {
+                    <button type="button"
+                            class="w-full text-left px-3 py-2 hover:bg-surface-muted transition-colors flex items-center justify-between gap-2"
+                            [class.bg-accent-tint]="chosenTargetId() === cand.id"
+                            (click)="chooseTarget(cand.id)" data-test="substitute-candidate">
+                      <span><span class="font-semibold text-ink">{{ cand.name }}</span><span class="text-ink-muted"> — {{ cand.role }}</span></span>
+                      @if (cand.organization) {
+                        <span class="text-xs text-ink-muted shrink-0">{{ cand.organization }}</span>
+                      }
+                    </button>
+                  }
+                  @if (filteredCandidates().length === 0) {
+                    <p class="p-3 text-xs text-ink-secondary text-center">No matching resources.</p>
+                  }
+                </div>
+
+                @if (chosenTarget(); as person) {
+                  <div class="command-card-muted p-3 text-sm space-y-2" data-test="substitute-summary">
+                    <p>Hand <span class="font-semibold">{{ projectLabel(target.item) }}</span> — <span class="font-semibold">{{ monthLabelLong(target.item.month) }}</span> to <span class="font-semibold">{{ person.name }}</span>.</p>
+                    <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
+                      <input type="checkbox" class="command-checkbox" data-test="substitute-apply-remaining"
+                             [checked]="applyToRemaining()" (change)="applyToRemaining.set(!applyToRemaining())">
+                      Apply to all remaining months
+                    </label>
+                    <button type="button" data-test="substitute-confirm" (click)="confirmSubstitute()" class="command-button">Confirm substitution</button>
+                  </div>
+                }
+                <button type="button" class="command-button secondary text-xs" (click)="closeSubstitute()">Cancel</button>
+              }
             </div>
           }
         </div>
@@ -523,5 +655,165 @@ export class ApprovalModalComponent {
       case 'Rejected': return 'red';
       default: return 'neutral';
     }
+  }
+
+  // --- Substitute (C2): hand a dummy's booked month to a real person --------
+
+  /**
+   * Candidate person list. `/resources` is principal-gated exactly like the
+   * approval feed itself (every role that can open this modal — resource-
+   * manager, delivery-executive, admin — can also read it; see
+   * docs/roles-and-permissions.md), so this is keyed on `authReady` the same
+   * way `ReportingComponent` gates its own reads: never fire before the OIDC
+   * bootstrap settles, or it races the token and 401s into an empty latch.
+   */
+  private resourcesRes = rxResource<Resource[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResources() : of([] as Resource[])),
+    defaultValue: [] as Resource[],
+  });
+  private resources = computed(() => this.resourcesRes.value() ?? []);
+
+  /**
+   * Internal, non-terminated resources — every other filter (text,
+   * organization) only narrows this set further, never widens beyond it.
+   * `countsTowardInternalCapacity` is true only for 'internal' (excludes both
+   * dummy and subco); termination mirrors `ResourcesComponent.isTerminated`
+   * exactly (`terminationDate` set to a date on or before today).
+   */
+  private eligibleTargets = computed<Resource[]>(() =>
+    this.resources().filter(r => countsTowardInternalCapacity(kindOf(r)) && !this.isTerminated(r)));
+
+  private isTerminated(r: Resource): boolean {
+    return !!r.terminationDate && r.terminationDate <= todayIso();
+  }
+
+  /** Organizations actually present among `eligibleTargets` — what the
+   *  organization `<select>` offers, so a chosen filter can never produce a
+   *  silently-empty list. */
+  protected candidateOrganizations = computed<string[]>(() => {
+    const orgs = new Set<string>();
+    for (const r of this.eligibleTargets()) if (r.organization) orgs.add(r.organization);
+    return [...orgs].sort();
+  });
+
+  protected personFilter = signal('');
+  protected orgFilter = signal('');
+
+  protected filteredCandidates = computed<Resource[]>(() => {
+    const org = this.orgFilter();
+    const q = this.personFilter().trim().toLowerCase();
+    return this.eligibleTargets().filter(r => {
+      if (org && r.organization !== org) return false;
+      if (!q) return true;
+      return r.name.toLowerCase().includes(q) || r.role.toLowerCase().includes(q);
+    });
+  });
+
+  protected onOrgFilterChange(event: Event): void {
+    this.orgFilter.set((event.target as HTMLSelectElement).value);
+  }
+
+  /** The line whose substitute panel is open, or null. A single signal (not a
+   *  Set, unlike the notes toggle): only one panel is ever open at a time,
+   *  since opening a second mid-flow would silently abandon whatever
+   *  person/flag was chosen for the first. */
+  private substituteTarget = signal<Line | null>(null);
+
+  /** Public: the spec drives this directly, opening the panel for one line's item.
+   *  Resets EVERY piece of picker/outcome state — including `applyToRemaining` —
+   *  so a flag or selection left over from a PREVIOUS line's panel can never
+   *  silently carry into this one. Regression: `applyToRemaining` was originally
+   *  left out of this reset, so checking "Apply to all remaining months" on one
+   *  dummy line and then opening Substitute on a different line kept it checked,
+   *  which would apply the transfer to months the operator never opted into. */
+  openSubstitute(item: AllocationApprovalItem): void {
+    const row = this.rows().find(r => r.items.some(i => i.assignmentMonthId === item.assignmentMonthId));
+    if (!row) return;
+    this.substituteTarget.set({ row, item });
+    this.chosenTargetId.set(null);
+    this.substitutionResult.set(null);
+    this.personFilter.set('');
+    this.orgFilter.set(this.defaultOrgFor(row));
+    this.applyToRemaining.set(false);
+  }
+
+  protected closeSubstitute(): void {
+    this.substituteTarget.set(null);
+  }
+
+  /** Returns the open substitute target when it's THIS line's, else null —
+   *  lets the template gate the panel with `@if (...; as target)`. */
+  protected substituteTargetFor(line: Line): Line | null {
+    const target = this.substituteTarget();
+    return target && target.item.assignmentMonthId === line.item.assignmentMonthId ? target : null;
+  }
+
+  /**
+   * Ambiguity resolution: the approval row carries no organization of its
+   * own, so the filter is pre-set to the DUMMY's organization, looked up by
+   * `row.resourceId` in the resource list — but only when that organization
+   * still has at least one eligible candidate under it; otherwise the filter
+   * starts empty rather than presenting the operator an unexplained empty
+   * list. The select stays clearable ("All organizations") either way.
+   */
+  private defaultOrgFor(row: AllocationApprovalRow): string {
+    const dummy = this.resources().find(r => r.id === row.resourceId);
+    const org = dummy?.organization;
+    return org && this.candidateOrganizations().includes(org) ? org : '';
+  }
+
+  /** Protected, not private: the template reads it directly to highlight the
+   *  selected candidate row. */
+  protected chosenTargetId = signal<string | null>(null);
+
+  /** Public: the spec drives this directly. */
+  chooseTarget(id: string): void {
+    this.chosenTargetId.set(id);
+  }
+
+  protected chosenTarget = computed(() => this.resources().find(r => r.id === this.chosenTargetId()));
+
+  /** Public: the spec drives this directly (defaults to substituting just the one month). */
+  applyToRemaining = signal(false);
+
+  protected substitutionResult = signal<SubstitutionResult | null>(null);
+
+  /**
+   * Send the substitution. The endpoint always returns 200 — even when the
+   * primary month's transfer failed outright, it comes back as an outcome
+   * with `skipped` set rather than an HTTP error (see the class doc comment
+   * and `outcomeStatusLabel`/`outcomeStatusClass` below) — so a 200 here only
+   * means "render the outcomes", never "it succeeded". `decided` is emitted
+   * regardless so the host's feed reflects whatever DID move.
+   */
+  protected confirmSubstitute(): void {
+    const target = this.substituteTarget();
+    const targetId = this.chosenTargetId();
+    if (!target || !targetId) return;
+    this.api.substituteDummyMonth(target.item.assignmentMonthId, targetId, this.applyToRemaining())
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(result => {
+        this.substitutionResult.set(result);
+        this.decided.emit();
+      });
+  }
+
+  /**
+   * Tells the three outcomes apart (see the class doc comment / api.service's
+   * `SubstitutionMonthOutcome`): a `skipped` reason OR zero transferred hours
+   * is NOT a success regardless of the month's remaining hours — it must
+   * never read the same as a full transfer.
+   */
+  protected outcomeStatusLabel(o: SubstitutionMonthOutcome): string {
+    if (o.skipped || o.transferredHours === 0) return 'Not done';
+    return o.remainingHours > 0 ? 'Partial' : 'Transferred';
+  }
+
+  /** command-status tone for `outcomeStatusLabel` — green only for a full
+   *  transfer, amber for a partial one, red for skipped/zero (never green). */
+  protected outcomeStatusClass(o: SubstitutionMonthOutcome): string {
+    if (o.skipped || o.transferredHours === 0) return 'red';
+    return o.remainingHours > 0 ? 'amber' : 'green';
   }
 }
