@@ -88,15 +88,20 @@ export const resources: Resource[] = [
   // ALLOCATION APPROVAL WORKFLOW: utilizationPlanned mirrors utilization for the
   // seed because every seeded assignment status is 'Allocated' (confirmed) —
   // there are no pending allocations, so planned == confirmed here.
-  { id: '1', name: 'Julie Armstrong', role: 'Developer',
+  // C1 — ADAPTER PARITY: `kind: 'internal'` is spelled out on these three rather
+  // than left to the reader's default. Omitting it diverges the two backends:
+  // Postgres applies the column's DEFAULT 'internal' on insert and serves the
+  // field back, while the in-memory adapter stores exactly what it was given and
+  // serves no `kind` at all. Same seed, two different JSON shapes.
+  { id: '1', name: 'Julie Armstrong', role: 'Developer', kind: 'internal',
     skills: [{ name: 'Java', level: 3 }, { name: 'Spring', level: 2 }],
     projectRoles: ['Senior Developer', 'Backend Engineer'],
     externalExperience: [{ projectName: 'E-commerce Migration', company: 'TechCorp', role: 'Java Developer', startDate: '2020-01-01', endDate: '2022-12-31', comment: 'Migrated legacy system to Spring Boot.' }],
     profilePicture: '', resume: '', utilization: 95, utilizationPlanned: 95, capacity: 40, managerId: '1', organization: 'Engineering', location: 'New York', costRate: 600, billRate: 1120, hireDate: '2019-03-04', contractHoursPerDay: 8 },
-  { id: '2', name: 'John Miller', role: 'Consultant',
+  { id: '2', name: 'John Miller', role: 'Consultant', kind: 'internal',
     skills: [{ name: 'Project Management', level: 2 }], projectRoles: ['Business Consultant'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 90, utilizationPlanned: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London', costRate: 720, billRate: 1440, hireDate: '2021-09-13', contractHoursPerDay: 8 },
-  { id: '3', name: 'Alice Smith', role: 'Designer',
+  { id: '3', name: 'Alice Smith', role: 'Designer', kind: 'internal',
     skills: [{ name: 'Figma', level: 3 }], projectRoles: ['UX Designer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 55, utilizationPlanned: 55, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', hireDate: '2023-01-16', contractHoursPerDay: 4 },
   // C1 — placeholder and external resources. The manual pre-loads dummies by

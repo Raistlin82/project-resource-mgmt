@@ -1361,15 +1361,17 @@ apiRouter.post('/resources', async (req, res) => {
   const kindErr = await validateResourceKind(body.kind, body.vendorId);
   if (kindErr) { res.status(400).json({ error: kindErr }); return; }
   if (body.kind === undefined) body.kind = 'internal';
-  // A non-subco '' vendorId already passed validation (validateResourceKind
-  // treats '' like absent) but must never be PERSISTED as a literal empty
-  // string — normalize to undefined so the field is genuinely absent. Use
+  // A non-subco '' or null vendorId already passed validation
+  // (validateResourceKind treats both like absent) but must never be PERSISTED
+  // verbatim — normalize to undefined so the field is genuinely absent. Use
   // undefined (not null) here: the in-memory adapter's create() has no
   // null-stripping step (that only exists on update()), so a literal null
-  // would leak into every later read of this row, unlike Postgres where
-  // nullsToUndefined() would mask it — undefined is the one value both
-  // adapters agree means "don't set this column" on create.
-  if (body.vendorId === '') body.vendorId = undefined;
+  // would leak into every later read of this row, unlike Postgres where the
+  // column is NULL and nullsToUndefined() hands it back absent — undefined is
+  // the one value both adapters agree means "don't set this column" on create.
+  // `pick()` copies an explicit null straight through, so it has to be caught
+  // here alongside '': this normalization IS the adapter parity.
+  if (body.vendorId === '' || body.vendorId === null) body.vendorId = undefined;
   const item = {
     skills: [], projectRoles: [], externalExperience: [],
     ...body,
@@ -1382,8 +1384,13 @@ apiRouter.post('/resources', async (req, res) => {
   res.status(201).json(resolved);
 });
 apiRouter.put('/resources/:id', async (req, res) => {
-  const existing = await repos.resources.get(req.params.id);
-  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  // Preflight snapshot: it answers the 404 and supplies the stored hireDate for
+  // the terminationDate ordering rule. It is deliberately NOT the basis of the
+  // kind/vendorId merge or the daily-cap guard below — those re-read the row
+  // inside the res: lock, because they are a read-modify-write and this read is
+  // not (see the TOCTOU note there).
+  const preflight = await repos.resources.get(req.params.id);
+  if (preflight === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   const body = pick<Resource>(req.body, RESOURCE_FIELDS);
   // Phase E: map any supplied costRateOverride/billRateOverride onto the columns
   // ('' clears the override → inherit; absent leaves the stored rate untouched).
@@ -1403,7 +1410,7 @@ apiRouter.put('/resources/:id', async (req, res) => {
       res.status(400).json({ error: 'terminationDate must be an ISO date string' });
       return;
     }
-    const effectiveHire = body.hireDate ?? existing.hireDate;
+    const effectiveHire = body.hireDate ?? preflight.hireDate;
     if (isIsoDateString(effectiveHire) && Date.parse(body.terminationDate) < Date.parse(effectiveHire)) {
       res.status(400).json({ error: 'terminationDate must be on or after hireDate' });
       return;
@@ -1434,44 +1441,50 @@ apiRouter.put('/resources/:id', async (req, res) => {
   // null (same '' === clear convention as applyRateOverrides above) — never
   // persist a literal ''. Normalize before computing the merge so it's
   // treated as "supplied" (a real clear), not silently dropped back to the
-  // stale existing value the way `'' ?? existing.vendorId` would.
-  if (body.vendorId === '') body.vendorId = null as unknown as undefined;
-  const mergedKind = body.kind ?? existing.kind;
-  const vendorSupplied = body.vendorId !== undefined;
-  let mergedVendorId: string | null | undefined = vendorSupplied ? body.vendorId : existing.vendorId;
-  if (!vendorSupplied && mergedKind !== 'subco' && existing.vendorId !== undefined) {
-    body.vendorId = null as unknown as undefined;
-    mergedVendorId = null;
-  }
-  const kindErr = await validateResourceKind(mergedKind, mergedVendorId);
-  if (kindErr) { res.status(400).json({ error: kindErr }); return; }
-  // C1: narrowing a kind (dummy/subco -> internal) shrinks the daily ceiling by
-  // MULTI_FTE_MAX. Refuse if that would strand existing bookings above the new
-  // cap rather than silently leaving invalid allocations behind. baseCap is
-  // resolved exactly like the allocation handler's gate (resolveBaseCap:
-  // stored contractHoursPerDay, guarded against 0/NaN/negative, else
-  // getHoursPerDay()).
-  // TOCTOU: a concurrent PUT .../allocation could book hours onto this very
-  // resource between reading its assignment days and writing the narrowed
-  // kind, so the re-check AND the write happen inside the SAME res: lock —
-  // the same discipline the allocation handler's own res: critical section
-  // (below) uses for exactly this reason.
-  const baseCap = await resolveBaseCap(existing);
-  const currentCap = dailyCapFor(kindOf(existing), baseCap);
-  const newCap = dailyCapFor(kindOf({ kind: mergedKind }), baseCap);
-  const locked = await withLock(`res:${existing.id}`, async (): Promise<{ offender?: string; updated?: Resource }> => {
+  // stale stored value the way `'' ?? current.vendorId` would.
+  //
+  // Then: narrowing a kind (dummy/subco -> internal) shrinks the daily ceiling
+  // by MULTI_FTE_MAX. Refuse if that would strand existing bookings above the
+  // new cap rather than silently leaving invalid allocations behind. baseCap is
+  // resolved exactly like the allocation handler's gate (resolveBaseCap: stored
+  // contractHoursPerDay, guarded against 0/NaN/negative, else getHoursPerDay()).
+  //
+  // TOCTOU: ALL of it — the read of the stored row, the merge, both caps, the
+  // assignment-day re-check and the write — happens inside ONE res: lock, the
+  // same discipline the allocation handler's own res: critical section (below)
+  // uses. Two concurrent PUTs that each read the pre-state would otherwise
+  // reason from the same snapshot and could persist exactly the incoherent
+  // kind/vendor pair (or the over-cap narrowing) this block exists to prevent;
+  // a concurrent PUT .../allocation could equally book hours in between. The
+  // section acquires no other lock, so it cannot deadlock.
+  const locked = await withLock(`res:${req.params.id}`, async (): Promise<{ status?: number; error?: string; updated?: Resource }> => {
+    const current = await repos.resources.get(req.params.id);
+    if (current === undefined) return { status: 404, error: 'Not found' };
+    if (body.vendorId === '') body.vendorId = null as unknown as undefined;
+    const mergedKind = body.kind ?? current.kind;
+    const vendorSupplied = body.vendorId !== undefined;
+    let mergedVendorId: string | null | undefined = vendorSupplied ? body.vendorId : current.vendorId;
+    if (!vendorSupplied && mergedKind !== 'subco' && current.vendorId !== undefined) {
+      body.vendorId = null as unknown as undefined;
+      mergedVendorId = null;
+    }
+    const kindErr = await validateResourceKind(mergedKind, mergedVendorId);
+    if (kindErr) return { status: 400, error: kindErr };
+
+    const baseCap = await resolveBaseCap(current);
+    const currentCap = dailyCapFor(kindOf(current), baseCap);
+    const newCap = dailyCapFor(kindOf({ kind: mergedKind }), baseCap);
     if (newCap < currentCap) {
-      const ids = new Set((await repos.assignments.list()).filter(a => a.resourceId === existing.id).map(a => a.id));
+      const ids = new Set((await repos.assignments.list()).filter(a => a.resourceId === current.id).map(a => a.id));
       const byDate = sumHoursByDate((await repos.assignmentDays.list()).filter(d => ids.has(d.assignmentId)));
       const offender = Object.keys(byDate).sort().find(day => exceedsDailyCapacity(byDate[day], newCap));
-      if (offender !== undefined) return { offender };
+      if (offender !== undefined) {
+        return { status: 400, error: `changing kind to ${mergedKind} would exceed the daily capacity on ${offender}` };
+      }
     }
     return { updated: await repos.resources.update(req.params.id, body) };
   });
-  if (locked.offender !== undefined) {
-    res.status(400).json({ error: `changing kind to ${mergedKind} would exceed the daily capacity on ${locked.offender}` });
-    return;
-  }
+  if (locked.error !== undefined) { res.status(locked.status ?? 400).json({ error: locked.error }); return; }
   const [resolved] = await resolveResourceRates([locked.updated as Resource]);
   res.json(resolved);
 });
@@ -1739,7 +1752,12 @@ apiRouter.get('/assignments/:id/allocation', async (req, res) => {
     : [];
 
   const resource = await repos.resources.get(assig.resourceId);
-  const contractHoursPerDay = resource?.contractHoursPerDay ?? await getHoursPerDay();
+  // resolveBaseCap, not `?? getHoursPerDay()`: a stored contractHoursPerDay of
+  // 0 / NaN / negative is not a usable cap, and this value is load-bearing on
+  // the client — it seeds the calendar's dailyCap(), the per-day over-capacity
+  // hint and the FTE fill. Reporting a broken base here would make the screen
+  // disagree with the write gate, which resolves the very same way.
+  const contractHoursPerDay = await resolveBaseCap(resource ?? {});
   // C1: the calendar cannot decide whether to offer the multi-FTE selector (or
   // widen its per-day capacity hint) without knowing the resource's kind.
   const resourceKind = kindOf(resource);

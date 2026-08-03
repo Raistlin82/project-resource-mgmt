@@ -1783,6 +1783,15 @@ async function checkResourceKinds() {
 
   const base = { role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, hireDate: '2026-01-01' };
 
+  // ADAPTER PARITY: the pre-C1 seeded resources must serve an explicit
+  // kind: 'internal' on BOTH backends. Postgres would apply the column DEFAULT
+  // even if the seed omitted it; the in-memory adapter would not, and the two
+  // would answer this GET with different JSON shapes.
+  const seededInternal = await req('GET', '/resources/1');
+  check('C1 a seeded pre-existing resource reports kind=internal',
+    seededInternal.status === 200 && seededInternal.body?.kind === 'internal',
+    `status=${seededInternal.status} kind=${JSON.stringify(seededInternal.body?.kind)}`);
+
   const badKind = await req('POST', '/resources', { body: { ...base, name: 'C1 bad kind', kind: 'contractor' } });
   check('C1 an unknown kind is rejected', badKind.status === 400, `status=${badKind.status}`);
 
@@ -1809,6 +1818,22 @@ async function checkResourceKinds() {
   check('C1 an empty-string vendorId on create is normalized to absent, not literal ""',
     emptyVendorCreate.status === 201 && !('vendorId' in (emptyVendorCreate.body || {})),
     `status=${emptyVendorCreate.status} vendorId=${JSON.stringify(emptyVendorCreate.body?.vendorId)}`);
+
+  // Same for an explicit null: pick() copies it straight through, so without a
+  // create-side strip the in-memory adapter (whose create() has no null step)
+  // would store a literal null while Postgres stores NULL and reads it back
+  // absent — a divergence in exactly the seam this normalization exists for.
+  const nullVendorCreate = await req('POST', '/resources', { body: { ...base, name: 'C1 null vendorId is absent', vendorId: null } });
+  check('C1 a null vendorId on create is normalized to absent, not literal null',
+    nullVendorCreate.status === 201 && !('vendorId' in (nullVendorCreate.body || {})),
+    `status=${nullVendorCreate.status} vendorId=${JSON.stringify(nullVendorCreate.body?.vendorId)}`);
+  // And it must survive a re-read, not just the create response.
+  if (nullVendorCreate.body?.id) {
+    const reread = await req('GET', `/resources/${nullVendorCreate.body.id}`);
+    check('C1 a null vendorId is still absent when the row is re-read',
+      reread.status === 200 && !('vendorId' in (reread.body || {})),
+      `status=${reread.status} vendorId=${JSON.stringify(reread.body?.vendorId)}`);
+  }
 
   const emptyVendorPut = await req('PUT', `/resources/${plain.body.id}`, { body: { vendorId: '' } });
   check('C1 an empty-string vendorId on PUT is normalized to absent, not literal ""',
