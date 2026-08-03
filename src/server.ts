@@ -1070,6 +1070,21 @@ async function validateOrgTreeNode(
     const wanted = ORG_LEVELS[ORG_LEVELS.indexOf(level) - 1];
     if (parent.level !== wanted) return `the parent of a ${level} must be a ${wanted}`;
   }
+  // DEFENCE IN DEPTH, not dead code: with the level rules above enforced (a
+  // capability has no parent, a practice's parent must be a capability, a
+  // competence's parent must be a practice), a cycle is structurally
+  // UNREACHABLE through this API — closing one would require a capability to
+  // sit beneath something, which the `level === 'capability'` guard above
+  // already refuses first. There is deliberately no smoke check driving this
+  // branch through the live API for that reason (see the note at check 6 in
+  // scripts/smoke-api.mjs); `wouldCycleInOrgTree` itself is unit-tested
+  // directly in org-scope.util.spec.ts. This guard earns its place anyway:
+  // rows predating D (this feature) have no meaningful level — an admin can
+  // hold, or later import, data whose levels are already inconsistent with
+  // the parent chain, a state the level guard above was never designed to
+  // catch (it only reasons about the level being written NOW). For such a
+  // row, the level guard would not fire first, and this is the only thing
+  // standing between an inconsistent write and a real cycle.
   if (ctx?.id !== undefined && wouldCycleInOrgTree(ctx.id, parentId, nodes)) {
     return 'parentId would close a cycle in the organizational tree';
   }
@@ -3209,9 +3224,14 @@ apiRouter.put('/resource-organizations/:id', async (req, res) => {
   // as "leave untouched" — but a client clears an optional reference by
   // sending '', not null (the UI has no way to author a literal `null`). Left
   // as-is, '' would persist as a literal empty string on BOTH adapters (never
-  // becoming absent), instead of reading back as a root. Translate the ''
-  // sentinel to `null` here so parentId clears identically on both adapters.
+  // becoming absent), instead of reading back as a root/manager-less node.
+  // Translate the '' sentinel to `null` here so parentId AND managerId each
+  // clear identically on both adapters. managerId matters beyond symmetry:
+  // Task 7's manager <select> has no way to author a literal `null`, so its
+  // empty option — the only way to detach a Capability Leader from a node —
+  // relies on exactly this translation to do anything at all.
   if (body.parentId === '') (body as Record<string, unknown>)['parentId'] = null;
+  if (body.managerId === '') (body as Record<string, unknown>)['managerId'] = null;
   const updated = await repos.resourceOrganizations.update(req.params.id, body);
   res.json(updated);
 });

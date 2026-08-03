@@ -2952,9 +2952,12 @@ async function checkDummySubstitution() {
 /**
  * D (Task 3) — org-tree integrity on the bespoke `/resource-organizations`
  * handlers (src/server.ts, NOT mounted with `crud()`): levels, parent/child
- * pairing, whole-tree name uniqueness (self excluded on PUT), cycle refusal on
- * write, and the two protected-delete guards (children / resources still
- * referencing the node by name). Nine checks, matching the task-3 brief 1:1.
+ * pairing, whole-tree name uniqueness (self excluded on PUT), the
+ * capability-is-a-root rule on write, and the two protected-delete guards
+ * (children / resources still referencing the node by name) — each isolated
+ * on its OWN fixture so neither can mask the other. Plus, alongside the nine
+ * checks from the task-3 brief, the same clear-to-absent seam proven for
+ * `parentId` is proven again for `managerId` (review round 1 — see below).
  *
  * SEED FIXTURES relied on (src/db/seed.ts resourceOrganizations) — none of
  * these are mutated by earlier smoke sections:
@@ -2962,15 +2965,44 @@ async function checkDummySubstitution() {
  *     organization: 'Engineering' (resources bind to a node BY NAME, spec §2.4).
  *   id '5' — 'Platform' (practice), parentId '2'.
  *   id '6' — 'Backend' (competence), parentId '5' — Engineering's grandchild,
- *     used to prove both the cycle guard (6) and the has-children delete guard (7).
+ *     used by check 7 (has-children delete guard) and check 6 (capability
+ *     root rule — see the note at check 6 for why this is NOT a cycle-guard
+ *     exercise, despite '6' being '2's own descendant).
  *
- * Checks 7 and 8 DELETE seeded nodes '5' and '2'. Against the pre-Task-3
- * build (delete is an unguarded one-liner) those calls actually SUCCEED
- * (204) and remove the rows from the in-memory store for the rest of THIS
- * process's lifetime — expected and harmless: the task's own instructions
- * have the server restarted between runs, and post-implementation the 409
- * guards mean neither delete ever goes through, so seed data survives a
- * green run intact.
+ * Check 7 DELETEs seeded node '5'. Check 8 (review round 1 — rewritten, see
+ * below) no longer touches seeded nodes at all: it builds its OWN fresh,
+ * childless leaf and a throwaway resource, specifically so the CHILDREN guard
+ * cannot fire first and mask the RESOURCES guard, which check 8 exists to
+ * prove. Against the pre-Task-3 build (delete was an unguarded one-liner)
+ * check 7's DELETE actually SUCCEEDED (204) and removed '5' from the
+ * in-memory store for the rest of THAT throwaway process's lifetime —
+ * expected and harmless: the task's own instructions have the server
+ * restarted between runs, and post-implementation the 409 guard means the
+ * delete never goes through, so seed data survives a green run intact.
+ *
+ * REVIEW ROUND 1 (coordinator feedback on the first pass):
+ *   1. Check 8 originally deleted seeded node '2' (Engineering), which 409s
+ *      via the CHILDREN guard (it still has '5' beneath it) — the RESOURCES
+ *      guard was never actually exercised. Rewritten as described above;
+ *      confirmed by mutation (temporarily commenting out the resources-guard
+ *      branch in the DELETE handler made this check fail — see the task-3
+ *      report for the captured output) that this version really does depend
+ *      on that guard.
+ *   2. managerId gained the same clear-to-absent check parentId already had
+ *      (see 9b below) — not academic: Task 7's manager `<select>` has no way
+ *      to author a literal `null`, so its empty option relies on this exact
+ *      translation to ever detach a Capability Leader from a node.
+ *   3. Check 6 reworded (see the comment there) to state what it actually
+ *      verifies — a capability cannot be given a parent — rather than
+ *      implying cycle-guard coverage it never had. Per the coordinator's
+ *      ruling, no smoke check was added for the cycle guard itself: with the
+ *      level rules enforced, a cycle is structurally unreachable through this
+ *      API (closing one would require a capability to sit beneath something,
+ *      which the level guard refuses first), so there is no honest API-level
+ *      fixture for it. `wouldCycleInOrgTree` is unit-tested directly in
+ *      `org-scope.util.spec.ts`; the cycle guard's own defence-in-depth
+ *      rationale is now documented at the guard itself (`src/server.ts`,
+ *      `validateOrgTreeNode`).
  */
 async function checkOrgTreeIntegrity() {
   const ENGINEERING_ID = '2';
@@ -3049,14 +3081,20 @@ async function checkOrgTreeIntegrity() {
     );
   }
 
-  // 6) PUT parentId to its OWN descendant -> 400 (cycle refused).
+  // 6) A capability cannot be given a parent -> 400. NOT a cycle-guard
+  // exercise, despite '6' (Backend) being '2's (Engineering's) own descendant:
+  // node '2' is still a capability in this PUT (no `level` sent), so
+  // validateOrgTreeNode's capability-is-a-root guard rejects it before the
+  // cycle check ever runs — see the comment at that cycle guard (src/server.ts)
+  // for why a cycle is structurally unreachable through this API at all. This
+  // check only proves the root rule fires on an UPDATE, not merely on create.
   {
     const cyc = await req('PUT', `/resource-organizations/${ENGINEERING_ID}`, {
       headers: RBAC_HEADERS,
       body: { parentId: BACKEND_ID },
     });
     check(
-      "PUT /api/resource-organizations/2 {parentId:'6'} (its own descendant) -> 400",
+      "PUT /api/resource-organizations/2 {parentId:'6'} -> 400 (a capability cannot be given a parent)",
       cyc.status === 400,
       `status=${cyc.status}, body=${JSON.stringify(cyc.body)}`,
     );
@@ -3072,14 +3110,73 @@ async function checkOrgTreeIntegrity() {
     );
   }
 
-  // 8) DELETE a node seeded resources still reference by name -> 409.
+  // 8) DELETE a CHILDLESS node that a resource still references by name -> 409
+  // — the RESOURCES guard specifically. Deleting '2' (Engineering) would also
+  // 409, but only via the CHILDREN guard (it still has '5'/Platform beneath
+  // it) — that would leave the resources-guard branch completely untested.
+  // Built on a FRESH leaf with zero children instead, so the children guard
+  // structurally cannot fire first, and the resources guard is the only one
+  // that can produce the 409 below.
   {
-    const del2 = await req('DELETE', `/resource-organizations/${ENGINEERING_ID}`, { headers: RBAC_HEADERS });
-    check(
-      "DELETE /api/resource-organizations/2 (Engineering) while seeded resources carry organization:'Engineering' -> 409",
-      del2.status === 409,
-      `status=${del2.status}, body=${JSON.stringify(del2.body)}`,
+    const leaf = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Leaf (resource-guard)', description: 'x', level: 'capability' },
+    });
+    const leafOk = check(
+      'check 8 setup: a fresh, childless leaf node is created',
+      leaf.status === 200 && typeof leaf.body?.id === 'string',
+      `status=${leaf.status}, body=${JSON.stringify(leaf.body)}`,
     );
+    if (leafOk) {
+      const leafId = leaf.body.id;
+      const leafName = leaf.body.name;
+
+      // No DELETE /resources endpoint exists (checked: src/server.ts has no
+      // `apiRouter.delete('/resources...')`), so this throwaway resource is
+      // never removed — same convention already used by the C2 dummy-
+      // substitution fixtures above, which also never delete the resources
+      // they create.
+      const resource = await req('POST', '/resources', {
+        headers: RBAC_HEADERS,
+        body: { name: 'D Smoke Resource (resource-guard)', role: 'Developer', kind: 'internal', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8 },
+      });
+      const resourceOk = check(
+        'check 8 setup: a throwaway resource is created',
+        resource.status === 201 && typeof resource.body?.id === 'string',
+        `status=${resource.status}, body=${JSON.stringify(resource.body)}`,
+      );
+      if (resourceOk) {
+        const resourceId = resource.body.id;
+        const attach = await req('PUT', `/resources/${resourceId}`, {
+          headers: RBAC_HEADERS,
+          body: { organization: leafName },
+        });
+        const attachOk = check(
+          `check 8 setup: PUT /api/resources/${resourceId} {organization:'${leafName}'} -> 200 (resources bind by NAME, spec §2.4)`,
+          attach.status === 200 && attach.body?.organization === leafName,
+          `status=${attach.status}, body=${JSON.stringify(attach.body)}`,
+        );
+        if (attachOk) {
+          const del2 = await req('DELETE', `/resource-organizations/${leafId}`, { headers: RBAC_HEADERS });
+          check(
+            `DELETE /api/resource-organizations/${leafId} (childless leaf) while a resource carries organization:'${leafName}' -> 409, the RESOURCES guard specifically`,
+            del2.status === 409 && del2.body?.error === 'Cannot delete an organization that resources still reference',
+            `status=${del2.status}, body=${JSON.stringify(del2.body)}`,
+          );
+        }
+
+        // Cleanup: detach the resource (organization: '') so the leaf becomes
+        // deletable again, then remove the leaf itself — leaving only the
+        // permanent, un-deletable throwaway resource behind (see the note above).
+        const detach = await req('PUT', `/resources/${resourceId}`, {
+          headers: RBAC_HEADERS,
+          body: { organization: '' },
+        });
+        check(`check 8 cleanup: PUT /api/resources/${resourceId} {organization:''} -> 200, detaches`, detach.status === 200, `status=${detach.status}`);
+        const cleanup = await req('DELETE', `/resource-organizations/${leafId}`, { headers: RBAC_HEADERS });
+        check(`check 8 cleanup: DELETE /api/resource-organizations/${leafId} (now unreferenced, childless) -> 204`, cleanup.status === 204, `status=${cleanup.status}`);
+      }
+    }
   }
 
   // 9) THE DUAL-ADAPTER CLEAR-TO-ABSENT SEAM — PUT {level:'capability',
@@ -3111,6 +3208,46 @@ async function checkOrgTreeIntegrity() {
         node ? `node=${JSON.stringify(node)}` : `status=${status}, missing`,
       );
     }
+
+    // 9b) THE SAME SEAM FOR managerId — a client clears the manager by
+    // sending '', not null (identical reasoning to parentId above: an
+    // untranslated '' would persist as a literal empty string on both
+    // adapters, never becoming absent). This is not just symmetry for its own
+    // sake: Task 7 builds a manager <select> whose empty option is the ONLY
+    // way to detach a Capability Leader from a node — without this
+    // translation, clearing the manager in that UI would silently do nothing.
+    const managerSet = await req('PUT', `/resource-organizations/${smokeNodeId}`, {
+      headers: RBAC_HEADERS,
+      body: { managerId: '1' },
+    });
+    check(
+      `PUT /api/resource-organizations/${smokeNodeId} {managerId:'1'} -> 200, sets a real manager`,
+      managerSet.status === 200 && managerSet.body?.managerId === '1',
+      `status=${managerSet.status}, body=${JSON.stringify(managerSet.body)}`,
+    );
+    // The assertion folds in the precondition that a REAL managerId was set
+    // beforehand (same discipline as the parentId seam above), so this fails
+    // for the right reason if the translation is missing, not by accident.
+    const managerCleared = await req('PUT', `/resource-organizations/${smokeNodeId}`, {
+      headers: RBAC_HEADERS,
+      body: { managerId: '' },
+    });
+    check(
+      `PUT /api/resource-organizations/${smokeNodeId} {managerId:''} -> 200, clears a REAL manager to absent`,
+      managerSet.body?.managerId === '1' && managerCleared.status === 200 &&
+      managerCleared.body !== undefined && !('managerId' in managerCleared.body),
+      `preManagerId=${managerSet.body?.managerId}, status=${managerCleared.status}, body=${JSON.stringify(managerCleared.body)}`,
+    );
+    {
+      const { status, body } = await req('GET', '/resource-organizations');
+      const node = Array.isArray(body) ? body.find((n) => n.id === smokeNodeId) : undefined;
+      check(
+        'GET /api/resource-organizations reflects the cleared node with managerId absent on re-read',
+        status === 200 && Boolean(node) && !('managerId' in node),
+        node ? `node=${JSON.stringify(node)}` : `status=${status}, missing`,
+      );
+    }
+
     // Cleanup: the smoke node is now a childless root with no resources
     // referencing it — deletable, so a future run against a persistent
     // (Postgres) backend never accumulates cruft.
