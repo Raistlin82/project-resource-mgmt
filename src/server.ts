@@ -2371,6 +2371,13 @@ apiRouter.post('/assignment-months/:id/substitute', async (req, res) => {
  * stay OUTSIDE both locks (the recompute takes the dummy's `res:` lock itself,
  * sequentially, never nested).
  *
+ * IDEMPOTENT: `row` is the caller's SNAPSHOT, so the link is re-read from the
+ * repository INSIDE the locks and an already-unlinked month returns nothing (see
+ * `moveBack`). With three callers — the decision hook, the self-managed retarget
+ * and the assignment delete — two of them can race on one month, and acting on a
+ * snapshot another caller has already settled would hand the dummy the same hours
+ * twice.
+ *
  * A dummy month — or its assignment, or its resource — that no longer exists
  * makes this a LOGGED NO-OP, not an error: the back-link is deliberately a soft
  * reference (Task 2) precisely because the dummy row may legitimately be deleted
@@ -2410,6 +2417,38 @@ async function returnHoursToDummy(
   const dummyCap = dailyCapFor(kindOf(dummyResource), await resolveBaseCap(dummyResource));
 
   const moveBack = async (): Promise<{ giveBackHours: number; shortfallHours: number }> => {
+    // IDEMPOTENCE UNDER CONCURRENCY — re-read the month row and bail out if the
+    // link is already gone. This MUST happen here, inside both `res:` locks, and
+    // never before acquiring them: the lock is the only thing that makes the
+    // answer authoritative for the duration of the write below.
+    //
+    // The caller hands us a SNAPSHOT of the row. That was safe while the decision
+    // hook was the only caller — two decisions on the same approval serialize on
+    // `approval:<id>`, so no second give-back could interleave. It is NOT safe now
+    // that a retarget and a delete can also end a substitution: the decision hook
+    // reads its row, then does the approval write and the audit entry, and only
+    // then calls us — a window in which a concurrent delete or retarget can give
+    // the same hours back and close the link. Acting on the stale snapshot would
+    // credit the dummy a SECOND time. The error inflates demand rather than
+    // destroying it, so the direction is safe, but the hours are simply wrong.
+    //
+    // `closeLink()` in the outer `finally` still runs, unchanged: patching an
+    // already-cleared row with the same explicit `null`s is a harmless no-op on
+    // both adapters.
+    const fresh = await repos.assignmentMonths.get(row.id);
+    if (fresh === undefined || fresh.replacedFromAssignmentMonthId === undefined) {
+      // Not silent: this is a real interleaving, not a bug, but "the hours were
+      // already returned by someone else" is exactly the kind of thing that must
+      // be reconstructable afterwards.
+      console.warn(`give-back: month ${row.id} was already unlinked by a concurrent caller — returning nothing`);
+      return { giveBackHours: 0, shortfallHours: 0 };
+    }
+    // The FRESH map, not the caller's: having re-read the row under the lock, that
+    // read is the authoritative one. Identical to the snapshot in every ordinary
+    // case; when a second substitution overwrote the columns in between, it is the
+    // map that describes what is actually on loan right now.
+    const replacedDays = fresh.replacedDays ?? {};
+
     const allDays = await repos.assignmentDays.list();
     const heldByDate = sumHoursByDate(allDays.filter(d => d.assignmentId === assig.id && monthOf(d.date) === month));
 
@@ -2423,7 +2462,7 @@ async function returnHoursToDummy(
     const dummyBooked = sumHoursByDate(
       allDays.filter(d => dummyAssignmentIds.has(d.assignmentId) && monthOf(d.date) === month));
 
-    const plan = planGiveBack(row.replacedDays ?? {}, heldByDate, decided, dummyBooked, dummyCap);
+    const plan = planGiveBack(replacedDays, heldByDate, decided, dummyBooked, dummyCap);
     if (plan.giveBackHours === 0) return plan;
 
     for (const [date, hours] of Object.entries(plan.giveBack)) {
@@ -2458,8 +2497,9 @@ async function returnHoursToDummy(
   // `withLock` is NOT re-entrant (the inner section chains onto a tail promise
   // that contains itself), so ONE lock is taken when both sides are the same
   // resource. Unreachable today — the substitution endpoint refuses a target that
-  // is the dummy itself — but this function is now called from the DECISION hook,
-  // where nothing re-checks that, and the failure mode is not an error: it is a
+  // is the dummy itself — but this function is called from three places (the
+  // decision hook, the self-managed retarget and the assignment delete), none of
+  // which re-checks that, and the failure mode is not an error: it is a
   // permanently wedged `res:` key that silently hangs every later critical
   // section for that resource.
   const [firstId, secondId] = [assig.resourceId, dummyAssig.resourceId].sort();

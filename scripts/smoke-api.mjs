@@ -2634,6 +2634,29 @@ async function checkDummySubstitution() {
       check('C2 a self-managed retarget hands back exactly what the person no longer covers',
         (retDummy.body.days || []).find(d => d.date === DAY)?.hours === 11,
         `hours=${(retDummy.body.days || []).find(d => d.date === DAY)?.hours}`);
+
+      // IDEMPOTENCE, the sequential half. The give-back above closed the link, so
+      // ending the SAME month a second way must credit the dummy nothing further
+      // — 11h stays 11h, it does not become 14h. This is the reachable, ordered
+      // version of the concurrent double-give-back the in-lock re-read in
+      // `returnHoursToDummy`/`moveBack` guards; that interleaving itself cannot be
+      // forced through HTTP without a timing hack, so it is deliberately not
+      // simulated here.
+      const secondStandIn = await req('POST', '/resources', {
+        body: { ...base, name: 'C2 retarget second stand-in (self-managed)', kind: 'internal', contractHoursPerDay: 8, managerId: '1' },
+      });
+      if (check('C2 retarget setup: a second self-managed stand-in exists',
+        secondStandIn.status === 201 && typeof secondStandIn.body?.id === 'string', `status=${secondStandIn.status}`)) {
+        const reRetarget = await req('PUT', `/assignments/${retargetFixture.personAssignmentId}`, {
+          body: { resourceId: secondStandIn.body.id },
+        });
+        check('C2 an already-given-back month can be retargeted again', reRetarget.status === 200,
+          `status=${reRetarget.status} err=${reRetarget.body?.error}`);
+        const twiceDummy = await req('GET', `/assignments/${retargetFixture.dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+        check('C2 a second retarget does NOT credit the dummy the same hours again',
+          (twiceDummy.body.days || []).find(d => d.date === DAY)?.hours === 11,
+          `hours=${(twiceDummy.body.days || []).find(d => d.date === DAY)?.hours}`);
+      }
     }
   }
 
