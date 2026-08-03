@@ -25,6 +25,7 @@ import { AuthService } from './services/auth.service';
 import { NotificationService } from './services/notification.service';
 import { ThemeService } from './services/theme.service';
 import { ALLOCATION_APPROVAL_ROLES, CAPACITY_ROLES } from './guards/role.guard';
+import { countsTowardDeliveryCapacity, kindOf } from './services/resource-kind.util';
 
 type NavBadge = 'requests' | 'risks' | 'changes' | 'overbooked';
 
@@ -598,7 +599,18 @@ export class App {
   changesBadge = computed(() =>
     this.navState().changes.filter(c => c.status === 'Submitted' || c.status === 'Draft').length,
   );
-  overbookedBadge = computed(() => this.navState().resources.filter(r => r.utilization > 110).length);
+  /**
+   * C1: same "who is overbooked" semantic as the dashboard's
+   * `overbookedResourcesList` — a dummy is a placeholder hole, not a real
+   * over-booked body, and must never inflate this globally-visible nav badge;
+   * a subco IS deliverable capacity, just not internal, so it stays in
+   * (`countsTowardDeliveryCapacity`). Keeping this in lock-step with the
+   * dashboard matters: two views of the same KPI disagreeing is worse than
+   * either being wrong consistently.
+   */
+  overbookedBadge = computed(() =>
+    this.navState().resources.filter(r => countsTowardDeliveryCapacity(kindOf(r)) && r.utilization > 110).length,
+  );
 
   toggleMenu() {
     this.isMobileMenuOpen.update(v => !v);

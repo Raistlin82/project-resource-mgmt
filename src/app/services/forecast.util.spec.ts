@@ -170,18 +170,21 @@ describe('forecast.util — capacityForecast', () => {
   });
 
   it('excludes dummy resources from supply but keeps subco in (C1: a dummy is not deliverable capacity)', () => {
+    // Distinct capacities per kind so the assertion can only pass for the
+    // correct filter: excluding internal (60), excluding subco (30), or
+    // summing all three (70) are all distinguishable from the expected 50.
     const data: ForecastData = {
       resources: [
-        res('1', 40, 0, [], 'internal'),
-        res('2', 40, 0, [], 'dummy'),
+        res('1', 10, 0, [], 'internal'),
+        res('2', 20, 0, [], 'dummy'),
         res('3', 40, 0, [], 'subco'),
       ],
       requests: [],
       assignments: [],
     };
     const rows = capacityForecast(data, '2026-06-08', 1);
-    // internal (40) + subco (40) = 80; the dummy's 40 must NOT be counted.
-    expect(rows[0].supply).toBe(80);
+    // internal (10) + subco (40) = 50; the dummy's 20 must NOT be counted.
+    expect(rows[0].supply).toBe(50);
   });
 });
 
