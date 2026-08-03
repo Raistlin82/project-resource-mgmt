@@ -30,6 +30,13 @@ export function isWorkingDay(date: string, holidays: ReadonlySet<string>): boole
   return !Number.isNaN(d) && d !== 0 && d !== 6 && !holidays.has(date);
 }
 
+/** Last calendar day of `month` ('YYYY-MM') as 'YYYY-MM-DD' — 28/29/30/31 aware. */
+export function lastDayOfMonth(month: string): string {
+  const [y, m] = month.split('-').map(Number);
+  const day = new Date(Date.UTC(y, m, 0)).getUTCDate(); // m is 1-based → day 0 of next month
+  return `${month}-${String(day).padStart(2, '0')}`;
+}
+
 /** All working-day dates of `month` ('YYYY-MM'), ascending. */
 export function workingDaysInMonth(month: string, holidays: ReadonlySet<string>): string[] {
   const [y, m] = month.split('-').map(Number);

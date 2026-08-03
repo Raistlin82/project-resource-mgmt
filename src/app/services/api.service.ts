@@ -169,6 +169,19 @@ export interface AssignmentMonth {
    * see `planGiveBack`. Written and cleared together with the back-link above.
    */
   replacedDays?: Record<string, number>;
+  /**
+   * C2 — what she ALREADY held on each of those dates, on this assignment,
+   * immediately before the transfer (`{ 'YYYY-MM-DD': hours }`, same dates as
+   * `replacedDays`).
+   *
+   * The give-back needs the day's hours split into "hers" and "on loan", and a date
+   * can legitimately carry both (a substitution onto a month she already had hours
+   * in DEMOTES it — `demotedExistingWork`). That split is NOT reconstructable from
+   * what she happens to hold at decision time, so the transfer records it: without
+   * it, trimming a shared day charges her own hours against the loan and destroys
+   * booked demand. Written and cleared together with the two fields above.
+   */
+  replacedBaselineDays?: Record<string, number>;
 }
 
 /**

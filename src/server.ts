@@ -13,7 +13,7 @@ import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, As
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, decisionToAssignmentStatus, allocationApproverStep } from './app/services/staffing.util';
 import { deriveAssignmentStatus, monthRowId, parseMonthRowId, monthlyAggregateHours, type MonthStatus } from './app/services/allocation-month.util';
 import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity, monthlyTargetHours } from './app/services/calendar.util';
-import { planSubstitution, planGiveBack, type SubstitutionPlan } from './app/services/substitution.util';
+import { planSubstitution, planGiveBack, planSubstitutionBooking, type SubstitutionPlan } from './app/services/substitution.util';
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
@@ -1693,7 +1693,7 @@ apiRouter.put('/assignments/:id', async (req, res) => {
         // turn it into a 500 — but it must never vanish silently either.
         if (row.replacedFromAssignmentMonthId !== undefined) {
           try {
-            await returnHoursToDummy(row, mergedAssig, 'Approved');
+            await returnHoursToDummy(req, row, mergedAssig, 'Approved');
           } catch (err) {
             console.error(`PUT /assignments/${oldAssig.id}: substitution give-back failed for month ${row.id} on retarget:`, err);
           }
@@ -1764,7 +1764,7 @@ apiRouter.delete('/assignments/:id', async (req, res) => {
     .filter(m => m.assignmentId === oldAssig.id && m.replacedFromAssignmentMonthId !== undefined);
   for (const row of linkedMonths) {
     try {
-      await returnHoursToDummy(row, oldAssig, 'Rejected');
+      await returnHoursToDummy(req, row, oldAssig, 'Rejected');
     } catch (err) {
       console.error(`DELETE /assignments/${oldAssig.id}: substitution give-back failed for month ${row.id}:`, err);
     }
@@ -2042,6 +2042,47 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
 // ---------------------------------------------------------------------------
 
 /**
+ * C2 — give an assignment the SUBSTITUTION ITSELF CREATED a booking window and an
+ * `allocationPct`, derived from its own day rows.
+ *
+ * Review finding: the substitution was the ONLY writer that created an assignment
+ * without either. `schedule.util` defaults a missing `allocationPct` to 100 and
+ * falls back to the linked REQUEST's dates, so 40 transferred hours in one month on
+ * a six-month request rendered as a 100% booking spanning all six — and
+ * `sweepResource` then flagged that booking AND the person's real one as
+ * conflicting for the whole window. The arithmetic is in `planSubstitutionBooking`
+ * (pure, unit-tested); this is the I/O around it.
+ *
+ * Called ONLY for assignments this substitution created (the caller tracks them):
+ * an assignment a planner created carries their own explicit window and pct, and
+ * this must never overwrite it. Re-derived from ALL the assignment's day rows on
+ * every transfer, so `applyToRemainingMonths` widens the window month by month
+ * instead of leaving it pinned to the first.
+ */
+async function syncSubstitutionBooking(assignmentId: string, dailyCap: number): Promise<void> {
+  const round2 = (n: number): number => Math.round(n * 100) / 100;
+  const hoursByMonth: Record<string, number> = {};
+  for (const d of await repos.assignmentDays.list()) {
+    if (d.assignmentId !== assignmentId || !Number.isFinite(d.hours) || d.hours <= 0) continue;
+    const m = monthOf(d.date);
+    hoursByMonth[m] = round2((hoursByMonth[m] ?? 0) + d.hours);
+  }
+  const months = Object.keys(hoursByMonth).sort();
+  if (months.length === 0) return;
+
+  // Capacity over every month the window SPANS, not just the ones carrying hours:
+  // the pct is one constant across the whole window (see `planSubstitutionBooking`).
+  const holidays = new Set((await repos.holidays.list()).map(h => h.id));
+  const capacityByMonth: Record<string, number> = {};
+  for (const m of monthsInRange(months[0], months[months.length - 1])) {
+    capacityByMonth[m] = monthlyTargetHours(dailyCap, m, holidays);
+  }
+
+  const booking = planSubstitutionBooking(hoursByMonth, capacityByMonth);
+  if (booking !== undefined) await repos.assignments.update(assignmentId, booking);
+}
+
+/**
  * Move ONE dummy month's hours to `target`, as far as that person can absorb
  * them. Returns what moved and what stayed; transferring zero is a legitimate
  * outcome (the target is full that month), not an error — it tells the caller
@@ -2051,8 +2092,9 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
  * LEXICOGRAPHIC ORDER OF THE RESOURCE IDS, never "dummy first". Two crossing
  * substitutions would otherwise take them in opposite orders and deadlock. The
  * approval I/O and the month status write stay OUTSIDE both locks, as the rest
- * of this file requires, and the aggregate recompute runs last, best-effort
- * (in the route handler, after this function returns).
+ * of this file requires, but they are NOT unserialized: they run under
+ * `month:<target row id>` (see below), and the aggregate recompute runs last,
+ * best-effort (in the route handler, after this function returns).
  */
 async function transferDummyMonth(
   req: Request,
@@ -2060,6 +2102,10 @@ async function transferDummyMonth(
   dummyAssig: Assignment,
   target: Resource,
   targetBaseCap: number,
+  /** Assignments THIS request created, so a later month of the same batch can widen
+   *  the window it set (see `syncSubstitutionBooking`). Never contains an assignment
+   *  a planner created. */
+  createdAssignmentIds: Set<string>,
 ): Promise<SubstitutionMonthOutcome> {
   const month = dummyRow.month;
 
@@ -2068,7 +2114,7 @@ async function transferDummyMonth(
   const cap = dailyCapFor(kindOf(target), targetBaseCap);
 
   const [firstId, secondId] = [dummyAssig.resourceId, target.id].sort();
-  const { plan, targetAssig: lockedTargetAssig } = await withLock(`res:${firstId}`, () => withLock(`res:${secondId}`, async (): Promise<{ plan: SubstitutionPlan; targetAssig?: Assignment }> => {
+  const { plan, targetAssig: lockedTargetAssig, baseline } = await withLock(`res:${firstId}`, () => withLock(`res:${secondId}`, async (): Promise<{ plan: SubstitutionPlan; targetAssig?: Assignment; baseline: Record<string, number> }> => {
     // The target's assignment on the SAME request — resolved (never yet
     // CREATED) here, INSIDE both locks. Review finding (Task 3, Important #1):
     // reading the assignment list and finding-or-creating this row BEFORE the
@@ -2101,7 +2147,7 @@ async function transferDummyMonth(
       // target (review finding, Minor #2) and don't recompute anything —
       // the target's day rows (and a legacy assignedHours total with no day
       // rows at all, if that's what this assignment is) are left untouched.
-      return { plan: p, targetAssig: existingTargetAssig };
+      return { plan: p, targetAssig: existingTargetAssig, baseline: {} };
     }
 
     // Created ONLY NOW that something is actually moving onto it. 'Draft':
@@ -2110,6 +2156,16 @@ async function transferDummyMonth(
       id: newId(), requestId: dummyAssig.requestId, resourceId: target.id,
       assignedHours: 0, status: 'Draft',
     } as Assignment);
+    if (existingTargetAssig === undefined) createdAssignmentIds.add(targetAssig.id);
+
+    // THE PRE-TRANSFER BASELINE, per date: what she already held on that date on
+    // THIS assignment. Captured HERE — at the moment of the write, inside both
+    // locks — because it is the only moment it is knowable. After the transfer her
+    // day row carries her own hours and the loan fused into one number, and the
+    // give-back cannot tell them apart: charging the whole of it against the loan
+    // destroys booked hours on a trim (see `planGiveBack`). Recorded for EVERY date
+    // in the map, zeros included, so the two maps always cover the same dates.
+    const baseline: Record<string, number> = {};
 
     for (const [date, hours] of Object.entries(p.transfer)) {
       // Add to the target (merging with anything already booked that day on THIS
@@ -2117,7 +2173,9 @@ async function transferDummyMonth(
       // the same rule the allocation endpoint applies.
       const targetDayId = `${targetAssig.id}:${date}`;
       const existing = await repos.assignmentDays.get(targetDayId);
-      const merged = Math.round(((existing?.hours ?? 0) + hours) * 100) / 100;
+      const held = Number.isFinite(existing?.hours) ? existing!.hours : 0;
+      baseline[date] = held;
+      const merged = Math.round((held + hours) * 100) / 100;
       if (existing) await repos.assignmentDays.update(targetDayId, { hours: merged });
       else await repos.assignmentDays.create({ id: targetDayId, assignmentId: targetAssig.id, date, hours: merged } as AssignmentDay);
 
@@ -2127,6 +2185,12 @@ async function transferDummyMonth(
       else await repos.assignmentDays.remove(dummyDayId);
     }
 
+    // The window + pct for an assignment THIS substitution created — after the day
+    // rows are written, so it reads the complete picture, and inside the locks that
+    // serialize those rows. Skipped for a planner-created assignment: its own
+    // booking window is not ours to overwrite.
+    if (createdAssignmentIds.has(targetAssig.id)) await syncSubstitutionBooking(targetAssig.id, cap);
+
     // recomputeAssignedHours is called only now that `p.transfer` is known
     // non-empty (review finding, Important #2): calling it unconditionally
     // rewrote BOTH assignments' assignedHours to the sum of their (unchanged)
@@ -2135,7 +2199,7 @@ async function transferDummyMonth(
     // (the exact case recomputeAssignedHours's own doc comment calls out).
     await recomputeAssignedHours(dummyAssig.id);
     await recomputeAssignedHours(targetAssig.id);
-    return { plan: p, targetAssig };
+    return { plan: p, targetAssig, baseline };
   }));
 
   if (plan.transferredHours === 0) {
@@ -2156,32 +2220,62 @@ async function transferDummyMonth(
 
   // OUTSIDE both locks: the month row, its approval and the notes.
   const targetRow = await ensureAssignmentMonth(targetAssig.id, month);
-  // Snapshotted BEFORE any write below — the row this substitution may demote.
-  const wasAllocated = targetRow.status === 'Allocated';
   const selfManaged = await autoApprovesAllocation(req, target.id);
-  await withdrawAllocationApproval(targetRow.approvalId, 'superseded by substitution');
+  const dummyName = (await repos.resources.get(dummyAssig.resourceId))?.name ?? 'a placeholder';
 
-  const note = `Takes over from ${(await repos.resources.get(dummyAssig.resourceId))?.name ?? 'a placeholder'} — ${month}`;
-  const plannerNote = targetRow.plannerNote ? `${targetRow.plannerNote}\n${note}` : note;
+  // SERIALIZED on `month:<rowId>`, matching the allocation PUT's STEP 2 exactly.
+  // read `approvalId` -> withdraw -> create -> write is a read-modify-write over one
+  // SHARED row: two substitutions of two different dummy months onto the SAME person
+  // (normal when one request needs several people) both read the same approvalId,
+  // both withdraw it, both open a fresh approval and both write their own — leaving
+  // one Pending and ORPHANED, decidable later against a month row that has moved on.
+  // The same race runs against a concurrent `PUT /assignments/:id/allocation` on this
+  // month, which DOES take this lock, so without it the lock bought nothing here.
+  //
+  // NOT NESTED, and that is load-bearing: `withLock` is not re-entrant, and
+  // `ensureAssignmentMonth` above takes `month:<the same id>` — acquiring it again
+  // from inside would wedge the key forever. That call has returned, and both `res:`
+  // locks were released when the section above resolved, so this is taken
+  // sequentially, from no other critical section. `month:` is still only ever taken
+  // in these three places, none of them inside a `res:`/`req:`/`approval:` section,
+  // so no lock cycle is reachable.
+  const wasAllocated = await withLock(`month:${targetRow.id}`, async (): Promise<boolean> => {
+    // RE-READ rather than reuse the `ensureAssignmentMonth` snapshot: `approvalId`,
+    // `status` and `plannerNote` are shared mutable state and several awaits have
+    // passed. Withdrawing a STALE approvalId cancels an approval that no longer
+    // governs anything and leaves the current one Pending and orphaned.
+    const current = await repos.assignmentMonths.get(targetRow.id) ?? targetRow;
+    const priorStatus = current.status;
+    await withdrawAllocationApproval(current.approvalId, 'superseded by substitution');
 
-  if (selfManaged) {
-    // No decision will follow, so there is nothing to give back later: close the
-    // link immediately rather than leaving it dangling forever.
-    await repos.assignmentMonths.update(targetRow.id, {
-      status: 'Allocated', approvalId: null as unknown as undefined,
-      replacedFromAssignmentMonthId: null as unknown as undefined,
-      replacedDays: null as unknown as undefined, plannerNote,
-    } as Partial<AssignmentMonth>);
-  } else {
-    const approvalId = await createAllocationApproval(req, targetAssig, targetRow.id);
-    // `plan.transfer` — the PER-DAY map of what moved, not just its total: the
-    // give-back at decision time is decided day by day (`returnHoursToDummy`).
-    await repos.assignmentMonths.update(targetRow.id, {
-      status: 'Requested', approvalId,
-      replacedFromAssignmentMonthId: dummyRow.id, replacedDays: plan.transfer,
-      plannerNote,
-    } as Partial<AssignmentMonth>);
-  }
+    const note = `Takes over from ${dummyName} — ${month}`;
+    const plannerNote = current.plannerNote ? `${current.plannerNote}\n${note}` : note;
+
+    if (selfManaged) {
+      // No decision will follow, so there is nothing to give back later: close the
+      // link immediately rather than leaving it dangling forever.
+      await repos.assignmentMonths.update(targetRow.id, {
+        status: 'Allocated', approvalId: null as unknown as undefined,
+        replacedFromAssignmentMonthId: null as unknown as undefined,
+        replacedDays: null as unknown as undefined,
+        replacedBaselineDays: null as unknown as undefined, plannerNote,
+      } as Partial<AssignmentMonth>);
+    } else {
+      const approvalId = await createAllocationApproval(req, targetAssig, targetRow.id);
+      // `plan.transfer` — the PER-DAY map of what moved, not just its total: the
+      // give-back at decision time is decided day by day (`returnHoursToDummy`).
+      // `baseline` is its other half: what she ALREADY held on those dates, without
+      // which a trim on a shared date cannot be told from a trim of the loan.
+      await repos.assignmentMonths.update(targetRow.id, {
+        status: 'Requested', approvalId,
+        replacedFromAssignmentMonthId: dummyRow.id, replacedDays: plan.transfer,
+        replacedBaselineDays: baseline, plannerNote,
+      } as Partial<AssignmentMonth>);
+    }
+    // The row this substitution may have demoted — observed under the lock, on the
+    // state the write above actually replaced.
+    return priorStatus === 'Allocated';
+  });
 
   // The dummy's own month records who took what.
   const dummyNote = `${target.name} took ${plan.transferredHours}h for ${month}`;
@@ -2272,8 +2366,11 @@ apiRouter.post('/assignment-months/:id/substitute', async (req, res) => {
 
   const targetBaseCap = await resolveBaseCap(target);
   const outcomes: SubstitutionMonthOutcome[] = [];
+  // Shared across every month of this request so a later month can widen the booking
+  // window the first one set on an assignment IT created (`syncSubstitutionBooking`).
+  const createdAssignmentIds = new Set<string>();
   try {
-    outcomes.push(await transferDummyMonth(req, dummyRow, dummyAssig, target, targetBaseCap));
+    outcomes.push(await transferDummyMonth(req, dummyRow, dummyAssig, target, targetBaseCap, createdAssignmentIds));
   } catch (err) {
     outcomes.push(await failedMonthOutcome(err, dummyAssig.id, dummyRow.month));
   }
@@ -2314,7 +2411,7 @@ apiRouter.post('/assignment-months/:id/substitute', async (req, res) => {
       }
 
       try {
-        outcomes.push(await transferDummyMonth(req, row, dummyAssig, target, targetBaseCap));
+        outcomes.push(await transferDummyMonth(req, row, dummyAssig, target, targetBaseCap, createdAssignmentIds));
       } catch (err) {
         outcomes.push(await failedMonthOutcome(err, dummyAssig.id, row.month));
       }
@@ -2369,7 +2466,8 @@ apiRouter.post('/assignment-months/:id/substitute', async (req, res) => {
  * them — the same rule, for the same deadlock reason, as `transferDummyMonth`.
  * The month-row patch, the derived-state refresh and the aggregate recompute all
  * stay OUTSIDE both locks (the recompute takes the dummy's `res:` lock itself,
- * sequentially, never nested).
+ * sequentially, never nested), and the placeholder-month reopen below takes
+ * `month:<dummy row id>` — also sequentially, after both `res:` locks resolved.
  *
  * IDEMPOTENT: `row` is the caller's SNAPSHOT, so the link is re-read from the
  * repository INSIDE the locks and an already-unlinked month returns nothing (see
@@ -2384,6 +2482,7 @@ apiRouter.post('/assignment-months/:id/substitute', async (req, res) => {
  * while the month that came from it lives on.
  */
 async function returnHoursToDummy(
+  req: Request,
   row: AssignmentMonth,
   assig: Assignment,
   decided: 'Approved' | 'Rejected',
@@ -2393,12 +2492,16 @@ async function returnHoursToDummy(
   if (linkId === undefined) return; // the caller guards; belt and braces.
   const month = row.month;
 
-  // Closed on EVERY path below, including the no-ops (see the doc comment). Cast
-  // just these two values so a typo in a neighbouring field is still type-checked.
+  // Closed on EVERY path below, including the no-ops (see the doc comment). All
+  // THREE substitution columns go together — `replacedDays` and
+  // `replacedBaselineDays` are two halves of one record and a surviving baseline
+  // would misdescribe the next substitution's loan. Cast just these values so a typo
+  // in a neighbouring field is still type-checked.
   const closeLink = async (): Promise<void> => {
     await repos.assignmentMonths.update(row.id, {
       replacedFromAssignmentMonthId: null as unknown as undefined,
       replacedDays: null as unknown as undefined,
+      replacedBaselineDays: null as unknown as undefined,
     } as Partial<AssignmentMonth>);
   };
 
@@ -2448,6 +2551,11 @@ async function returnHoursToDummy(
     // case; when a second substitution overwrote the columns in between, it is the
     // map that describes what is actually on loan right now.
     const replacedDays = fresh.replacedDays ?? {};
+    // Its other half, read from the same authoritative row: what she already held on
+    // those dates before the transfer. An absent map (a link written before this
+    // column existed) degrades to "all of it was on loan" — the pre-fix behaviour,
+    // which is only wrong on a date that mixed her own hours with the loan.
+    const replacedBaselineDays = fresh.replacedBaselineDays ?? {};
 
     const allDays = await repos.assignmentDays.list();
     const heldByDate = sumHoursByDate(allDays.filter(d => d.assignmentId === assig.id && monthOf(d.date) === month));
@@ -2462,7 +2570,7 @@ async function returnHoursToDummy(
     const dummyBooked = sumHoursByDate(
       allDays.filter(d => dummyAssignmentIds.has(d.assignmentId) && monthOf(d.date) === month));
 
-    const plan = planGiveBack(replacedDays, heldByDate, decided, dummyBooked, dummyCap);
+    const plan = planGiveBack(replacedDays, replacedBaselineDays, heldByDate, decided, dummyBooked, dummyCap);
     if (plan.giveBackHours === 0) return plan;
 
     for (const [date, hours] of Object.entries(plan.giveBack)) {
@@ -2526,6 +2634,54 @@ async function returnHoursToDummy(
     console.warn(`give-back: ${outcome.shortfallHours}h of month ${row.id} could not return to ${linkId} — the dummy is at its daily ceiling on those days`);
   }
   if (outcome.giveBackHours === 0) return;
+
+  // C2 — REOPEN A TERMINAL PLACEHOLDER MONTH, or the restored demand is invisible
+  // where it matters most. `capacity.util` classifies each day row by ITS MONTH
+  // ROW's status: `PLANNED = {Requested, Allocated}`, `CONFIRMED = {Allocated}`.
+  // 'Rejected' is in NEITHER, so hours handed back onto a rejected placeholder month
+  // contribute ZERO to `/capacity/monthly`, to `demandFteUncovered` and to the B2
+  // semaphore. They exist in storage and on the calendar; the uncovered gap this
+  // whole feature exists to surface does not appear on the dashboard.
+  //
+  // Reachable exactly as the review described: the placeholder's own month is
+  // submitted, the substitution drains half of it, the approver rejects what is left
+  // of the placeholder, and only then is the person's month rejected — sending hours
+  // home to a row that no longer counts.
+  //
+  // Rejected -> Requested WITH A FRESH APPROVAL, which is the transition `submit`
+  // itself already permits and the shape `transferDummyMonth` gives the target side.
+  // The alternatives were both worse: 'Requested' with no approval is decidable by
+  // nobody AND re-submittable by nobody (submit only accepts Draft|Rejected), so the
+  // row would wedge; 'Allocated' would silently auto-approve demand a human had just
+  // rejected. For a DUMMY row the two are dashboard-equivalent anyway — demand rows
+  // contribute `ftePlanned` to `demandFteUncovered`, and PLANNED covers both.
+  //
+  // 'Draft' is deliberately NOT promoted: a Draft month contributed nothing to the
+  // bands BEFORE the substitution either, so leaving it is exactly "the same band it
+  // occupied before", and promoting it would submit for approval a month no planner
+  // ever submitted (the same reasoning that keeps the retarget loop off Draft rows).
+  //
+  // Serialized on `month:<dummy row id>` for the read-`approvalId`/withdraw/create/
+  // write reason as everywhere else, and taken from NO other critical section: both
+  // `res:` locks resolved above, `closeLink()` ran in the `finally`, and all three
+  // callers (the decision hook — which runs after the `approval:` lock is released —
+  // the retarget loop and the delete handler) hold no lock here. Before the derived
+  // status refresh below, which rolls the month statuses up into the assignment.
+  try {
+    await withLock(`month:${dummyRow.id}`, async () => {
+      const current = await repos.assignmentMonths.get(dummyRow.id);
+      if (current === undefined || current.status !== 'Rejected') return;
+      // A decided approval makes this a no-op; it only bites on a stale Pending id.
+      await withdrawAllocationApproval(current.approvalId, 'superseded by returned substitution hours');
+      const approvalId = await createAllocationApproval(req, dummyAssig, dummyRow.id);
+      await repos.assignmentMonths.update(dummyRow.id, { status: 'Requested', approvalId } as Partial<AssignmentMonth>);
+    });
+  } catch (err) {
+    // Best-effort, like every other side effect here: the hours are already back on
+    // the day rows, so a failure to reopen must not throw away the give-back.
+    console.error(`give-back: could not reopen the placeholder month ${dummyRow.id} after restoring hours:`, err);
+  }
+
   // Only the DUMMY's derived state is refreshed here: the person's rollup and
   // aggregates are the decision hook's own job (it runs them straight after this
   // returns, and the batch endpoint defers them to the end of the batch), and both
@@ -4332,7 +4488,7 @@ async function applyAllocationDecision(
   // this branch moves hours, and a bug here would otherwise leave no trace.
   if (row.replacedFromAssignmentMonthId !== undefined) {
     try {
-      await returnHoursToDummy(row, assig, decided);
+      await returnHoursToDummy(req, row, assig, decided);
     } catch (err) {
       console.error(`applyAllocationDecision: give-back failed for month ${row.id}:`, err);
     }
