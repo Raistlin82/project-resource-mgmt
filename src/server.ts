@@ -1054,6 +1054,33 @@ async function validateOrgTreeNode(
   const nodes = all.map(n => ({ id: n.id, name: n.name, level: n.level, parentId: n.parentId, managerId: n.managerId }));
   const existing = ctx?.id === undefined ? undefined : all.find(n => n.id === ctx.id);
 
+  // REVIEW ROUND 2 (critical) — `level` and `name` are `notNull()` columns, and
+  // `pick()` copies an explicit JSON `null` straight through (it only filters
+  // `undefined`). A naive `body.level ?? existing?.level` cannot tell "the
+  // client didn't touch this field" from "the client sent null": `??` treats
+  // both as nullish and falls back to the EXISTING value for every check
+  // below, so validation sees a perfectly consistent row and passes — while
+  // `body.level`/`body.name` STILL carry a literal `null` into the object
+  // handed to the repo. In-memory `update()` then DELETES the key outright
+  // (repository.ts's explicit-null-clears rule); Postgres issues `SET name =
+  // NULL` and raises an unmapped NOT NULL violation (SQLSTATE 23502) as an
+  // opaque 500 — the two adapters silently disagree (200 vs 500), and either
+  // way the row is corrupted. Worse for `name` on POST specifically: `null ??
+  // existing?.name` with no `existing` resolves to `undefined`, so the
+  // uniqueness check below is skipped entirely and `create()` (no
+  // null-stripping at all) persists a literal `name: null`. And the
+  // corruption can be CHAINED to defeat the delete guard: mask a childless-
+  // but-referenced node's name to `undefined`, then `DELETE` — the guard's
+  // `resources.some(r => r.organization === node.name)` no longer matches the
+  // resource that used to reference it by its real name.
+  //
+  // This is a DIFFERENT rule from the nullable `parentId`/`managerId`, where
+  // `''`/`null` legitimately mean "clear to absent" — `level` and `name` have
+  // no "absent" state to clear TO, so an explicit `null` here is simply
+  // invalid input, rejected before it ever reaches the `??` fallbacks below.
+  if (body.level === null) return 'level is required and cannot be cleared';
+  if (body.name === null) return 'name is required and cannot be cleared';
+
   const level = (body.level ?? existing?.level) as OrgLevel | undefined;
   if (level !== undefined && !ORG_LEVELS.includes(level)) {
     return `level must be one of ${ORG_LEVELS.join(', ')}`;
@@ -3219,6 +3246,35 @@ apiRouter.put('/resource-organizations/:id', async (req, res) => {
   // name-uniqueness check and enabling the cycle check (PUT only).
   const treeErr = await validateOrgTreeNode(body, { id: req.params.id });
   if (treeErr) { res.status(400).json({ error: treeErr }); return; }
+  // REVIEW ROUND 2 (important) — a rename must not silently ORPHAN every
+  // resource still bound to the OLD name. Resources attach to a node by NAME
+  // (spec §2.4) — that is precisely WHY tree-wide name uniqueness exists in
+  // validateOrgTreeNode above — so renaming the node they point at walks
+  // straight past that binding: `dimensionsOf`/`pickRateCard` would stop
+  // resolving for every one of them, silently, the moment this PUT commits.
+  // 409, not a 400: this is a conflict with other live data, exactly like the
+  // DELETE guard below, which this mirrors — a rename is refused under the
+  // exact same condition a delete would be. A no-op rename (body.name equals
+  // the existing name — see check 5) is deliberately excluded: nothing is
+  // actually changing, so nothing can be orphaned.
+  //
+  // NOT cascaded onto the resources: rewriting `Resource.organization` on
+  // every affected row is a side effect into ANOTHER collection with its own
+  // audit implications (the append-only audit middleware would need to
+  // attribute those writes to something), and that is a decision for its own
+  // task, not a silent side-effect bundled into this one. Recorded here, not
+  // left implicit, so the next reader knows cascade-on-rename was considered
+  // and deliberately deferred, not overlooked.
+  if (body.name !== undefined && body.name !== existing.name) {
+    const resources = await repos.resources.list();
+    const affected = resources.filter(r => r.organization === existing.name);
+    if (affected.length > 0) {
+      res.status(409).json({
+        error: `Cannot rename: ${affected.length} resource(s) still reference the name "${existing.name}"`,
+      });
+      return;
+    }
+  }
   // D — CLEAR-TO-ABSENT SEAM (src/db/repository.ts): both adapters treat an
   // explicit `null` in an update patch as "clear this field" and `undefined`
   // as "leave untouched" — but a client clears an optional reference by

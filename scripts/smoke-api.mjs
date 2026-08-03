@@ -3254,6 +3254,202 @@ async function checkOrgTreeIntegrity() {
     const cleanup = await req('DELETE', `/resource-organizations/${smokeNodeId}`, { headers: RBAC_HEADERS });
     check(`DELETE /api/resource-organizations/${smokeNodeId} (smoke cleanup) -> 204`, cleanup.status === 204, `status=${cleanup.status}`);
   }
+
+  // 10) REVIEW ROUND 2 (critical #1) — PUT {name: null} must be REJECTED
+  // (400), never masked. `body.level ?? existing?.level` / `body.name ??
+  // existing?.name` cannot tell "absent" from "explicitly null" — both are
+  // nullish to `??` — and pick() copies an explicit `null` straight through
+  // (it only filters `undefined`). Left unchecked this corrupts the row: the
+  // in-memory adapter's update() DELETES the `name` key outright (it is
+  // `notNull()` in the schema); Postgres raises an unmapped NOT NULL
+  // violation (SQLSTATE 23502) as an opaque 500. Uses a FRESH throwaway node,
+  // never a seeded one — against the pre-fix build this call actually
+  // corrupts whatever row it targets, and seeded nodes are load-bearing for
+  // every other check in this function.
+  {
+    const throwaway = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Null-Name Guard', description: 'x', level: 'capability' },
+    });
+    const throwawayOk = check(
+      'null-name guard setup: a fresh throwaway node is created',
+      throwaway.status === 200 && typeof throwaway.body?.id === 'string',
+      `status=${throwaway.status}, body=${JSON.stringify(throwaway.body)}`,
+    );
+    if (throwawayOk) {
+      const throwawayId = throwaway.body.id;
+      const masked = await req('PUT', `/resource-organizations/${throwawayId}`, {
+        headers: RBAC_HEADERS,
+        body: { name: null },
+      });
+      check(
+        `PUT /api/resource-organizations/${throwawayId} {name: null} -> 400 (rejected, not masked by the ?? fallback)`,
+        masked.status === 400,
+        `status=${masked.status}, body=${JSON.stringify(masked.body)}`,
+      );
+      // The point of this check is that the row was never corrupted, even
+      // transiently — not just that the response was a 400.
+      {
+        const { status, body } = await req('GET', '/resource-organizations');
+        const node = Array.isArray(body) ? body.find((n) => n.id === throwawayId) : undefined;
+        check(
+          "GET /api/resource-organizations shows the throwaway node's name UNCHANGED after the rejected PUT",
+          status === 200 && node?.name === 'D Smoke Null-Name Guard',
+          node ? `name=${JSON.stringify(node.name)}` : `status=${status}, missing`,
+        );
+      }
+      const cleanup10 = await req('DELETE', `/resource-organizations/${throwawayId}`, { headers: RBAC_HEADERS });
+      check(`null-name guard cleanup: DELETE /api/resource-organizations/${throwawayId} -> 204`, cleanup10.status === 204, `status=${cleanup10.status}`);
+    }
+  }
+
+  // 11) REVIEW ROUND 2 (critical #1, the full exploit chain) — a masked
+  // {name: null} PUT was the one thing that could get a resource-still-
+  // referenced node PAST the delete guard: rename to `undefined` (silently),
+  // then the guard's `resources.some(r => r.organization === node.name)`
+  // compares against `undefined` and matches nobody. Proves the WHOLE chain
+  // is closed, not just the isolated PUT from check 10 — a fresh, childless
+  // leaf with an attached resource, attempt the masking PUT (must now 400),
+  // then attempt the delete (must STILL 409 — the guard never stopped
+  // working, because the name never actually changed).
+  {
+    const leaf2 = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Leaf (null-name chain)', description: 'x', level: 'capability' },
+    });
+    const leaf2Ok = check(
+      'check 11 setup: a fresh, childless leaf node is created',
+      leaf2.status === 200 && typeof leaf2.body?.id === 'string',
+      `status=${leaf2.status}, body=${JSON.stringify(leaf2.body)}`,
+    );
+    if (leaf2Ok) {
+      const leaf2Id = leaf2.body.id;
+      const leaf2Name = leaf2.body.name;
+      const resource2 = await req('POST', '/resources', {
+        headers: RBAC_HEADERS,
+        body: { name: 'D Smoke Resource (null-name chain)', role: 'Developer', kind: 'internal', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8 },
+      });
+      const resource2Ok = check(
+        'check 11 setup: a throwaway resource is created',
+        resource2.status === 201 && typeof resource2.body?.id === 'string',
+        `status=${resource2.status}, body=${JSON.stringify(resource2.body)}`,
+      );
+      if (resource2Ok) {
+        const resource2Id = resource2.body.id;
+        const attach2 = await req('PUT', `/resources/${resource2Id}`, {
+          headers: RBAC_HEADERS,
+          body: { organization: leaf2Name },
+        });
+        const attach2Ok = check(
+          `check 11 setup: PUT /api/resources/${resource2Id} {organization:'${leaf2Name}'} -> 200`,
+          attach2.status === 200 && attach2.body?.organization === leaf2Name,
+          `status=${attach2.status}, body=${JSON.stringify(attach2.body)}`,
+        );
+        if (attach2Ok) {
+          const maskAttempt = await req('PUT', `/resource-organizations/${leaf2Id}`, {
+            headers: RBAC_HEADERS,
+            body: { name: null },
+          });
+          check(
+            `check 11: PUT /api/resource-organizations/${leaf2Id} {name: null} -> 400 (the masking attempt is rejected)`,
+            maskAttempt.status === 400,
+            `status=${maskAttempt.status}, body=${JSON.stringify(maskAttempt.body)}`,
+          );
+          const delAttempt = await req('DELETE', `/resource-organizations/${leaf2Id}`, { headers: RBAC_HEADERS });
+          check(
+            `check 11: DELETE /api/resource-organizations/${leaf2Id} -> 409, the resources guard STILL fires (the name was never actually changed, so the bypass is closed)`,
+            delAttempt.status === 409,
+            `status=${delAttempt.status}, body=${JSON.stringify(delAttempt.body)}`,
+          );
+        }
+        // Cleanup: detach, then remove the leaf.
+        const detach2 = await req('PUT', `/resources/${resource2Id}`, {
+          headers: RBAC_HEADERS,
+          body: { organization: '' },
+        });
+        check(`check 11 cleanup: PUT /api/resources/${resource2Id} {organization:''} -> 200, detaches`, detach2.status === 200, `status=${detach2.status}`);
+        const cleanup11 = await req('DELETE', `/resource-organizations/${leaf2Id}`, { headers: RBAC_HEADERS });
+        check(`check 11 cleanup: DELETE /api/resource-organizations/${leaf2Id} (now unreferenced, childless) -> 204`, cleanup11.status === 204, `status=${cleanup11.status}`);
+      }
+    }
+  }
+
+  // 12) REVIEW ROUND 2 (important) — a rename must not silently orphan every
+  // resource still bound to the OLD name. Exercises the EXACT scenario the
+  // coordinator reported: renaming seeded 'Engineering' (id '2'), which
+  // several seeded resources reference by organization name (spec §2.4:
+  // resources bind by NAME, and tree-wide name uniqueness exists PRECISELY
+  // because of that binding). Mirrors the delete guard as a 409 refusal, NOT
+  // a cascade onto the resources — see the comment at this guard in
+  // src/server.ts for why cascading was considered and deliberately deferred.
+  {
+    const renamed = await req('PUT', `/resource-organizations/${ENGINEERING_ID}`, {
+      headers: RBAC_HEADERS,
+      body: { name: 'Engineering EMEA' },
+    });
+    check(
+      "PUT /api/resource-organizations/2 {name:'Engineering EMEA'} -> 409 (resources still reference 'Engineering' by name)",
+      renamed.status === 409,
+      `status=${renamed.status}, body=${JSON.stringify(renamed.body)}`,
+    );
+    // Not just the status — confirm the name genuinely never changed.
+    const { status, body } = await req('GET', '/resource-organizations');
+    const node = Array.isArray(body) ? body.find((n) => n.id === ENGINEERING_ID) : undefined;
+    check(
+      "GET /api/resource-organizations shows 'Engineering' (id '2') name UNCHANGED after the refused rename",
+      status === 200 && node?.name === 'Engineering',
+      node ? `name=${JSON.stringify(node.name)}` : `status=${status}, missing`,
+    );
+  }
+
+  // 13) REVIEW ROUND 2 (minor, the brief's "highest-risk area") — three
+  // single-field PUTs the validator's cross-field logic already handles
+  // correctly (per the coordinator's own read of the code), pinned so a
+  // future edit to validateOrgTreeNode can't quietly break them. Read-only:
+  // each is rejected with 400 before validateOrgTreeNode ever reaches
+  // `update()`, so none of these mutate seed data.
+  {
+    // {level: 'capability'} ALONE on '5' (Platform), which still has parentId
+    // '2' — the capability-is-a-root rule must fire off the EXISTING
+    // parentId, not just a parentId supplied in the same body.
+    const r13a = await req('PUT', `/resource-organizations/${PLATFORM_ID}`, {
+      headers: RBAC_HEADERS,
+      body: { level: 'capability' },
+    });
+    check(
+      "PUT /api/resource-organizations/5 {level:'capability'} ALONE (still has parentId '2') -> 400",
+      r13a.status === 400,
+      `status=${r13a.status}, body=${JSON.stringify(r13a.body)}`,
+    );
+
+    // {parentId: X} ALONE on '6' (Backend, competence), where X ('2',
+    // Engineering) is a capability, not the practice a competence requires —
+    // the wrong-level check must fire off the EXISTING level, not just a
+    // level supplied in the same body. '2' is not '6's descendant, so this is
+    // purely the wrong-level branch, not a cycle.
+    const r13b = await req('PUT', `/resource-organizations/${BACKEND_ID}`, {
+      headers: RBAC_HEADERS,
+      body: { parentId: ENGINEERING_ID },
+    });
+    check(
+      "PUT /api/resource-organizations/6 {parentId:'2'} ALONE (a capability, wrong level for a competence's parent) -> 400",
+      r13b.status === 400,
+      `status=${r13b.status}, body=${JSON.stringify(r13b.body)}`,
+    );
+
+    // {parentId: ''} ALONE on '5' (Platform, practice) — clearing the parent
+    // must be caught off the EXISTING level ('practice' must have a parent),
+    // not just a level supplied in the same body.
+    const r13c = await req('PUT', `/resource-organizations/${PLATFORM_ID}`, {
+      headers: RBAC_HEADERS,
+      body: { parentId: '' },
+    });
+    check(
+      "PUT /api/resource-organizations/5 {parentId:''} ALONE (a practice, which must have a parent) -> 400",
+      r13c.status === 400,
+      `status=${r13c.status}, body=${JSON.stringify(r13c.body)}`,
+    );
+  }
 }
 
 async function main() {
