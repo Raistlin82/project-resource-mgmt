@@ -358,11 +358,18 @@ export const serviceOrganizations: ServiceOrganization[] = [
 // resources carry organization 'Engineering'/'Consulting'/'Design', so add a row per
 // name (alongside the original Germany org) to keep existing data a valid SELECT
 // option. costCenters reference the configuration cost-centers catalog (CC-9001/9002).
+//
+// D — the org tree. The four F2 rows keep their ids and names (resources bind
+// by NAME and rate cards match on the same value) and become capability roots:
+// we do not invent a hierarchy we do not know. PRA-1/COM-1 are a real
+// three-level branch so the scope and the filters are exercisable on first boot.
 export const resourceOrganizations: ResourceOrganization[] = [
-  { id: '1', name: 'Res Org Germany', description: 'Resource Org for Germany', costCenters: ['CC_DE_1', 'CC_DE_2'], serviceOrganizationId: '1' },
-  { id: '2', name: 'Engineering', description: 'Engineering organization', costCenters: ['CC-9001'], serviceOrganizationId: '1' },
-  { id: '3', name: 'Consulting', description: 'Consulting organization', costCenters: ['CC-9002'], serviceOrganizationId: '1' },
-  { id: '4', name: 'Design', description: 'Design organization', costCenters: [], serviceOrganizationId: '1' },
+  { id: '1', name: 'Res Org Germany', description: 'Resource Org for Germany', costCenters: ['CC_DE_1', 'CC_DE_2'], serviceOrganizationId: '1', level: 'capability' },
+  { id: '2', name: 'Engineering', description: 'Engineering organization', costCenters: ['CC-9001'], serviceOrganizationId: '1', level: 'capability', managerId: '1' },
+  { id: '3', name: 'Consulting', description: 'Consulting organization', costCenters: ['CC-9002'], serviceOrganizationId: '1', level: 'capability' },
+  { id: '4', name: 'Design', description: 'Design organization', costCenters: [], serviceOrganizationId: '1', level: 'capability' },
+  { id: '5', name: 'Platform', description: 'Platform practice, under Engineering', costCenters: [], serviceOrganizationId: '1', level: 'practice', parentId: '2', managerId: '1' },
+  { id: '6', name: 'Backend', description: 'Backend competence, under Platform', costCenters: [], serviceOrganizationId: '1', level: 'competence', parentId: '5' },
 ];
 
 // --- Customizing catalogs (Phase F1 — additive reference data) --------------

@@ -4,6 +4,7 @@ import { Observable } from 'rxjs';
 import { API_BASE_URL } from './api-config';
 import type { CapacityCell, CapacityRow, CapacityTotals } from './capacity.util';
 import type { ResourceKind } from './resource-kind.util';
+import type { OrgLevel } from './org-scope.util';
 
 export type { CapacityCell, CapacityRow, CapacityTotals, ResourceKind };
 
@@ -385,12 +386,31 @@ export interface ServiceOrganization {
   costCenters: string[];
 }
 
+/**
+ * A node of the organizational tree (D). Capability > Practice > Competence.
+ *
+ * TWO REFERENCES UPWARD, deliberately orthogonal (design spec §2.3):
+ *   - `parentId`              -> the DELIVERY hierarchy. Drives manager scope,
+ *                                derived dimensions and filters.
+ *   - `serviceOrganizationId` -> FINANCIAL belonging. Drives cost centres and
+ *                                rate-card selection. NOT part of the tree; it
+ *                                is never walked for scope.
+ *
+ * `managerId` IS the manual's Capability Leader / Practice Manager / Competence
+ * Manager — the node's level says which. No new RBAC role exists for them.
+ */
 export interface ResourceOrganization {
   id: string;
   name: string;
   description: string;
   costCenters: string[];
   serviceOrganizationId?: string;
+  /** The node above this one in the DELIVERY tree. Absent on a capability (root). */
+  parentId?: string;
+  /** Declared level. A capability has no parent; a practice's parent is a capability; a competence's parent is a practice. */
+  level: OrgLevel;
+  /** The resource who manages this node — soft reference, like `Resource.managerId`. */
+  managerId?: string;
 }
 
 // --- Customizing catalogs (Phase F1 — additive reference data) ---
