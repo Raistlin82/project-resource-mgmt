@@ -2350,6 +2350,127 @@ async function checkDummySubstitution() {
       }
     }
   }
+
+  // --- GIVE-BACK ON DECISION (Task 5). A substituted month carries the hours
+  // AND a link to the dummy month they came from; the decision closes that link:
+  //   (1) a REJECTION hands every transferred hour back and leaves the person
+  //       holding nothing — she never took the work;
+  //   (2) an APPROVAL hands back only what the approver TRIMMED before
+  //       approving, and leaves her the approved remainder.
+  // Each scenario runs on its OWN fixtures: the pair at the top of this section
+  // has since been approved, demoted and re-substituted, so its back-link no
+  // longer points where these checks need it to.
+  //
+  // The decision is taken by a DIFFERENT principal than the one that requested
+  // the substitution (the suite default, X-User-Id 1) — Segregation of Duties
+  // forbids deciding your own item.
+  const GIVE_BACK_DECIDER = { 'X-User-Id': '9', 'X-User-Role': 'admin' };
+
+  /**
+   * A fresh dummy booked at 2 FTE on DAY plus a free person, substituted once:
+   * 8h move to the person (her 1-FTE ceiling), 8h stay on the dummy, and her
+   * month awaits approval carrying the back-link. Returns undefined (having
+   * already recorded the failing check) when any setup step fails.
+   */
+  async function giveBackFixture(label) {
+    const gbDummy = await req('POST', '/resources', { body: { ...base, name: `C2 ${label} dummy`, kind: 'dummy', contractHoursPerDay: 8 } });
+    const gbPerson = await req('POST', '/resources', { body: { ...base, name: `C2 ${label} person`, kind: 'internal', contractHoursPerDay: 8 } });
+    if (!check(`C2 ${label} setup: dummy/person resources created`,
+      gbDummy.status === 201 && gbPerson.status === 201,
+      `dummy=${gbDummy.status} person=${gbPerson.status}`)) return undefined;
+
+    const gbRequest = await req('POST', '/requests', { body: { name: `C2 ${label} request`, requiredRole: 'Developer', requiredEffort: 2, skills: [] } });
+    if (!check(`C2 ${label} setup: request created`,
+      gbRequest.status === 200 && typeof gbRequest.body?.id === 'string', `status=${gbRequest.status}`)) return undefined;
+
+    const gbAssignment = await req('POST', '/assignments', { body: { requestId: gbRequest.body.id, resourceId: gbDummy.body.id, assignedHours: 0 } });
+    if (!check(`C2 ${label} setup: dummy assignment created`,
+      gbAssignment.status === 200 && typeof gbAssignment.body?.id === 'string', `status=${gbAssignment.status}`)) return undefined;
+
+    const gbBooked = await req('PUT', `/assignments/${gbAssignment.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 16 } } });
+    if (!check(`C2 ${label} setup: dummy booked at 2 FTE`,
+      gbBooked.status === 200, `status=${gbBooked.status} err=${gbBooked.body?.error}`)) return undefined;
+
+    const gbSub = await req('POST', `/assignment-months/${gbAssignment.body.id}:${MONTH}/substitute`, {
+      body: { targetResourceId: gbPerson.body.id },
+    });
+    const gbOutcome = (gbSub.body?.outcomes || [])[0];
+    const gbTargetMonthId = typeof gbOutcome?.targetAssignmentMonthId === 'string' ? gbOutcome.targetAssignmentMonthId : '';
+    if (!check(`C2 ${label} setup: one FTE moved to the person, her month awaits approval`,
+      gbSub.status === 200 && gbOutcome?.transferredHours === 8 && gbOutcome?.status === 'Requested' && gbTargetMonthId !== '',
+      `status=${gbSub.status} outcome=${JSON.stringify(gbOutcome)}`)) return undefined;
+
+    return {
+      dummyAssignmentId: gbAssignment.body.id,
+      personAssignmentId: gbTargetMonthId.split(':')[0],
+      substitutedMonthId: gbTargetMonthId,
+    };
+  }
+
+  const rejFixture = await giveBackFixture('give-back rejection');
+  if (rejFixture) {
+    const dec = await req('POST', '/allocation-approvals/decide', {
+      headers: GIVE_BACK_DECIDER,
+      body: { items: [{ assignmentMonthId: rejFixture.substitutedMonthId, decision: 'Rejected', note: 'not available after all' }] },
+    });
+    check('C2 rejection decided', (dec.body?.results || [])[0]?.status === 'Rejected', `res=${JSON.stringify(dec.body?.results)}`);
+
+    const dummyBack = await req('GET', `/assignments/${rejFixture.dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    check('C2 the dummy is whole again after a rejection',
+      (dummyBack.body.days || []).find(d => d.date === DAY)?.hours === 16,
+      `hours=${(dummyBack.body.days || []).find(d => d.date === DAY)?.hours}`);
+
+    const personBack = await req('GET', `/assignments/${rejFixture.personAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    check('C2 the person keeps nothing from a rejected substitution',
+      (personBack.body.days || []).every(d => d.date !== DAY), 'the day is still booked on the person');
+    const rejMonth = (personBack.body.months || [])[0];
+    check('C2 the rejected month is Rejected', rejMonth?.status === 'Rejected', `status=${rejMonth?.status}`);
+    check('C2 the back-link AND the recorded hours are cleared by the decision',
+      rejMonth !== undefined && !('replacedFromAssignmentMonthId' in rejMonth) && !('replacedHours' in rejMonth),
+      `month=${JSON.stringify(rejMonth)}`);
+
+    // Derived state: the dummy's assignedHours must follow its day rows back up
+    // (there is no GET /assignments/:id — the list is the only read).
+    const allAssignments = await req('GET', '/assignments');
+    const dummyAssig = (allAssignments.body || []).find(a => a.id === rejFixture.dummyAssignmentId);
+    check('C2 the dummy assignment-s assignedHours is restored with its days',
+      dummyAssig?.assignedHours === 16, `assignedHours=${dummyAssig?.assignedHours}`);
+  }
+
+  const trimFixture = await giveBackFixture('give-back trimmed approval');
+  if (trimFixture) {
+    // The approver CORRECTS the month before approving it (a first-class
+    // approver power): 8h transferred -> 5h kept. The month is still
+    // 'Requested', so the edit keeps its pending approval and its back-link.
+    const trim = await req('PUT', `/assignments/${trimFixture.personAssignmentId}/allocation`, {
+      body: { month: MONTH, dailyHours: { [DAY]: 5 } },
+    });
+    check('C2 the substituted month can be trimmed before approval', trim.status === 200, `status=${trim.status} err=${trim.body?.error}`);
+
+    const dec = await req('POST', '/allocation-approvals/decide', {
+      headers: GIVE_BACK_DECIDER,
+      body: { items: [{ assignmentMonthId: trimFixture.substitutedMonthId, decision: 'Approved', note: '5h is all she can take' }] },
+    });
+    check('C2 trimmed approval decided', (dec.body?.results || [])[0]?.status === 'Approved', `res=${JSON.stringify(dec.body?.results)}`);
+
+    const personKept = await req('GET', `/assignments/${trimFixture.personAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    check('C2 the person keeps exactly the approved remainder',
+      (personKept.body.days || []).find(d => d.date === DAY)?.hours === 5,
+      `hours=${(personKept.body.days || []).find(d => d.date === DAY)?.hours}`);
+    const trimMonth = (personKept.body.months || [])[0];
+    check('C2 the trimmed month is Allocated', trimMonth?.status === 'Allocated', `status=${trimMonth?.status}`);
+    check('C2 an approved substitution also clears the back-link and the recorded hours',
+      trimMonth !== undefined && !('replacedFromAssignmentMonthId' in trimMonth) && !('replacedHours' in trimMonth),
+      `month=${JSON.stringify(trimMonth)}`);
+
+    // 16h were booked, 8 moved, the approver cut 3 of them: 8 never left the
+    // dummy + 3 came back = 11, and 5 + 11 == the original 16 (no hour is
+    // created or destroyed by the give-back).
+    const dummyBack = await req('GET', `/assignments/${trimFixture.dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    check('C2 an approval gives back exactly the trimmed difference, no more',
+      (dummyBack.body.days || []).find(d => d.date === DAY)?.hours === 11,
+      `hours=${(dummyBack.body.days || []).find(d => d.date === DAY)?.hours}`);
+  }
 }
 
 async function main() {

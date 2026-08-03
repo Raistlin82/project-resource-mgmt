@@ -2263,6 +2263,171 @@ apiRouter.post('/assignment-months/:id/substitute', async (req, res) => {
 });
 
 /**
+ * C2 — THE INVERSE OF `transferDummyMonth`: give a substituted month's hours
+ * back to the dummy they came from, when the decision on that month lands.
+ *
+ * A substitution is IMMEDIATE (the hours leave the dummy at once, so demand is
+ * never double-counted while the approval is pending) but REVERSIBLE: the
+ * person's month keeps a soft link to the dummy month it came from. The
+ * decision closes that link:
+ *   - Rejected — she never took the work, so every hour she holds for that
+ *     month on that assignment goes back. Never MORE than the substitution
+ *     actually moved: hours that are on her month for another reason (her own
+ *     earlier work on the same month, demoted by the substitution; a second
+ *     substitution's hours; hours an approver added) were never the dummy's, and
+ *     returning them would invent demand the dummy never carried.
+ *   - Approved — only what the approver TRIMMED goes back, i.e.
+ *     `replacedHours - hoursStillOnTheMonth`. `replacedHours` is the figure the
+ *     transfer recorded: correcting a month before approving it is a first-class
+ *     approver power (C1 spec, decision 2), and once the days are rewritten the
+ *     original total is no longer readable anywhere else. A difference <= 0
+ *     gives back NOTHING — the approver left everything, or added hours of her
+ *     own, and the extra is a new allocation, not part of the substitution.
+ *
+ * Both `replacedFromAssignmentMonthId` and `replacedHours` are cleared with
+ * explicit `null`s (the documented "clear to absent" patch value on BOTH
+ * adapters) on EVERY path, including the no-ops — a decided month must never be
+ * mistaken for a pending substitution.
+ *
+ * CONCURRENCY: touches TWO resources, so it takes both `res:` locks in
+ * LEXICOGRAPHIC ORDER OF THE RESOURCE IDS and does its day-row reads inside
+ * them — the same rule, for the same deadlock reason, as `transferDummyMonth`.
+ * The month-row patch, the derived-state refresh and the aggregate recompute all
+ * stay OUTSIDE both locks (the recompute takes the dummy's `res:` lock itself,
+ * sequentially, never nested).
+ *
+ * A dummy month — or its assignment, or its resource — that no longer exists
+ * makes this a LOGGED NO-OP, not an error: the back-link is deliberately a soft
+ * reference (Task 2) precisely because the dummy row may legitimately be deleted
+ * while the month that came from it lives on.
+ */
+async function returnHoursToDummy(
+  row: AssignmentMonth,
+  assig: Assignment,
+  decided: 'Approved' | 'Rejected',
+): Promise<void> {
+  const round2 = (n: number): number => Math.round(n * 100) / 100;
+  const linkId = row.replacedFromAssignmentMonthId;
+  if (linkId === undefined) return; // the caller guards; belt and braces.
+  const month = row.month;
+
+  // Closed on EVERY path below, including the no-ops (see the doc comment). Cast
+  // just these two values so a typo in a neighbouring field is still type-checked.
+  const closeLink = async (): Promise<void> => {
+    await repos.assignmentMonths.update(row.id, {
+      replacedFromAssignmentMonthId: null as unknown as undefined,
+      replacedHours: null as unknown as undefined,
+    } as Partial<AssignmentMonth>);
+  };
+
+  const dummyRow = await repos.assignmentMonths.get(linkId);
+  const dummyAssig = dummyRow ? await repos.assignments.get(dummyRow.assignmentId) : undefined;
+  const dummyResource = dummyAssig ? await repos.resources.get(dummyAssig.resourceId) : undefined;
+  if (dummyRow === undefined || dummyAssig === undefined || dummyResource === undefined) {
+    console.warn(`give-back: month ${row.id} came from ${linkId}, which no longer exists — closing the link without returning hours`);
+    await closeLink();
+    return;
+  }
+
+  // The DUMMY's own daily ceiling (multi-FTE: it stands for capacity a single
+  // person does not cover). Resolved before the locks — it reads the resource
+  // row and the settings, never shared mutable state.
+  const dummyCap = dailyCapFor(kindOf(dummyResource), await resolveBaseCap(dummyResource));
+
+  const moveBack = async (): Promise<number> => {
+    const allDays = await repos.assignmentDays.list();
+    const heldByDate = sumHoursByDate(allDays.filter(d => d.assignmentId === assig.id && monthOf(d.date) === month));
+    const heldNow = round2(Object.values(heldByDate).reduce((s, h) => s + h, 0));
+
+    // HOW MUCH goes back. `replacedHours` is what the transfer moved; a row that
+    // somehow carries the link WITHOUT it (nothing writes one without the other)
+    // means "the size of the substitution is unknown", so a rejection still
+    // returns what she holds while an approval returns nothing rather than guess
+    // a difference.
+    const moved = Number.isFinite(row.replacedHours) ? (row.replacedHours as number) : undefined;
+    const budget = decided === 'Rejected'
+      ? (moved === undefined ? heldNow : Math.min(heldNow, moved))
+      : (moved === undefined ? 0 : round2(moved - heldNow));
+    // heldNow <= 0 is not just an optimization: her day rows are the only record
+    // of WHERE the transfer landed, so with none there is nowhere to put the
+    // hours back and no honest way to invent a distribution.
+    if (!(budget > 0) || !(heldNow > 0)) return 0;
+
+    // WHERE they go back. The per-day split of the original transfer is not
+    // stored (Task 2 records only its TOTAL), so it is reconstructed from the one
+    // per-day record that does exist — the days the transfer landed on — giving
+    // each day the budget IN PROPORTION to what it holds. `planSubstitution`, the
+    // very arithmetic that moved the hours out, then caps each day at what the
+    // dummy can still absorb that day: the give-back can therefore never push a
+    // day past the dummy's own ceiling, and because the dummy was UNDER that
+    // ceiling when the hours were first booked, the room left on a day is always
+    // at least what was taken from it.
+    const returnable: Record<string, number> = {};
+    for (const [date, hours] of Object.entries(heldByDate)) returnable[date] = round2(hours * budget / heldNow);
+
+    const dummyBooked = sumHoursByDate(allDays.filter(d => d.assignmentId === dummyAssig.id && monthOf(d.date) === month));
+    const plan = planSubstitution(returnable, dummyBooked, dummyCap);
+    if (plan.transferredHours === 0) return 0;
+
+    for (const [date, hours] of Object.entries(plan.transfer)) {
+      // Merge onto the dummy's day, RECREATING the row when it is gone — the
+      // transfer removes a day row that reaches zero, so the day the dummy gave
+      // everything from no longer exists.
+      const dummyDayId = `${dummyAssig.id}:${date}`;
+      const existing = await repos.assignmentDays.get(dummyDayId);
+      const merged = round2((existing?.hours ?? 0) + hours);
+      if (existing) await repos.assignmentDays.update(dummyDayId, { hours: merged });
+      else await repos.assignmentDays.create({ id: dummyDayId, assignmentId: dummyAssig.id, date, hours: merged } as AssignmentDay);
+
+      // The PERSON only loses hours on a REJECTION. On an approval the hours that
+      // go back left her month at TRIM time (the allocation PUT rewrote its day
+      // rows); what she still holds IS the approved allocation and must not be
+      // touched — deducting it again would destroy the hours she was just granted.
+      if (decided !== 'Rejected') continue;
+      // Never negative: a rejection's budget is capped at what she holds, so the
+      // proportional share of any day is <= that day's own hours, and the plan's
+      // per-day cap only lowers it further.
+      const left = round2((heldByDate[date] ?? 0) - hours);
+      if (left > 0) await repos.assignmentDays.update(`${assig.id}:${date}`, { hours: left });
+      else await repos.assignmentDays.remove(`${assig.id}:${date}`);
+    }
+
+    // The per-day rows are the source of truth for assignedHours on both sides
+    // (the person's only changed on a rejection).
+    await recomputeAssignedHours(dummyAssig.id);
+    if (decided === 'Rejected') await recomputeAssignedHours(assig.id);
+    return plan.transferredHours;
+  };
+
+  // Both `res:` locks, in LEXICOGRAPHIC ORDER OF THE RESOURCE IDS — two crossing
+  // give-backs would otherwise take them in opposite orders and deadlock.
+  // `withLock` is NOT re-entrant (the inner section chains onto a tail promise
+  // that contains itself), so ONE lock is taken when both sides are the same
+  // resource. Unreachable today — the substitution endpoint refuses a target that
+  // is the dummy itself — but this function is now called from the DECISION hook,
+  // where nothing re-checks that, and the failure mode is not an error: it is a
+  // permanently wedged `res:` key that silently hangs every later critical
+  // section for that resource.
+  const [firstId, secondId] = [assig.resourceId, dummyAssig.resourceId].sort();
+  const returnedHours = firstId === secondId
+    ? await withLock(`res:${firstId}`, moveBack)
+    : await withLock(`res:${firstId}`, () => withLock(`res:${secondId}`, moveBack));
+
+  // OUTSIDE both locks. The link is closed FIRST, so a failure in the derived
+  // state below can never leave a decided month looking like a pending
+  // substitution. Only the DUMMY's derived state is refreshed here: the person's
+  // rollup and aggregates are the decision hook's own job (it runs them straight
+  // after this returns, and the batch endpoint defers them to the end of the
+  // batch), and both assignments sit on the SAME request by construction — the
+  // substitution creates the target assignment on the dummy's request — so the
+  // hook's `req:` recompute already covers the dummy's side of it.
+  await closeLink();
+  if (returnedHours === 0) return;
+  await refreshDerivedAssignmentStatus(dummyAssig.id);
+  await withLock(`res:${dummyAssig.resourceId}`, () => recomputeResourceUtilization(dummyAssig.resourceId));
+}
+
+/**
  * Shared preamble for the per-month endpoints: resolve the assignment and
  * validate the :month path parameter. Returns undefined after having written
  * the error response.
@@ -4043,6 +4208,26 @@ async function applyAllocationDecision(
   try {
     if (rowAfter) await repos.auditLogs.create(monthTransitionAudit(req, row, rowAfter));
   } catch { /* audit is best-effort; the decision already committed */ }
+
+  // C2 — SUBSTITUTION GIVE-BACK. A month that arrived by substitution carries a
+  // link to the dummy month it came from; the decision closes that link and
+  // hands back the hours the person did not end up taking (all of them on a
+  // rejection, only the trimmed difference on an approval — see
+  // `returnHoursToDummy`). Placed HERE, after the month's own status write and
+  // its audit entry and BEFORE the `deferAggregates` return, so the single
+  // decision and the batch behave identically.
+  //
+  // BEST-EFFORT and LAST, exactly like the recompute below: the decision and the
+  // month transition have already committed, so a give-back failure must never
+  // turn a landed decision into a 500. Logged rather than swallowed silently —
+  // this branch moves hours, and a bug here would otherwise leave no trace.
+  if (row.replacedFromAssignmentMonthId !== undefined) {
+    try {
+      await returnHoursToDummy(row, assig, decided);
+    } catch (err) {
+      console.error(`applyAllocationDecision: give-back failed for month ${row.id}:`, err);
+    }
+  }
 
   if (deferAggregates) {
     // The rollup and the recompute are the caller's job — they are
