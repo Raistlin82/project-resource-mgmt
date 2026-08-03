@@ -17,6 +17,7 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 import { ListStateComponent } from '../shared/list-state.component';
 import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
 import { RESOURCE_KINDS, RESOURCE_KIND_LABELS, countsTowardInternalCapacity, kindOf, type ResourceKind } from '../services/resource-kind.util';
+import { dimensionsOf } from '../services/org-scope.util';
 
 /** Today as an ISO 'YYYY-MM-DD' string, used for status derivation + the terminate default. */
 function todayIso(): string {
@@ -58,28 +59,68 @@ const REMOTE_LOCATION = 'Remote';
       </div>
 
       <div class="command-card overflow-hidden">
-        <div class="p-4 border-b border-[var(--cc-line)] flex flex-col sm:flex-row gap-4 bg-[var(--cc-panel-muted)]">
-          <div class="flex-1 relative">
-            <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted">search</mat-icon>
-            <input type="text" placeholder="Search resources..."
-                   [ngModel]="search()" (ngModelChange)="search.set($event)"
-                   aria-label="Search resources"
-                   class="w-full pl-10 pr-4 py-2 bg-surface focus:bg-surface border border-line-strong rounded-xl text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:ring-2 focus:ring-accent/25 transition-all outline-none">
+        <div class="p-4 border-b border-[var(--cc-line)] flex flex-col gap-4 bg-[var(--cc-panel-muted)]">
+          <div class="flex flex-col sm:flex-row gap-4">
+            <div class="flex-1 relative">
+              <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted">search</mat-icon>
+              <input type="text" placeholder="Search resources..."
+                     [ngModel]="search()" (ngModelChange)="search.set($event)"
+                     aria-label="Search resources"
+                     class="w-full pl-10 pr-4 py-2 bg-surface focus:bg-surface border border-line-strong rounded-xl text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:ring-2 focus:ring-accent/25 transition-all outline-none">
+            </div>
+            <label class="inline-flex items-center gap-2 text-sm font-medium text-ink-secondary select-none">
+              <input type="checkbox" [ngModel]="activeOnly()" (ngModelChange)="activeOnly.set($event)"
+                     aria-label="Show active resources only"
+                     class="size-4 rounded border-line-strong text-accent focus:ring-2 focus:ring-accent/25">
+              Active only
+            </label>
+            <!-- Kind filter (C1): isolate internal / dummy / subco rows. -->
+            <select [ngModel]="kindFilter()" (ngModelChange)="kindFilter.set($event)"
+                    aria-label="Filter by kind" class="command-select sm:w-52">
+              <option value="">All kinds</option>
+              @for (opt of resourceKindOptions; track opt.value) {
+                <option [value]="opt.value">{{ opt.label }}</option>
+              }
+            </select>
           </div>
-          <label class="inline-flex items-center gap-2 text-sm font-medium text-ink-secondary select-none">
-            <input type="checkbox" [ngModel]="activeOnly()" (ngModelChange)="activeOnly.set($event)"
-                   aria-label="Show active resources only"
-                   class="size-4 rounded border-line-strong text-accent focus:ring-2 focus:ring-accent/25">
-            Active only
-          </label>
-          <!-- Kind filter (C1): isolate internal / dummy / subco rows. -->
-          <select [ngModel]="kindFilter()" (ngModelChange)="kindFilter.set($event)"
-                  aria-label="Filter by kind" class="command-select sm:w-52">
-            <option value="">All kinds</option>
-            @for (opt of resourceKindOptions; track opt.value) {
-              <option [value]="opt.value">{{ opt.label }}</option>
-            }
-          </select>
+          <!-- Capability / Practice / Competence / People Manager filters (D, Task 8).
+               Derived through dimensionsOf, so a capability filter also matches a
+               resource attached BELOW it (e.g. a competence two levels down) — never
+               a raw equality check against r.organization. These <select>s load their
+               <option>s from an async rxResource, so per the established trap they use
+               (change) + per-option [selected] rather than [value]/[ngModel] on the
+               <select> itself (that binding is applied before the @for's <option>s
+               exist and is silently dropped). -->
+          <div class="flex flex-col sm:flex-row gap-4">
+            <select (change)="onCapabilityChange($event)" aria-label="Filter by capability"
+                    data-test="capability-filter" class="command-select sm:w-48">
+              <option value="" [selected]="capabilityFilter() === ''">All capabilities</option>
+              @for (name of capabilityOptions(); track name) {
+                <option [value]="name" [selected]="name === capabilityFilter()">{{ name }}</option>
+              }
+            </select>
+            <select (change)="onPracticeChange($event)" aria-label="Filter by practice"
+                    data-test="practice-filter" class="command-select sm:w-48">
+              <option value="" [selected]="practiceFilter() === ''">All practices</option>
+              @for (name of practiceOptions(); track name) {
+                <option [value]="name" [selected]="name === practiceFilter()">{{ name }}</option>
+              }
+            </select>
+            <select (change)="onCompetenceChange($event)" aria-label="Filter by competence"
+                    data-test="competence-filter" class="command-select sm:w-48">
+              <option value="" [selected]="competenceFilter() === ''">All competences</option>
+              @for (name of competenceOptions(); track name) {
+                <option [value]="name" [selected]="name === competenceFilter()">{{ name }}</option>
+              }
+            </select>
+            <select (change)="onManagerFilterChange($event)" aria-label="Filter by People Manager"
+                    data-test="manager-filter" class="command-select sm:w-48">
+              <option value="" [selected]="managerFilter() === ''">All people managers</option>
+              @for (m of managerFilterOptions(); track m.id) {
+                <option [value]="m.id" [selected]="m.id === managerFilter()">{{ m.name }}</option>
+              }
+            </select>
+          </div>
         </div>
 
         <app-list-state
@@ -106,7 +147,7 @@ const REMOTE_LOCATION = 'Remote';
                 <tr>
                   <td class="font-bold">
                     <span class="inline-flex items-center gap-2">
-                      {{ r.name }}
+                      <span data-test="resource-name">{{ r.name }}</span>
                       <app-resource-kind-badge [kind]="r.kind" />
                     </span>
                   </td>
@@ -542,13 +583,59 @@ export class ResourcesComponent {
   protected readonly resourceKindOptions: { value: ResourceKind; label: string }[] =
     RESOURCE_KINDS.map(k => ({ value: k, label: RESOURCE_KIND_LABELS[k] }));
 
+  // D (Task 8): Capability / Practice / Competence / People Manager filters. '' = all.
+  // The dimension filters are matched via `dimensionsOf`, not a raw equality against
+  // r.organization — that is what makes a capability filter also match a resource
+  // attached BELOW it (e.g. a competence two levels down).
+  capabilityFilter = signal('');
+  practiceFilter = signal('');
+  competenceFilter = signal('');
+  managerFilter = signal('');
+
+  /** Option lists filtered by level, in tree order (node names are unique across the whole tree). */
+  capabilityOptions = computed<string[]>(() => this.orgOptions().filter(n => n.level === 'capability').map(n => n.name));
+  practiceOptions = computed<string[]>(() => this.orgOptions().filter(n => n.level === 'practice').map(n => n.name));
+  competenceOptions = computed<string[]>(() => this.orgOptions().filter(n => n.level === 'competence').map(n => n.name));
+
+  /** Distinct People Managers actually present among the (unfiltered) resource list, name-sorted. */
+  managerFilterOptions = computed<{ id: string; name: string }[]>(() => {
+    const all = this.resources();
+    const ids = new Set(all.map(r => r.managerId).filter((id): id is string => !!id));
+    return [...ids]
+      .map(id => ({ id, name: all.find(r => r.id === id)?.name ?? id }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  });
+
+  onCapabilityChange(event: Event): void {
+    this.capabilityFilter.set((event.target as HTMLSelectElement).value);
+  }
+  onPracticeChange(event: Event): void {
+    this.practiceFilter.set((event.target as HTMLSelectElement).value);
+  }
+  onCompetenceChange(event: Event): void {
+    this.competenceFilter.set((event.target as HTMLSelectElement).value);
+  }
+  onManagerFilterChange(event: Event): void {
+    this.managerFilter.set((event.target as HTMLSelectElement).value);
+  }
+
   filteredResources = computed(() => {
     const q = this.search().toLowerCase();
     const activeOnly = this.activeOnly();
     const kind = this.kindFilter();
+    const cap = this.capabilityFilter();
+    const pra = this.practiceFilter();
+    const com = this.competenceFilter();
+    const mgr = this.managerFilter();
+    const nodes = this.orgOptions();
     return this.resources().filter(r => {
       if (activeOnly && this.isTerminated(r)) return false;
       if (kind && kindOf(r) !== kind) return false;
+      const dims = dimensionsOf(r, nodes);
+      if (cap && dims.capability !== cap) return false;
+      if (pra && dims.practice !== pra) return false;
+      if (com && dims.competence !== com) return false;
+      if (mgr && r.managerId !== mgr) return false;
       return [r.name, r.role, r.organization, r.location].some(
         v => (v ?? '').toLowerCase().includes(q),
       );

@@ -2,7 +2,7 @@ import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
 import { ResourcesComponent } from './resources.component';
-import { ApiService, Resource, Vendor } from '../services/api.service';
+import { ApiService, Resource, ResourceOrganization, Vendor } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 
@@ -15,10 +15,22 @@ const RESOURCES: Resource[] = [
 
 const VENDORS: Vendor[] = [{ id: 'V4', name: 'Acme Staffing' }];
 
-function setup(resources: Resource[] = RESOURCES) {
+/**
+ * D (Task 8): Engineering (capability) > Platform (practice) > Backend (competence),
+ * plus Consulting, a capability with no children of its own — same ids the real
+ * seed uses ('2'/'5'/'6'), so the fixture reads as the seeded shape.
+ */
+const ORG_NODES: ResourceOrganization[] = [
+  { id: '2', name: 'Engineering', description: '', costCenters: [], level: 'capability' },
+  { id: '3', name: 'Consulting', description: '', costCenters: [], level: 'capability' },
+  { id: '5', name: 'Platform', description: '', costCenters: [], level: 'practice', parentId: '2' },
+  { id: '6', name: 'Backend', description: '', costCenters: [], level: 'competence', parentId: '5' },
+];
+
+function setup(resources: Resource[] = RESOURCES, orgNodes: ResourceOrganization[] = []) {
   const getResources = vi.fn(() => of(resources));
   const getProjectRoles = vi.fn(() => of([]));
-  const getResourceOrganizations = vi.fn(() => of([]));
+  const getResourceOrganizations = vi.fn(() => of(orgNodes));
   const getCountries = vi.fn(() => of([]));
   const getCities = vi.fn(() => of([]));
   const getRateCards = vi.fn(() => of([]));
@@ -185,5 +197,73 @@ describe('ResourcesComponent', () => {
     const host = fixture.nativeElement as HTMLElement;
     const options = Array.from(host.querySelectorAll('#res-manager option')).map(o => o.textContent?.trim());
     expect(options).not.toContain('External Co');
+  });
+
+  describe('org-dimension and people-manager filters (D, Task 8)', () => {
+    /** Jane Doe sits on Backend (competence, two levels under Engineering);
+     *  John Miller sits directly on Consulting (a capability with no children).
+     *  Each has a distinct People Manager, so the manager filter has something
+     *  to discriminate on too. */
+    const ORG_RESOURCES: Resource[] = [
+      { id: '10', name: 'Jane Doe', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal', organization: 'Backend', managerId: 'm1' },
+      { id: '11', name: 'John Miller', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal', organization: 'Consulting', managerId: 'm2' },
+      { id: 'm1', name: 'Mona Manager', role: 'Delivery Lead', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal' },
+      { id: 'm2', name: 'Nora Manager', role: 'Delivery Lead', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal' },
+    ];
+
+    it('filters the list by capability', async () => {
+      // Fixture: one resource on 'Backend' (competence under Platform under Engineering),
+      // one on 'Consulting' (a capability of its own).
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+
+      fixture.componentInstance.capabilityFilter.set('Engineering');
+      fixture.detectChanges();
+      const host = fixture.nativeElement as HTMLElement;
+      const names = [...host.querySelectorAll('[data-test="resource-name"]')].map(e => e.textContent?.trim());
+      expect(names).toContain('Jane Doe');        // on Backend, under Engineering
+      expect(names).not.toContain('John Miller'); // on Consulting
+    });
+
+    it('offers only the dimensions that exist in the tree', async () => {
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const opts = [...host.querySelectorAll<HTMLOptionElement>('[data-test="capability-filter"] option')]
+        .map(o => o.value);
+      expect(opts).toEqual(['', 'Engineering', 'Consulting']);   // '' = all
+    });
+
+    it('filters the list by practice', async () => {
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+
+      fixture.componentInstance.practiceFilter.set('Platform');
+      fixture.detectChanges();
+      expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['10']);
+    });
+
+    it('filters the list by competence', async () => {
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+
+      fixture.componentInstance.competenceFilter.set('Backend');
+      fixture.detectChanges();
+      expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['10']);
+    });
+
+    it('filters the list by People Manager and offers only the managers present', async () => {
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+
+      const host = fixture.nativeElement as HTMLElement;
+      const opts = [...host.querySelectorAll<HTMLOptionElement>('[data-test="manager-filter"] option')]
+        .map(o => o.textContent?.trim());
+      expect(opts).toEqual(['All people managers', 'Mona Manager', 'Nora Manager']);
+
+      fixture.componentInstance.managerFilter.set('m1');
+      fixture.detectChanges();
+      expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['10']);
+    });
   });
 });
