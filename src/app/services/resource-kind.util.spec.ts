@@ -1,6 +1,7 @@
 import {
   MULTI_FTE_MAX,
   RESOURCE_KINDS,
+  countsTowardDeliveryCapacity,
   countsTowardInternalCapacity,
   dailyCapFor,
   isMultiFteEligible,
@@ -69,5 +70,25 @@ describe('countsTowardInternalCapacity', () => {
     expect(countsTowardInternalCapacity('internal')).toBe(true);
     expect(countsTowardInternalCapacity('dummy')).toBe(false);
     expect(countsTowardInternalCapacity('subco')).toBe(false);
+  });
+});
+
+describe('countsTowardDeliveryCapacity', () => {
+  it('is true for internal and subco, false for dummy', () => {
+    expect(countsTowardDeliveryCapacity('internal')).toBe(true);
+    expect(countsTowardDeliveryCapacity('subco')).toBe(true);
+    expect(countsTowardDeliveryCapacity('dummy')).toBe(false);
+  });
+
+  it('differs from countsTowardInternalCapacity precisely on subco', () => {
+    // The two predicates are independent concepts, not aliases of each other:
+    // subco is excluded from internal-capacity KPIs but IS deliverable capacity.
+    for (const kind of RESOURCE_KINDS) {
+      if (kind === 'subco') {
+        expect(countsTowardDeliveryCapacity(kind)).not.toBe(countsTowardInternalCapacity(kind));
+      } else {
+        expect(countsTowardDeliveryCapacity(kind)).toBe(countsTowardInternalCapacity(kind));
+      }
+    }
   });
 });

@@ -6,12 +6,14 @@ import {
   ForecastData,
 } from './forecast.util';
 import { Resource, ResourceRequest, Assignment } from './api.service';
+import { ResourceKind } from './resource-kind.util';
 
 function res(
   id: string,
   capacity: number,
   utilization: number,
   skills: { name: string; level: number }[] = [],
+  kind?: ResourceKind,
 ): Resource {
   return {
     id,
@@ -22,6 +24,7 @@ function res(
     externalExperience: [],
     utilization,
     capacity,
+    ...(kind ? { kind } : {}),
   };
 }
 
@@ -165,6 +168,21 @@ describe('forecast.util — capacityForecast', () => {
     const rows = capacityForecast(data, '2026-06-08', 1, 'monthly');
     expect(rows[0].supply).toBeCloseTo(40 * (52 / 12), 6);
   });
+
+  it('excludes dummy resources from supply but keeps subco in (C1: a dummy is not deliverable capacity)', () => {
+    const data: ForecastData = {
+      resources: [
+        res('1', 40, 0, [], 'internal'),
+        res('2', 40, 0, [], 'dummy'),
+        res('3', 40, 0, [], 'subco'),
+      ],
+      requests: [],
+      assignments: [],
+    };
+    const rows = capacityForecast(data, '2026-06-08', 1);
+    // internal (40) + subco (40) = 80; the dummy's 40 must NOT be counted.
+    expect(rows[0].supply).toBe(80);
+  });
 });
 
 describe('forecast.util — benchList', () => {
@@ -198,6 +216,19 @@ describe('forecast.util — benchList', () => {
     expect(benchList(data, 60).length).toBe(0); // 65 not below 60
     expect(benchList(data, 70).length).toBe(1); // 65 below 70
   });
+
+  it('never lists a dummy even when under-allocated, but keeps a matching subco', () => {
+    const data: ForecastData = {
+      resources: [
+        res('1', 40, 50, [], 'dummy'), // would qualify by utilization alone
+        res('2', 40, 50, [], 'subco'), // same shape, but IS deliverable capacity
+      ],
+      requests: [],
+      assignments: [],
+    };
+    const bench = benchList(data);
+    expect(bench.map(b => b.resourceId)).toEqual(['2']);
+  });
 });
 
 describe('forecast.util — overAllocated', () => {
@@ -223,6 +254,19 @@ describe('forecast.util — overAllocated', () => {
       assignments: [],
     };
     expect(overAllocated(data, 100).map(o => o.resourceId)).toEqual(['1', '2']);
+  });
+
+  it('never lists a dummy even when over threshold, but keeps a matching subco', () => {
+    const data: ForecastData = {
+      resources: [
+        res('1', 40, 150, [], 'dummy'), // would qualify by utilization alone
+        res('2', 40, 150, [], 'subco'), // same shape, but IS deliverable capacity
+      ],
+      requests: [],
+      assignments: [],
+    };
+    const over = overAllocated(data);
+    expect(over.map(o => o.resourceId)).toEqual(['2']);
   });
 });
 

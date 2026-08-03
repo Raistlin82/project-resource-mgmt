@@ -39,6 +39,7 @@ import {
   TrendSeries,
 } from '../shared/charts';
 import { ListStateComponent } from '../shared/list-state.component';
+import { countsTowardDeliveryCapacity, kindOf } from '../services/resource-kind.util';
 
 interface DashboardData {
   resources: Resource[];
@@ -779,8 +780,17 @@ export class DashboardComponent {
   );
   escalations = computed(() => this.data().issues.filter(i => i.status !== 'Resolved' && i.escalated).length);
 
+  /**
+   * C1: a dummy is a placeholder for a hole to be filled, not a real over-booked
+   * body, and must never appear in this alert list — but a subco IS deliverable
+   * capacity, just not internal, so an over-booked subco stays in (same
+   * `countsTowardDeliveryCapacity` split `forecast.util`'s `overAllocated` uses).
+   */
   overbookedResourcesList = computed(() =>
-    this.data().resources.filter(r => r.utilization > 110).sort((a, b) => b.utilization - a.utilization).slice(0, 6),
+    this.data().resources
+      .filter(r => countsTowardDeliveryCapacity(kindOf(r)) && r.utilization > 110)
+      .sort((a, b) => b.utilization - a.utilization)
+      .slice(0, 6),
   );
   overbookedResources = computed(() => this.overbookedResourcesList().length);
 

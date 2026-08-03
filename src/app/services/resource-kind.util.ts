@@ -75,3 +75,24 @@ export function dailyCapFor(kind: ResourceKind, contractHoursPerDay: number): nu
 export function countsTowardInternalCapacity(kind: ResourceKind): boolean {
   return kind === 'internal';
 }
+
+/**
+ * True iff this kind is capacity the organisation can actually staff work with.
+ *
+ * Deliberately NOT the same question as `countsTowardInternalCapacity`, and the
+ * two must stay independent rather than be derived from one another:
+ *   - `countsTowardInternalCapacity` measures the SATURATION OF EMPLOYEES — it
+ *     answers "is this a person whose utilization % means something", which is
+ *     why subco is excluded (manual §4.1.2: subcontractors don't count toward
+ *     the internal-allocation KPIs).
+ *   - `countsTowardDeliveryCapacity` measures what the organisation can actually
+ *     DELIVER — a subco is a real, biddable body the org can staff onto work,
+ *     so it belongs in supply/bench/over-allocation math even though it is not
+ *     "internal". A dummy is neither: it is a placeholder for a person not yet
+ *     identified, i.e. a hole to be filled, not capacity that exists today.
+ *
+ * Net effect: true for 'internal' and 'subco', false for 'dummy'.
+ */
+export function countsTowardDeliveryCapacity(kind: ResourceKind): boolean {
+  return kind !== 'dummy';
+}
