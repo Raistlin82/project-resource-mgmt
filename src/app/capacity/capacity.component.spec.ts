@@ -50,8 +50,8 @@ const ENVELOPE: CapacityMonthly = {
   },
 };
 
-function setup(ready: boolean) {
-  const getCapacityMonthly = vi.fn(() => of(ENVELOPE));
+function setup(ready: boolean, envelope: CapacityMonthly = ENVELOPE) {
+  const getCapacityMonthly = vi.fn(() => of(envelope));
   const apiStub = { getCapacityMonthly } as unknown as ApiService;
   const authStub = {
     authReady: signal(ready),
@@ -166,5 +166,57 @@ describe('CapacityComponent', () => {
     // A demand cell must not carry a band tint class — it has no capacity to saturate.
     expect(demand[0].querySelector('[data-test="band-cell"]')).toBeNull();
     expect(host.querySelector('[data-test="kpi-uncovered"]')?.textContent).toContain('2.0');
+  });
+
+  it('writes both the internal grid and the uncovered-demand block to the CSV', async () => {
+    const { fixture } = setup(true);
+    await flush(fixture);
+
+    const csv = fixture.componentInstance['buildCsv']();
+    const lines = csv.split('\r\n');
+
+    // Header names the section column first, then a Planned/Confirmed/Band trio per month.
+    expect(lines[0]).toBe(
+      'Section,Resource,Jul 26 Planned FTE,Jul 26 Confirmed FTE,Jul 26 Band,' +
+      'Aug 26 Planned FTE,Aug 26 Confirmed FTE,Aug 26 Band',
+    );
+    // Internal rows first, then the demand block — nothing dropped.
+    expect(lines.length).toBe(4);
+    expect(lines[1]).toBe('Internal capacity,Alice,1.25,1.00,over,1.00,0.95,healthy');
+    expect(lines[2]).toBe('Internal capacity,Bob,0.25,0.13,idle,0.80,0.50,under');
+    // The demand row carries its FTE, but never a band: the envelope's `idle` is
+    // an inert placeholder and must not reach a spreadsheet as a judgement.
+    expect(lines[3]).toBe('Uncovered demand,Dummy SAP,2.00,0.00,n/a,1.00,0.00,n/a');
+  });
+
+  it('keeps the exports enabled for a window whose only content is uncovered demand', async () => {
+    const demandOnly: CapacityMonthly = {
+      ...ENVELOPE,
+      rows: [],
+      totals: {
+        '2026-07': { demandFteConfirmed: 0, demandFtePlanned: 0, capacityFte: 0, resourceCount: 0, demandFteUncovered: 2.0 },
+        '2026-08': { demandFteConfirmed: 0, demandFtePlanned: 0, capacityFte: 0, resourceCount: 0, demandFteUncovered: 1.0 },
+      },
+    };
+    const { fixture } = setup(true, demandOnly);
+    await flush(fixture);
+
+    const host = fixture.nativeElement as HTMLElement;
+    const buttons = Array.from(host.querySelectorAll('button')).filter((b) => /CSV|JSON/.test(b.textContent ?? ''));
+    expect(buttons.length).toBe(2);
+    for (const b of buttons) expect((b as HTMLButtonElement).disabled).toBe(false);
+
+    // And the file that comes out actually carries the demand block.
+    expect(fixture.componentInstance['buildCsv']()).toContain('Uncovered demand,Dummy SAP');
+  });
+
+  it('disables the exports only when both blocks are empty', async () => {
+    const { fixture } = setup(true, { months: [], rows: [], demandRows: [], totals: {} });
+    await flush(fixture);
+
+    const host = fixture.nativeElement as HTMLElement;
+    const buttons = Array.from(host.querySelectorAll('button')).filter((b) => /CSV|JSON/.test(b.textContent ?? ''));
+    expect(buttons.length).toBe(2);
+    for (const b of buttons) expect((b as HTMLButtonElement).disabled).toBe(true);
   });
 });

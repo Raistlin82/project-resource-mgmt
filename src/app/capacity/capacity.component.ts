@@ -25,6 +25,17 @@ const EMPTY: CapacityMonthly = { months: [], rows: [], demandRows: [], totals: {
 /** How many months to pad the range-selector option list beyond the loaded window. */
 const OPTION_PAD_MONTHS = 6;
 
+/**
+ * CSV `Section` values. The export flattens the screen's two blocks into one
+ * sheet, so every line has to say which it belongs to — and the demand block's
+ * Band cells key off this discriminator rather than the row's inert `band`.
+ */
+const SECTION_INTERNAL = 'Internal capacity';
+const SECTION_DEMAND = 'Uncovered demand';
+
+/** A `CapacityRow` tagged with the block it came from, for the flattened CSV. */
+type ExportRow = CapacityRow & { section: string };
+
 /** Per-band presentation: label (WCAG text, not colour alone) + design-system tone tokens. */
 interface BandMeta {
   label: string;
@@ -151,11 +162,15 @@ function shiftMonth(month: string, delta: number): string {
               </select>
             </label>
           }
+          <!-- C1: a window whose only content is uncovered demand (every planned
+               hour on dummies, nobody internal in range) is still exportable —
+               gating on the internal rows alone made the one figure the
+               forecast block needs unreachable. -->
           <div class="flex items-center gap-2">
-            <button type="button" (click)="exportCsv()" [disabled]="rows().length === 0" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
+            <button type="button" (click)="exportCsv()" [disabled]="!hasExportableRows()" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
               <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> CSV
             </button>
-            <button type="button" (click)="exportJson()" [disabled]="rows().length === 0" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
+            <button type="button" (click)="exportJson()" [disabled]="!hasExportableRows()" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
               <mat-icon class="text-[18px] w-[18px] h-[18px]">data_object</mat-icon> JSON
             </button>
           </div>
@@ -416,6 +431,9 @@ export class CapacityComponent {
     }));
   });
 
+  /** Either block has something to write — see the export buttons' disabled state. */
+  protected hasExportableRows = computed(() => this.rows().length > 0 || this.demandRows().length > 0);
+
   /** Per-month totals row: confirmed/planned demand vs capacity FTE. */
   protected totalsRow = computed<TotalsVm[]>(() => {
     const value = this.capacityRes.value();
@@ -538,17 +556,43 @@ export class CapacityComponent {
   }
 
   // --- export (SSR-safe; guarded on the browser) ---------------------------
+  /**
+   * CSV of BOTH blocks the screen shows: the internal capacity grid and the C1
+   * uncovered-demand section. Exporting only `rows` would silently drop the
+   * dummy/subco demand a user just read off the KPI strip ("3.0 FTE uncovered
+   * demand"), and would disagree with `exportJson()`, which serialises the whole
+   * envelope. `demandFteUncovered` is the figure the hiring/subco forecast block
+   * consumes, and this file is the hand-off artefact.
+   *
+   * A leading Section column keeps the two blocks apart. The Band cells of a
+   * demand row read 'n/a', never the envelope's inert `band: 'idle'` — a
+   * dummy/subco has no capacity to saturate, so it has no band (spec §4.3), and
+   * writing 'idle' into a spreadsheet would invite exactly the misreading the
+   * on-screen table is careful to avoid.
+   */
   protected exportCsv(): void {
     if (!isPlatformBrowser(this.platformId)) return;
+    downloadCsv('capacity-monthly.csv', this.buildCsv());
+  }
+
+  /** The exact CSV text `exportCsv()` writes — split out so it is assertable without a DOM download. */
+  protected buildCsv(): string {
     const value = this.capacityRes.value();
-    const cols: CsvColumn<CapacityRow>[] = [{ key: 'resourceName', header: 'Resource' }];
+    const rows: ExportRow[] = [
+      ...value.rows.map((r) => ({ ...r, section: SECTION_INTERNAL })),
+      ...value.demandRows.map((r) => ({ ...r, section: SECTION_DEMAND })),
+    ];
+    const cols: CsvColumn<ExportRow>[] = [
+      { key: 'section', header: 'Section' },
+      { key: 'resourceName', header: 'Resource' },
+    ];
     for (const m of value.months) {
       const label = this.monthLabel(m);
       cols.push({ key: m, header: `${label} Planned FTE`, map: (r) => (r.monthly[m]?.ftePlanned ?? 0).toFixed(2) });
       cols.push({ key: m, header: `${label} Confirmed FTE`, map: (r) => (r.monthly[m]?.fteConfirmed ?? 0).toFixed(2) });
-      cols.push({ key: m, header: `${label} Band`, map: (r) => r.monthly[m]?.band ?? 'n/a' });
+      cols.push({ key: m, header: `${label} Band`, map: (r) => (r.section === SECTION_DEMAND ? 'n/a' : r.monthly[m]?.band ?? 'n/a') });
     }
-    downloadCsv('capacity-monthly.csv', toCsv(value.rows, cols));
+    return toCsv(rows, cols);
   }
 
   protected exportJson(): void {
