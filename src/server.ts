@@ -18,6 +18,7 @@ import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { isResourceKind, RESOURCE_KINDS, kindOf, dailyCapFor } from './app/services/resource-kind.util';
+import { ORG_LEVELS, wouldCycleInOrgTree, type OrgLevel } from './app/services/org-scope.util';
 import { maxIdSeq } from './server/id-seq.util';
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
@@ -1030,6 +1031,55 @@ async function validateResourceOrgRefs(body: { costCenters?: unknown; serviceOrg
     if (!(await existsRepo(repos.serviceOrganizations, body.serviceOrganizationId))) {
       return 'serviceOrganizationId must reference an existing service organization';
     }
+  }
+  return null;
+}
+
+/**
+ * D — org-tree integrity for a `/resource-organizations` body (design spec §2.1,
+ * §2.4). Returns a 400-suitable message, or null when the body is acceptable.
+ *
+ * `ctx.id` is the record's own id on PUT (absent on POST): the name-uniqueness
+ * check must exclude the record being edited, or renaming nothing would 400.
+ *
+ * Cycles are refused here, in WRITE. The read side is separately cycle-safe
+ * (org-scope.util carries a visited set on every traversal) — both are needed:
+ * this stops new cycles, that survives ones already in the data.
+ */
+async function validateOrgTreeNode(
+  body: Partial<ResourceOrganization>,
+  ctx?: { id?: string },
+): Promise<string | null> {
+  const all = await repos.resourceOrganizations.list();
+  const nodes = all.map(n => ({ id: n.id, name: n.name, level: n.level, parentId: n.parentId, managerId: n.managerId }));
+  const existing = ctx?.id === undefined ? undefined : all.find(n => n.id === ctx.id);
+
+  const level = (body.level ?? existing?.level) as OrgLevel | undefined;
+  if (level !== undefined && !ORG_LEVELS.includes(level)) {
+    return `level must be one of ${ORG_LEVELS.join(', ')}`;
+  }
+  // An empty string clears the parent (the clear-to-absent seam), so treat it as absent.
+  const rawParent = body.parentId === undefined ? existing?.parentId : body.parentId;
+  const parentId = rawParent === '' || rawParent === null ? undefined : rawParent;
+
+  if (level === 'capability' && parentId !== undefined) return 'a capability is a root and cannot have a parent';
+  if (level !== undefined && level !== 'capability') {
+    if (parentId === undefined) return `a ${level} must have a parent`;
+    const parent = all.find(n => n.id === parentId);
+    if (parent === undefined) return 'parentId must reference an existing resource organization';
+    const wanted = ORG_LEVELS[ORG_LEVELS.indexOf(level) - 1];
+    if (parent.level !== wanted) return `the parent of a ${level} must be a ${wanted}`;
+  }
+  if (ctx?.id !== undefined && wouldCycleInOrgTree(ctx.id, parentId, nodes)) {
+    return 'parentId would close a cycle in the organizational tree';
+  }
+  const name = body.name ?? existing?.name;
+  if (name !== undefined && all.some(n => n.name === name && n.id !== ctx?.id)) {
+    return 'name must be unique across the whole organizational tree';
+  }
+  if (body.managerId !== undefined && body.managerId !== '') {
+    const manager = await repos.resources.get(body.managerId);
+    if (manager === undefined) return 'managerId must reference an existing resource';
   }
   return null;
 }
@@ -3116,29 +3166,70 @@ apiRouter.get('/service-organizations', async (_req, res) => { res.json(await re
 
 apiRouter.get('/resource-organizations', async (_req, res) => { res.json(await repos.resourceOrganizations.list()); });
 apiRouter.post('/resource-organizations', async (req, res) => {
-  const body = pick<ResourceOrganization>(req.body, ['name', 'description', 'costCenters', 'serviceOrganizationId']);
+  const body = pick<ResourceOrganization>(req.body, [
+    'name', 'description', 'costCenters', 'serviceOrganizationId',
+    // D — the delivery tree. A field missing here is dropped SILENTLY.
+    'parentId', 'level', 'managerId',
+  ]);
   // REFERENCE-DATA INTEGRITY (Phase F2): costCenters[] -> cost-centers catalog (id),
   // serviceOrganizationId -> service-organizations (id). Optional; supplied values checked.
   const refErr = await validateResourceOrgRefs(body as Record<string, unknown>);
   if (refErr) { res.status(400).json({ error: refErr }); return; }
-  // D — `level` is NOT in the pick() allow-list yet (Task 3 widens it), so `body`
-  // never carries one: default explicitly to 'capability', mirroring the schema
-  // default, so the two adapters agree. In-memory stores exactly what it is
-  // handed (no column default to fall back on), so leaving this out would make
-  // an in-memory-created row silently disagree with a Postgres one.
+  // D — org-tree integrity (levels, parent/child, cycles, unique name). Run
+  // AFTER the F2 reference check, on the same allow-listed body; no ctx.id on
+  // create.
+  const treeErr = await validateOrgTreeNode(body);
+  if (treeErr) { res.status(400).json({ error: treeErr }); return; }
+  // D — `level` IS now in the pick() allow-list above, so an explicit value
+  // overrides this default; an omitted one still lands as 'capability',
+  // mirroring the schema default, so the two adapters agree. In-memory stores
+  // exactly what it is handed (no column default to fall back on), so leaving
+  // this out would make an in-memory-created row silently disagree with a
+  // Postgres one. `level` MUST stay before `...body` — reversing the order
+  // would make every explicit `level` silently ignored.
   const item = { id: newId(), costCenters: [], level: 'capability', ...body } as ResourceOrganization;
   res.json(await repos.resourceOrganizations.create(item));
 });
 apiRouter.put('/resource-organizations/:id', async (req, res) => {
   const existing = await repos.resourceOrganizations.get(req.params.id);
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
-  const body = pick<ResourceOrganization>(req.body, ['name', 'description', 'costCenters', 'serviceOrganizationId']);
+  const body = pick<ResourceOrganization>(req.body, [
+    'name', 'description', 'costCenters', 'serviceOrganizationId',
+    // D — the delivery tree. A field missing here is dropped SILENTLY.
+    'parentId', 'level', 'managerId',
+  ]);
   const refErr = await validateResourceOrgRefs(body as Record<string, unknown>);
   if (refErr) { res.status(400).json({ error: refErr }); return; }
+  // D — org-tree integrity, excluding this record's own id from the
+  // name-uniqueness check and enabling the cycle check (PUT only).
+  const treeErr = await validateOrgTreeNode(body, { id: req.params.id });
+  if (treeErr) { res.status(400).json({ error: treeErr }); return; }
+  // D — CLEAR-TO-ABSENT SEAM (src/db/repository.ts): both adapters treat an
+  // explicit `null` in an update patch as "clear this field" and `undefined`
+  // as "leave untouched" — but a client clears an optional reference by
+  // sending '', not null (the UI has no way to author a literal `null`). Left
+  // as-is, '' would persist as a literal empty string on BOTH adapters (never
+  // becoming absent), instead of reading back as a root. Translate the ''
+  // sentinel to `null` here so parentId clears identically on both adapters.
+  if (body.parentId === '') (body as Record<string, unknown>)['parentId'] = null;
   const updated = await repos.resourceOrganizations.update(req.params.id, body);
   res.json(updated);
 });
-apiRouter.delete('/resource-organizations/:id', async (req, res) => { await repos.resourceOrganizations.remove(req.params.id); res.status(204).send(); });
+apiRouter.delete('/resource-organizations/:id', async (req, res) => {
+  const node = await repos.resourceOrganizations.get(req.params.id);
+  if (node === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const all = await repos.resourceOrganizations.list();
+  if (all.some(n => n.parentId === req.params.id)) {
+    res.status(409).json({ error: 'Cannot delete an organization that has children' }); return;
+  }
+  // Resources bind to a node by NAME (design spec §2.4), so this is a name check.
+  const resources = await repos.resources.list();
+  if (resources.some(r => r.organization === node.name)) {
+    res.status(409).json({ error: 'Cannot delete an organization that resources still reference' }); return;
+  }
+  await repos.resourceOrganizations.remove(req.params.id);
+  res.status(204).send();
+});
 
 // --- Customizing catalogs (Phase F1 — additive reference data) --------------
 // Reads stay open (like the other config catalogs); mutations are gated to

@@ -2949,6 +2949,176 @@ async function checkDummySubstitution() {
   }
 }
 
+/**
+ * D (Task 3) — org-tree integrity on the bespoke `/resource-organizations`
+ * handlers (src/server.ts, NOT mounted with `crud()`): levels, parent/child
+ * pairing, whole-tree name uniqueness (self excluded on PUT), cycle refusal on
+ * write, and the two protected-delete guards (children / resources still
+ * referencing the node by name). Nine checks, matching the task-3 brief 1:1.
+ *
+ * SEED FIXTURES relied on (src/db/seed.ts resourceOrganizations) — none of
+ * these are mutated by earlier smoke sections:
+ *   id '2' — 'Engineering' (capability), no parent. Seeded resources carry
+ *     organization: 'Engineering' (resources bind to a node BY NAME, spec §2.4).
+ *   id '5' — 'Platform' (practice), parentId '2'.
+ *   id '6' — 'Backend' (competence), parentId '5' — Engineering's grandchild,
+ *     used to prove both the cycle guard (6) and the has-children delete guard (7).
+ *
+ * Checks 7 and 8 DELETE seeded nodes '5' and '2'. Against the pre-Task-3
+ * build (delete is an unguarded one-liner) those calls actually SUCCEED
+ * (204) and remove the rows from the in-memory store for the rest of THIS
+ * process's lifetime — expected and harmless: the task's own instructions
+ * have the server restarted between runs, and post-implementation the 409
+ * guards mean neither delete ever goes through, so seed data survives a
+ * green run intact.
+ */
+async function checkOrgTreeIntegrity() {
+  const ENGINEERING_ID = '2';
+  const PLATFORM_ID = '5';
+  const BACKEND_ID = '6';
+
+  // 1) POST carries level + parentId through (today: silently dropped by the
+  // pick() allow-list — the row still gets created, just as a bare capability).
+  const created = await req('POST', '/resource-organizations', {
+    headers: RBAC_HEADERS,
+    body: { name: 'D Smoke Practice', description: 'x', level: 'practice', parentId: ENGINEERING_ID },
+  });
+  check(
+    "POST /api/resource-organizations {level:'practice', parentId:'2'} -> 200, response carries both through",
+    created.status === 200 && created.body?.level === 'practice' && created.body?.parentId === ENGINEERING_ID,
+    `status=${created.status}, body=${JSON.stringify(created.body)}`,
+  );
+  // Keep the id even if the assertion above failed (pre-implementation the
+  // POST still succeeds, just with the wrong shape) so check 9 below can
+  // still run its own — independently meaningful — assertion.
+  const smokeNodeId = typeof created.body?.id === 'string' ? created.body.id : undefined;
+
+  // 2) A practice with no parent -> 400.
+  {
+    const bad = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Bad', description: 'x', level: 'practice' },
+    });
+    check(
+      'POST a practice with no parentId -> 400',
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+  }
+
+  // 3) A competence whose parent is a capability (wrong level) -> 400.
+  {
+    const bad2 = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Bad2', description: 'x', level: 'competence', parentId: ENGINEERING_ID },
+    });
+    check(
+      "POST a competence whose parent ('2', a capability) is the wrong level -> 400",
+      bad2.status === 400,
+      `status=${bad2.status}, body=${JSON.stringify(bad2.body)}`,
+    );
+  }
+
+  // 4) A name already in the tree -> 400.
+  {
+    const dup = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'Engineering', description: 'x', level: 'capability' },
+    });
+    check(
+      "POST with a name already in the tree ('Engineering') -> 400",
+      dup.status === 400,
+      `status=${dup.status}, body=${JSON.stringify(dup.body)}`,
+    );
+  }
+
+  // 5) PUT its OWN unchanged name -> 200 (must not collide with itself). This
+  // is a regression guard on the new uniqueness check's ctx.id exclusion —
+  // note it can ALREADY pass today (no uniqueness check exists yet to break
+  // it), which is fine: its job is to prove the eventual validator doesn't
+  // regress a working rename-to-self, not to prove a currently-broken 400.
+  {
+    const self = await req('PUT', `/resource-organizations/${ENGINEERING_ID}`, {
+      headers: RBAC_HEADERS,
+      body: { name: 'Engineering' },
+    });
+    check(
+      "PUT /api/resource-organizations/2 {name:'Engineering'} (unchanged) -> 200, not a self-collision",
+      self.status === 200,
+      `status=${self.status}, body=${JSON.stringify(self.body)}`,
+    );
+  }
+
+  // 6) PUT parentId to its OWN descendant -> 400 (cycle refused).
+  {
+    const cyc = await req('PUT', `/resource-organizations/${ENGINEERING_ID}`, {
+      headers: RBAC_HEADERS,
+      body: { parentId: BACKEND_ID },
+    });
+    check(
+      "PUT /api/resource-organizations/2 {parentId:'6'} (its own descendant) -> 400",
+      cyc.status === 400,
+      `status=${cyc.status}, body=${JSON.stringify(cyc.body)}`,
+    );
+  }
+
+  // 7) DELETE a node that still has a child -> 409.
+  {
+    const del1 = await req('DELETE', `/resource-organizations/${PLATFORM_ID}`, { headers: RBAC_HEADERS });
+    check(
+      "DELETE /api/resource-organizations/5 (Platform) while '6' (Backend) still names it as parent -> 409",
+      del1.status === 409,
+      `status=${del1.status}, body=${JSON.stringify(del1.body)}`,
+    );
+  }
+
+  // 8) DELETE a node seeded resources still reference by name -> 409.
+  {
+    const del2 = await req('DELETE', `/resource-organizations/${ENGINEERING_ID}`, { headers: RBAC_HEADERS });
+    check(
+      "DELETE /api/resource-organizations/2 (Engineering) while seeded resources carry organization:'Engineering' -> 409",
+      del2.status === 409,
+      `status=${del2.status}, body=${JSON.stringify(del2.body)}`,
+    );
+  }
+
+  // 9) THE DUAL-ADAPTER CLEAR-TO-ABSENT SEAM — PUT {level:'capability',
+  // parentId:''} on the node from check 1 must land as a root (parentId
+  // ABSENT from the response, not a stored literal ''), identically on both
+  // adapters. The assertion below folds in the precondition that the node
+  // really did carry parentId '2' beforehand (from check 1) — so pre-
+  // implementation this fails for the REAL reason (parentId was never
+  // attached by POST in the first place), not by accident.
+  if (smokeNodeId !== undefined) {
+    const cleared = await req('PUT', `/resource-organizations/${smokeNodeId}`, {
+      headers: RBAC_HEADERS,
+      body: { level: 'capability', parentId: '' },
+    });
+    check(
+      `PUT /api/resource-organizations/${smokeNodeId} {level:'capability', parentId:''} -> 200, clears a REAL parentId to absent (root)`,
+      created.body?.parentId === ENGINEERING_ID && cleared.status === 200 &&
+      cleared.body !== undefined && !('parentId' in cleared.body),
+      `preParentId=${created.body?.parentId}, status=${cleared.status}, body=${JSON.stringify(cleared.body)}`,
+    );
+    // Re-confirm via a FRESH GET (not just the PUT's own echoed response) —
+    // the point of this seam is that it persists identically on both adapters.
+    {
+      const { status, body } = await req('GET', '/resource-organizations');
+      const node = Array.isArray(body) ? body.find((n) => n.id === smokeNodeId) : undefined;
+      check(
+        'GET /api/resource-organizations reflects the cleared node as a root (parentId absent) on re-read',
+        status === 200 && Boolean(node) && !('parentId' in node),
+        node ? `node=${JSON.stringify(node)}` : `status=${status}, missing`,
+      );
+    }
+    // Cleanup: the smoke node is now a childless root with no resources
+    // referencing it — deletable, so a future run against a persistent
+    // (Postgres) backend never accumulates cruft.
+    const cleanup = await req('DELETE', `/resource-organizations/${smokeNodeId}`, { headers: RBAC_HEADERS });
+    check(`DELETE /api/resource-organizations/${smokeNodeId} (smoke cleanup) -> 204`, cleanup.status === 204, `status=${cleanup.status}`);
+  }
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -3046,6 +3216,15 @@ async function main() {
     await checkDummySubstitution();
   } catch (err) {
     console.log(`FAIL  dummy-substitution flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the D org-tree-integrity
+  // flow never masks or blocks any of the prior section results.
+  try {
+    await checkOrgTreeIntegrity();
+  } catch (err) {
+    console.log(`FAIL  org-tree integrity flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 
