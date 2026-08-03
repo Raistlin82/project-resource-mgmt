@@ -179,6 +179,14 @@ export function scopedApproversOf(
   if (node !== undefined) {
     for (const n of ancestorChain(node.id, nodes)) if (n.managerId !== undefined) managerIds.add(n.managerId);
   }
+  // This is an AUTHORIZATION decision, not hygiene. A target that is itself the
+  // manager of the very node it sits on (e.g. a Capability Leader with no
+  // personal managerId, managing their own capability) would otherwise appear
+  // as its own only approver. Removing it can legitimately empty `managerIds`
+  // and flip `roleFallback` to true — and that is CORRECT and must stay: nobody
+  // can be their own approver (SoD refuses it one layer up regardless), so "the
+  // only candidate is the target" really does mean nobody is accountable for
+  // this resource. Do not "fix" this by keeping the target in the set.
   managerIds.delete(target.id);
   return { managerIds, roleFallback: managerIds.size === 0 };
 }

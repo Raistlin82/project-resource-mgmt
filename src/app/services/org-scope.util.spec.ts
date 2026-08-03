@@ -76,6 +76,14 @@ describe('descendantOrgIds', () => {
   it('is just the node itself for a leaf', () => {
     expect([...descendantOrgIds('COM', NODES)]).toEqual(['COM']);
   });
+
+  it('does not hang on a cycle in the org tree', () => {
+    const cyclic: OrgNode[] = [
+      { id: 'A', name: 'A', level: 'practice', parentId: 'B' },
+      { id: 'B', name: 'B', level: 'practice', parentId: 'A' },
+    ];
+    expect([...descendantOrgIds('A', cyclic)].sort()).toEqual(['A', 'B']);
+  });
 });
 
 describe('reportsClosure', () => {
@@ -128,6 +136,17 @@ describe('scopedApproversOf', () => {
       { id: 'z', managerId: 'r3' }, RESOURCES, NODES);
     expect([...managerIds]).toEqual(['r3']);
     expect(roleFallback).toBe(false);
+  });
+
+  it('falls back when the only candidate manager is the target itself', () => {
+    // r100 IS the manager of 'Delivery' (CAP) and sits on that very node, with
+    // no personal managerId. Removing the target from its own candidate set
+    // empties it: nobody but r100 is accountable, and r100 cannot approve for
+    // themselves, so this must be a role fallback, not an empty-but-valid set.
+    const { managerIds, roleFallback } = scopedApproversOf(
+      { id: 'r100', organization: 'Delivery' }, RESOURCES, NODES);
+    expect([...managerIds]).toEqual([]);
+    expect(roleFallback).toBe(true);
   });
 });
 
