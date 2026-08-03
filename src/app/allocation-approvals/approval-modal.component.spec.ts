@@ -390,6 +390,35 @@ describe('ApprovalModalComponent — Substitute (C2)', () => {
     expect(outcome.querySelector('.green')).toBeNull();
   });
 
+  it('does not read an empty outcomes array as a success', async () => {
+    // The endpoint always returns 200, even for a request that moved NOTHING
+    // at all (e.g. every month it touched was already fully covered). No
+    // `[data-test="substitute-outcome"]` rows exist to inspect in this case,
+    // so the component must say so explicitly rather than rendering nothing
+    // (which would read as "there was nothing to report", not "this failed").
+    const { fixture } = setup({
+      rows: [ROW_DUMMY],
+      substituteResult: { targetResourceId: 'r9', targetResourceName: 'Nora Fenn', outcomes: [] },
+    });
+    await flush(fixture);
+
+    fixture.componentInstance.openSubstitute(ROW.items[0]);
+    fixture.componentInstance.chooseTarget('r9');
+    fixture.detectChanges();
+    (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('[data-test="substitute-confirm"]')!.click();
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    const panel = host.querySelector('[data-test="substitute-panel"]')!;
+    expect(panel.querySelector('[data-test="substitute-outcome"]')).toBeNull();
+    expect(panel.textContent).toContain('Nothing was transferred');
+    // Never styled/labelled as a success — scoped to the substitute panel
+    // itself, since an unrelated line elsewhere in the SAME modal (ROW's own
+    // second, already-'Allocated' item) legitimately renders a '.green'
+    // status chip of its own.
+    expect(panel.querySelector('.green')).toBeNull();
+  });
+
   it('filters candidates to internal, non-terminated resources', async () => {
     const { fixture } = setup({ rows: [ROW_DUMMY] });
     await flush(fixture);
@@ -432,5 +461,25 @@ describe('ApprovalModalComponent — Substitute (C2)', () => {
     fixture.detectChanges();
 
     expect(namesOf().some(t => t.includes('Sam Cole'))).toBe(true); // clearing the filter reveals it
+  });
+
+  it('resets applyToRemaining when Substitute is opened on a DIFFERENT line', async () => {
+    // Regression: openSubstitute() reset chosenTargetId/substitutionResult/
+    // personFilter/orgFilter but originally left applyToRemaining untouched.
+    // A People Manager processing several dummy lines in one modal session —
+    // exactly C2's workflow — would check "Apply to all remaining months" for
+    // one dummy line, decide or cancel, then open Substitute on a DIFFERENT
+    // line and find the checkbox silently pre-checked, applying a transfer
+    // across months the operator never opted into for THAT line.
+    const ROW_DUMMY_TWO_PENDING: AllocationApprovalRow = { ...ROW_TWO_PENDING, kind: 'dummy' };
+    const { fixture } = setup({ rows: [ROW_DUMMY_TWO_PENDING] });
+    await flush(fixture);
+
+    fixture.componentInstance.openSubstitute(ROW_TWO_PENDING.items[0]); // Apollo (A1)
+    fixture.componentInstance.applyToRemaining.set(true);
+    expect(fixture.componentInstance.applyToRemaining()).toBe(true);
+
+    fixture.componentInstance.openSubstitute(ROW_TWO_PENDING.items[1]); // Mercury (A3) — a DIFFERENT line
+    expect(fixture.componentInstance.applyToRemaining()).toBe(false);
   });
 });

@@ -720,7 +720,13 @@ export class ApprovalModalComponent {
    *  person/flag was chosen for the first. */
   private substituteTarget = signal<Line | null>(null);
 
-  /** Public: the spec drives this directly, opening the panel for one line's item. */
+  /** Public: the spec drives this directly, opening the panel for one line's item.
+   *  Resets EVERY piece of picker/outcome state — including `applyToRemaining` —
+   *  so a flag or selection left over from a PREVIOUS line's panel can never
+   *  silently carry into this one. Regression: `applyToRemaining` was originally
+   *  left out of this reset, so checking "Apply to all remaining months" on one
+   *  dummy line and then opening Substitute on a different line kept it checked,
+   *  which would apply the transfer to months the operator never opted into. */
   openSubstitute(item: AllocationApprovalItem): void {
     const row = this.rows().find(r => r.items.some(i => i.assignmentMonthId === item.assignmentMonthId));
     if (!row) return;
@@ -729,6 +735,7 @@ export class ApprovalModalComponent {
     this.substitutionResult.set(null);
     this.personFilter.set('');
     this.orgFilter.set(this.defaultOrgFor(row));
+    this.applyToRemaining.set(false);
   }
 
   protected closeSubstitute(): void {
