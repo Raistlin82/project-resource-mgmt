@@ -2,7 +2,7 @@ import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
 import { ApprovalModalComponent } from './approval-modal.component';
-import { AllocationApprovalRow, ApiService, UserRole } from '../services/api.service';
+import { AllocationApprovalRow, ApiService, Resource, SubstitutionResult, UserRole } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 
@@ -39,6 +39,20 @@ const ROW_2: AllocationApprovalRow = {
   ],
 };
 
+/**
+ * C2 candidate pool: 'r1' is the DUMMY itself (kind 'dummy', organization
+ * 'Digital' — the row.resourceId ROW/ROW_DUMMY carry), 'r9'/'r10' are real,
+ * available people ('r9' in the same 'Digital' org as the dummy, 'r10' in a
+ * different org — exercises the organization pre-filter), and 'r11' is an
+ * internal resource terminated in the past, which must never be offered.
+ */
+const RESOURCES: Resource[] = [
+  { id: 'r1', name: 'Dummy Ada', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 0, kind: 'dummy', organization: 'Digital' },
+  { id: 'r9', name: 'Nora Fenn', role: 'Backend Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 0, kind: 'internal', organization: 'Digital' },
+  { id: 'r10', name: 'Sam Cole', role: 'QA Engineer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 0, kind: 'internal', organization: 'Cloud' },
+  { id: 'r11', name: 'Terminated Tom', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 0, kind: 'internal', organization: 'Digital', terminationDate: '2020-01-01' },
+];
+
 interface SetupOptions {
   rows?: AllocationApprovalRow[];
   months?: string[];
@@ -48,6 +62,10 @@ interface SetupOptions {
   role?: UserRole;
   /** The principal's RESOURCE id (mirrors AuthService.userId()). */
   userId?: string;
+  /** Resources `getResources()` resolves with — the Substitute picker's candidate pool. */
+  resources?: Resource[];
+  /** Result `substituteDummyMonth()` resolves with. */
+  substituteResult?: SubstitutionResult;
 }
 
 function setup({
@@ -59,9 +77,16 @@ function setup({
   // pre-existing cases below keep exercising the decision flow, not the gate.
   role = 'admin',
   userId = 'm1',
+  resources = RESOURCES,
+  substituteResult = {
+    targetResourceId: 'r9', targetResourceName: 'Nora Fenn',
+    outcomes: [{ month: '2026-09', transferredHours: 8, remainingHours: 0, targetAssignmentMonthId: 'X1:2026-09', status: 'Requested' }],
+  },
 }: SetupOptions = {}) {
   const decideAllocationMonths = vi.fn(() => of({ results: decideResults }));
-  const apiStub = { decideAllocationMonths } as unknown as ApiService;
+  const getResources = vi.fn(() => of(resources));
+  const substituteDummyMonth = vi.fn(() => of(substituteResult));
+  const apiStub = { decideAllocationMonths, getResources, substituteDummyMonth } as unknown as ApiService;
   const notifyStub = { success: vi.fn(), error: vi.fn() } as unknown as NotificationService;
   const authStub = {
     authReady: signal(true), isAuthenticated: signal(true),
@@ -81,7 +106,7 @@ function setup({
   fixture.componentRef.setInput('months', months);
   fixture.componentRef.setInput('multi', multi);
   fixture.detectChanges();
-  return { fixture, decideAllocationMonths, notifyStub };
+  return { fixture, decideAllocationMonths, getResources, substituteDummyMonth, notifyStub };
 }
 
 describe('ApprovalModalComponent', () => {
@@ -277,5 +302,135 @@ describe('ApprovalModalComponent — multi-resource mode', () => {
     expect(sections.length).toBe(2);
     expect(sections[0].textContent).toContain('Ada');
     expect(sections[1].textContent).toContain('Bob');
+  });
+});
+
+/** `getResources()` (an rxResource, like the host page's own feed) resolves
+ *  asynchronously even over a synchronous `of(...)` stream — mirrors the
+ *  `flush` helper in allocation-approvals.component.spec.ts. Every Substitute
+ *  test needs the candidate list settled BEFORE opening the panel, since
+ *  `openSubstitute` reads it synchronously to pre-set the organization filter. */
+async function flush(fixture: { detectChanges: () => void; whenStable: () => Promise<unknown> }): Promise<void> {
+  fixture.detectChanges();
+  await fixture.whenStable();
+  fixture.detectChanges();
+}
+
+describe('ApprovalModalComponent — Substitute (C2)', () => {
+  /** Same resource/items as ROW, but the row itself is the dummy placeholder
+   *  (resourceId 'r1' matches RESOURCES' dummy entry, organization 'Digital'). */
+  const ROW_DUMMY: AllocationApprovalRow = { ...ROW, kind: 'dummy' };
+
+  it('offers Substitute only on a dummy line', () => {
+    const { fixture } = setup({ rows: [ROW_DUMMY] });
+    expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="substitute"]')).not.toBeNull();
+  });
+
+  it('does not offer Substitute on an internal line', () => {
+    const { fixture } = setup({ rows: [ROW] }); // ROW.kind === 'internal'
+    expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="substitute"]')).toBeNull();
+  });
+
+  it('sends the chosen person and the remaining-months flag', async () => {
+    const { fixture, substituteDummyMonth } = setup({ rows: [ROW_DUMMY] });
+    await flush(fixture);
+
+    fixture.componentInstance.openSubstitute(ROW.items[0]);
+    fixture.componentInstance.chooseTarget('r9');
+    fixture.componentInstance.applyToRemaining.set(true);
+    fixture.detectChanges();
+    (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('[data-test="substitute-confirm"]')!.click();
+
+    expect(substituteDummyMonth).toHaveBeenCalledWith(ROW.items[0].assignmentMonthId, 'r9', true);
+  });
+
+  it('shows what moved and what stayed', async () => {
+    const { fixture } = setup({
+      rows: [ROW_DUMMY],
+      substituteResult: {
+        targetResourceId: 'r9', targetResourceName: 'Nora Fenn',
+        outcomes: [{ month: '2026-09', transferredHours: 8, remainingHours: 8 }],
+      },
+    });
+    await flush(fixture);
+
+    fixture.componentInstance.openSubstitute(ROW.items[0]);
+    fixture.componentInstance.chooseTarget('r9');
+    fixture.detectChanges();
+    (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('[data-test="substitute-confirm"]')!.click();
+    fixture.detectChanges();
+
+    const outcome = (fixture.nativeElement as HTMLElement).querySelector('[data-test="substitute-outcome"]')!;
+    // Both numbers rendered in distinct, separately-queryable places — hours
+    // moved and hours still owed by the dummy are not the same claim.
+    expect(outcome.querySelector('[data-test="outcome-transferred"]')!.textContent).toContain('8');
+    expect(outcome.querySelector('[data-test="outcome-remaining"]')!.textContent).toContain('8');
+  });
+
+  it('does not read a skipped, zero-transfer outcome as a success', async () => {
+    const { fixture } = setup({
+      rows: [ROW_DUMMY],
+      substituteResult: {
+        targetResourceId: 'r9', targetResourceName: 'Nora Fenn',
+        outcomes: [{ month: '2026-09', transferredHours: 0, remainingHours: 8, skipped: 'the target had no capacity left that month' }],
+      },
+    });
+    await flush(fixture);
+
+    fixture.componentInstance.openSubstitute(ROW.items[0]);
+    fixture.componentInstance.chooseTarget('r9');
+    fixture.detectChanges();
+    (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('[data-test="substitute-confirm"]')!.click();
+    fixture.detectChanges();
+
+    const outcome = (fixture.nativeElement as HTMLElement).querySelector('[data-test="substitute-outcome"]')!;
+    expect(outcome.textContent).toContain('no capacity left');
+    expect(outcome.querySelector('[data-test="outcome-transferred"]')).toBeNull();
+    // Never styled the same as a successful transfer.
+    expect(outcome.querySelector('.green')).toBeNull();
+  });
+
+  it('filters candidates to internal, non-terminated resources', async () => {
+    const { fixture } = setup({ rows: [ROW_DUMMY] });
+    await flush(fixture);
+
+    fixture.componentInstance.openSubstitute(ROW.items[0]);
+    fixture.detectChanges();
+    const host = fixture.nativeElement as HTMLElement;
+    // Clear the organization pre-filter (default 'Digital', the dummy's own
+    // org — see the dedicated pre-set/clearable test below): this test is
+    // about the kind/termination filter, not the organization one.
+    const orgSelect = host.querySelector<HTMLSelectElement>('[data-test="substitute-org-filter"]')!;
+    orgSelect.value = '';
+    orgSelect.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+
+    const names = Array.from(host.querySelectorAll('[data-test="substitute-candidate"]'))
+      .map(el => el.textContent ?? '');
+    expect(names.some(t => t.includes('Nora Fenn'))).toBe(true);
+    expect(names.some(t => t.includes('Sam Cole'))).toBe(true);
+    expect(names.some(t => t.includes('Dummy Ada'))).toBe(false); // kind 'dummy'
+    expect(names.some(t => t.includes('Terminated Tom'))).toBe(false); // terminationDate in the past
+  });
+
+  it("pre-sets the organization filter to the dummy's organization, and it stays clearable", async () => {
+    const { fixture } = setup({ rows: [ROW_DUMMY] }); // r1 (the dummy) is org 'Digital'
+    await flush(fixture);
+
+    fixture.componentInstance.openSubstitute(ROW.items[0]);
+    fixture.detectChanges();
+    const host = fixture.nativeElement as HTMLElement;
+
+    const namesOf = () => Array.from(host.querySelectorAll('[data-test="substitute-candidate"]')).map(el => el.textContent ?? '');
+    expect(namesOf().some(t => t.includes('Nora Fenn'))).toBe(true); // Digital
+    expect(namesOf().some(t => t.includes('Sam Cole'))).toBe(false); // Cloud — filtered out by the pre-set org
+
+    const orgSelect = host.querySelector<HTMLSelectElement>('[data-test="substitute-org-filter"]')!;
+    expect(orgSelect.value).toBe('Digital');
+    orgSelect.value = '';
+    orgSelect.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+
+    expect(namesOf().some(t => t.includes('Sam Cole'))).toBe(true); // clearing the filter reveals it
   });
 });
