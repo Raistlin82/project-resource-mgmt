@@ -3121,7 +3121,12 @@ apiRouter.post('/resource-organizations', async (req, res) => {
   // serviceOrganizationId -> service-organizations (id). Optional; supplied values checked.
   const refErr = await validateResourceOrgRefs(body as Record<string, unknown>);
   if (refErr) { res.status(400).json({ error: refErr }); return; }
-  const item = { id: newId(), costCenters: [], ...body } as ResourceOrganization;
+  // D — `level` is NOT in the pick() allow-list yet (Task 3 widens it), so `body`
+  // never carries one: default explicitly to 'capability', mirroring the schema
+  // default, so the two adapters agree. In-memory stores exactly what it is
+  // handed (no column default to fall back on), so leaving this out would make
+  // an in-memory-created row silently disagree with a Postgres one.
+  const item = { id: newId(), costCenters: [], level: 'capability', ...body } as ResourceOrganization;
   res.json(await repos.resourceOrganizations.create(item));
 });
 apiRouter.put('/resource-organizations/:id', async (req, res) => {
