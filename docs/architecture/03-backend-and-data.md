@@ -294,6 +294,7 @@ erDiagram
     vendors     ||--o{ resources : "subco vendor (FK, C1)"
     assignments ||--o{ assignmentDays : "booked per day (B1)"
     assignments ||--o{ assignmentMonths : "governed per month (B3)"
+    assignmentMonths ||--o| assignmentMonths : "replaced a dummy month (C2, soft, transient)"
 
     resources {
         text id PK
@@ -338,8 +339,52 @@ erDiagram
         text month
         text status "authoritative"
         text approvalId "soft"
+        text replacedFromAssignmentMonthId "soft SELF-ref, NOT an FK (C2)"
+        jsonb replacedDays "date -> hours moved (C2)"
     }
 ```
+
+#### C2 — the substitution back-link is deliberately not a foreign key
+
+`assignmentMonths` carries two nullable, **transient** columns (migrations
+`0012_groovy_magik.sql` adds `replaced_from_assignment_month_id`,
+`0013_c2_replaced_days.sql` adds `replaced_days`). They are written together when
+a dummy month's hours are handed to a real person
+(`POST /assignment-months/:id/substitute`) and cleared together — in a `finally`
+— the moment that month is decided:
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `replaced_from_assignment_month_id` | `text`, nullable | The **dummy's** month-row id these hours came from, i.e. where to give back what the person does not end up taking. |
+| `replaced_days` | `jsonb`, nullable | `{ 'YYYY-MM-DD': hours }` — **which** days moved and how many hours from each. Days that moved nothing are absent. |
+
+**The back-link is a plain `text` column, not a `.references(() => assignmentMonths.id)` self-FK. That is a decision, not an omission.** The row it
+points at is legitimately deleted while the row holding the pointer lives on:
+deleting the dummy's assignment drops all of its month rows
+(`DELETE /assignments/:id` clears children by hand, since
+`assignment_months → assignments` is `ON DELETE no action`). With a real FK that
+delete would either be rejected by Postgres — mapped to a **409**, so removing a
+stale dummy would fail for as long as anyone's substituted month was pending — or,
+with a cascade, would reach across into *another resource's* month row. Neither is
+acceptable: the person's month is her own record and her decision must not depend
+on the dummy still existing. A missing dummy row instead makes the give-back a
+**logged no-op** (`returnHoursToDummy`), and the decision lands normally.
+
+Two consequences of that choice worth knowing:
+
+- The link is **only** meaningful while the month is pending. `closeLink()` clears
+  both columns on **every** decision path, including the no-ops and a give-back
+  that throws half way, because a decided month that still looks linked would
+  hand the same hours back a second time on a retry.
+- `replaced_days` is a **map, not a total**, and it is not derivable at decision
+  time. The approver may trim or zero the month before approving, so the original
+  figures are no longer readable anywhere, and a single total would have to be
+  spread over whichever days she happens to hold — silently moving her *own*
+  unrelated work onto the dummy. The arithmetic lives in `planGiveBack`
+  (`src/app/services/substitution.util.ts`).
+
+Both columns exist only on this branch's migrations; no shipped schema ever had
+the intermediate `replaced_hours` column that `0012` created and `0013` dropped.
 
 ### Projects & sub-resources
 
@@ -482,7 +527,7 @@ foreign keys; *(soft)* marks columns that carry a reference without a hard FK.
 | `requests` | Demand (resource requests) | `id`, `requiredEffort`, `staffedEffort`, `status`; **FK** `projectId→projects`; `requesterId` *(soft)* | Resourcing |
 | `assignments` | Staffing of a resource onto a request | `id`, `assignedHours`; **FK** `requestId→requests`, `resourceId→resources` | Resourcing |
 | `assignmentDays` | Per-day hours of an assignment (B1, time-phased allocation) | `id` = `<assignmentId>:<YYYY-MM-DD>`, `date`, `hours`; **FK** `assignmentId→assignments` | Resourcing |
-| `assignmentMonths` | Per-(assignment, month) approval lifecycle (B3) — **authoritative**; `assignments.status` is a derived rollup of these rows | `id` = `<assignmentId>:<YYYY-MM>`, `month`, `status`, `plannerNote`, `approverNote`; **FK** `assignmentId→assignments`; `approvalId` *(soft → approvalRequests)* | Resourcing / Governance |
+| `assignmentMonths` | Per-(assignment, month) approval lifecycle (B3) — **authoritative**; `assignments.status` is a derived rollup of these rows | `id` = `<assignmentId>:<YYYY-MM>`, `month`, `status`, `plannerNote`, `approverNote`; **FK** `assignmentId→assignments`; `approvalId` *(soft → approvalRequests)*; C2: `replacedFromAssignmentMonthId` *(soft **self**-ref, deliberately not an FK)* + `replacedDays` (jsonb `date→hours`), both nullable and transient — [why](#c2--the-substitution-back-link-is-deliberately-not-a-foreign-key) | Resourcing / Governance |
 | `timeEntries` | Logged hours with approval lifecycle | `id`, `hours`, `status`, `approvedBy/At`; **FK** `assignmentId→assignments`, `requestId→requests`, `resourceId→resources`, `projectId→projects` | Resourcing / Governance |
 | `languages` | UI languages (natural key `code`) | `code` PK, `isDefault` | Config |
 | `skillCatalogs` | Named collections of skills | `id`, `skills` (jsonb id array) | Config |

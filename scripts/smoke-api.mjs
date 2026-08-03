@@ -2084,6 +2084,20 @@ async function checkDummySubstitution() {
   const badTarget = await req('POST', `/assignment-months/${dummyMonthId}/substitute`, { body: { targetResourceId: otherDummyId } });
   check('C2 a non-internal target is refused', badTarget.status === 400, `status=${badTarget.status}`);
 
+  // RBAC (spec §5.7): substituting is an APPROVER action, gated to
+  // resource-manager/delivery-executive/admin by the '/assignment-months'
+  // mutation rule. 'pm' is the interesting negative — a planner may mutate
+  // '/assignments' (and therefore book the dummy's hours in the first place) but
+  // must NOT be able to hand them to a person. Asserted here so the rule
+  // transcribed in docs/roles-and-permissions.md cannot silently drift: roleGate
+  // rejects before the handler runs, so this leaves no state behind.
+  const asPlanner = await req('POST', `/assignment-months/${dummyMonthId}/substitute`, {
+    headers: { 'X-User-Id': '3', 'X-User-Role': 'pm' },
+    body: { targetResourceId: personId },
+  });
+  check("C2 substituting as 'pm' is refused by RBAC", asPlanner.status === 403,
+    `status=${asPlanner.status} body=${JSON.stringify(asPlanner.body)}`);
+
   const saturated = await req('POST', `/assignment-months/${dummyMonthId}/substitute`, { body: { targetResourceId: personId } });
   check('C2 a saturated target transfers nothing but does not error',
     saturated.status === 200 && (saturated.body.outcomes || [])[0]?.transferredHours === 0,
