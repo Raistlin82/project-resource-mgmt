@@ -157,13 +157,18 @@ export interface AssignmentMonth {
    */
   replacedFromAssignmentMonthId?: string;
   /**
-   * C2 — how many hours that substitution moved. NOT derivable at decision time:
-   * the approver may have trimmed the month before approving, so the original
-   * figure is no longer readable anywhere, and the give-back is
-   * `replacedHours - hoursStillOnTheMonth`. Written and cleared together with
-   * the back-link above.
+   * C2 — WHICH days that substitution moved, and how many hours from each
+   * (`{ 'YYYY-MM-DD': hours }`, days that moved nothing absent).
+   *
+   * NOT derivable at decision time, and a per-day map rather than a total on
+   * purpose: the approver may trim or zero the month before approving, so the
+   * original figures are no longer readable anywhere, and the give-back must be
+   * decided DAY BY DAY (`moved[date] - min(moved[date], stillHeld[date])`). A
+   * single total would have to be spread over the days she happens to hold at
+   * decision time, which silently moves her own unrelated work onto the dummy —
+   * see `planGiveBack`. Written and cleared together with the back-link above.
    */
-  replacedHours?: number;
+  replacedDays?: Record<string, number>;
 }
 
 /**

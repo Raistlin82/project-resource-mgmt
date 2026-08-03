@@ -230,14 +230,16 @@ export const assignmentMonths = pgTable(
     plannerNote: text('planner_note'),
     approverNote: text('approver_note'),
     // C2: back-link to the dummy month a substitution took these hours from, and
-    // how many hours it moved. Both nullable and transient — written together at
-    // transfer time, cleared together when the decision resolves. Plain `text`,
-    // NOT a `.references()` self-FK: the dummy month it points at is legitimately
-    // deleted while this row lives on (deleting a dummy's assignment removes its
-    // month rows), and that must not cascade into a person's month or fail her
-    // decision — a missing dummy row makes the give-back a recorded no-op.
+    // the PER-DAY map of what it moved (`{ 'YYYY-MM-DD': hours }`). Both nullable
+    // and transient — written together at transfer time, cleared together when the
+    // decision resolves. Plain `text`, NOT a `.references()` self-FK: the dummy
+    // month it points at is legitimately deleted while this row lives on (deleting
+    // a dummy's assignment removes its month rows), and that must not cascade into
+    // a person's month or fail her decision — a missing dummy row makes the
+    // give-back a recorded no-op. `replaced_days` is a MAP, not a total, because
+    // the give-back is decided day by day: see `planGiveBack`.
     replacedFromAssignmentMonthId: text('replaced_from_assignment_month_id'),
-    replacedHours: doublePrecision('replaced_hours'),
+    replacedDays: jsonb('replaced_days').$type<Record<string, number>>(),
   },
   (t) => [
     index('assignment_months_assignment_id_idx').on(t.assignmentId),

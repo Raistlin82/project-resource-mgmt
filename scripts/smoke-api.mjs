@@ -2426,7 +2426,7 @@ async function checkDummySubstitution() {
     const rejMonth = (personBack.body.months || [])[0];
     check('C2 the rejected month is Rejected', rejMonth?.status === 'Rejected', `status=${rejMonth?.status}`);
     check('C2 the back-link AND the recorded hours are cleared by the decision',
-      rejMonth !== undefined && !('replacedFromAssignmentMonthId' in rejMonth) && !('replacedHours' in rejMonth),
+      rejMonth !== undefined && !('replacedFromAssignmentMonthId' in rejMonth) && !('replacedDays' in rejMonth),
       `month=${JSON.stringify(rejMonth)}`);
 
     // Derived state: the dummy's assignedHours must follow its day rows back up
@@ -2460,7 +2460,7 @@ async function checkDummySubstitution() {
     const trimMonth = (personKept.body.months || [])[0];
     check('C2 the trimmed month is Allocated', trimMonth?.status === 'Allocated', `status=${trimMonth?.status}`);
     check('C2 an approved substitution also clears the back-link and the recorded hours',
-      trimMonth !== undefined && !('replacedFromAssignmentMonthId' in trimMonth) && !('replacedHours' in trimMonth),
+      trimMonth !== undefined && !('replacedFromAssignmentMonthId' in trimMonth) && !('replacedDays' in trimMonth),
       `month=${JSON.stringify(trimMonth)}`);
 
     // 16h were booked, 8 moved, the approver cut 3 of them: 8 never left the
@@ -2470,6 +2470,92 @@ async function checkDummySubstitution() {
     check('C2 an approval gives back exactly the trimmed difference, no more',
       (dummyBack.body.days || []).find(d => d.date === DAY)?.hours === 11,
       `hours=${(dummyBack.body.days || []).find(d => d.date === DAY)?.hours}`);
+  }
+
+  // --- MIXED OWN + TRANSFERRED HOURS ON THE SAME MONTH, THEN REJECTED. The
+  // regression guard for the give-back's hardest shape, and the one every
+  // single-day fixture above is blind to: the dummy is booked on TWO days and the
+  // person ALREADY holds a full day of her own work on the first, so the transfer
+  // can only move the second. The rejection must return that second day and leave
+  // the first — on BOTH resources — exactly as it was. Distributing the returned
+  // hours by what she merely *holds* would strip her own work and credit it to a
+  // dummy day that never gave up an hour.
+  const mixDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 mixed-days dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  const mixPerson = await req('POST', '/resources', { body: { ...base, name: 'C2 mixed-days person', kind: 'internal', contractHoursPerDay: 8 } });
+  const mixSetupOk = check('C2 mixed-days setup: dummy/person resources created',
+    mixDummy.status === 201 && mixPerson.status === 201, `dummy=${mixDummy.status} person=${mixPerson.status}`);
+  if (mixSetupOk) {
+    const mixRequest = await req('POST', '/requests', { body: { name: 'C2 mixed-days request', requiredRole: 'Developer', requiredEffort: 2, skills: [] } });
+    const mixDummyAssig = await req('POST', '/assignments', { body: { requestId: mixRequest.body?.id, resourceId: mixDummy.body.id, assignedHours: 0 } });
+    const mixPersonAssig = await req('POST', '/assignments', { body: { requestId: mixRequest.body?.id, resourceId: mixPerson.body.id, assignedHours: 0 } });
+    const mixFixtureOk = check('C2 mixed-days setup: request and both assignments created',
+      mixRequest.status === 200 && mixDummyAssig.status === 200 && mixPersonAssig.status === 200,
+      `request=${mixRequest.status} dummy=${mixDummyAssig.status} person=${mixPersonAssig.status}`);
+    if (mixFixtureOk) {
+      // The dummy carries one FTE on each of two days; the person is already full
+      // on the FIRST of them with work of her own.
+      const mixDummyBooked = await req('PUT', `/assignments/${mixDummyAssig.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 8, [DAY2]: 8 } } });
+      const mixOwnBooked = await req('PUT', `/assignments/${mixPersonAssig.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 8 } } });
+      const mixBookedOk = check('C2 mixed-days setup: dummy on two days, person already full on the first',
+        mixDummyBooked.status === 200 && mixOwnBooked.status === 200,
+        `dummy=${mixDummyBooked.status} own=${mixOwnBooked.status} err=${mixDummyBooked.body?.error || mixOwnBooked.body?.error}`);
+      if (mixBookedOk) {
+        const mixSub = await req('POST', `/assignment-months/${mixDummyAssig.body.id}:${MONTH}/substitute`, {
+          body: { targetResourceId: mixPerson.body.id },
+        });
+        const mixOutcome = (mixSub.body?.outcomes || [])[0];
+        check('C2 mixed-days: only the day she has room on transfers',
+          mixSub.status === 200 && mixOutcome?.transferredHours === 8 && mixOutcome?.remainingHours === 8,
+          `status=${mixSub.status} outcome=${JSON.stringify(mixOutcome)}`);
+
+        const mixDec = await req('POST', '/allocation-approvals/decide', {
+          headers: GIVE_BACK_DECIDER,
+          body: { items: [{ assignmentMonthId: mixOutcome?.targetAssignmentMonthId, decision: 'Rejected', note: 'no' }] },
+        });
+        check('C2 mixed-days rejection decided', (mixDec.body?.results || [])[0]?.status === 'Rejected', `res=${JSON.stringify(mixDec.body?.results)}`);
+
+        const mixDummyAfter = await req('GET', `/assignments/${mixDummyAssig.body.id}/allocation?from=${MONTH}&to=${MONTH}`);
+        const mixDummyDays = mixDummyAfter.body?.days || [];
+        check('C2 mixed-days: the dummy day the substitution never touched is left alone',
+          mixDummyDays.find(d => d.date === DAY)?.hours === 8, `hours=${mixDummyDays.find(d => d.date === DAY)?.hours}`);
+        check('C2 mixed-days: the transferred day comes back whole to the dummy',
+          mixDummyDays.find(d => d.date === DAY2)?.hours === 8, `hours=${mixDummyDays.find(d => d.date === DAY2)?.hours}`);
+
+        const mixPersonAfter = await req('GET', `/assignments/${mixPersonAssig.body.id}/allocation?from=${MONTH}&to=${MONTH}`);
+        const mixPersonDays = mixPersonAfter.body?.days || [];
+        check('C2 mixed-days: her OWN work on the untouched day survives the rejection',
+          mixPersonDays.find(d => d.date === DAY)?.hours === 8, `hours=${mixPersonDays.find(d => d.date === DAY)?.hours}`);
+        check('C2 mixed-days: she keeps nothing of the rejected transfer',
+          mixPersonDays.every(d => d.date !== DAY2), `days=${JSON.stringify(mixPersonDays)}`);
+      }
+    }
+  }
+
+  // --- ZERO-THEN-APPROVE. Zeroing the allocation and approving it is how the
+  // source tool expresses a refusal, so the transferred hours must go back to the
+  // days they came from — not vanish because the person's month no longer records
+  // where they landed.
+  const zeroFixture = await giveBackFixture('give-back zeroed approval');
+  if (zeroFixture) {
+    const zeroed = await req('PUT', `/assignments/${zeroFixture.personAssignmentId}/allocation`, {
+      body: { month: MONTH, dailyHours: { [DAY]: 0 } },
+    });
+    check('C2 the substituted month can be zeroed before approval', zeroed.status === 200, `status=${zeroed.status} err=${zeroed.body?.error}`);
+
+    const zeroDec = await req('POST', '/allocation-approvals/decide', {
+      headers: GIVE_BACK_DECIDER,
+      body: { items: [{ assignmentMonthId: zeroFixture.substitutedMonthId, decision: 'Approved', note: 'nothing left to approve' }] },
+    });
+    check('C2 zeroed approval decided', (zeroDec.body?.results || [])[0]?.status === 'Approved', `res=${JSON.stringify(zeroDec.body?.results)}`);
+
+    const zeroDummy = await req('GET', `/assignments/${zeroFixture.dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    check('C2 zeroing the month and approving returns the whole transfer, no hour vanishes',
+      (zeroDummy.body.days || []).find(d => d.date === DAY)?.hours === 16,
+      `hours=${(zeroDummy.body.days || []).find(d => d.date === DAY)?.hours}`);
+    const zeroPerson = await req('GET', `/assignments/${zeroFixture.personAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+    check('C2 the zeroed month stays empty and carries no back-link',
+      (zeroPerson.body.days || []).length === 0 && !('replacedDays' in ((zeroPerson.body.months || [])[0] ?? {})),
+      `days=${JSON.stringify(zeroPerson.body.days)} month=${JSON.stringify((zeroPerson.body.months || [])[0])}`);
   }
 }
 
