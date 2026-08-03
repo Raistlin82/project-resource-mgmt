@@ -42,13 +42,16 @@ Questa non è una complicazione aggiunta: è la sostituzione parziale del manual
 
 Nessuna tabella nuova. Il trasferimento agisce sulle strutture di B1/B3 (`assignmentDays`, `assignmentMonths`).
 
-Una sola colonna su `assignmentMonths`:
+Due colonne su `assignmentMonths`:
 
 ```
-replacedFromAssignmentMonthId  text (nullable) → assignmentMonths.id
+replacedFromAssignmentMonthId  text (nullable)             -- riferimento SOFT, non FK
+replacedHours                  doublePrecision (nullable)  -- ore trasferite in quel momento
 ```
 
-Il mese del dummy da cui questo mese proviene. Serve a tre cose, tutte necessarie:
+`replacedHours` è necessaria e non derivabile: all'approvazione bisogna restituire al dummy la **differenza fra le ore trasferite e quelle approvate**, ma l'approvatore può aver ridotto le ore nel frattempo, quindi il valore originale non è più leggibile da nessuna parte. Senza questo campo la restituzione dovrebbe indovinare — e una restituzione sbagliata inventa o distrugge ore prenotate. Le due colonne nascono e muoiono insieme.
+
+`replacedFromAssignmentMonthId` è il mese del dummy da cui questo mese proviene. Serve a tre cose, tutte necessarie:
 1. sapere **dove restituire** le ore quando la decisione arriva;
 2. **evidenziare** nel calendario i mesi arrivati per subentro (§4.2.1: «con una leggera evidenziazione»);
 3. generare la **nota automatica** che il manuale richiede.
@@ -109,9 +112,9 @@ Sul mese del target una `plannerNote` generata: «Subentra a *<nome dummy>* — 
 L'hook post-decisione di B3 guadagna **un ramo, senza toccare quelli esistenti**: se il mese deciso porta `replacedFromAssignmentMonthId`,
 
 - **rifiutato** → tutte le ore tornano al dummy, il mese del target si azzera;
-- **approvato** → torna al dummy solo la **differenza** fra le ore trasferite e quelle approvate (l'approvatore può averle ridotte); il resto è definitivo.
+- **approvato** → torna al dummy solo la **differenza** fra `replacedHours` (quanto era stato trasferito) e le ore ora presenti sul mese del target (quanto l'approvatore ha lasciato); il resto è definitivo. Se la differenza è ≤ 0 — l'approvatore ha lasciato tutto, o ha addirittura aggiunto ore — non si restituisce nulla: le ore in più sono un'allocazione nuova, non parte della sostituzione (§8).
 
-In entrambi i casi `replacedFromAssignmentMonthId` viene azzerato e l'audit registra la restituzione. Se la riga del dummy nel frattempo non esiste più (incarico cancellato), la restituzione è un no-op registrato, non un errore: la decisione non deve fallire per questo.
+In entrambi i casi `replacedFromAssignmentMonthId` e `replacedHours` vengono azzerati e l'audit registra la restituzione. Se la riga del dummy nel frattempo non esiste più (incarico cancellato), la restituzione è un no-op registrato, non un errore: la decisione non deve fallire per questo.
 
 ### 5.7 RBAC
 
