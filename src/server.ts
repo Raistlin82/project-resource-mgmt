@@ -3159,9 +3159,41 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
   const feedRole = trustedRole(req);
   const feedActorResourceId = await actorResourceId(req);
   const feedGlobalRole = feedRole === 'admin' || feedRole === 'delivery-executive';
-  const visibleResourceIds = feedGlobalRole || feedActorResourceId === undefined
+  const visibleResourceIds = feedGlobalRole
     ? undefined
-    : scopeOf(feedActorResourceId, resources, orgNodes);
+    : feedActorResourceId === undefined
+      // DEFENSIVE, CURRENTLY UNREACHABLE: `actorResourceId` resolves via
+      // `actorId(req)` (`id = req.verifiedUserId || String(req.header('X-User-Id')
+      // || 'system')`), which can never be falsy — `verifyBearer` yields
+      // 'unknown' rather than '', and the unauthenticated fallback is the
+      // literal 'system' — so `actorResourceId`'s own `?? (id || undefined)`
+      // always yields the (truthy) id, never `undefined`. This branch is
+      // therefore dead today. It is kept, rather than deleted, and made
+      // RESTRICTIVE (an empty scope — the roleFallback-only rows below, not an
+      // unrestricted feed) so that if `actorId`/`actorResourceId` ever change to
+      // make it reachable, the feed cannot silently diverge from
+      // `decideOneApproval`'s OWN treatment of an unresolved `deciderResourceId`:
+      // there, `scopeMatch` reduces to `roleFallback` alone, never to "anything
+      // goes". An empty `Set` (not `undefined`) is what makes the loop below
+      // apply exactly that: only no-manager-anywhere rows survive.
+      ? new Set<string>()
+      : scopeOf(feedActorResourceId, resources, orgNodes);
+  // PERFORMANCE: `scopedApproversOf` is O(resources.length) per call (it
+  // rebuilds a resources-by-id Map internally) and is evaluated once per
+  // VISIBLE-CHECK below, not once per resource — a resource with N month-rows
+  // in the window would otherwise re-derive the identical answer N times, an
+  // O(rows × resources) cost where O(rows + resources) is available. Memoized
+  // per resource id so each resource pays for the computation at most once
+  // per request, regardless of how many month-rows it has in range.
+  const roleFallbackCache = new Map<string, boolean>();
+  const isRoleFallback = (resource: Resource): boolean => {
+    let cached = roleFallbackCache.get(resource.id);
+    if (cached === undefined) {
+      cached = scopedApproversOf(resource, resources, orgNodes).roleFallback;
+      roleFallbackCache.set(resource.id, cached);
+    }
+    return cached;
+  };
   const hoursPerDay = await getHoursPerDay();
   const assignmentById = new Map(assignments.map(a => [a.id, a]));
   const resourceById = new Map(resources.map(r => [r.id, r]));
@@ -3211,7 +3243,7 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
     if (
       visibleResourceIds !== undefined
       && !visibleResourceIds.has(resource.id)
-      && !scopedApproversOf(resource, resources, orgNodes).roleFallback
+      && !isRoleFallback(resource)
     ) continue;
 
     let row = rowsByResource.get(resource.id);
