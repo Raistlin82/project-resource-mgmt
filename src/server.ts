@@ -18,7 +18,7 @@ import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { isResourceKind, RESOURCE_KINDS, kindOf, dailyCapFor } from './app/services/resource-kind.util';
-import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, scopedApproversOf, type OrgLevel } from './app/services/org-scope.util';
+import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, scopeOf, scopedApproversOf, type OrgLevel } from './app/services/org-scope.util';
 import { maxIdSeq } from './server/id-seq.util';
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
@@ -3145,11 +3145,23 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
   if (monthToIdx(to) - monthToIdx(from) + 1 > 24) { res.status(400).json({ error: 'range must span at most 24 months' }); return; }
   const months = monthsInRange(from, to);
 
-  const [resources, assignments, monthRows, days, requests, projects, holidayRows] = await Promise.all([
+  const [resources, assignments, monthRows, days, requests, projects, holidayRows, orgNodes] = await Promise.all([
     repos.resources.list(), repos.assignments.list(), repos.assignmentMonths.list(),
     repos.assignmentDays.list(), repos.requests.list(), repos.projects.list(), repos.holidays.list(),
+    repos.resourceOrganizations.list(),
   ]);
   const holidays = new Set(holidayRows.map(h => h.id));
+
+  // D (design spec §3.3) — a manager sees their own scope. This rule MUST mirror
+  // `decideOneApproval`: a row the actor cannot decide would render as a dead
+  // button, and a row they CAN decide must never be hidden — hence the
+  // no-manager-anywhere rows stay visible to every resource-manager.
+  const feedRole = trustedRole(req);
+  const feedActorResourceId = await actorResourceId(req);
+  const feedGlobalRole = feedRole === 'admin' || feedRole === 'delivery-executive';
+  const visibleResourceIds = feedGlobalRole || feedActorResourceId === undefined
+    ? undefined
+    : scopeOf(feedActorResourceId, resources, orgNodes);
   const hoursPerDay = await getHoursPerDay();
   const assignmentById = new Map(assignments.map(a => [a.id, a]));
   const resourceById = new Map(resources.map(r => [r.id, r]));
@@ -3196,6 +3208,11 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
     if (assig === undefined) continue;
     const resource = resourceById.get(assig.resourceId);
     if (resource === undefined) continue;
+    if (
+      visibleResourceIds !== undefined
+      && !visibleResourceIds.has(resource.id)
+      && !scopedApproversOf(resource, resources, orgNodes).roleFallback
+    ) continue;
 
     let row = rowsByResource.get(resource.id);
     if (row === undefined) {

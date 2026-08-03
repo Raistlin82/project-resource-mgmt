@@ -3859,6 +3859,124 @@ async function checkScopedAllocationDecision() {
 }
 
 /**
+ * D task 6 — THE SCOPED APPROVAL FEED (design spec §3.3).
+ *
+ * `GET /allocation-approvals` used to return every row to anyone holding one
+ * of the feed's roles (src/server.ts:542), regardless of what
+ * `decideOneApproval` (Task 5) would actually let them decide — offering a
+ * manager rows whose buttons the server then refused, which reads as a
+ * broken UI rather than as a permission boundary. This proves the feed now
+ * mirrors the decision gate: a resource is visible when it is in the actor's
+ * `scopeOf(...)`, OR when `scopedApproversOf(resource).roleFallback` is true
+ * (nobody is accountable for it anywhere) — the second disjunct is what keeps
+ * a no-manager-anywhere placeholder both VISIBLE and DECIDABLE, never one
+ * without the other.
+ *
+ * REUSES the fixtures `checkScopedAllocationDecision` (Task 5, immediately
+ * above) already created, rather than booking fresh ones: that section left
+ * genuine assignment-month rows for MONTH '2026-11' on resource '3' (Alice —
+ * decided, Allocated), resource '4' (the Engineering dummy — refused, still
+ * Requested) and resource '5' (the Consulting dummy — decided, Allocated).
+ * `status=all` on the feed query returns a row regardless of decided/pending
+ * state, so all three show up under one `from=to='2026-11'` query with no new
+ * bookings needed. This is WHY this section must run immediately after
+ * `checkScopedAllocationDecision` and — like it — BEFORE
+ * `checkResourceManagerCycle`, which permanently rewrites resource '3's
+ * managerId and would break the chain both sections read.
+ *
+ * SEED FACTS this leans on (already asserted as preconditions in
+ * `checkScopedAllocationDecision`, immediately above):
+ *   - resource '3' (Alice) is reachable from resource-manager '2' (John) via
+ *     the managerId chain 3 -> 2 — `scopeOf('2', ...)` is exactly {'3'}, since
+ *     John manages no org-tree node.
+ *   - resource '4' (a dummy attached to 'Engineering') is decidable ONLY by
+ *     node-manager '1' (Julie), NOT by '2' — `scopedApproversOf('4').roleFallback`
+ *     is FALSE (a real manager exists), so it is the genuine "outside scope,
+ *     must be hidden" row for actor '2' and for a stranger alike.
+ *   - resource '5' (a dummy attached to 'Consulting', which has no manager and
+ *     no parent) has NO manager anywhere — `roleFallback` is TRUE — so it stays
+ *     visible to EVERY resource-manager, including one who manages nobody.
+ */
+async function checkScopedApprovalFeed() {
+  const MANAGER_2 = { 'X-User-Id': '2', 'X-User-Role': 'resource-manager' };            // -> resource '2' (John); scope = {'3'}
+  const ADMIN = { 'X-User-Id': '9', 'X-User-Role': 'admin' };                            // global role — resourceId irrelevant
+  const DELIVERY_EXECUTIVE = { 'X-User-Id': '1', 'X-User-Role': 'delivery-executive' };  // global role — resourceId irrelevant
+  // Maps to no user row, so `actorResourceId` falls back to the raw id: a
+  // resource-manager who manages NOBODY and no org node — scope = ∅.
+  const STRANGER = { 'X-User-Id': '99', 'X-User-Role': 'resource-manager' };
+
+  const FEED_PATH = '/allocation-approvals?from=2026-11&to=2026-11&status=all';
+  const ALICE = '3';
+  const DUMMY_ENGINEERING = '4';
+  const DUMMY_CONSULTING = '5';
+
+  /** The set of `resourceId`s carried by the feed's `rows`, or empty on a bad body. */
+  const rowIds = (body) => new Set((Array.isArray(body?.rows) ? body.rows : []).map((r) => r.resourceId));
+  const rowCount = (body) => (Array.isArray(body?.rows) ? body.rows.length : -1);
+
+  // --- Check 1: a resource-manager sees their own scope, not more ----------
+  const scoped = await req('GET', FEED_PATH, { headers: MANAGER_2 });
+  const scopedIds = rowIds(scoped.body);
+  check(
+    "D6 the feed scopes to the actor: manager '2' sees resource '3' (in scope, 3 -> 2)",
+    scoped.status === 200 && scopedIds.has(ALICE),
+    `status=${scoped.status}, resourceIds=[${[...scopedIds].join(',')}]`,
+  );
+  check(
+    "D6 the feed scopes to the actor: manager '2' does NOT see resource '4' (outside scope — a real manager exists elsewhere)",
+    scoped.status === 200 && !scopedIds.has(DUMMY_ENGINEERING),
+    `status=${scoped.status}, resourceIds=[${[...scopedIds].join(',')}]`,
+  );
+
+  // --- Check 2: admin's feed is unrestricted --------------------------------
+  const asAdmin = await req('GET', FEED_PATH, { headers: ADMIN });
+  const adminIds = rowIds(asAdmin.body);
+  check(
+    "D6 admin's feed is unrestricted: at least as many rows as the scoped call",
+    asAdmin.status === 200 && rowCount(asAdmin.body) >= rowCount(scoped.body),
+    `status=${asAdmin.status}, adminRows=${rowCount(asAdmin.body)}, scopedRows=${rowCount(scoped.body)}`,
+  );
+  check(
+    "D6 admin's feed is unrestricted: includes resource '4', which the scoped manager could not see",
+    asAdmin.status === 200 && adminIds.has(DUMMY_ENGINEERING),
+    `status=${asAdmin.status}, resourceIds=[${[...adminIds].join(',')}]`,
+  );
+
+  // --- Check 3: delivery-executive's feed is unrestricted, same reason as
+  // Task 5 (D5 doc: inert for the DECISION, but a global oversight role that
+  // keeps seeing everything on the FEED — do not "fix" this into consistency).
+  const asDE = await req('GET', FEED_PATH, { headers: DELIVERY_EXECUTIVE });
+  const deIds = rowIds(asDE.body);
+  check(
+    "D6 delivery-executive's feed is unrestricted: at least as many rows as the scoped call",
+    asDE.status === 200 && rowCount(asDE.body) >= rowCount(scoped.body),
+    `status=${asDE.status}, deRows=${rowCount(asDE.body)}, scopedRows=${rowCount(scoped.body)}`,
+  );
+  check(
+    "D6 delivery-executive's feed is unrestricted: includes resource '4' too",
+    asDE.status === 200 && deIds.has(DUMMY_ENGINEERING),
+    `status=${asDE.status}, resourceIds=[${[...deIds].join(',')}]`,
+  );
+
+  // --- Check 4: the decision fallback is mirrored in the feed ---------------
+  // A resource-manager who manages NOBODY (not even resource '3') must still
+  // see resource '5' — the fallback exists precisely so a no-manager-anywhere
+  // row is never both invisible AND undecidable.
+  const asStranger = await req('GET', FEED_PATH, { headers: STRANGER });
+  const strangerIds = rowIds(asStranger.body);
+  check(
+    "D6 the decision fallback is mirrored in the feed: a resource-manager who manages nobody still sees resource '5' (no manager anywhere)",
+    asStranger.status === 200 && strangerIds.has(DUMMY_CONSULTING),
+    `status=${asStranger.status}, resourceIds=[${[...strangerIds].join(',')}]`,
+  );
+  check(
+    "D6 the fallback stays narrow: the same stranger does NOT see resource '3' or '4' (both have a real accountable manager elsewhere)",
+    asStranger.status === 200 && !strangerIds.has(ALICE) && !strangerIds.has(DUMMY_ENGINEERING),
+    `status=${asStranger.status}, resourceIds=[${[...strangerIds].join(',')}]`,
+  );
+}
+
+/**
  * D task 4 — refuse a `Resource.managerId` assignment that would close a
  * cycle in the ORG CHART (distinct from the ORG TREE cycle guard exercised
  * above — see org-scope.util's module doc for the two axes). Uses
@@ -4267,6 +4385,19 @@ async function main() {
     await checkScopedAllocationDecision();
   } catch (err) {
     console.log(`FAIL  scoped allocation-decision flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the D scoped-approval-feed
+  // flow never masks or blocks any of the prior section results. MUST run
+  // immediately after checkScopedAllocationDecision (reuses its '2026-11'
+  // fixtures for resources '3'/'4'/'5') and — like it — BEFORE
+  // checkResourceManagerCycle, which permanently clears resource '3's
+  // managerId.
+  try {
+    await checkScopedApprovalFeed();
+  } catch (err) {
+    console.log(`FAIL  scoped approval-feed flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 
