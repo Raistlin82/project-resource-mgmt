@@ -2,7 +2,7 @@ import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
 import { ApprovalModalComponent } from './approval-modal.component';
-import { AllocationApprovalRow, ApiService, Resource, SubstitutionResult, UserRole } from '../services/api.service';
+import { AllocationApprovalRow, ApiService, Resource, ResourceOrganization, SubstitutionResult, UserRole } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 
@@ -62,8 +62,12 @@ interface SetupOptions {
   role?: UserRole;
   /** The principal's RESOURCE id (mirrors AuthService.userId()). */
   userId?: string;
-  /** Resources `getResources()` resolves with — the Substitute picker's candidate pool. */
+  /** Resources `getResources()` resolves with — the Substitute picker's candidate
+   *  pool AND (D) the org-chart axis `canDecideFor` scopes on. */
   resources?: Resource[];
+  /** D — the org tree `getResourceOrganizations()` resolves with: the second
+   *  scope axis. Empty by default, which means "no node has a manager". */
+  orgs?: ResourceOrganization[];
   /** Result `substituteDummyMonth()` resolves with. */
   substituteResult?: SubstitutionResult;
 }
@@ -78,6 +82,7 @@ function setup({
   role = 'admin',
   userId = 'm1',
   resources = RESOURCES,
+  orgs = [],
   substituteResult = {
     targetResourceId: 'r9', targetResourceName: 'Nora Fenn',
     outcomes: [{ month: '2026-09', transferredHours: 8, remainingHours: 0, targetAssignmentMonthId: 'X1:2026-09', status: 'Requested' }],
@@ -85,8 +90,9 @@ function setup({
 }: SetupOptions = {}) {
   const decideAllocationMonths = vi.fn(() => of({ results: decideResults }));
   const getResources = vi.fn(() => of(resources));
+  const getResourceOrganizations = vi.fn(() => of(orgs));
   const substituteDummyMonth = vi.fn(() => of(substituteResult));
-  const apiStub = { decideAllocationMonths, getResources, substituteDummyMonth } as unknown as ApiService;
+  const apiStub = { decideAllocationMonths, getResources, getResourceOrganizations, substituteDummyMonth } as unknown as ApiService;
   const notifyStub = { success: vi.fn(), error: vi.fn() } as unknown as NotificationService;
   const authStub = {
     authReady: signal(true), isAuthenticated: signal(true),
@@ -194,9 +200,106 @@ describe('ApprovalModalComponent — decidability (final-review finding)', () =>
     expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="line-blocked"]')).toBeNull();
   });
 
-  it('offers every resource to a resource-manager (the role every allocation step is routed to)', () => {
-    const { fixture } = setup({ role: 'resource-manager', userId: 'not-the-manager' });
-    expect([...fixture.componentInstance.checked()]).toEqual(['A1:2026-09']);
+});
+
+/**
+ * D (design spec §3.4) — the modal must mirror the SCOPED server rule, not the
+ * pre-D "any resource-manager decides anything" fallback it used to mirror.
+ *
+ * Fixtures: 's1' is the target and has NO `managerId` at all — neither on its
+ * resource row nor on the feed row — so nothing here can pass through the
+ * named-approver shortcut and every assertion below really does exercise the
+ * ORG TREE axis. It is attached to the 'Platform' practice, whose parent
+ * capability 'Engineering' is managed by 's9'. 's2' is the org-CHART case: it
+ * reports to 's3', who reports to 's9'. 's0' sits under 'Cloud', a capability
+ * with no manager, and has no manager of its own — the `roleFallback` case.
+ *
+ * Every test FLUSHES first: both lists resolve asynchronously, and an unflushed
+ * fixture would see an empty tree, which is legitimately permissive (see
+ * `canDecideFor`) — so a refusal asserted without flushing would be asserting
+ * nothing.
+ */
+describe('ApprovalModalComponent — scoped decision (D §3.4)', () => {
+  const base = {
+    role: 'Developer', skills: [], projectRoles: [], externalExperience: [],
+    utilization: 0, capacity: 40, kind: 'internal' as const,
+  };
+  const SCOPE_RESOURCES: Resource[] = [
+    { ...base, id: 's1', name: 'Scoped Sam', organization: 'Platform' },
+    { ...base, id: 's2', name: 'Chained Chris', organization: 'Cloud', managerId: 's3' },
+    { ...base, id: 's3', name: 'Middle Mo', organization: 'Cloud', managerId: 's9' },
+    { ...base, id: 's9', name: 'Node Manager Nia', organization: 'Engineering' },
+    { ...base, id: 'sX', name: 'Stranger Stan', organization: 'Cloud' },
+    { ...base, id: 's0', name: 'Unmanaged Uma', organization: 'Cloud' },
+  ];
+  const SCOPE_ORGS: ResourceOrganization[] = [
+    { id: 'o1', name: 'Engineering', description: '', costCenters: [], level: 'capability', managerId: 's9' },
+    { id: 'o2', name: 'Platform', description: '', costCenters: [], level: 'practice', parentId: 'o1' },
+    { id: 'o3', name: 'Cloud', description: '', costCenters: [], level: 'capability' },
+  ];
+
+  /** A feed row for `resourceId` with ONE pending, decidable-shaped item and NO
+   *  `managerId`, so only the scope rule can admit anyone. */
+  const rowFor = (resourceId: string, resourceName: string): AllocationApprovalRow => ({
+    resourceId, resourceName, kind: 'internal', contractHoursPerDay: 8,
+    targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 8 },
+    items: [{
+      assignmentMonthId: 'S1:2026-09', assignmentId: 'S1', month: '2026-09', status: 'Requested',
+      requestId: '1', projectName: 'Apollo', hours: 8, approvalId: 'AR9',
+    }],
+  });
+
+  const scopeSetup = (role: UserRole, userId: string, resourceId = 's1', resourceName = 'Scoped Sam') =>
+    setup({ rows: [rowFor(resourceId, resourceName)], resources: SCOPE_RESOURCES, orgs: SCOPE_ORGS, role, userId });
+
+  it("offers the line to a resource-manager who manages a node ABOVE the resource's own", async () => {
+    const { fixture } = scopeSetup('resource-manager', 's9');
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Select Apollo"]')!.disabled).toBe(false);
+    expect(host.querySelector('[data-test="line-blocked"]')).toBeNull();
+    expect(host.querySelector<HTMLButtonElement>('[data-test="approve-month"]')!.disabled).toBe(false);
+  });
+
+  it('offers the line to a resource-manager who is a TRANSITIVE manager in the org chart', async () => {
+    const { fixture } = scopeSetup('resource-manager', 's9', 's2', 'Chained Chris');
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Select Apollo"]')!.disabled).toBe(false);
+    expect(host.querySelector('[data-test="line-blocked"]')).toBeNull();
+  });
+
+  it('does NOT offer the line to a resource-manager outside the scope (the pre-D fallback)', async () => {
+    const { fixture } = scopeSetup('resource-manager', 'sX');
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Select Apollo"]')!.disabled).toBe(true);
+    expect(host.querySelector('[data-test="line-blocked"]')!.textContent).toContain("Only Scoped Sam's manager");
+    expect(host.querySelector<HTMLButtonElement>('[data-test="approve-month"]')!.disabled).toBe(true);
+    expect([...fixture.componentInstance.checked()]).toEqual([]);
+  });
+
+  it('offers the line to an admin regardless of scope', async () => {
+    const { fixture } = scopeSetup('admin', 'sX');
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Select Apollo"]')!.disabled).toBe(false);
+    expect(host.querySelector('[data-test="line-blocked"]')).toBeNull();
+  });
+
+  it('keeps the line open to ANY resource-manager when the resource has no manager anywhere', async () => {
+    // The C2 case: a placeholder with no `managerId` under a node with no
+    // manager. Refusing here would strand every substitution.
+    const { fixture } = scopeSetup('resource-manager', 'sX', 's0', 'Unmanaged Uma');
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Select Apollo"]')!.disabled).toBe(false);
+    expect(host.querySelector('[data-test="line-blocked"]')).toBeNull();
   });
 });
 

@@ -3559,6 +3559,236 @@ async function checkOrgTreeIntegrity() {
 }
 
 /**
+ * D task 5 — THE SCOPED ALLOCATION DECISION (design spec §3.3, §3.4, §3.5).
+ *
+ * Until D, `decideOneApproval` admitted ANY actor holding the step's role, so
+ * every `resource-manager` could decide every allocation (the gap-A §4.3
+ * fallback). D replaces that with a real scope — the target's transitive
+ * `managerId` chain UNION the managers of every org node above the target —
+ * and keeps the role fallback ONLY for a resource with no manager anywhere.
+ * §3.5 declares the breaking change: "chi oggi approva risorse che non
+ * gestisce smetterà di poterlo fare".
+ *
+ * IDENTITIES. Header trust (AUTH_TRUST_HEADERS=true) resolves ROLE and
+ * IDENTITY through two independent paths — `trustedRole` reads X-User-Role
+ * while `actorResourceId` maps X-User-Id through the users directory — which
+ * is what makes "a resource-manager acting AS resource '1'" expressible at
+ * all: seed user '1' (Julie) carries role 'delivery-executive' in the
+ * directory, and a delivery-executive is NOT admitted to a step routed to
+ * 'resource-manager' (that is today's behaviour and D does not change it), so
+ * asserting the SCOPE rule requires forging the role header. That is exactly
+ * the demo-mode affordance this suite already relies on everywhere else.
+ *
+ * SEED FACTS this section leans on (asserted as preconditions below, so a
+ * failure points at the rule and not at drifted seed data):
+ *   - resource '3' (Alice) has managerId '2' (John), who has managerId '1'
+ *     (Julie) -> Alice's scoped approvers are {'2','1'};
+ *   - org node '2' 'Engineering' has managerId '1' -> anyone attached to
+ *     Engineering (or to 'Platform'/'Backend' beneath it) is decidable by '1'
+ *     even with NO org-chart link at all;
+ *   - resource '4' (a dummy) is attached to 'Engineering' and has NO
+ *     managerId -> its ONLY scoped approver is node manager '1';
+ *   - resource '5' (a dummy) is attached to 'Consulting', which has no
+ *     manager and no parent -> `roleFallback` is true and ANY
+ *     resource-manager may still decide (this is what keeps C2's
+ *     substitutions decidable).
+ *
+ * The PROPOSER is never one of the deciders, so a scope refusal can never be
+ * masked by (or mistaken for) the segregation-of-duties 403 that sits above
+ * the scope check in `decideOneApproval`.
+ */
+async function checkScopedAllocationDecision() {
+  const PROPOSER = { 'X-User-Id': '3', 'X-User-Role': 'pm' };                // -> resource '3'
+  const MANAGER_1 = { 'X-User-Id': '1', 'X-User-Role': 'resource-manager' };  // -> resource '1' (Julie)
+  const MANAGER_2 = { 'X-User-Id': '2', 'X-User-Role': 'resource-manager' };  // -> resource '2' (John)
+  // Maps to no user row, so `actorResourceId` falls back to the raw id: a
+  // resource-manager who manages nobody and no node — the "stranger" of §3.5.
+  const STRANGER = { 'X-User-Id': '99', 'X-User-Role': 'resource-manager' };
+  const ADMIN = { 'X-User-Id': '9', 'X-User-Role': 'admin' };
+
+  const ALICE = '3';
+  const DUMMY_ENGINEERING = '4';
+  const DUMMY_CONSULTING = '5';
+
+  // One month per approval: a month row can only be decided once, and reusing
+  // ONE assignment across several months is what keeps this section's request
+  // count down (each approval otherwise needs its own assignment).
+  // All three months are Open in the seed (2026-04..2026-12) and every day
+  // below is a Tuesday that is not a seeded holiday.
+  const MONTHS = { a: '2026-10', b: '2026-11', c: '2026-12' };
+  const DAYS = { '2026-10': '2026-10-06', '2026-11': '2026-11-03', '2026-12': '2026-12-01' };
+
+  // --- Preconditions --------------------------------------------------------
+  {
+    const alice = await req('GET', `/resources/${ALICE}`);
+    check(
+      "D5 setup: resource '3' (Alice) has managerId '2' — her scoped approvers are {'2','1'}",
+      alice.status === 200 && alice.body?.managerId === '2',
+      `status=${alice.status}, managerId=${JSON.stringify(alice.body?.managerId)}`,
+    );
+    const dummyEng = await req('GET', `/resources/${DUMMY_ENGINEERING}`);
+    check(
+      "D5 setup: resource '4' (dummy) is attached to 'Engineering' and has NO managerId",
+      dummyEng.status === 200 && dummyEng.body?.organization === 'Engineering' && dummyEng.body?.managerId === undefined,
+      `status=${dummyEng.status}, organization=${JSON.stringify(dummyEng.body?.organization)}, managerId=${JSON.stringify(dummyEng.body?.managerId)}`,
+    );
+    const dummyCon = await req('GET', `/resources/${DUMMY_CONSULTING}`);
+    check(
+      "D5 setup: resource '5' (dummy) is attached to 'Consulting' and has NO managerId",
+      dummyCon.status === 200 && dummyCon.body?.organization === 'Consulting' && dummyCon.body?.managerId === undefined,
+      `status=${dummyCon.status}, organization=${JSON.stringify(dummyCon.body?.organization)}, managerId=${JSON.stringify(dummyCon.body?.managerId)}`,
+    );
+    const { status, body } = await req('GET', '/resource-organizations');
+    const nodes = Array.isArray(body) ? body : [];
+    const engineering = nodes.find((n) => n.name === 'Engineering');
+    const consulting = nodes.find((n) => n.name === 'Consulting');
+    check(
+      "D5 setup: org node 'Engineering' has managerId '1' and 'Consulting' has no manager and no parent",
+      status === 200 && engineering?.managerId === '1' &&
+      consulting !== undefined && consulting.managerId === undefined && consulting.parentId === undefined,
+      `engineering=${JSON.stringify(engineering)}, consulting=${JSON.stringify(consulting)}`,
+    );
+  }
+
+  // Shared parent request for every assignment below — one row, not one per case.
+  const request = await req('POST', '/requests', {
+    headers: PROPOSER,
+    body: { name: 'D5 scoped-decision request', requiredRole: 'Developer', requiredEffort: 1, skills: [] },
+  });
+  const requestOk = check(
+    'D5 setup: the shared parent request is created',
+    request.status === 200 && typeof request.body?.id === 'string',
+    `status=${request.status}, body=${JSON.stringify(request.body)}`,
+  );
+  if (!requestOk) return;
+
+  /** One assignment per target resource, booked lazily per month below. */
+  async function assignmentFor(resourceId) {
+    const created = await req('POST', '/assignments', {
+      headers: PROPOSER,
+      body: { requestId: request.body.id, resourceId, assignedHours: 0 },
+    });
+    const ok = check(
+      `D5 setup: assignment created for resource '${resourceId}'`,
+      created.status === 200 && typeof created.body?.id === 'string',
+      `status=${created.status}, body=${JSON.stringify(created.body)}`,
+    );
+    return ok ? created.body.id : undefined;
+  }
+
+  /**
+   * Book one hour in `month` and submit it, returning the Pending approval id.
+   * The PROPOSER is a `pm` who is nobody's manager here, so
+   * `autoApprovesAllocation` is false and a REAL approval always opens.
+   */
+  async function openApproval(assignmentId, month) {
+    const booked = await req('PUT', `/assignments/${assignmentId}/allocation`, {
+      headers: PROPOSER,
+      body: { month, dailyHours: { [DAYS[month]]: 1 } },
+    });
+    if (!check(
+      `D5 setup: 1h booked on ${DAYS[month]} for assignment ${assignmentId}`,
+      booked.status === 200,
+      `status=${booked.status}, body=${JSON.stringify(booked.body)}`,
+    )) return undefined;
+    const submitted = await req('POST', `/assignments/${assignmentId}/months/${month}/submit`, {
+      headers: PROPOSER, body: {},
+    });
+    const ok = check(
+      `D5 setup: ${assignmentId}:${month} submitted -> 'Requested' with a real approvalId`,
+      submitted.status === 200 && submitted.body?.status === 'Requested' && typeof submitted.body?.approvalId === 'string',
+      `status=${submitted.status}, monthStatus=${submitted.body?.status}, approvalId=${submitted.body?.approvalId}`,
+    );
+    return ok ? submitted.body.approvalId : undefined;
+  }
+
+  /** Decide `approvalId` as `headers` and assert the HTTP status. */
+  async function decideAs(name, approvalId, headers, expected) {
+    if (approvalId === undefined) { check(name, false, 'no approval id (setup failed above)'); return; }
+    const decided = await req('PUT', `/approval-requests/${approvalId}/decision`, {
+      headers, body: { decision: 'Approved', note: 'D5 smoke' },
+    });
+    check(name, decided.status === expected, `status=${decided.status}, body=${JSON.stringify(decided.body)}`);
+  }
+
+  // --- Alice ('3'): a real org-chart chain, 3 -> 2 -> 1 ---------------------
+  const aliceAssignment = await assignmentFor(ALICE);
+  if (aliceAssignment !== undefined) {
+    // §3.4 rule 1 + rule 2: John IS the step's named approver AND is in scope.
+    await decideAs(
+      "D5 the resource's own manager decides in scope (Alice/'3' decided by '2') -> 200",
+      await openApproval(aliceAssignment, MONTHS.a), MANAGER_2, 200,
+    );
+    // §3.4 rule 2 ALONE: Julie is NOT the step's `approverId` (that is '2'), so
+    // this can only pass through the TRANSITIVE chain 3 -> 2 -> 1.
+    await decideAs(
+      "D5 a transitive manager decides in scope (Alice/'3' decided by '1', not the named approver) -> 200",
+      await openApproval(aliceAssignment, MONTHS.b), MANAGER_1, 200,
+    );
+    // THE BREAKING CHANGE (§3.5): passes today via the role fallback, must not.
+    await decideAs(
+      "D5 a stranger resource-manager is refused (Alice/'3' decided by '99') -> 403",
+      await openApproval(aliceAssignment, MONTHS.c), STRANGER, 403,
+    );
+  }
+
+  // --- Dummy in Engineering ('4'): no org-chart link, node manager only -----
+  const dummyEngAssignment = await assignmentFor(DUMMY_ENGINEERING);
+  if (dummyEngAssignment !== undefined) {
+    // §3.4 rule 2 via the ORG TREE: '1' manages node 'Engineering' and the
+    // dummy has no `managerId` at all, so the org chart offers nothing here.
+    await decideAs(
+      "D5 the node manager decides with no org-chart link (dummy '4' in Engineering decided by '1') -> 200",
+      await openApproval(dummyEngAssignment, MONTHS.a), MANAGER_1, 200,
+    );
+    // A REAL seeded resource-manager who manages neither the dummy nor any
+    // node above it. Passes today via the role fallback, must not.
+    await decideAs(
+      "D5 a resource-manager outside the node's scope is refused (dummy '4' decided by '2') -> 403",
+      await openApproval(dummyEngAssignment, MONTHS.b), MANAGER_2, 403,
+    );
+    // §3.3: `admin` is a global role and is never scoped.
+    await decideAs(
+      "D5 admin is unaffected by scope (dummy '4' decided by admin '9') -> 200",
+      await openApproval(dummyEngAssignment, MONTHS.c), ADMIN, 200,
+    );
+  }
+
+  // --- Dummy in Consulting ('5'): no manager ANYWHERE -> the last resort ----
+  const dummyConAssignment = await assignmentFor(DUMMY_CONSULTING);
+  if (dummyConAssignment !== undefined) {
+    // §3.4 rule 3. This is the check that keeps C2's substitutions decidable:
+    // it must stay GREEN across this change.
+    await decideAs(
+      "D5 the role fallback survives for a resource with no manager anywhere (dummy '5' decided by '99') -> 200",
+      await openApproval(dummyConAssignment, MONTHS.b), STRANGER, 200,
+    );
+  }
+
+  // --- Scope binds ALLOCATION only -----------------------------------------
+  // Another kind routes by ROLE and has no target resource, so
+  // `allocationTargetResourceId` returns undefined and the rule falls through
+  // to the pre-D behaviour. A stranger resource-manager must still decide it.
+  {
+    const other = await req('POST', '/approval-requests', {
+      headers: PROPOSER,
+      body: { kind: 'TimeEntry', refId: 'D5-not-an-allocation' },
+    });
+    const otherOk = check(
+      "D5 setup: a non-allocation ('TimeEntry') approval is created, routed to 'resource-manager'",
+      other.status === 200 && typeof other.body?.id === 'string' && other.body?.steps?.[0]?.role === 'resource-manager',
+      `status=${other.status}, body=${JSON.stringify(other.body)}`,
+    );
+    if (otherOk) {
+      await decideAs(
+        'D5 scope binds allocation only: a non-allocation approval still routes by role -> 200',
+        other.body.id, STRANGER, 200,
+      );
+    }
+  }
+}
+
+/**
  * D task 4 — refuse a `Resource.managerId` assignment that would close a
  * cycle in the ORG CHART (distinct from the ORG TREE cycle guard exercised
  * above — see org-scope.util's module doc for the two axes). Uses
@@ -3917,6 +4147,17 @@ async function main() {
     await checkOrgTreeIntegrity();
   } catch (err) {
     console.log(`FAIL  org-tree integrity flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the D scoped-decision
+  // flow never masks or blocks any of the prior section results. Runs BEFORE
+  // checkResourceManagerCycle, which permanently clears resource '1's
+  // managerId — this section reads the seeded 3 -> 2 -> 1 chain.
+  try {
+    await checkScopedAllocationDecision();
+  } catch (err) {
+    console.log(`FAIL  scoped allocation-decision flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

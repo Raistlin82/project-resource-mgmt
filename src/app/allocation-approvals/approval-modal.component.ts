@@ -20,6 +20,7 @@ import {
   AllocationDecisionItem,
   ApiService,
   Resource,
+  ResourceOrganization,
   SubstitutionMonthOutcome,
   SubstitutionResult,
 } from '../services/api.service';
@@ -27,6 +28,7 @@ import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
 import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
+import { scopedApproversOf, type ScopeResource } from '../services/org-scope.util';
 
 /** Today as ISO 'YYYY-MM-DD' — matches ResourcesComponent.isTerminated's own
  *  local helper exactly, so a candidate resource is filtered out here under
@@ -467,23 +469,44 @@ export class ApprovalModalComponent {
 
   /**
    * Mirror of the server's per-step enforcement in `decideOneApproval`
-   * (src/server.ts): the actor may decide when their ROLE matches the step's
-   * role — every allocation step is built by `allocationApproverStep` with role
-   * 'resource-manager', and 'admin' matches ANY step — OR when they ARE the
-   * resource's manager (`step.approverId` is the resource's `managerId`,
-   * compared in resource-id space, exactly what `AuthService.userId()` returns).
+   * (src/server.ts) — D design spec §3.4. The actor may decide when:
+   *   - their role is 'admin' (global, never scoped); or
+   *   - they ARE the resource's manager, i.e. the step's `approverId`, compared
+   *     in resource-id space (exactly what `AuthService.userId()` returns); or
+   *   - they hold the role every allocation step is routed to
+   *     ('resource-manager', per `allocationApproverStep`) AND the resource is
+   *     in their ORG SCOPE — the transitive `managerId` chain union the managers
+   *     of the org nodes above it (`scopedApproversOf`); or
+   *   - that same role, when the resource has no manager ANYWHERE
+   *     (`roleFallback`) — a placeholder/dummy today, which is what keeps C2's
+   *     substitutions actionable.
    *
-   * In practice this only ever blocks a `delivery-executive` who is not the
-   * resource's own manager: they pass the feed's READ rule and so see every
-   * resource in range, but the server refuses their decision per item.
+   * BEFORE D this returned true for ANY `resource-manager`, which now would
+   * promise the operator a button the server refuses. A `delivery-executive`
+   * still reaches this only through the named-manager line: their role matches
+   * no allocation step, exactly as before D.
+   *
+   * Falls back to PERMISSIVE when the target resource or the org tree has not
+   * loaded yet (the lists resolve async): the server is the authority, and
+   * disabling a line on a not-yet-loaded list would flicker a refusal that
+   * isn't one.
    *
    * UX only, like the route guards — the server is the authority. It cannot
    * predict segregation of duties (the approval's requester is not in the feed).
    */
   private canDecideFor(row: AllocationApprovalRow): boolean {
     const { role, resourceId } = this.principal();
-    if (role === 'admin' || role === 'resource-manager') return true;
-    return row.managerId !== undefined && row.managerId === resourceId;
+    if (role === 'admin') return true;
+    if (row.managerId !== undefined && row.managerId === resourceId) return true;
+    if (role !== 'resource-manager') return false;
+    const resources = this.resources();
+    // The feed row carries no `organization`, so the scope target is the real
+    // resource when the list has it; the row's own `managerId` is the fallback
+    // shape, which exercises the org-chart axis alone.
+    const target: ScopeResource = resources.find(r => r.id === row.resourceId)
+      ?? { id: row.resourceId, managerId: row.managerId };
+    const { managerIds, roleFallback } = scopedApproversOf(target, resources, this.orgNodes());
+    return roleFallback || managerIds.has(resourceId);
   }
 
   protected decidable(line: Line): boolean {
@@ -673,6 +696,21 @@ export class ApprovalModalComponent {
     defaultValue: [] as Resource[],
   });
   private resources = computed(() => this.resourcesRes.value() ?? []);
+
+  /**
+   * D — the ORG TREE, the second axis `canDecideFor` scopes on (the first being
+   * `resources`' own `managerId` chain). Loaded exactly like `resourcesRes`
+   * above and keyed on the same `authReady()`: `/resource-organizations` reads
+   * are open to any verified actor, but firing before the OIDC bootstrap
+   * settles would still race the token and latch an empty tree — which reads as
+   * "no node has a manager", i.e. silently permissive.
+   */
+  private orgNodesRes = rxResource<ResourceOrganization[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResourceOrganizations() : of([] as ResourceOrganization[])),
+    defaultValue: [] as ResourceOrganization[],
+  });
+  private orgNodes = computed(() => this.orgNodesRes.value() ?? []);
 
   /**
    * Internal, non-terminated resources — every other filter (text,

@@ -18,7 +18,7 @@ import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { isResourceKind, RESOURCE_KINDS, kindOf, dailyCapFor } from './app/services/resource-kind.util';
-import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, type OrgLevel } from './app/services/org-scope.util';
+import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, scopedApproversOf, type OrgLevel } from './app/services/org-scope.util';
 import { maxIdSeq } from './server/id-seq.util';
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
@@ -4556,6 +4556,34 @@ interface DeciderContext { by: string; decidingRole: string; deciderResourceId: 
 interface DecisionOutcome { status: number; body: unknown; allocation?: { refId: string; decided: 'Approved' | 'Rejected' } }
 
 /**
+ * D — the resource an ALLOCATION approval is about, or undefined for any other
+ * kind. Undefined means "not scoped": the caller falls through to the role rule.
+ *
+ * `kind` is the CAPITALIZED `'Allocation'` (see `ApprovalKind` /
+ * `createAllocationApproval`) — a lowercase compare would silently never match
+ * and would quietly restore the pre-D "any resource-manager" rule while
+ * looking like it enforced a scope.
+ *
+ * `refId` is resolved with `parseMonthRowId`, the SAME splitter
+ * `applyAllocationDecision` uses: a B3 approval's refId is the composite month
+ * row `<assignmentId>:<YYYY-MM>`, a gap-A one is a bare assignment id, and the
+ * assignment is what carries `resourceId` in both cases. Not a naive
+ * `split(':')` — that helper anchors on the LAST colon and validates the month,
+ * so an id that merely contains a colon can never be mistaken for a month row.
+ *
+ * Reads only, so it takes NO lock: it runs inside the caller's
+ * `approval:<id>` section, and acquiring the `org-chart` lock (or any other)
+ * from in there would invent a lock order no other call site uses — see the
+ * ordering note on the `/resources` PUT handler.
+ */
+async function allocationTargetResourceId(ar: ApprovalRequestEntry): Promise<string | undefined> {
+  if (ar.kind !== 'Allocation') return undefined;
+  const assignmentId = parseMonthRowId(ar.refId)?.assignmentId ?? ar.refId;
+  const assignment = await repos.assignments.get(assignmentId);
+  return assignment?.resourceId;
+}
+
+/**
  * Decide ONE approval request. Extracted from the /decision handler so the B3
  * batch endpoint and the single-request endpoint share ONE implementation of
  * SoD + per-manager step enforcement — duplicating those rules is exactly how a
@@ -4585,34 +4613,65 @@ async function decideOneApproval(
     }
     const step = ar.steps[ar.currentStep];
     if (!step) return { status: 400, body: { error: 'No pending step to decide' } };
-    // STEP ENFORCEMENT — the actor may decide when EITHER holds:
-    //   roleMatch:    they hold the ROLE the routing assigned to the CURRENT
-    //                 step; 'admin' matches any step.
-    //   managerMatch: the step carries an explicit `approverId` (a manager, by
-    //                 RESOURCE id — that is how `allocationApproverStep` routes
-    //                 allocation requests) and the deciding actor IS that
-    //                 resource.
+    // STEP ENFORCEMENT — D (design spec §3.4). Supersedes the gap-A role
+    // fallback: an actor holding the step's role no longer decides for ANYONE.
+    // An actor may decide when ANY of these holds:
+    //   1. they are the step's named approver (`step.approverId`, a RESOURCE id
+    //      — that is how `allocationApproverStep` routes an allocation);
+    //   2. they hold the step's role AND the target resource is in their scope;
+    //   3. they hold the step's role AND the target has no manager ANYWHERE
+    //      (`scopedApproversOf(...).roleFallback`) — the last resort;
+    //   4. their role is 'admin'.
     //
-    // READ THIS BEFORE "FIXING" IT. The two are a genuine OR, so for an
-    // ALLOCATION step — which `allocationApproverStep` always builds with
-    // `role: 'resource-manager'` — `roleMatch` alone admits ANY resource-manager,
-    // not only the one named by `approverId`. That is DELIBERATE, per the gap-A
-    // design spec §4.3: "un altro resource-manager, diverso dal proponente, può
-    // approvare" — a manager must not be a single point of failure for their own
-    // team's bookings. An earlier version of this comment claimed the block exists
-    // to stop "any resource-manager deciding ANY manager's allocation", which is
-    // the opposite of what the code does and of what was specified; do not
-    // tighten the code to match that wording without reopening the spec decision.
+    // HISTORY, so nobody re-tightens or re-loosens this by accident: gap-A §4.3
+    // deliberately let ANY resource-manager decide ("un altro resource-manager,
+    // diverso dal proponente, può approvare"), so that a manager was not a
+    // single point of failure for their own team's bookings — and the comment
+    // that stood here said so, ending with "do not tighten the code without
+    // reopening the spec decision". THAT DECISION WAS REOPENED AND CHANGED WITH
+    // THE USER: D replaces the flat fallback with a real scope — the transitive
+    // org chart UNION the org subtrees the actor manages — and keeps a fallback
+    // ONLY for a resource with no manager anywhere, which is the case of a
+    // placeholder (dummy) today and is what keeps C2's substitutions decidable.
+    // The previous wording is therefore obsolete, not a constraint: D's design
+    // spec §3.4 is the rule, and §3.5 declares the breaking change (whoever
+    // approves resources they do not manage stops being able to).
     //
-    // What the block DOES buy: a role the routing did NOT assign gets in only by
-    // being the named approver. Concretely, a `delivery-executive` (who passes the
-    // coarse `/approval-requests` gate and sees the whole approval feed) can
-    // decide an allocation only for a resource they personally manage.
-    // Segregation of duties is enforced separately, above, and binds every role.
-    // `canDecideFor` in the approvals modal mirrors exactly this rule.
+    // Scope binds ALLOCATION steps only: every other kind routes by role and has
+    // no target resource, so `allocationTargetResourceId` returns undefined and
+    // the rule falls through to the pre-D behaviour. It also falls through when
+    // the target cannot be resolved (a deleted assignment/resource) — refusing
+    // there would strand a live approval nobody could decide.
+    //
+    // `admin` and `delivery-executive` are GLOBAL roles (§3.3) and are never
+    // narrowed by scope. Note what that does NOT mean for an allocation: a
+    // delivery-executive still fails `roleMatch` on a step routed to
+    // 'resource-manager', so they keep exactly the coarse access they have
+    // today — the named-approver path only. `globalRole` exempts them from
+    // scope, it does not grant them a step their role was never routed to.
+    //
+    // Segregation of duties is enforced separately, ABOVE, and binds every role.
+    // `canDecideFor` in the approvals modal mirrors this rule.
+    //
+    // LOCKING: the two list reads below take NO lock. They are reads, and this
+    // runs inside `withLock('approval:<id>')` — acquiring `org-chart` here would
+    // create an `approval:` -> `org-chart` order that no other call site uses
+    // (see the lock-order note on `PUT /resources/:id`) and is exactly how a
+    // deadlock gets introduced.
     const roleMatch = decidingRole === step.role || decidingRole === 'admin';
     const managerMatch = step.approverId !== undefined && deciderResourceId === step.approverId;
-    if (!roleMatch && !managerMatch) {
+    const globalRole = decidingRole === 'admin' || decidingRole === 'delivery-executive';
+    let scopeMatch = roleMatch;
+    const targetResourceId = await allocationTargetResourceId(ar);
+    if (roleMatch && !globalRole && targetResourceId !== undefined) {
+      const target = await repos.resources.get(targetResourceId);
+      if (target !== undefined) {
+        const [resources, nodes] = await Promise.all([repos.resources.list(), repos.resourceOrganizations.list()]);
+        const { managerIds, roleFallback } = scopedApproversOf(target, resources, nodes);
+        scopeMatch = roleFallback || (deciderResourceId !== undefined && managerIds.has(deciderResourceId));
+      }
+    }
+    if (!scopeMatch && !managerMatch) {
       return { status: 403, body: { error: `Actor cannot decide a step assigned to ${step.approverId ?? step.role}` } };
     }
     const decidedAt = new Date().toISOString();
