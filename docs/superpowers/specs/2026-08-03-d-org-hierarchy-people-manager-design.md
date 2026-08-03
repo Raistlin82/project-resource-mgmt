@@ -147,8 +147,8 @@ Conseguenza operativa: gli smoke check che oggi approvano un'allocazione autenti
 
 Due fatti del backend che il piano deve rispettare, entrambi già presenti nel codice:
 
-- **Le tre colonne nuove vanno aggiunte all'allow-list `allowed` di `crud('resource-organizations', …)`.** `crud()` copia dal body solo i campi nominati (`pick()`, la guardia contro il mass assignment): un campo non elencato non è scrivibile e falirebbe in silenzio, senza errore.
-- **I vincoli di §2.1 entrano nell'hook `validate` che `crud()` già espone** (`src/server.ts:643`), usato allo stesso modo dalle fasi D ed E per le regole di integrità che il controllo numerico generico non esprime. L'hook riceve il body già filtrato e, su `PUT`, l'id del record — ciò che serve per escludere se stesso dal controllo di unicità del nome. **Il handler resta quindi generico:** non serve trasformare questa collezione in un handler bespoke.
+- **`/resource-organizations` non è montato con `crud()`: ha già handler bespoke** (`src/server.ts:3117-3136`), con la propria `pick()` e il proprio validatore `validateResourceOrgRefs`. Le tre colonne nuove vanno aggiunte alle **due** allow-list `pick<ResourceOrganization>(req.body, ['name', 'description', 'costCenters', 'serviceOrganizationId'])` — quella del `POST` e quella del `PUT`, che sono duplicate. Un campo non elencato non è scrivibile e falisce **in silenzio**, senza errore: è la guardia contro il mass assignment che si comporta come un bug quando si aggiunge una colonna.
+- **I vincoli di §2.1 si innestano accanto a `validateResourceOrgRefs`**, che entrambi i handler già chiamano. Il controllo di unicità del nome ha bisogno dell'id del record per escludere se stesso: nel `PUT` è `req.params.id`, nel `POST` non esiste. La `DELETE` (`src/server.ts:3136`) oggi rimuove senza alcun controllo — è lì che vanno i due 409 di §6 (nodo con figli, nodo puntato da risorse).
 
 L'RBAC del customizing **non cambia**: le mutazioni su `/resource-organizations` restano ad `admin` e `delivery-executive` (`src/server.ts:529`), la lettura resta aperta agli attori verificati perché ogni schermata che mostra un'organizzazione ne ha bisogno.
 
