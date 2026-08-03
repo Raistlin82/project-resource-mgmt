@@ -22,8 +22,8 @@ function allocationFor(kind: ResourceKind): AssignmentAllocation {
 const PERIODS: PlanningPeriod[] = [{ id: '2026-09', status: 'Open' }];
 const HOLIDAYS: Holiday[] = [];
 
-function setup(kind: ResourceKind) {
-  const getAssignmentAllocation = vi.fn(() => of(allocationFor(kind)));
+function setup(kind: ResourceKind, overrides: Partial<AssignmentAllocation> = {}) {
+  const getAssignmentAllocation = vi.fn(() => of({ ...allocationFor(kind), ...overrides }));
   const getPlanningPeriods = vi.fn(() => of(PERIODS));
   const getHolidays = vi.fn(() => of(HOLIDAYS));
   const api = {
@@ -149,6 +149,18 @@ describe('AllocationCalendarComponent', () => {
 
     pick('2.5');
     expect(new Set(Object.values(fixture.componentInstance.editedHours('2026-09')))).toEqual(new Set([20]));
+  });
+
+  it('marks a month that arrived by substitution', async () => {
+    const { fixture } = setup('internal', { months: [{ id: 'A1:2026-09', assignmentId: 'A1', month: '2026-09', status: 'Requested', replacedFromAssignmentMonthId: 'A9:2026-09' }] });
+    await flush(fixture);
+    expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="substituted-month"]')).not.toBeNull();
+  });
+
+  it('leaves an ordinary month unmarked', async () => {
+    const { fixture } = setup('internal', { months: [{ id: 'A1:2026-09', assignmentId: 'A1', month: '2026-09', status: 'Requested' }] });
+    await flush(fixture);
+    expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="substituted-month"]')).toBeNull();
   });
 
   it('caps the FTE options at MULTI_FTE_MAX', async () => {
