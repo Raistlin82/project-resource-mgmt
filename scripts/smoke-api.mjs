@@ -3593,6 +3593,93 @@ async function checkOrgTreeIntegrity() {
       await req('DELETE', `/resource-organizations/${leaked.id}`, { headers: RBAC_HEADERS });
     }
   }
+
+  // 17) REVIEW ROUND 1 (Task 7 coordinator feedback, critical #2) — changing a
+  // node's OWN level while it has an EXISTING CHILD must be refused: every
+  // check above only ever validates the record being edited against ITS OWN
+  // parent, never against a child pointing back at it. Isolated on a fresh,
+  // throwaway capability -> practice -> competence chain (never the seeded
+  // Platform/Backend used elsewhere in this function) so a pre-fix run that
+  // lets this through does not corrupt a fixture other checks rely on.
+  {
+    const rootC = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Level-Guard Root', description: 'x', level: 'capability' },
+    });
+    const rootOk = check(
+      'check 17 setup: a fresh capability root is created',
+      rootC.status === 200 && typeof rootC.body?.id === 'string',
+      `status=${rootC.status}, body=${JSON.stringify(rootC.body)}`,
+    );
+    if (rootOk) {
+      const rootId = rootC.body.id;
+      const midC = await req('POST', '/resource-organizations', {
+        headers: RBAC_HEADERS,
+        body: { name: 'D Smoke Level-Guard Mid', description: 'x', level: 'practice', parentId: rootId },
+      });
+      const midOk = check(
+        'check 17 setup: a fresh practice, child of the root, is created',
+        midC.status === 200 && typeof midC.body?.id === 'string',
+        `status=${midC.status}, body=${JSON.stringify(midC.body)}`,
+      );
+      if (midOk) {
+        const midId = midC.body.id;
+        const leafC = await req('POST', '/resource-organizations', {
+          headers: RBAC_HEADERS,
+          body: { name: 'D Smoke Level-Guard Leaf', description: 'x', level: 'competence', parentId: midId },
+        });
+        const leafOk = check(
+          'check 17 setup: a fresh competence, child of the practice, is created',
+          leafC.status === 200 && typeof leafC.body?.id === 'string',
+          `status=${leafC.status}, body=${JSON.stringify(leafC.body)}`,
+        );
+        if (leafOk) {
+          const leafId = leafC.body.id;
+          // The guard itself: mid has a child (the leaf, a competence
+          // requiring a practice parent) — changing mid's own level to
+          // 'capability' would leave that child's parent no longer a practice.
+          const changed = await req('PUT', `/resource-organizations/${midId}`, {
+            headers: RBAC_HEADERS,
+            body: { level: 'capability', parentId: '' },
+          });
+          check(
+            `PUT /api/resource-organizations/${midId} {level:'capability'} while it still has a competence child -> 400 (would orphan the child's level requirement)`,
+            changed.status === 400,
+            `status=${changed.status}, body=${JSON.stringify(changed.body)}`,
+          );
+          // Confirm the row was never actually changed, not just the status.
+          const { status: sMid, body: bMid } = await req('GET', '/resource-organizations');
+          const midNode = Array.isArray(bMid) ? bMid.find((n) => n.id === midId) : undefined;
+          check(
+            "GET /api/resource-organizations shows the mid node's level UNCHANGED ('practice') after the rejected PUT",
+            sMid === 200 && midNode?.level === 'practice' && midNode?.parentId === rootId,
+            midNode ? `node=${JSON.stringify(midNode)}` : `status=${sMid}, missing`,
+          );
+          // The guard is scoped to "has children", not "level changes are
+          // never allowed again" — delete the only child, then the exact same
+          // PUT must now succeed.
+          const delLeaf = await req('DELETE', `/resource-organizations/${leafId}`, { headers: RBAC_HEADERS });
+          check(`check 17: DELETE /api/resource-organizations/${leafId} (the now-only child) -> 204`, delLeaf.status === 204, `status=${delLeaf.status}`);
+          const changedOk = await req('PUT', `/resource-organizations/${midId}`, {
+            headers: RBAC_HEADERS,
+            body: { level: 'capability', parentId: '' },
+          });
+          check(
+            `PUT /api/resource-organizations/${midId} {level:'capability'} now that it has NO children -> 200 (the guard is scoped to children, not a blanket freeze)`,
+            changedOk.status === 200 && changedOk.body?.level === 'capability',
+            `status=${changedOk.status}, body=${JSON.stringify(changedOk.body)}`,
+          );
+        }
+        // Cleanup: mid is now childless either way (the leaf was deleted
+        // above on the success path; leaf creation never happened at all on
+        // the setup-failure path), so a single DELETE here covers both.
+        const cleanupMid = await req('DELETE', `/resource-organizations/${midId}`, { headers: RBAC_HEADERS });
+        check(`check 17 cleanup: DELETE /api/resource-organizations/${midId} -> 204`, cleanupMid.status === 204, `status=${cleanupMid.status}`);
+      }
+      const cleanupRoot = await req('DELETE', `/resource-organizations/${rootId}`, { headers: RBAC_HEADERS });
+      check(`check 17 cleanup: DELETE /api/resource-organizations/${rootId} -> 204`, cleanupRoot.status === 204, `status=${cleanupRoot.status}`);
+    }
+  }
 }
 
 /**

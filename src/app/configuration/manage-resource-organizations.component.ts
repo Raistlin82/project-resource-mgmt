@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, DestroyRef, inject, signal, computed } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, effect, inject, signal, computed } from '@angular/core';
 import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { of } from 'rxjs';
 import { ReactiveFormsModule, FormBuilder, FormGroup, Validators } from '@angular/forms';
@@ -8,11 +8,19 @@ import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 import { ORG_LEVELS, ancestorChain, descendantOrgIds, type OrgLevel } from '../services/org-scope.util';
+import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
 
 /** One rendered tree row: the node plus its indentation depth (root = 0). */
 interface OrgTreeRow {
   org: ResourceOrganization;
   depth: number;
+}
+
+/** Today as ISO 'YYYY-MM-DD' — matches ResourcesComponent.isTerminated's own
+ *  local helper exactly, so a candidate manager is filtered out here under the
+ *  SAME rule the People page shows it terminated under. */
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
 }
 
 @Component({
@@ -49,11 +57,14 @@ interface OrgTreeRow {
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <label for="orgLevel" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Level</label>
-                <select id="orgLevel" formControlName="level" data-test="org-level" class="command-select">
+                <select id="orgLevel" formControlName="level" data-test="org-level" class="command-select disabled:opacity-50 disabled:cursor-not-allowed">
                   @for (l of orgLevels; track l) {
                     <option [value]="l">{{ levelLabel(l) }}</option>
                   }
                 </select>
+                @if (hasChildren()) {
+                  <p class="mt-1 text-xs text-[var(--cc-muted)]">This node has children — its level cannot change while they exist.</p>
+                }
               </div>
               @if (levelValue() !== 'capability') {
                 <div>
@@ -234,11 +245,7 @@ export class ManageResourceOrganizationsComponent {
   costCenterOptions = this.costCentersRes.value;
   serviceOrgOptions = this.serviceOrgsRes.value;
 
-  // D: the manager select is a plain resource lookup — every resource is an
-  // eligible Capability Leader / Practice Manager / Competence Manager
-  // candidate (unlike the Resource form's People Manager select, nothing here
-  // restricts by kind/termination; the design spec draws no such line for the
-  // org node's own manager). Principal-gated read, so key on authReady like
+  // D: the manager select — Principal-gated read, so key on authReady like
   // the resources.component.ts convention.
   private resourcesRes = rxResource<Resource[], boolean>({
     params: () => this.auth.authReady(),
@@ -246,7 +253,29 @@ export class ManageResourceOrganizationsComponent {
     defaultValue: [] as Resource[],
   });
   resources = this.resourcesRes.value;
-  managerOptions = computed<Resource[]>(() => this.resources().slice().sort((a, b) => a.name.localeCompare(b.name)));
+
+  // REVIEW ROUND 1 (critical) — a dummy or terminated resource must NEVER be
+  // offered here, the same rule (and the same reused helpers) as
+  // ResourcesComponent's own People Manager select. This is not cosmetic
+  // parity: `managerId` on an org node feeds `scopedApproversOf`, which adds
+  // every ancestor node's manager into the candidate set regardless of
+  // whether that id belongs to an authenticatable user. Pick a dummy as a
+  // Capability Leader and `roleFallback` becomes FALSE for everyone under that
+  // node — so the subtree does NOT fall back to "any resource-manager" — while
+  // the one id that would satisfy scope belongs to a resource nobody can ever
+  // log in as. Every allocation under that subtree becomes decidable by admin
+  // alone, and silently vanishes from every resource-manager's feed, with no
+  // error anywhere. An EMPTY manager is strictly safer than a placeholder one
+  // (empty correctly falls through to the role fallback).
+  managerOptions = computed<Resource[]>(() =>
+    this.resources()
+      .filter(r => !this.isTerminated(r) && countsTowardInternalCapacity(kindOf(r)))
+      .sort((a, b) => a.name.localeCompare(b.name)));
+
+  /** A resource is Terminated when terminationDate is set to a date on/before today. */
+  private isTerminated(r: Resource): boolean {
+    return !!r.terminationDate && r.terminationDate <= todayIso();
+  }
 
   orgForm: FormGroup = this.fb.group({
     name: ['', Validators.required],
@@ -276,6 +305,18 @@ export class ManageResourceOrganizationsComponent {
     initialValue: this.orgForm.controls['level'].value as OrgLevel,
   });
 
+  // REVIEW ROUND 1 (critical) — the node being edited has an EXISTING CHILD
+  // pointing at it. The server now refuses a level change in that state (it
+  // would leave the child's own parent-level requirement violated —
+  // validateOrgTreeNode has no way to re-validate a node it isn't editing),
+  // so the Level select is disabled here rather than letting the admin pick a
+  // new level only to meet that refusal on save. False while creating (a
+  // brand-new node has no children yet).
+  hasChildren = computed(() => {
+    const id = this.editingId();
+    return id !== null && this.resourceOrganizations().some(n => n.parentId === id);
+  });
+
   constructor() {
     // A level change invalidates whatever was selected as parent under the
     // PREVIOUS level (parentOptions() below recomputes against the new legal
@@ -283,6 +324,19 @@ export class ManageResourceOrganizationsComponent {
     // since the stale id almost certainly matches no new option) and the
     // signal driving save() never disagree.
     this.orgForm.controls['level'].valueChanges.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.formParentId.set(''));
+
+    // Reactive Forms recommends toggling `disabled` via the control itself
+    // (not a template `[disabled]` binding alongside `formControlName`) — this
+    // keeps `hasChildren()` and the control's own disabled state from ever
+    // disagreeing, including when the underlying tree data changes out from
+    // under an open form. `getRawValue()` in save() still returns a disabled
+    // control's value, so this never affects what gets sent.
+    effect(() => {
+      const disable = this.hasChildren();
+      const control = this.orgForm.controls['level'];
+      if (disable && control.enabled) control.disable({ emitEvent: false });
+      if (!disable && control.disabled) control.enable({ emitEvent: false });
+    });
   }
 
   /** Legal parent level for the CURRENT level control value; undefined for a capability (root, no parent). */
@@ -350,16 +404,25 @@ export class ManageResourceOrganizationsComponent {
       for (const n of childrenOf.get(parentId) ?? []) {
         if (visited.has(n.id)) continue;
         visited.add(n.id);
-        rows.push({ org: n, depth: ancestorChain(n.id, nodes).length - 1 });
+        rows.push({ org: n, depth: Math.max(0, ancestorChain(n.id, nodes).length - 1) });
         visit(n.id);
       }
     };
     visit(undefined);
-    for (const n of nodes) {
-      if (!visited.has(n.id)) {
-        visited.add(n.id);
-        rows.push({ org: n, depth: Math.max(0, ancestorChain(n.id, nodes).length - 1) });
-      }
+    // REVIEW ROUND 1 (small) — a node whose parentId never resolves back to a
+    // real, visited root (a dangling parentId, or a pre-D cycle) is never
+    // reached by visit(undefined) above. Sweep those in through the SAME
+    // parent-before-children walk (each leftover "root" pushed, then its own
+    // children pulled in via visit()) rather than a flat, raw-array-order
+    // loop — the previous version could render a child ABOVE and LESS
+    // indented than its own displayed parent. Sorted so the result is
+    // deterministic regardless of the array order the data happens to arrive in.
+    const leftoverRoots = nodes.filter(n => !visited.has(n.id)).sort((a, b) => a.name.localeCompare(b.name));
+    for (const root of leftoverRoots) {
+      if (visited.has(root.id)) continue; // already swept in as a "child" of an earlier leftover root
+      visited.add(root.id);
+      rows.push({ org: root, depth: Math.max(0, ancestorChain(root.id, nodes).length - 1) });
+      visit(root.id);
     }
     return rows;
   });

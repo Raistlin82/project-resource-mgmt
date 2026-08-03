@@ -23,6 +23,11 @@ const ORGS: ResourceOrganization[] = [
 const RESOURCES: Resource[] = [
   { id: '1', name: 'Julie', role: 'Practice Lead', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40 },
   { id: '2', name: 'Sam Cole', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40 },
+  // REVIEW ROUND 1 (critical): a dummy and a terminated resource must never be
+  // offered as a node manager — see managerOptions()'s comment for why (a
+  // placeholder manager makes roleFallback FALSE while satisfying nobody).
+  { id: '3', name: 'Dummy Placeholder', role: 'Consultant', kind: 'dummy', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40 },
+  { id: '4', name: 'Terminated Tom', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, terminationDate: '2020-01-01' },
 ];
 
 function setup(orgs: ResourceOrganization[] = ORGS, resources: Resource[] = RESOURCES) {
@@ -126,7 +131,7 @@ describe('ManageResourceOrganizationsComponent', () => {
     }));
   });
 
-  it('omits parentId when creating a new capability (nothing to persist)', async () => {
+  it('omits parentId and managerId when creating a new capability (nothing to persist)', async () => {
     const { fixture, createResourceOrganization } = setup();
     await flush(fixture);
 
@@ -139,8 +144,50 @@ describe('ManageResourceOrganizationsComponent', () => {
     const payload = createResourceOrganization.mock.calls[0][0] as Record<string, unknown>;
     expect(payload['level']).toBe('capability');
     // Sending '' on CREATE (unlike PUT) would persist a literal empty string
-    // instead of leaving parentId absent — the key must not be sent at all.
+    // instead of leaving the field absent — both keys go through the
+    // IDENTICAL branch in save(), so both must be omitted entirely.
     expect('parentId' in payload).toBe(false);
+    expect('managerId' in payload).toBe(false);
+  });
+
+  it('excludes a dummy and a terminated resource from the manager options', async () => {
+    // REVIEW ROUND 1 (critical) — a placeholder or terminated resource must
+    // never be pickable as a node manager: managerId feeds scopedApproversOf,
+    // and a manager id nobody can authenticate as makes roleFallback FALSE
+    // (no fallback to "any resource-manager") while satisfying nobody — worse
+    // than leaving the field empty. Asserted on the rendered <option>s, not
+    // the signal, per this file's own DOM-assertion discipline.
+    const { fixture } = setup();
+    await flush(fixture);
+
+    fixture.componentInstance.openForm(ORGS.find(o => o.id === '2')!);
+    fixture.detectChanges();
+    const host = fixture.nativeElement as HTMLElement;
+    const optionText = Array.from(host.querySelectorAll<HTMLOptionElement>('[data-test="org-manager"] option'))
+      .map(o => o.textContent?.trim());
+    expect(optionText).toContain('Julie'); // active, internal — still offered
+    expect(optionText).not.toContain('Dummy Placeholder');
+    expect(optionText).not.toContain('Terminated Tom');
+  });
+
+  it('disables the level select while the node being edited has children, and re-enables it once childless', async () => {
+    // REVIEW ROUND 1 (critical) — changing a node's level while it has an
+    // existing child would leave that child's own parent-level requirement
+    // violated (the server now refuses this on save); the UI mirrors it by
+    // disabling the control outright rather than letting the admin choose a
+    // new level only to hit that refusal.
+    const { fixture } = setup();
+    await flush(fixture);
+
+    fixture.componentInstance.openForm(ORGS.find(o => o.id === '5')!); // Platform — has child Backend
+    await flush(fixture); // the disable/enable sync runs in an effect, not a computed
+    const host = fixture.nativeElement as HTMLElement;
+    const levelSelect = host.querySelector<HTMLSelectElement>('[data-test="org-level"]')!;
+    expect(levelSelect.disabled).toBe(true);
+
+    fixture.componentInstance.openForm(ORGS.find(o => o.id === '6')!); // Backend — childless leaf
+    await flush(fixture);
+    expect(levelSelect.disabled).toBe(false);
   });
 
   it('clears a previously-set manager by sending an explicit empty string on update', async () => {

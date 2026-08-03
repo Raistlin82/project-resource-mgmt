@@ -1124,6 +1124,29 @@ async function validateOrgTreeNode(
     const wanted = ORG_LEVELS[ORG_LEVELS.indexOf(level) - 1];
     if (parent.level !== wanted) return `the parent of a ${level} must be a ${wanted}`;
   }
+  // REVIEW ROUND 1 (Task 7 coordinator feedback, critical) — every check above
+  // only ever looks at THIS record against ITS OWN parent; nothing looked the
+  // other way, at EXISTING CHILDREN that point at this record as THEIRS. Left
+  // unguarded: Platform (a practice, child Backend a competence) could have
+  // its own level changed to 'capability' — Platform's own parent is cleared
+  // correctly above, but Backend is left a competence whose parent is now a
+  // capability, a state the level guard never re-validates because it only
+  // ever runs against the record being edited, never against Backend. Every
+  // resource at/under Backend then silently loses its practice dimension in
+  // dimensionsOf() (reporting, rate-card resolution), with no error anywhere.
+  // Only fires on an ACTUAL level change — comparing the RESOLVED `level`
+  // against the record's own EXISTING level, not merely `body.level` being
+  // present, because the UI's save() resends the unchanged level on every
+  // edit (Task 7's orgForm always carries a `level` control).
+  if (ctx?.id !== undefined && level !== undefined && existing !== undefined && level !== existing.level) {
+    const children = all.filter(n => n.parentId === ctx.id);
+    for (const child of children) {
+      const wantedForChild = ORG_LEVELS[ORG_LEVELS.indexOf(child.level) - 1];
+      if (wantedForChild !== level) {
+        return `cannot change level to ${level}: existing ${child.level} child "${child.name}" requires a ${wantedForChild} parent`;
+      }
+    }
+  }
   // DEFENCE IN DEPTH, not dead code: with the level rules above enforced (a
   // capability has no parent, a practice's parent must be a capability, a
   // competence's parent must be a practice), a cycle is structurally
