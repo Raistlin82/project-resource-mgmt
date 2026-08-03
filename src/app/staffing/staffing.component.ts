@@ -443,7 +443,7 @@ export class StaffingComponent {
         },
         error: () => {
           this.assigning.set(false);
-          this.notifications.show('Impossibile creare l’allocazione', 'error');
+          this.notifications.show('Unable to create the allocation', 'error');
         }
       });
     }
