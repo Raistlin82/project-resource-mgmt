@@ -2163,16 +2163,57 @@ apiRouter.post('/assignment-months/:id/substitute', async (req, res) => {
   if (period?.status !== 'Open') { res.status(403).json({ error: 'month is not open for planning' }); return; }
 
   const targetBaseCap = await resolveBaseCap(target);
-  const outcome = await transferDummyMonth(req, dummyRow, dummyAssig, target, targetBaseCap);
+  const outcomes: SubstitutionMonthOutcome[] = [await transferDummyMonth(req, dummyRow, dummyAssig, target, targetBaseCap)];
 
-  // Aggregates last, best-effort — the transfer has already committed.
+  // C2/Task 4 — "apply to all remaining months": a dummy typically spans
+  // several months, and repeating this search-and-confirm for each one is
+  // exactly what this flag removes. Only month rows STRICTLY AFTER the
+  // primary one that still carry hours are attempted — a month already at
+  // zero (fully substituted already, or never booked) gets no outcome entry
+  // at all, matching `transferDummyMonth`'s own "nothing to move" carve-out
+  // one level up. A month whose planning period is not Open is skipped WITH
+  // A REASON rather than aborting the loop — one closed month must never
+  // stop the months after it from transferring.
+  if (body.applyToRemainingMonths === true) {
+    const laterRows = (await repos.assignmentMonths.list())
+      .filter(m => m.assignmentId === dummyAssig.id && m.month > dummyRow.month)
+      .sort((a, b) => a.month.localeCompare(b.month));
+
+    // Snapshot ONCE before the loop: each month's day rows are keyed by date,
+    // so an earlier iteration's transfer (which only touches ITS OWN month's
+    // dates) can never change what a later iteration reads here.
+    const allDays = await repos.assignmentDays.list();
+
+    for (const row of laterRows) {
+      const hoursThisMonth = allDays
+        .filter(d => d.assignmentId === dummyAssig.id && monthOf(d.date) === row.month)
+        .reduce((s, d) => s + (Number.isFinite(d.hours) ? d.hours : 0), 0);
+      if (!(hoursThisMonth > 0)) continue;
+
+      const rowPeriod = await repos.planningPeriods.get(row.month);
+      if (rowPeriod?.status !== 'Open') {
+        outcomes.push({
+          month: row.month, transferredHours: 0,
+          remainingHours: Math.round(hoursThisMonth * 100) / 100,
+          skipped: 'the month is not open for planning',
+        });
+        continue;
+      }
+
+      outcomes.push(await transferDummyMonth(req, row, dummyAssig, target, targetBaseCap));
+    }
+  }
+
+  // Aggregates last, best-effort, ONCE for the whole batch — the transfers
+  // have already committed and every month shares the same dummy resource,
+  // target resource and request.
   try {
     await withLock(`res:${dummyAssig.resourceId}`, () => recomputeResourceUtilization(dummyAssig.resourceId));
     await withLock(`res:${target.id}`, () => recomputeResourceUtilization(target.id));
     await withLock(`req:${dummyAssig.requestId}`, () => recomputeRequestStaffing(dummyAssig.requestId));
   } catch { /* aggregates self-heal on the next mutation */ }
 
-  res.json({ targetResourceId: target.id, targetResourceName: target.name, outcomes: [outcome] } as SubstitutionResult);
+  res.json({ targetResourceId: target.id, targetResourceName: target.name, outcomes } as SubstitutionResult);
 });
 
 /**

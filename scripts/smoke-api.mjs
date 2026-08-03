@@ -2186,6 +2186,136 @@ async function checkDummySubstitution() {
       }
     }
   }
+
+  // --- applyToRemainingMonths (Task 4): a dummy booked across THREE
+  // consecutive OPEN months, substituted from the FIRST with
+  // `applyToRemainingMonths: true`, must return one outcome PER MONTH — not
+  // just the primary one — each landing on its own target month row, and the
+  // dummy's LATER months (2nd/3rd) must be reduced too, not just the first.
+  const REMAINING_M1 = '2026-05', REMAINING_M2 = '2026-06', REMAINING_M3 = '2026-07';
+  const REMAINING_DAY1 = `${REMAINING_M1}-05`; // Tuesday
+  const REMAINING_DAY2 = `${REMAINING_M2}-01`; // Monday
+  const REMAINING_DAY3 = `${REMAINING_M3}-06`; // Monday
+
+  const remDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 remaining-months dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  const remPerson = await req('POST', '/resources', { body: { ...base, name: 'C2 remaining-months person', kind: 'internal', contractHoursPerDay: 8 } });
+  const remSetupOk = check('C2 remaining-months setup: dummy/person resources created',
+    remDummy.status === 201 && remPerson.status === 201,
+    `dummy=${remDummy.status} person=${remPerson.status}`);
+  if (remSetupOk) {
+    const remRequest = await req('POST', '/requests', { body: { name: 'C2 remaining-months request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+    const remReqOk = check('C2 remaining-months setup: request created', remRequest.status === 200 && typeof remRequest.body?.id === 'string', `status=${remRequest.status}`);
+    if (remReqOk) {
+      const remAssignment = await req('POST', '/assignments', { body: { requestId: remRequest.body.id, resourceId: remDummy.body.id, assignedHours: 0 } });
+      const remAssignOk = check('C2 remaining-months setup: dummy assignment created', remAssignment.status === 200 && typeof remAssignment.body?.id === 'string', `status=${remAssignment.status}`);
+      if (remAssignOk) {
+        const remAssignmentId = remAssignment.body.id;
+        const remBook1 = await req('PUT', `/assignments/${remAssignmentId}/allocation`, { body: { month: REMAINING_M1, dailyHours: { [REMAINING_DAY1]: 8 } } });
+        const remBook2 = await req('PUT', `/assignments/${remAssignmentId}/allocation`, { body: { month: REMAINING_M2, dailyHours: { [REMAINING_DAY2]: 8 } } });
+        const remBook3 = await req('PUT', `/assignments/${remAssignmentId}/allocation`, { body: { month: REMAINING_M3, dailyHours: { [REMAINING_DAY3]: 8 } } });
+        const remBookedOk = check('C2 remaining-months setup: dummy booked at 1 FTE across three consecutive months',
+          remBook1.status === 200 && remBook2.status === 200 && remBook3.status === 200,
+          `m1=${remBook1.status} m2=${remBook2.status} m3=${remBook3.status}`);
+        if (remBookedOk) {
+          const remDummyMonth1Id = `${remAssignmentId}:${REMAINING_M1}`;
+
+          const remSub = await req('POST', `/assignment-months/${remDummyMonth1Id}/substitute`, {
+            body: { targetResourceId: remPerson.body.id, applyToRemainingMonths: true },
+          });
+          check('C2 applyToRemainingMonths accepted', remSub.status === 200, `status=${remSub.status} err=${remSub.body?.error}`);
+          const remOutcomes = remSub.body?.outcomes || [];
+          check('C2 applyToRemainingMonths returns one outcome per month (3)', remOutcomes.length === 3,
+            `count=${remOutcomes.length} outcomes=${JSON.stringify(remOutcomes)}`);
+          check('C2 applyToRemainingMonths outcomes are in ascending month order',
+            remOutcomes.map(o => o.month).join(',') === [REMAINING_M1, REMAINING_M2, REMAINING_M3].join(','),
+            `months=${remOutcomes.map(o => o.month).join(',')}`);
+          check('C2 applyToRemainingMonths fully absorbs each month (1 FTE dummy, 1 FTE-capable person)',
+            remOutcomes.every(o => o.transferredHours === 8 && o.remainingHours === 0),
+            `outcomes=${JSON.stringify(remOutcomes)}`);
+          const remTargetAssignmentIds = new Set(remOutcomes.map(o => o.targetAssignmentMonthId?.split(':')[0]));
+          check('C2 applyToRemainingMonths lands every month on its OWN target month row, all on the SAME target assignment',
+            remOutcomes.every(o => typeof o.targetAssignmentMonthId === 'string') &&
+            new Set(remOutcomes.map(o => o.targetAssignmentMonthId)).size === 3 &&
+            remTargetAssignmentIds.size === 1,
+            `outcomes=${JSON.stringify(remOutcomes)}`);
+
+          // The dummy's LATER months (2nd and 3rd) must be reduced too, not
+          // just the primary one that the pre-Task-4 handler already covered.
+          const remDummyAfter = await req('GET', `/assignments/${remAssignmentId}/allocation?from=${REMAINING_M1}&to=${REMAINING_M3}`);
+          const remDummyDays = remDummyAfter.body?.days || [];
+          check('C2 applyToRemainingMonths clears the dummy-s days in ALL three months',
+            [REMAINING_DAY1, REMAINING_DAY2, REMAINING_DAY3].every(d => (remDummyDays.find(x => x.date === d)?.hours ?? 0) === 0),
+            `days=${JSON.stringify(remDummyDays)}`);
+        }
+      }
+    }
+  }
+
+  // --- applyToRemainingMonths + a CLOSED later month: the closed month must
+  // be skipped WITH A REASON, but the months after it must still transfer —
+  // one closed month must never abort the ones that follow.
+  const CLOSED_M1 = '2026-08', CLOSED_M2 = '2026-09', CLOSED_M3 = '2026-10';
+  const CLOSED_DAY1 = `${CLOSED_M1}-03`; // Monday
+  const CLOSED_DAY2 = `${CLOSED_M2}-01`; // Tuesday
+  const CLOSED_DAY3 = `${CLOSED_M3}-05`; // Monday
+
+  const closedDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 closed-month dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  const closedPerson = await req('POST', '/resources', { body: { ...base, name: 'C2 closed-month person', kind: 'internal', contractHoursPerDay: 8 } });
+  const closedSetupOk = check('C2 closed-month setup: dummy/person resources created',
+    closedDummy.status === 201 && closedPerson.status === 201,
+    `dummy=${closedDummy.status} person=${closedPerson.status}`);
+  if (closedSetupOk) {
+    const closedRequest = await req('POST', '/requests', { body: { name: 'C2 closed-month request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+    const closedReqOk = check('C2 closed-month setup: request created', closedRequest.status === 200 && typeof closedRequest.body?.id === 'string', `status=${closedRequest.status}`);
+    if (closedReqOk) {
+      const closedAssignment = await req('POST', '/assignments', { body: { requestId: closedRequest.body.id, resourceId: closedDummy.body.id, assignedHours: 0 } });
+      const closedAssignOk = check('C2 closed-month setup: dummy assignment created', closedAssignment.status === 200 && typeof closedAssignment.body?.id === 'string', `status=${closedAssignment.status}`);
+      if (closedAssignOk) {
+        const closedAssignmentId = closedAssignment.body.id;
+        const closedBook1 = await req('PUT', `/assignments/${closedAssignmentId}/allocation`, { body: { month: CLOSED_M1, dailyHours: { [CLOSED_DAY1]: 8 } } });
+        const closedBook2 = await req('PUT', `/assignments/${closedAssignmentId}/allocation`, { body: { month: CLOSED_M2, dailyHours: { [CLOSED_DAY2]: 8 } } });
+        const closedBook3 = await req('PUT', `/assignments/${closedAssignmentId}/allocation`, { body: { month: CLOSED_M3, dailyHours: { [CLOSED_DAY3]: 8 } } });
+        const closedBookedOk = check('C2 closed-month setup: dummy booked at 1 FTE across three consecutive months',
+          closedBook1.status === 200 && closedBook2.status === 200 && closedBook3.status === 200,
+          `m1=${closedBook1.status} m2=${closedBook2.status} m3=${closedBook3.status}`);
+        if (closedBookedOk) {
+          const closePeriod = await req('PUT', `/planning-periods/${CLOSED_M2}`, { body: { status: 'Closed' } });
+          check('C2 closed-month setup: middle month closed for planning', closePeriod.status === 200, `status=${closePeriod.status}`);
+
+          const closedDummyMonth1Id = `${closedAssignmentId}:${CLOSED_M1}`;
+          const closedSub = await req('POST', `/assignment-months/${closedDummyMonth1Id}/substitute`, {
+            body: { targetResourceId: closedPerson.body.id, applyToRemainingMonths: true },
+          });
+          check('C2 applyToRemainingMonths with a closed later month is still accepted', closedSub.status === 200,
+            `status=${closedSub.status} err=${closedSub.body?.error}`);
+          const closedOutcomes = closedSub.body?.outcomes || [];
+          check('C2 applyToRemainingMonths still returns one outcome per month even when one is closed',
+            closedOutcomes.length === 3, `count=${closedOutcomes.length} outcomes=${JSON.stringify(closedOutcomes)}`);
+
+          const [closedOutcome1, closedOutcome2, closedOutcome3] = closedOutcomes;
+          check('C2 the open first month still transfers',
+            closedOutcome1?.month === CLOSED_M1 && closedOutcome1?.transferredHours === 8 && closedOutcome1?.remainingHours === 0,
+            `outcome=${JSON.stringify(closedOutcome1)}`);
+          check('C2 the closed month is skipped with a reason, not transferred',
+            closedOutcome2?.month === CLOSED_M2 && closedOutcome2?.transferredHours === 0 &&
+            typeof closedOutcome2?.skipped === 'string' && closedOutcome2.skipped.length > 0,
+            `outcome=${JSON.stringify(closedOutcome2)}`);
+          check('C2 the month AFTER the closed one still transfers (one closed month does not abort the rest)',
+            closedOutcome3?.month === CLOSED_M3 && closedOutcome3?.transferredHours === 8 && closedOutcome3?.remainingHours === 0,
+            `outcome=${JSON.stringify(closedOutcome3)}`);
+
+          // The closed month's dummy hours must be left exactly as they were.
+          const closedDummyAfter = await req('GET', `/assignments/${closedAssignmentId}/allocation?from=${CLOSED_M2}&to=${CLOSED_M2}`);
+          const closedDummyDay = (closedDummyAfter.body?.days || []).find(d => d.date === CLOSED_DAY2);
+          check('C2 the closed month-s dummy hours are untouched',
+            closedDummyDay?.hours === 8, `hours=${closedDummyDay?.hours}`);
+
+          const reopenPeriod = await req('PUT', `/planning-periods/${CLOSED_M2}`, { body: { status: 'Open' } });
+          check('C2 closed-month teardown: middle month reopened for planning', reopenPeriod.status === 200, `status=${reopenPeriod.status}`);
+        }
+      }
+    }
+  }
 }
 
 async function main() {
