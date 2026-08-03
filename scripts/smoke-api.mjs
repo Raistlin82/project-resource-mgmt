@@ -1990,6 +1990,166 @@ async function checkResourceKinds() {
   check('C1 the same kind change succeeds once the allocation fits', demoteOk.status === 200 && demoteOk.body?.kind === 'internal', `status=${demoteOk.status}`);
 }
 
+/**
+ * C2 — handing a dummy's hours to a real person. The transfer is capped by what
+ * that person can absorb, so a multi-FTE dummy needs more than one substitution.
+ */
+async function checkDummySubstitution() {
+  const MONTH = '2026-04';
+  const DAY = `${MONTH}-07`; // Tuesday
+  const DAY2 = `${MONTH}-08`; // Wednesday — a second day, for the demoted-existing-work case
+
+  const base = { role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, hireDate: '2026-01-01' };
+
+  // Fixtures: a dummy booked at 2 FTE on one working day of an open month, an
+  // internal person free that day, a second dummy of a non-internal kind (to
+  // prove a non-internal target is refused), a plain internal resource booked
+  // on its OWN request (to prove a non-dummy month is refused — kept separate
+  // from `person` so its booking never eats into the target's daily room), and
+  // a THIRD dummy on the SAME request as the first, for the
+  // demoted-existing-work case.
+  const dummy = await req('POST', '/resources', { body: { ...base, name: 'C2 dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  const person = await req('POST', '/resources', { body: { ...base, name: 'C2 person', kind: 'internal', contractHoursPerDay: 8 } });
+  const otherDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 other dummy (bad target)', kind: 'dummy', contractHoursPerDay: 8 } });
+  const plainInternal = await req('POST', '/resources', { body: { ...base, name: 'C2 plain internal (non-dummy month)', kind: 'internal', contractHoursPerDay: 8 } });
+  const dummy2 = await req('POST', '/resources', { body: { ...base, name: 'C2 second dummy (demotes existing work)', kind: 'dummy', contractHoursPerDay: 8 } });
+  const setupOk = check('C2 setup: dummy/person/other-dummy/plain-internal/dummy2 resources created',
+    dummy.status === 201 && person.status === 201 && otherDummy.status === 201 && plainInternal.status === 201 && dummy2.status === 201,
+    `dummy=${dummy.status} person=${person.status} other=${otherDummy.status} plain=${plainInternal.status} dummy2=${dummy2.status}`);
+  if (!setupOk) return;
+  const personId = person.body.id;
+  const otherDummyId = otherDummy.body.id;
+
+  const request = await req('POST', '/requests', { body: { name: 'C2 substitution request', requiredRole: 'Developer', requiredEffort: 2, skills: [] } });
+  const plainRequest = await req('POST', '/requests', { body: { name: 'C2 non-dummy month request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+  const reqsOk = check('C2 setup: requests created',
+    request.status === 200 && typeof request.body?.id === 'string' &&
+    plainRequest.status === 200 && typeof plainRequest.body?.id === 'string',
+    `request=${request.status} plainRequest=${plainRequest.status}`);
+  if (!reqsOk) return;
+
+  // The dummy's assignment (2 FTE) and the second dummy's assignment share
+  // `request` — that is what lets the demoted-existing-work substitution below
+  // land on the SAME target assignment the first substitution created. The
+  // plain-internal fixture is deliberately on its OWN, unrelated request.
+  const dummyAssignment = await req('POST', '/assignments', { body: { requestId: request.body.id, resourceId: dummy.body.id, assignedHours: 0 } });
+  const plainAssignment = await req('POST', '/assignments', { body: { requestId: plainRequest.body.id, resourceId: plainInternal.body.id, assignedHours: 0 } });
+  const dummy2Assignment = await req('POST', '/assignments', { body: { requestId: request.body.id, resourceId: dummy2.body.id, assignedHours: 0 } });
+  const assignmentsOk = check('C2 setup: assignments created (dummy, plain internal, second dummy)',
+    dummyAssignment.status === 200 && typeof dummyAssignment.body?.id === 'string' &&
+    plainAssignment.status === 200 && typeof plainAssignment.body?.id === 'string' &&
+    dummy2Assignment.status === 200 && typeof dummy2Assignment.body?.id === 'string',
+    `dummy=${dummyAssignment.status} plain=${plainAssignment.status} dummy2=${dummy2Assignment.status}`);
+  if (!assignmentsOk) return;
+  const dummyAssignmentId = dummyAssignment.body.id;
+  const dummy2AssignmentId = dummy2Assignment.body.id;
+
+  // Book the dummy at 2 FTE (16h) on DAY.
+  const booked = await req('PUT', `/assignments/${dummyAssignmentId}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 16 } } });
+  check('C2 setup: dummy booked at 2 FTE', booked.status === 200, `status=${booked.status} err=${booked.body?.error}`);
+  const dummyMonthId = `${dummyAssignmentId}:${MONTH}`;
+
+  // A non-dummy month row, to prove the 'only a dummy month can be substituted' guard.
+  const plainBooked = await req('PUT', `/assignments/${plainAssignment.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 1 } } });
+  check('C2 setup: plain internal resource booked (non-dummy month fixture)', plainBooked.status === 200, `status=${plainBooked.status}`);
+  const internalMonthId = `${plainAssignment.body.id}:${MONTH}`;
+
+  // Book the second dummy at 4h on a DIFFERENT day, for the demoted-existing-work case below.
+  const dummy2Booked = await req('PUT', `/assignments/${dummy2AssignmentId}/allocation`, { body: { month: MONTH, dailyHours: { [DAY2]: 4 } } });
+  check('C2 setup: second dummy booked on a different day', dummy2Booked.status === 200, `status=${dummy2Booked.status} err=${dummy2Booked.body?.error}`);
+  const dummy2MonthId = `${dummy2AssignmentId}:${MONTH}`;
+
+  const sub = await req('POST', `/assignment-months/${dummyMonthId}/substitute`, {
+    body: { targetResourceId: personId },
+  });
+  check('C2 substitution accepted', sub.status === 200, `status=${sub.status} err=${sub.body?.error}`);
+  const outcome = (sub.body?.outcomes || [])[0];
+  check('C2 the person absorbs one FTE', outcome?.transferredHours === 8, `transferred=${outcome?.transferredHours}`);
+  check('C2 the rest stays on the dummy', outcome?.remainingHours === 8, `remaining=${outcome?.remainingHours}`);
+  check('C2 no existing work was demoted on a fresh month', !outcome?.demotedExistingWork, `demoted=${outcome?.demotedExistingWork}`);
+
+  const dummyAfter = await req('GET', `/assignments/${dummyAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+  const dummyDay = (dummyAfter.body.days || []).find(d => d.date === DAY);
+  check('C2 the dummy day is reduced, not cleared', dummyDay?.hours === 8, `hours=${dummyDay?.hours}`);
+
+  const personAssignmentId = outcome?.targetAssignmentMonthId?.split(':')[0];
+  const personAlloc = await req('GET', `/assignments/${personAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+  const personMonth = (personAlloc.body.months || [])[0];
+  check('C2 the person-s month awaits approval', personMonth?.status === 'Requested', `status=${personMonth?.status}`);
+  check('C2 the month is linked back to the dummy', personMonth?.replacedFromAssignmentMonthId === dummyMonthId, `link=${personMonth?.replacedFromAssignmentMonthId}`);
+
+  const notDummy = await req('POST', `/assignment-months/${internalMonthId}/substitute`, { body: { targetResourceId: personId } });
+  check('C2 substituting a non-dummy month is refused', notDummy.status === 400, `status=${notDummy.status}`);
+
+  const badTarget = await req('POST', `/assignment-months/${dummyMonthId}/substitute`, { body: { targetResourceId: otherDummyId } });
+  check('C2 a non-internal target is refused', badTarget.status === 400, `status=${badTarget.status}`);
+
+  const saturated = await req('POST', `/assignment-months/${dummyMonthId}/substitute`, { body: { targetResourceId: personId } });
+  check('C2 a saturated target transfers nothing but does not error',
+    saturated.status === 200 && (saturated.body.outcomes || [])[0]?.transferredHours === 0,
+    `status=${saturated.status} outcome=${JSON.stringify(saturated.body?.outcomes?.[0])}`);
+  check('C2 a saturated substitution explains why', typeof (saturated.body?.outcomes || [])[0]?.skipped === 'string',
+    `skipped=${(saturated.body?.outcomes || [])[0]?.skipped}`);
+
+  // --- demotedExistingWork: approve the person's first month, then substitute
+  // MORE hours (a different day, same request -> same target assignment) onto
+  // it. The added work must demote the month back to Requested, and the
+  // outcome must say so — the operator must not discover this after the fact.
+  const DECIDER_HEADERS = { 'X-User-Id': '9', 'X-User-Role': 'admin' };
+  const approveFirst = await req('POST', '/allocation-approvals/decide', {
+    headers: DECIDER_HEADERS,
+    body: { items: [{ assignmentMonthId: outcome?.targetAssignmentMonthId, decision: 'Approved', note: 'looks good' }] },
+  });
+  check('C2 setup: the person-s first month is approved', (approveFirst.body?.results || [])[0]?.status === 'Approved',
+    `result=${JSON.stringify(approveFirst.body?.results)}`);
+  const allocatedCheck = await req('GET', `/assignments/${personAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+  check('C2 setup: the person-s month is now Allocated', (allocatedCheck.body.months || [])[0]?.status === 'Allocated',
+    `status=${(allocatedCheck.body.months || [])[0]?.status}`);
+
+  const secondSub = await req('POST', `/assignment-months/${dummy2MonthId}/substitute`, { body: { targetResourceId: personId } });
+  check('C2 second substitution accepted', secondSub.status === 200, `status=${secondSub.status} err=${secondSub.body?.error}`);
+  const secondOutcome = (secondSub.body?.outcomes || [])[0];
+  check('C2 the second transfer lands on the SAME target month', secondOutcome?.targetAssignmentMonthId === outcome?.targetAssignmentMonthId,
+    `target=${secondOutcome?.targetAssignmentMonthId} expected=${outcome?.targetAssignmentMonthId}`);
+  check('C2 the previously-approved month is demoted back to Requested',
+    secondOutcome?.status === 'Requested' && secondOutcome?.demotedExistingWork === true,
+    `status=${secondOutcome?.status} demoted=${secondOutcome?.demotedExistingWork}`);
+
+  // --- self-managed substitution: the target's manager IS the acting identity
+  // (the suite's default X-User-Id: 1), so the transfer auto-approves straight
+  // to Allocated with no back-link left dangling.
+  const selfManagedPerson = await req('POST', '/resources', { body: { ...base, name: 'C2 self-managed person', kind: 'internal', contractHoursPerDay: 8, managerId: '1' } });
+  const selfManagedDummy = await req('POST', '/resources', { body: { ...base, name: 'C2 self-managed dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  const selfSetupOk = check('C2 setup: self-managed person/dummy resources created',
+    selfManagedPerson.status === 201 && selfManagedDummy.status === 201,
+    `person=${selfManagedPerson.status} dummy=${selfManagedDummy.status}`);
+  if (selfSetupOk) {
+    const selfRequest = await req('POST', '/requests', { body: { name: 'C2 self-managed request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+    const selfReqOk = check('C2 setup: self-managed request created', selfRequest.status === 200 && typeof selfRequest.body?.id === 'string', `status=${selfRequest.status}`);
+    if (selfReqOk) {
+      const selfAssignment = await req('POST', '/assignments', { body: { requestId: selfRequest.body.id, resourceId: selfManagedDummy.body.id, assignedHours: 0 } });
+      const selfAssignOk = check('C2 setup: self-managed dummy assignment created', selfAssignment.status === 200 && typeof selfAssignment.body?.id === 'string', `status=${selfAssignment.status}`);
+      if (selfAssignOk) {
+        const selfBooked = await req('PUT', `/assignments/${selfAssignment.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 4 } } });
+        check('C2 setup: self-managed dummy booked', selfBooked.status === 200, `status=${selfBooked.status} err=${selfBooked.body?.error}`);
+        const selfDummyMonthId = `${selfAssignment.body.id}:${MONTH}`;
+
+        const selfSub = await req('POST', `/assignment-months/${selfDummyMonthId}/substitute`, { body: { targetResourceId: selfManagedPerson.body.id } });
+        const selfOutcome = (selfSub.body?.outcomes || [])[0];
+        check('C2 a self-managed substitution lands Allocated directly',
+          selfSub.status === 200 && selfOutcome?.status === 'Allocated', `status=${selfSub.status} outcome=${JSON.stringify(selfOutcome)}`);
+
+        const selfPersonAssignmentId = selfOutcome?.targetAssignmentMonthId?.split(':')[0];
+        const selfPersonAlloc = await req('GET', `/assignments/${selfPersonAssignmentId}/allocation?from=${MONTH}&to=${MONTH}`);
+        const selfPersonMonth = (selfPersonAlloc.body.months || [])[0];
+        check('C2 the self-managed month carries no dangling back-link or approval',
+          selfPersonMonth !== undefined && !('replacedFromAssignmentMonthId' in selfPersonMonth) && !('approvalId' in selfPersonMonth),
+          `month=${JSON.stringify(selfPersonMonth)}`);
+      }
+    }
+  }
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -2078,6 +2238,15 @@ async function main() {
     await checkResourceKinds();
   } catch (err) {
     console.log(`FAIL  resource-kinds flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the C2 dummy-substitution
+  // flow never masks or blocks any of the prior section results.
+  try {
+    await checkDummySubstitution();
+  } catch (err) {
+    console.log(`FAIL  dummy-substitution flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

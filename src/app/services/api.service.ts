@@ -265,6 +265,33 @@ export interface AllocationDecisionResult {
 }
 
 /**
+ * C2 — the outcome of transferring ONE dummy month to a real person, via
+ * `POST /assignment-months/:id/substitute`. Transferring 0 hours is a
+ * legitimate outcome (the target had no room left that month), not an error —
+ * `skipped` carries a human-readable reason for it (or for a month whose
+ * planning period was not Open, under `applyToRemainingMonths`).
+ */
+export interface SubstitutionMonthOutcome {
+  month: string;
+  transferredHours: number;
+  remainingHours: number;
+  /** Composite `<assignmentId>:<month>` of the target's month row, absent when nothing transferred. */
+  targetAssignmentMonthId?: string;
+  status?: AssignmentMonth['status'];
+  skipped?: string;
+  /** True when the transfer demoted work the target already had approved that month. */
+  demotedExistingWork?: boolean;
+}
+
+/** Response of `POST /assignment-months/:id/substitute` (C2): one outcome per
+ *  month transferred — a single entry unless `applyToRemainingMonths` was set. */
+export interface SubstitutionResult {
+  targetResourceId: string;
+  targetResourceName: string;
+  outcomes: SubstitutionMonthOutcome[];
+}
+
+/**
  * Envelope returned by `GET /capacity/monthly` (B2): a monthly FTE
  * capacity/demand rollup across resources. `months` are the requested
  * ('YYYY-MM') buckets; `rows` carry each internal resource's per-month cells;
@@ -902,6 +929,15 @@ export class ApiService {
   /** Decide N month rows in one call ("Approva Mese" / "Approva e Prosegui"). */
   decideAllocationMonths(items: AllocationDecisionItem[]): Observable<{ results: AllocationDecisionResult[] }> {
     return this.http.post<{ results: AllocationDecisionResult[] }>(`${this.baseUrl}/allocation-approvals/decide`, { items });
+  }
+
+  /**
+   * C2 — hand a dummy's month to a real person, capped by what they can absorb
+   * each day. `assignmentMonthId` is the DUMMY's month row. `applyToRemainingMonths`
+   * repeats the transfer across the dummy's later months in the same request/chain.
+   */
+  substituteDummyMonth(assignmentMonthId: string, targetResourceId: string, applyToRemainingMonths?: boolean): Observable<SubstitutionResult> {
+    return this.http.post<SubstitutionResult>(`${this.baseUrl}/assignment-months/${assignmentMonthId}/substitute`, { targetResourceId, applyToRemainingMonths });
   }
 
   // --- Monthly FTE capacity (B2) ---
