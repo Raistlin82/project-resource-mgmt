@@ -10,12 +10,12 @@ const FEED: AllocationApprovalFeed = {
   months: ['2026-09'],
   rows: [
     {
-      resourceId: 'r1', resourceName: 'Ada', managerId: 'm1', contractHoursPerDay: 8,
+      resourceId: 'r1', resourceName: 'Ada', managerId: 'm1', kind: 'internal', contractHoursPerDay: 8,
       targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 88 },
       items: [{ assignmentMonthId: 'A1:2026-09', assignmentId: 'A1', month: '2026-09', status: 'Requested', requestId: '1', projectName: 'Apollo', hours: 88, approvalId: 'AR1' }],
     },
     {
-      resourceId: 'r2', resourceName: 'Bob', managerId: 'm1', contractHoursPerDay: 8,
+      resourceId: 'r2', resourceName: 'Bob', managerId: 'm1', kind: 'internal', contractHoursPerDay: 8,
       targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 176 },
       items: [{ assignmentMonthId: 'A2:2026-09', assignmentId: 'A2', month: '2026-09', status: 'Allocated', requestId: '2', projectName: 'Gemini', hours: 176 }],
     },

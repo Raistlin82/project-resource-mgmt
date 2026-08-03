@@ -3,8 +3,9 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { API_BASE_URL } from './api-config';
 import type { CapacityCell, CapacityRow, CapacityTotals } from './capacity.util';
+import type { ResourceKind } from './resource-kind.util';
 
-export type { CapacityCell, CapacityRow, CapacityTotals };
+export type { CapacityCell, CapacityRow, CapacityTotals, ResourceKind };
 
 export interface Resource {
   id: string;
@@ -30,7 +31,7 @@ export interface Resource {
   billRate?: number;
   /**
    * Per-resource MANUAL OVERRIDE of the role's rate card, in **€/DAY**. `null`/
-   * `undefined` = inherit the card default. The form binds the Cost-rate (€/gg)
+   * `undefined` = inherit the card default. The form binds the Cost-rate (€/day)
    * input here; the server maps it onto the resources.cost_rate column. Phase E.
    */
   costRateOverride?: number | null;
@@ -66,6 +67,15 @@ export interface Resource {
    * `Setting` keyed `hoursPerDay`. Time-phased allocation (B1).
    */
   contractHoursPerDay?: number;
+  /**
+   * Resource kind (C1). 'internal' is a real person; 'dummy' is a placeholder
+   * for a person not yet identified; 'subco' is an external collaborator
+   * belonging to a vendor. Optional on the wire for backward compatibility —
+   * read it through `kindOf()`, which defaults an absent value to 'internal'.
+   */
+  kind?: ResourceKind;
+  /** Vendor a 'subco' resource belongs to (FK to the vendors catalog). Required for subco, absent otherwise. */
+  vendorId?: string;
 }
 
 export interface ResourceRequest {
@@ -152,6 +162,14 @@ export interface AssignmentAllocation {
   from?: string;
   to?: string;
   contractHoursPerDay: number;
+  /**
+   * The resource's kind (C1), normalized (`kindOf`) server-side. Lets the
+   * calendar decide whether to offer the multi-FTE selector and widen the
+   * per-day capacity hint (`dailyCapFor`). Optional on the wire for backward
+   * compatibility with pre-C1 clients/fixtures — read it through `kindOf()`,
+   * which defaults an absent value to 'internal'.
+   */
+  resourceKind?: ResourceKind;
   /** Per-month lifecycle rows for the requested span (B3). */
   months?: AssignmentMonth[];
   days: AssignmentDay[];
@@ -197,6 +215,13 @@ export interface AllocationApprovalRow {
   resourceId: string;
   resourceName: string;
   managerId?: string;
+  /**
+   * C1: the resource's kind, normalized (`kindOf`) server-side — never absent.
+   * A dummy/subco row has no capacity to saturate (manual §4.3), so the UI
+   * must skip the saturation band/percentage for any kind other than
+   * 'internal' and show the hours plainly instead.
+   */
+  kind: ResourceKind;
   contractHoursPerDay: number;
   targetHours: Record<string, number>;
   totalHours: Record<string, number>;
@@ -227,12 +252,15 @@ export interface AllocationDecisionResult {
 /**
  * Envelope returned by `GET /capacity/monthly` (B2): a monthly FTE
  * capacity/demand rollup across resources. `months` are the requested
- * ('YYYY-MM') buckets; `rows` carry each resource's per-month cells; `totals`
- * aggregates confirmed/planned demand and capacity FTE per month.
+ * ('YYYY-MM') buckets; `rows` carry each internal resource's per-month cells;
+ * `totals` aggregates confirmed/planned demand and capacity FTE per month.
+ * `demandRows` (C1) carries dummy/subco rows — same monthly cells, but they
+ * contribute no capacity or headcount, only `totals[month].demandFteUncovered`.
  */
 export interface CapacityMonthly {
   months: string[];
   rows: CapacityRow[];
+  demandRows: CapacityRow[];
   totals: Record<string, CapacityTotals>;
 }
 

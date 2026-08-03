@@ -20,10 +20,21 @@ import type { SemaphoreBand } from '../services/capacity.util';
 import { monthsInRange } from '../services/capacity.util';
 
 /** Empty envelope used until auth settles (and as the resource default). */
-const EMPTY: CapacityMonthly = { months: [], rows: [], totals: {} };
+const EMPTY: CapacityMonthly = { months: [], rows: [], demandRows: [], totals: {} };
 
 /** How many months to pad the range-selector option list beyond the loaded window. */
 const OPTION_PAD_MONTHS = 6;
+
+/**
+ * CSV `Section` values. The export flattens the screen's two blocks into one
+ * sheet, so every line has to say which it belongs to — and the demand block's
+ * Band cells key off this discriminator rather than the row's inert `band`.
+ */
+const SECTION_INTERNAL = 'Internal capacity';
+const SECTION_DEMAND = 'Uncovered demand';
+
+/** A `CapacityRow` tagged with the block it came from, for the flattened CSV. */
+type ExportRow = CapacityRow & { section: string };
 
 /** Per-band presentation: label (WCAG text, not colour alone) + design-system tone tokens. */
 interface BandMeta {
@@ -70,6 +81,27 @@ interface RowVm {
   resourceId: string;
   resourceName: string;
   cells: CellVm[];
+}
+
+/**
+ * C1: one rendered demand-grid cell. Dummy/subco cells share the server's
+ * `CapacityCell` shape but never carry a band — no `meta`/`band` fields here,
+ * so the template has nothing to accidentally tint.
+ */
+interface DemandCellVm {
+  month: string;
+  /** False when the resource has no cell that month (inactive). */
+  present: boolean;
+  plannedFte: number;
+  plannedHours: number;
+  confirmedHours: number;
+  aria: string;
+}
+
+interface DemandRowVm {
+  resourceId: string;
+  resourceName: string;
+  cells: DemandCellVm[];
 }
 
 interface TotalsVm {
@@ -130,11 +162,15 @@ function shiftMonth(month: string, delta: number): string {
               </select>
             </label>
           }
+          <!-- C1: a window whose only content is uncovered demand (every planned
+               hour on dummies, nobody internal in range) is still exportable —
+               gating on the internal rows alone made the one figure the
+               forecast block needs unreachable. -->
           <div class="flex items-center gap-2">
-            <button type="button" (click)="exportCsv()" [disabled]="rows().length === 0" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
+            <button type="button" (click)="exportCsv()" [disabled]="!hasExportableRows()" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
               <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> CSV
             </button>
-            <button type="button" (click)="exportJson()" [disabled]="rows().length === 0" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
+            <button type="button" (click)="exportJson()" [disabled]="!hasExportableRows()" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
               <mat-icon class="text-[18px] w-[18px] h-[18px]">data_object</mat-icon> JSON
             </button>
           </div>
@@ -150,7 +186,7 @@ function shiftMonth(month: string, delta: number): string {
 
       <!-- KPI strip — first month in the range. -->
       @if (firstMonth(); as fm) {
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
           <div class="command-kpi">
             <p class="command-kpi-label">Planned Demand — {{ monthLabel(fm) }}</p>
             <p class="command-kpi-value font-mono tabular-nums" data-test="kpi-planned">{{ kpiPlanned() | number:'1.1-1' }} <span class="text-base font-semibold text-ink-muted">FTE</span></p>
@@ -162,6 +198,10 @@ function shiftMonth(month: string, delta: number): string {
           <div class="command-kpi" [class.danger]="kpiOver() > 0">
             <p class="command-kpi-label">Overbooked Resources</p>
             <p class="command-kpi-value font-mono tabular-nums" [class.text-critical-text]="kpiOver() > 0" data-test="kpi-over">{{ kpiOver() }}</p>
+          </div>
+          <div class="command-kpi" [class.danger]="kpiUncovered() > 0">
+            <p class="command-kpi-label">Uncovered Demand — {{ monthLabel(fm) }}</p>
+            <p class="command-kpi-value font-mono tabular-nums" [class.text-critical-text]="kpiUncovered() > 0" data-test="kpi-uncovered">{{ kpiUncovered() | number:'1.1-1' }} <span class="text-base font-semibold text-ink-muted">FTE</span></p>
           </div>
         </div>
       }
@@ -199,7 +239,8 @@ function shiftMonth(month: string, delta: number): string {
                         <td class="px-2 py-2 align-top">
                           @if (c.present) {
                             <div class="rounded-lg ring-1 p-2 text-center {{ c.meta.cell }} {{ c.meta.ring }}"
-                                 [attr.data-test]="'cell-' + row.resourceId + '-' + c.month"
+                                 data-test="band-cell"
+                                 [attr.data-cell]="row.resourceId + '-' + c.month"
                                  [attr.data-band]="c.band"
                                  [attr.aria-label]="c.aria">
                               <div class="text-base font-bold font-mono tabular-nums {{ c.meta.text }}">{{ c.plannedPct | number:'1.0-0' }}%</div>
@@ -247,6 +288,62 @@ function shiftMonth(month: string, delta: number): string {
           </div>
         }
       </app-list-state>
+
+      <!-- Uncovered demand (C1): dummy/subco resources have no capacity of their
+           own, so they never appear in the grid above or its semaphore band —
+           this section shows what is booked against them instead, plainly, with
+           no band tint (mirrors how allocation-approvals.component.ts suppresses
+           the band for the same kinds). -->
+      @if (demandRows().length > 0) {
+        <div class="space-y-3">
+          <div>
+            <h2 class="text-lg font-bold text-ink">Uncovered demand</h2>
+            <p class="text-sm text-ink-secondary">Booked against dummy placeholders and subcontractors, which have no capacity of their own — this is demand waiting on real headcount, not the saturation of an existing resource.</p>
+          </div>
+          <div class="command-card overflow-hidden">
+            <div class="overflow-x-auto">
+              <table class="command-data-table">
+                <thead class="bg-surface-muted border-b border-line text-ink-muted">
+                  <tr>
+                    <th class="px-4 sm:px-6 py-4 font-semibold uppercase tracking-wider text-xs text-left sticky left-0 bg-surface-muted z-10">Resource</th>
+                    @for (m of months(); track m) {
+                      <th class="px-3 py-4 font-semibold uppercase tracking-wider text-xs text-center min-w-[7rem]">{{ monthLabel(m) }}</th>
+                    }
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-line">
+                  @for (row of demandRows(); track row.resourceId) {
+                    <tr class="hover:bg-surface-muted transition-colors" data-test="demand-row">
+                      <td class="px-4 sm:px-6 py-4 font-bold text-ink whitespace-nowrap sticky left-0 bg-surface z-10">{{ row.resourceName }}</td>
+                      @for (c of row.cells; track c.month) {
+                        <td class="px-2 py-2 align-top">
+                          @if (c.present) {
+                            <div class="rounded-lg ring-1 ring-line bg-surface-muted p-2 text-center" [attr.aria-label]="c.aria">
+                              <div class="text-base font-bold font-mono tabular-nums text-ink">{{ c.plannedFte | number:'1.1-1' }} <span class="text-[10px] font-semibold text-ink-muted">FTE</span></div>
+                              <div class="mt-1 text-[10px] font-mono tabular-nums text-ink-muted">
+                                {{ c.plannedHours | number:'1.0-0' }}h planned
+                                @if (c.confirmedHours > 0) {
+                                  ({{ c.confirmedHours | number:'1.0-0' }}h confirmed)
+                                }
+                              </div>
+                            </div>
+                          } @else {
+                            <div class="rounded-lg border border-dashed border-line bg-surface-muted p-2 text-center text-ink-muted"
+                                 [attr.aria-label]="row.resourceName + ' — ' + monthLabel(c.month) + ': not active'">
+                              <div class="text-sm font-mono tabular-nums">—</div>
+                              <div class="text-[10px] uppercase tracking-wide">n/a</div>
+                            </div>
+                          }
+                        </td>
+                      }
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      }
     </div>
   `,
 })
@@ -322,6 +419,21 @@ export class CapacityComponent {
     }));
   });
 
+  /** C1: dummy/subco rows — same monthly cells as `rows`, but rendered
+   *  without a semaphore band (see `toDemandCellVm`). */
+  protected demandRows = computed<DemandRowVm[]>(() => {
+    const value = this.capacityRes.value();
+    const months = value.months;
+    return value.demandRows.map((r) => ({
+      resourceId: r.resourceId,
+      resourceName: r.resourceName,
+      cells: months.map((m) => this.toDemandCellVm(r, m)),
+    }));
+  });
+
+  /** Either block has something to write — see the export buttons' disabled state. */
+  protected hasExportableRows = computed(() => this.rows().length > 0 || this.demandRows().length > 0);
+
   /** Per-month totals row: confirmed/planned demand vs capacity FTE. */
   protected totalsRow = computed<TotalsVm[]>(() => {
     const value = this.capacityRes.value();
@@ -349,6 +461,11 @@ export class CapacityComponent {
     const fm = this.firstMonth();
     if (!fm) return 0;
     return this.capacityRes.value().rows.filter((r) => r.monthly[fm]?.band === 'over').length;
+  });
+  /** C1: planned FTE booked on dummy/subco for the first month — capacity that does not exist yet. */
+  protected kpiUncovered = computed(() => {
+    const fm = this.firstMonth();
+    return fm ? this.capacityRes.value().totals[fm]?.demandFteUncovered ?? 0 : 0;
   });
 
   /** Range-selector options: the loaded window padded by ±OPTION_PAD_MONTHS so the user can narrow OR extend. */
@@ -416,18 +533,66 @@ export class CapacityComponent {
     return { month, present: true, band: cell.band, meta, plannedPct, confirmedPct, confirmedWidth, aria };
   }
 
+  /**
+   * Build one demand-cell view model. C1: a dummy/subco has no capacity to
+   * saturate (manual §4.3, mirrors `AllocationApprovalsComponent.toCellVm`'s
+   * `tracksSaturation` gate) — the accessible name states the hours plainly
+   * and never announces a band, since the server's `band: 'idle'` on this
+   * cell is an inert placeholder, not a real judgement.
+   */
+  private toDemandCellVm(row: CapacityRow, month: string): DemandCellVm {
+    const cell = row.monthly[month];
+    if (!cell) {
+      return {
+        month, present: false, plannedFte: 0, plannedHours: 0, confirmedHours: 0,
+        aria: `${row.resourceName} — ${this.monthLabelLong(month)}: not active`,
+      };
+    }
+    const aria =
+      `${row.resourceName}, ${this.monthLabelLong(month)}: ${Math.round(cell.plannedHours)}h planned ` +
+      `(${cell.ftePlanned.toFixed(1)} FTE), ${Math.round(cell.confirmedHours)}h confirmed — ` +
+      `uncovered demand, no capacity of its own to band.`;
+    return { month, present: true, plannedFte: cell.ftePlanned, plannedHours: cell.plannedHours, confirmedHours: cell.confirmedHours, aria };
+  }
+
   // --- export (SSR-safe; guarded on the browser) ---------------------------
+  /**
+   * CSV of BOTH blocks the screen shows: the internal capacity grid and the C1
+   * uncovered-demand section. Exporting only `rows` would silently drop the
+   * dummy/subco demand a user just read off the KPI strip ("3.0 FTE uncovered
+   * demand"), and would disagree with `exportJson()`, which serialises the whole
+   * envelope. `demandFteUncovered` is the figure the hiring/subco forecast block
+   * consumes, and this file is the hand-off artefact.
+   *
+   * A leading Section column keeps the two blocks apart. The Band cells of a
+   * demand row read 'n/a', never the envelope's inert `band: 'idle'` — a
+   * dummy/subco has no capacity to saturate, so it has no band (spec §4.3), and
+   * writing 'idle' into a spreadsheet would invite exactly the misreading the
+   * on-screen table is careful to avoid.
+   */
   protected exportCsv(): void {
     if (!isPlatformBrowser(this.platformId)) return;
+    downloadCsv('capacity-monthly.csv', this.buildCsv());
+  }
+
+  /** The exact CSV text `exportCsv()` writes — split out so it is assertable without a DOM download. */
+  protected buildCsv(): string {
     const value = this.capacityRes.value();
-    const cols: CsvColumn<CapacityRow>[] = [{ key: 'resourceName', header: 'Resource' }];
+    const rows: ExportRow[] = [
+      ...value.rows.map((r) => ({ ...r, section: SECTION_INTERNAL })),
+      ...value.demandRows.map((r) => ({ ...r, section: SECTION_DEMAND })),
+    ];
+    const cols: CsvColumn<ExportRow>[] = [
+      { key: 'section', header: 'Section' },
+      { key: 'resourceName', header: 'Resource' },
+    ];
     for (const m of value.months) {
       const label = this.monthLabel(m);
       cols.push({ key: m, header: `${label} Planned FTE`, map: (r) => (r.monthly[m]?.ftePlanned ?? 0).toFixed(2) });
       cols.push({ key: m, header: `${label} Confirmed FTE`, map: (r) => (r.monthly[m]?.fteConfirmed ?? 0).toFixed(2) });
-      cols.push({ key: m, header: `${label} Band`, map: (r) => r.monthly[m]?.band ?? 'n/a' });
+      cols.push({ key: m, header: `${label} Band`, map: (r) => (r.section === SECTION_DEMAND ? 'n/a' : r.monthly[m]?.band ?? 'n/a') });
     }
-    downloadCsv('capacity-monthly.csv', toCsv(value.rows, cols));
+    return toCsv(rows, cols);
   }
 
   protected exportJson(): void {

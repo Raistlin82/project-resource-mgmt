@@ -137,7 +137,11 @@ export async function initPersistence(): Promise<void> {
   //    Each entry is guarded independently by its own count(*) === 0 check.
   // Roots (no outgoing FKs to other seeded tables).
   await seedIfEmpty(database, schema.customers, seed.customers);
-  await seedIfEmpty(database, schema.resources, seed.resources);
+  // C1: resources.vendorId FKs to vendors (subco only), so vendors must be
+  // seeded first. vendors itself has no outgoing FKs, so hoisting it here
+  // ahead of its own "Customizing catalogs" batch below is safe.
+  await seedIfEmpty(database, schema.vendors, seed.vendors);
+  await seedIfEmpty(database, schema.resources, seed.resources); // -> vendors (C1, subco only)
   await seedIfEmpty(database, schema.languages, seed.languages);
   await seedIfEmpty(database, schema.fxRates, seed.fxRates);
   await seedIfEmpty(database, schema.settings, seed.settings); // global settings (hoursPerDay)
@@ -158,7 +162,8 @@ export async function initPersistence(): Promise<void> {
   await seedIfEmpty(database, schema.industries, seed.industries);
   await seedIfEmpty(database, schema.costCategories, seed.costCategories);
   await seedIfEmpty(database, schema.partnerRoles, seed.partnerRoles);
-  await seedIfEmpty(database, schema.vendors, seed.vendors);
+  // vendors is seeded earlier, above, alongside the other roots — resources
+  // (C1) now FKs to it, and resources seeds before this batch runs.
   // Rate cards (Phase E): role-based default rates. No DB FK (role/org are name
   // strings matched at resolve time), so ordering is unconstrained.
   await seedIfEmpty(database, schema.rateCards, seed.rateCards);

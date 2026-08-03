@@ -11,7 +11,7 @@ import { DecimalPipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { of } from 'rxjs';
 import { rxResource } from '@angular/core/rxjs-interop';
-import { AllocationApprovalFeed, AllocationApprovalRow, ApiService } from '../services/api.service';
+import { AllocationApprovalFeed, AllocationApprovalRow, ApiService, ResourceKind } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { ListStateComponent } from '../shared/list-state.component';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
@@ -57,11 +57,21 @@ interface CellVm {
   band: SemaphoreBand;
   meta: BandMeta;
   aria: string;
+  /**
+   * C1: false for a dummy/subco row — they have no capacity to saturate
+   * (spec §4.3), so a percentage/band computed against their un-widened
+   * `contractHoursPerDay` target would be a meaningless (and often wildly
+   * alarming) verdict for a legitimately multi-FTE booking. `total`/`target`
+   * stay visible either way; only the tint and the band LABEL are gated on
+   * this — never the numbers themselves.
+   */
+  tracksSaturation: boolean;
 }
 
 interface RowVm {
   resourceId: string;
   resourceName: string;
+  kind: ResourceKind;
   /** At least one item in the CURRENT (filtered) listing is 'Requested'. */
   hasPending: boolean;
   cells: CellVm[];
@@ -207,17 +217,28 @@ function shiftMonth(month: string, delta: number): string {
                         @if (row.hasPending) {
                           <span class="command-status amber uppercase ml-2 text-[10px]">Pending</span>
                         }
+                        <!-- C1: explains the neutral (uncoloured) cells to the right — a
+                             dummy/subco has no saturation band, not a missing one. -->
+                        @if (row.kind !== 'internal') {
+                          <span class="command-status uppercase ml-2 text-[10px]">{{ row.kind }}</span>
+                        }
                       </td>
                       @for (c of row.cells; track c.month) {
                         <td class="px-2 py-2 align-top">
                           <div class="rounded-lg ring-1 p-2 text-center {{ c.meta.cell }} {{ c.meta.ring }}"
                                [attr.data-test]="'cell-' + row.resourceId + '-' + c.month"
-                               [attr.data-band]="c.band"
+                               [attr.data-band]="c.tracksSaturation ? c.band : null"
                                [attr.aria-label]="c.aria">
                             <div class="text-sm font-bold font-mono tabular-nums {{ c.meta.text }}">
                               {{ c.total | number:'1.0-1' }} <span class="text-ink-muted font-normal">/ {{ c.target | number:'1.0-1' }}</span>
                             </div>
-                            <div class="text-[10px] font-bold uppercase tracking-wide {{ c.meta.text }}">{{ c.meta.label }}</div>
+                            <!-- C1: dummy/subco have no capacity to saturate (spec §4.3) — the
+                                 band LABEL is the saturation judgement, so it is never shown
+                                 for them (the neutral 'idle' tokens above only supply a plain,
+                                 uncoloured box, not a claim). -->
+                            @if (c.tracksSaturation) {
+                              <div class="text-[10px] font-bold uppercase tracking-wide {{ c.meta.text }}">{{ c.meta.label }}</div>
+                            }
                           </div>
                         </td>
                       }
@@ -346,6 +367,7 @@ export class AllocationApprovalsComponent {
     return value.rows.map(r => ({
       resourceId: r.resourceId,
       resourceName: r.resourceName,
+      kind: r.kind,
       hasPending: r.items.some(i => i.status === 'Requested'),
       cells: months.map(m => this.toCellVm(r, m)),
     }));
@@ -481,16 +503,31 @@ export class AllocationApprovalsComponent {
    * `totalHours`/`targetHours` maps — NEVER re-derived from `items`, since
    * `items` is narrowed by the status filter while these totals are not
    * (server contract this page must not misrepresent).
+   *
+   * C1: a dummy/subco row's `contractHoursPerDay` (and therefore `target`) is
+   * deliberately NOT widened by the multi-FTE factor (the server keeps it at
+   * the 1-FTE-equivalent base — see `GET /allocation-approvals` in
+   * server.ts), so a percentage/band computed against it would call a
+   * legitimate 20h/day dummy booking "250% — Over" on the approver's
+   * dashboard. Those rows skip the saturation judgement entirely
+   * (`tracksSaturation: false`) — the template renders the hours plainly,
+   * neutrally styled, with no band tint or label. The numbers themselves
+   * (`total`/`target`) are still returned and still shown.
    */
   private toCellVm(row: AllocationApprovalRow, month: string): CellVm {
     const target = row.targetHours[month] ?? 0;
     const total = row.totalHours[month] ?? 0;
+    const tracksSaturation = row.kind === 'internal';
+    if (!tracksSaturation) {
+      const aria = `${row.resourceName}, ${this.monthLabelLong(month)}: ${Math.round(total)}h booked (${row.kind} — no saturation band).`;
+      return { month, total, target, band: 'idle', meta: BAND_META.idle, aria, tracksSaturation };
+    }
     const pct = target > 0 ? (total / target) * 100 : 0;
     const band = semaphoreBand(pct);
     const meta = BAND_META[band];
     const aria =
       `${row.resourceName}, ${this.monthLabelLong(month)}: ${Math.round(total)}h of ${Math.round(target)}h target ` +
       `(${Math.round(pct)}%). Utilisation band: ${meta.label}.`;
-    return { month, total, target, band, meta, aria };
+    return { month, total, target, band, meta, aria, tracksSaturation };
   }
 }

@@ -10,11 +10,13 @@ import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-int
 import { of } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Resource, ProjectRole, Country, City, ResourceOrganization, RateCard } from '../services/api.service';
+import { ApiService, Resource, ProjectRole, Country, City, ResourceOrganization, RateCard, Vendor } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 import { ListStateComponent } from '../shared/list-state.component';
+import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
+import { RESOURCE_KINDS, RESOURCE_KIND_LABELS, countsTowardInternalCapacity, kindOf, type ResourceKind } from '../services/resource-kind.util';
 
 /** Today as an ISO 'YYYY-MM-DD' string, used for status derivation + the terminate default. */
 function todayIso(): string {
@@ -41,7 +43,7 @@ const REMOTE_LOCATION = 'Remote';
 @Component({
   selector: 'app-resources',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective, ListStateComponent],
+  imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective, ListStateComponent, ResourceKindBadgeComponent],
   template: `
     <div class="max-w-6xl mx-auto space-y-8">
       <div class="flex items-center justify-between">
@@ -70,6 +72,14 @@ const REMOTE_LOCATION = 'Remote';
                    class="size-4 rounded border-line-strong text-accent focus:ring-2 focus:ring-accent/25">
             Active only
           </label>
+          <!-- Kind filter (C1): isolate internal / dummy / subco rows. -->
+          <select [ngModel]="kindFilter()" (ngModelChange)="kindFilter.set($event)"
+                  aria-label="Filter by kind" class="command-select sm:w-52">
+            <option value="">All kinds</option>
+            @for (opt of resourceKindOptions; track opt.value) {
+              <option [value]="opt.value">{{ opt.label }}</option>
+            }
+          </select>
         </div>
 
         <app-list-state
@@ -94,7 +104,12 @@ const REMOTE_LOCATION = 'Remote';
             <tbody>
               @for (r of filteredResources(); track r.id) {
                 <tr>
-                  <td class="font-bold">{{ r.name }}</td>
+                  <td class="font-bold">
+                    <span class="inline-flex items-center gap-2">
+                      {{ r.name }}
+                      <app-resource-kind-badge [kind]="r.kind" />
+                    </span>
+                  </td>
                   <td>{{ r.role }}</td>
                   <td>{{ r.organization || '—' }}</td>
                   <td>{{ r.location || '—' }}</td>
@@ -175,6 +190,40 @@ const REMOTE_LOCATION = 'Remote';
                   <p role="alert" class="mt-1 text-xs text-critical-text">Role is required.</p>
                 }
               </div>
+
+              <div>
+                <label for="res-kind" class="block text-sm font-medium text-ink-secondary mb-1">Kind *</label>
+                <!-- Resource kind (C1): 'internal' is a real employee; 'dummy' is a
+                     placeholder awaiting hire; 'subco' is an external collaborator
+                     tied to a vendor (the field below, shown only for 'subco'). -->
+                <select id="res-kind" formControlName="kind" class="command-select">
+                  @for (opt of resourceKindOptions; track opt.value) {
+                    <option [value]="opt.value">{{ opt.label }}</option>
+                  }
+                </select>
+              </div>
+
+              @if (kindValue() === 'subco') {
+                <div>
+                  <label for="res-vendor" class="block text-sm font-medium text-ink-secondary mb-1">Vendor *</label>
+                  <!-- Vendor is a config FK bound to the vendors catalog by ID, required
+                       exactly when kind is 'subco' (validator toggled dynamically —
+                       see the constructor). -->
+                  <select id="res-vendor" data-test="res-vendor" formControlName="vendorId" class="command-select"
+                          [attr.aria-invalid]="invalid('vendorId')">
+                    <option value="">Select a vendor...</option>
+                    @for (v of vendorOptions(); track v.id) {
+                      <option [value]="v.id">{{ v.name }}</option>
+                    }
+                    @if (orphanVendorId(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
+                  @if (invalid('vendorId')) {
+                    <p role="alert" class="mt-1 text-xs text-critical-text">A vendor is required for a subcontractor.</p>
+                  }
+                </div>
+              }
 
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
@@ -259,12 +308,12 @@ const REMOTE_LOCATION = 'Remote';
                    Leaving an input empty INHERITS the card; a typed value OVERRIDES it. -->
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label for="res-cost" class="block text-sm font-medium text-ink-secondary mb-1">Cost rate (€/gg)</label>
+                  <label for="res-cost" class="block text-sm font-medium text-ink-secondary mb-1">Cost rate (€/day)</label>
                   <input id="res-cost" type="number" min="0" step="1" formControlName="costRateOverride" class="command-input"
                          [placeholder]="inheritedRate() ? ('Inherited: ' + inheritedRate()!.costRate) : 'e.g. 600'">
                 </div>
                 <div>
-                  <label for="res-bill" class="block text-sm font-medium text-ink-secondary mb-1">Bill rate (€/gg)</label>
+                  <label for="res-bill" class="block text-sm font-medium text-ink-secondary mb-1">Bill rate (€/day)</label>
                   <input id="res-bill" type="number" min="0" step="1" formControlName="billRateOverride" class="command-input"
                          [placeholder]="inheritedRate() ? ('Inherited: ' + inheritedRate()!.billRate) : 'e.g. 1120'">
                 </div>
@@ -272,7 +321,7 @@ const REMOTE_LOCATION = 'Remote';
               @if (inheritedRate(); as ir) {
                 <p class="-mt-2 text-xs text-[var(--cc-muted)]">
                   Leave empty to inherit the <strong class="text-ink-secondary">{{ form.controls.role.value }}</strong>
-                  rate card (cost {{ ir.costRate }} · bill {{ ir.billRate }} {{ ir.currency }}/giorno). Enter a value to override.
+                  rate card (cost {{ ir.costRate }} · bill {{ ir.billRate }} {{ ir.currency }}/day). Enter a value to override.
                 </p>
               } @else if (form.controls.role.value) {
                 <p class="-mt-2 text-xs text-[var(--cc-muted)]">No rate card for this role — enter cost/bill rates manually, or define one under Configuration → Rate Cards.</p>
@@ -383,6 +432,15 @@ export class ResourcesComponent {
   });
   rateCards = this.rateCardsRes.value;
 
+  // VENDOR (C1): the catalog a 'subco' resource's vendorId references. Open read,
+  // gated on authReady like the other config catalogs above.
+  protected readonly vendorsRes = rxResource<Vendor[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getVendors() : of<Vendor[]>([])),
+    defaultValue: [] as Vendor[],
+  });
+  vendorOptions = this.vendorsRes.value;
+
   // The selected country in the location picker. '' = none, '__REMOTE__' = the Remote
   // sentinel (stored location 'Remote'); else an ISO-2 country code filtering the city
   // list. A manual override (null = "derive from the stored location") lets the user
@@ -418,13 +476,30 @@ export class ResourcesComponent {
     return this.orgOptions().some(o => o.name === current) ? null : current;
   });
 
+  // ORPHAN VALUE: a stored vendorId not in the catalog (e.g. the vendor was
+  // deleted) stays selectable as a disabled option. Unlike organization/city/role
+  // above, vendor is keyed by ID rather than name, so there is no catalog-independent
+  // display name to recover for a vendor that's gone — the raw id is shown, same as
+  // those name-keyed fields show their raw stored value when it's no longer listed.
+  private editingVendorId = signal<string>('');
+  orphanVendorId = computed<string | null>(() => {
+    const current = this.editingVendorId();
+    if (!current) return null;
+    return this.vendorOptions().some(v => v.id === current) ? null : current;
+  });
+
   // PEOPLE MANAGER (allocation-approval workflow): managerId points at another
   // resource. The dropdown offers only ACTIVE resources (terminated excluded) and
   // never the resource being edited (nobody manages themselves). Sorted by name.
+  // C1: nor a dummy or a subco — a placeholder is nobody, and an external
+  // collaborator is not in the internal reporting line. Both would otherwise be
+  // offered as People Managers and would then appear as the approver on the
+  // allocation-approval feed. Same `countsTowardInternalCapacity` split the
+  // capacity rollup and the portfolio KPIs use.
   managerOptions = computed<Resource[]>(() => {
     const editingId = this.editingId();
     return this.resources()
-      .filter(r => !this.isTerminated(r) && r.id !== editingId)
+      .filter(r => !this.isTerminated(r) && r.id !== editingId && countsTowardInternalCapacity(kindOf(r)))
       .sort((a, b) => a.name.localeCompare(b.name));
   });
   // ORPHAN VALUE: when editing, a stored managerId that isn't in the active option
@@ -461,12 +536,19 @@ export class ResourcesComponent {
   search = signal('');
   /** "Active only" filter toggle — true by default (terminated rows hidden). */
   activeOnly = signal(true);
+  /** Kind filter (C1): '' = all kinds; otherwise isolate internal/dummy/subco rows. */
+  kindFilter = signal<'' | ResourceKind>('');
+  /** Kind `<select>` option list (value + readable label), shared by the kind filter and the form's kind select. */
+  protected readonly resourceKindOptions: { value: ResourceKind; label: string }[] =
+    RESOURCE_KINDS.map(k => ({ value: k, label: RESOURCE_KIND_LABELS[k] }));
 
   filteredResources = computed(() => {
     const q = this.search().toLowerCase();
     const activeOnly = this.activeOnly();
+    const kind = this.kindFilter();
     return this.resources().filter(r => {
       if (activeOnly && this.isTerminated(r)) return false;
+      if (kind && kindOf(r) !== kind) return false;
       return [r.name, r.role, r.organization, r.location].some(
         v => (v ?? '').toLowerCase().includes(q),
       );
@@ -491,6 +573,11 @@ export class ResourcesComponent {
     costRateOverride: new FormControl<number | null>(null),
     billRateOverride: new FormControl<number | null>(null),
     hireDate: new FormControl('', Validators.required),
+    // C1: resource kind + the vendor FK, required only for 'subco'. The
+    // required-ness is wired dynamically in the constructor below (kind's
+    // valueChanges), not as a static validator here — see that comment for why.
+    kind: new FormControl<ResourceKind>('internal', { nonNullable: true }),
+    vendorId: new FormControl(''),
   });
 
   // Live role/organization values drive the inherited-rate lookup as the user edits.
@@ -505,13 +592,59 @@ export class ResourcesComponent {
     return forRole.find(c => c.organization && c.organization === org) ?? forRole.find(c => !c.organization) ?? null;
   });
 
+  // Live kind value drives the vendor field's visibility in the template (C1).
+  protected readonly kindValue = toSignal(this.form.controls.kind.valueChanges, { initialValue: this.form.controls.kind.value });
+
+  constructor() {
+    // C1: vendorId must be required exactly when kind === 'subco', and react
+    // when the user switches kind — a validator set once at construction
+    // wouldn't. Chosen approach: subscribe to kind's valueChanges and toggle
+    // Validators.required on vendorId directly (rather than a form-level
+    // cross-field validator), because the invalid state needs to live on the
+    // vendorId CONTROL itself — that's what the template's invalid('vendorId')
+    // check and the vendor select's aria-invalid read, and what the tests
+    // assert via form.controls.vendorId.valid. RxJS's valueChanges emits
+    // synchronously on setValue, so this takes effect immediately with no
+    // extra change-detection plumbing.
+    this.form.controls.kind.valueChanges.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(kind => this.syncVendorRequirement(kind));
+  }
+
+  /**
+   * Toggle vendorId's required-ness (and clear a stale value when kind isn't
+   * 'subco') to match the given kind. Called two ways:
+   *  - reactively, from the kind.valueChanges subscription above, for live edits
+   *    while the form is open;
+   *  - explicitly, from openForm() right after form.reset(), for loads.
+   * The explicit call in openForm() is NOT redundant with the reactive one:
+   * FormGroup.reset() resets each child control independently, in the group's
+   * declaration order (kind before vendorId here), so relying solely on the
+   * valueChanges side effect would make the freshly-loaded validity state depend
+   * on where 'kind' happens to sit relative to 'vendorId' in the FormGroup
+   * literal above — an implicit, easy-to-break coupling. Calling this again,
+   * explicitly, after reset() has fully settled both controls removes that
+   * dependency: the post-load state is correct by direct assertion, not by
+   * incidental ordering.
+   */
+  private syncVendorRequirement(kind: ResourceKind): void {
+    const vendorId = this.form.controls.vendorId;
+    if (kind === 'subco') {
+      vendorId.setValidators(Validators.required);
+    } else {
+      vendorId.clearValidators();
+      // A non-subco resource must not carry a vendor (the server REFUSES it) —
+      // clear any selection made before the user switched kind away from subco.
+      if (vendorId.value) vendorId.setValue('', { emitEvent: false });
+    }
+    vendorId.updateValueAndValidity({ emitEvent: false });
+  }
+
   /** A resource is Terminated when terminationDate is set to a date on/before today. */
   isTerminated(r: Resource): boolean {
     return !!r.terminationDate && r.terminationDate <= todayIso();
   }
 
   /** Whether a control should show its inline error (touched/dirty + invalid). */
-  invalid(name: 'name' | 'role' | 'capacity' | 'hireDate'): boolean {
+  invalid(name: 'name' | 'role' | 'capacity' | 'hireDate' | 'vendorId'): boolean {
     const c = this.form.get(name);
     return !!c && c.invalid && (c.touched || c.dirty);
   }
@@ -523,6 +656,7 @@ export class ResourcesComponent {
       this.editingLocation.set(r.location ?? '');
       this.editingOrg.set(r.organization ?? '');
       this.editingManagerId.set(r.managerId ?? '');
+      this.editingVendorId.set(r.vendorId ?? '');
       this.countryOverride.set(null); // derive country from the stored location
       this.form.reset({
         name: r.name,
@@ -536,15 +670,21 @@ export class ResourcesComponent {
         costRateOverride: r.costRateOverride ?? null,
         billRateOverride: r.billRateOverride ?? null,
         hireDate: r.hireDate ?? '',
+        kind: kindOf(r),
+        vendorId: r.vendorId ?? '',
       });
+      // Explicit, not incidental — see syncVendorRequirement()'s doc comment.
+      this.syncVendorRequirement(kindOf(r));
     } else {
       this.editingId.set(null);
       this.editingRole.set('');
       this.editingLocation.set('');
       this.editingOrg.set('');
       this.editingManagerId.set('');
+      this.editingVendorId.set('');
       this.countryOverride.set('');
-      this.form.reset({ name: '', role: '', managerId: '', organization: '', location: '', capacity: 40, costRateOverride: null, billRateOverride: null, hireDate: '' });
+      this.form.reset({ name: '', role: '', managerId: '', organization: '', location: '', capacity: 40, costRateOverride: null, billRateOverride: null, hireDate: '', kind: 'internal', vendorId: '' });
+      this.syncVendorRequirement('internal');
     }
     this.showForm.set(true);
   }
@@ -575,6 +715,11 @@ export class ResourcesComponent {
       costRateOverride: raw.costRateOverride == null ? null : Number(raw.costRateOverride),
       billRateOverride: raw.billRateOverride == null ? null : Number(raw.billRateOverride),
       hireDate: raw.hireDate ?? '',
+      // C1: kind + vendor. vendorId is cleared to '' whenever kind isn't 'subco'
+      // (see the constructor), so it's always safe to send as-is — the server
+      // normalises an empty string to absent.
+      kind: raw.kind,
+      vendorId: raw.vendorId ?? '',
     };
     const id = this.editingId();
     const op = id ? this.api.updateResource(id, payload) : this.api.createResource(payload);

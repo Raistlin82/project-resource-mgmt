@@ -1771,6 +1771,225 @@ async function checkLegacyAllocationApproval() {
   await req('DELETE', `/assignments/${assignmentId}`);
 }
 
+/**
+ * C1 — resource kinds. A subco must carry a vendor; nobody else may. The kind
+ * itself must be one of the three known values.
+ */
+async function checkResourceKinds() {
+  const vendors = await req('GET', '/vendors');
+  const vendorId = (vendors.body || [])[0]?.id;
+  check('C1 a vendor exists to attach a subco to', typeof vendorId === 'string', `vendors=${vendors.body?.length}`);
+  if (!vendorId) return;
+
+  const base = { role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, hireDate: '2026-01-01' };
+
+  // ADAPTER PARITY: the pre-C1 seeded resources must serve an explicit
+  // kind: 'internal' on BOTH backends. Postgres would apply the column DEFAULT
+  // even if the seed omitted it; the in-memory adapter would not, and the two
+  // would answer this GET with different JSON shapes.
+  const seededInternal = await req('GET', '/resources/1');
+  check('C1 a seeded pre-existing resource reports kind=internal',
+    seededInternal.status === 200 && seededInternal.body?.kind === 'internal',
+    `status=${seededInternal.status} kind=${JSON.stringify(seededInternal.body?.kind)}`);
+
+  const badKind = await req('POST', '/resources', { body: { ...base, name: 'C1 bad kind', kind: 'contractor' } });
+  check('C1 an unknown kind is rejected', badKind.status === 400, `status=${badKind.status}`);
+
+  const subcoNoVendor = await req('POST', '/resources', { body: { ...base, name: 'C1 subco no vendor', kind: 'subco' } });
+  check('C1 a subco without a vendor is rejected', subcoNoVendor.status === 400, `status=${subcoNoVendor.status}`);
+
+  const subcoBadVendor = await req('POST', '/resources', { body: { ...base, name: 'C1 subco bad vendor', kind: 'subco', vendorId: 'V-nope' } });
+  check('C1 a subco with an unknown vendor is rejected', subcoBadVendor.status === 400, `status=${subcoBadVendor.status}`);
+
+  const internalWithVendor = await req('POST', '/resources', { body: { ...base, name: 'C1 internal with vendor', kind: 'internal', vendorId } });
+  check('C1 a non-subco carrying a vendor is rejected', internalWithVendor.status === 400, `status=${internalWithVendor.status}`);
+
+  // POST /resources responds 201 Created (see src/server.ts), not the generic
+  // crud() 200 — matched here rather than asserting 200 to avoid a false FAIL.
+  const subco = await req('POST', '/resources', { body: { ...base, name: 'C1 subco ok', kind: 'subco', vendorId } });
+  check('C1 a subco with a vendor is created', subco.status === 201 && subco.body?.kind === 'subco', `status=${subco.status} kind=${subco.body?.kind}`);
+
+  const plain = await req('POST', '/resources', { body: { ...base, name: 'C1 plain resource' } });
+  check('C1 an omitted kind defaults to internal', plain.status === 201 && plain.body?.kind === 'internal', `kind=${plain.body?.kind}`);
+
+  // An empty-string vendorId is accepted (same as omitted) but must never be
+  // PERSISTED literally — it must normalize to absent on both create and update.
+  const emptyVendorCreate = await req('POST', '/resources', { body: { ...base, name: 'C1 empty vendorId is absent', vendorId: '' } });
+  check('C1 an empty-string vendorId on create is normalized to absent, not literal ""',
+    emptyVendorCreate.status === 201 && !('vendorId' in (emptyVendorCreate.body || {})),
+    `status=${emptyVendorCreate.status} vendorId=${JSON.stringify(emptyVendorCreate.body?.vendorId)}`);
+
+  // Same for an explicit null: pick() copies it straight through, so without a
+  // create-side strip the in-memory adapter (whose create() has no null step)
+  // would store a literal null while Postgres stores NULL and reads it back
+  // absent — a divergence in exactly the seam this normalization exists for.
+  const nullVendorCreate = await req('POST', '/resources', { body: { ...base, name: 'C1 null vendorId is absent', vendorId: null } });
+  check('C1 a null vendorId on create is normalized to absent, not literal null',
+    nullVendorCreate.status === 201 && !('vendorId' in (nullVendorCreate.body || {})),
+    `status=${nullVendorCreate.status} vendorId=${JSON.stringify(nullVendorCreate.body?.vendorId)}`);
+  // And it must survive a re-read, not just the create response.
+  if (nullVendorCreate.body?.id) {
+    const reread = await req('GET', `/resources/${nullVendorCreate.body.id}`);
+    check('C1 a null vendorId is still absent when the row is re-read',
+      reread.status === 200 && !('vendorId' in (reread.body || {})),
+      `status=${reread.status} vendorId=${JSON.stringify(reread.body?.vendorId)}`);
+  }
+
+  const emptyVendorPut = await req('PUT', `/resources/${plain.body.id}`, { body: { vendorId: '' } });
+  check('C1 an empty-string vendorId on PUT is normalized to absent, not literal ""',
+    emptyVendorPut.status === 200 && !('vendorId' in (emptyVendorPut.body || {})),
+    `status=${emptyVendorPut.status} vendorId=${JSON.stringify(emptyVendorPut.body?.vendorId)}`);
+
+  // --- PUT: the merged-state validation and the vendor-clear-on-demote path.
+  // Everything above is POST-only; none of it would fail if the entire
+  // merged-state block in src/server.ts's PUT /resources/:id handler were
+  // deleted. This is the trickiest part of the task and the ground Task 4's
+  // kind-change guard builds on directly, so it gets its own checks.
+  const vendorId2 = (vendors.body || [])[1]?.id;
+  check('C1 a second vendor exists to test a vendor-to-vendor move', typeof vendorId2 === 'string', `vendors=${vendors.body?.length}`);
+
+  // A kind-only PUT to 'subco' on a vendor-less row must be rejected — the
+  // MERGED state (new kind + the row's existing, absent vendor) is invalid.
+  const putKindToSubcoNoVendor = await req('PUT', `/resources/${plain.body.id}`, { body: { kind: 'subco' } });
+  check('C1 PUT kind-only to subco on a vendor-less row is rejected', putKindToSubcoNoVendor.status === 400, `status=${putKindToSubcoNoVendor.status}`);
+
+  // A vendorId-only PUT on a row whose (unchanged) kind isn't subco must be
+  // rejected — the MERGED state (the row's existing 'internal' kind + the
+  // new vendor) is invalid.
+  const putVendorOnlyNonSubco = await req('PUT', `/resources/${plain.body.id}`, { body: { vendorId } });
+  check('C1 PUT vendorId-only on a non-subco row is rejected', putVendorOnlyNonSubco.status === 400, `status=${putVendorOnlyNonSubco.status}`);
+
+  if (vendorId2) {
+    // A subco moved to a different valid vendor: the new vendor is stored.
+    const subcoToRevendor = await req('POST', '/resources', { body: { ...base, name: 'C1 subco to revendor', kind: 'subco', vendorId } });
+    const revendorSetupOk = check('C1 PUT setup: subco-to-revendor fixture created',
+      subcoToRevendor.status === 201 && subcoToRevendor.body?.kind === 'subco', `status=${subcoToRevendor.status}`);
+    if (revendorSetupOk) {
+      const revendored = await req('PUT', `/resources/${subcoToRevendor.body.id}`, { body: { vendorId: vendorId2 } });
+      check('C1 PUT vendorId-only moves a subco to a different valid vendor',
+        revendored.status === 200 && revendored.body?.kind === 'subco' && revendored.body?.vendorId === vendorId2,
+        `status=${revendored.status} kind=${revendored.body?.kind} vendorId=${revendored.body?.vendorId}`);
+    }
+  }
+
+  // A subco moved to another kind: the stale vendor must be CLEARED (absent
+  // from the JSON entirely) — never left stale, and never a literal `null`
+  // surviving the round trip (that would be a different bug: nullsToUndefined
+  // / the in-memory null-strip both exist precisely to prevent this).
+  const subcoToDemote = await req('POST', '/resources', { body: { ...base, name: 'C1 subco to demote', kind: 'subco', vendorId } });
+  const demoteSetupOk = check('C1 PUT setup: subco-to-demote fixture created',
+    subcoToDemote.status === 201 && subcoToDemote.body?.kind === 'subco', `status=${subcoToDemote.status}`);
+  if (demoteSetupOk) {
+    const demoted = await req('PUT', `/resources/${subcoToDemote.body.id}`, { body: { kind: 'internal' } });
+    check('C1 PUT kind-only away from subco succeeds', demoted.status === 200 && demoted.body?.kind === 'internal',
+      `status=${demoted.status} kind=${demoted.body?.kind}`);
+    const afterDemote = await req('GET', `/resources/${subcoToDemote.body.id}`);
+    check('C1 the cleared vendor is ABSENT (not stale, not a literal null)',
+      afterDemote.status === 200 && !('vendorId' in (afterDemote.body || {})),
+      `vendorId=${JSON.stringify(afterDemote.body?.vendorId)} hasKey=${afterDemote.body ? 'vendorId' in afterDemote.body : 'n/a'}`);
+  }
+
+  // An unrelated-field PUT on a genuine subco must leave kind and vendor untouched.
+  const subcoUnrelated = await req('POST', '/resources', { body: { ...base, name: 'C1 subco unrelated edit', kind: 'subco', vendorId } });
+  const unrelatedSetupOk = check('C1 PUT setup: subco-unrelated-edit fixture created',
+    subcoUnrelated.status === 201 && subcoUnrelated.body?.kind === 'subco', `status=${subcoUnrelated.status}`);
+  if (unrelatedSetupOk) {
+    const unrelatedEdited = await req('PUT', `/resources/${subcoUnrelated.body.id}`, { body: { capacity: 41 } });
+    check('C1 an unrelated-field PUT on a subco leaves kind and vendor unchanged',
+      unrelatedEdited.status === 200 && unrelatedEdited.body?.kind === 'subco' &&
+      unrelatedEdited.body?.vendorId === vendorId && unrelatedEdited.body?.capacity === 41,
+      `status=${unrelatedEdited.status} kind=${unrelatedEdited.body?.kind} vendorId=${unrelatedEdited.body?.vendorId} capacity=${unrelatedEdited.body?.capacity}`);
+  }
+
+  // --- Task 4: kind-aware daily cap + the kind-change guard -----------------
+  // 2026-08 is a seeded Open planning period; 2026-08-04 is a Tuesday (no
+  // seeded holiday falls in August), so it is a plain working day.
+  const OPEN_MONTH = '2026-08';
+  const WORKING_DAY = '2026-08-04';
+
+  // A dummy may carry more than one FTE per day; an internal resource may not.
+  const dummy = await req('POST', '/resources', { body: { ...base, name: 'C1 dummy', kind: 'dummy', contractHoursPerDay: 8 } });
+  // POST /resources responds 201 (see the comment above the first POST in
+  // this section) — asserted here rather than 200 to avoid a false FAIL.
+  const dummyOk = check('C1 dummy created', dummy.status === 201 && dummy.body?.kind === 'dummy', `status=${dummy.status} kind=${dummy.body?.kind}`);
+  if (!dummyOk) return;
+
+  // A request + an assignment for the dummy, and another pair reusing `plain`
+  // (created earlier in this section, kind still 'internal' — none of the
+  // PUTs above that touched it ever succeeded in changing its kind). Neither
+  // resource has any other booking, so both allocations land on a clean slate.
+  // requiredRole and skills are both NOT NULL columns with no DB default
+  // (schema.ts); the in-memory adapter tolerates them absent, but Postgres
+  // rejects the insert — found via this task's fresh-Postgres run (a 500 on
+  // this exact POST). The real UI form always sends both (skills defaults to
+  // `[]` there too), so this is a smoke-fixture gap, not a product defect.
+  const dummyReq = await req('POST', '/requests', { body: { name: 'C1 dummy capacity request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+  const internalReq = await req('POST', '/requests', { body: { name: 'C1 internal capacity request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
+  const reqsOk = check('C1 setup: requests created for the dummy/internal assignments',
+    dummyReq.status === 200 && typeof dummyReq.body?.id === 'string' &&
+    internalReq.status === 200 && typeof internalReq.body?.id === 'string',
+    `dummyReq status=${dummyReq.status} internalReq status=${internalReq.status}`);
+  if (!reqsOk) return;
+
+  const dummyAssignment = await req('POST', '/assignments', { body: { requestId: dummyReq.body.id, resourceId: dummy.body.id, assignedHours: 0 } });
+  const internalAssignment = await req('POST', '/assignments', { body: { requestId: internalReq.body.id, resourceId: plain.body.id, assignedHours: 0 } });
+  const assignmentsOk = check('C1 setup: assignments created for the dummy and the internal resource',
+    dummyAssignment.status === 200 && typeof dummyAssignment.body?.id === 'string' &&
+    internalAssignment.status === 200 && typeof internalAssignment.body?.id === 'string',
+    `dummy assignment status=${dummyAssignment.status} internal assignment status=${internalAssignment.status}`);
+  if (!assignmentsOk) return;
+  const dummyAssignmentId = dummyAssignment.body.id;
+  const internalAssignmentId = internalAssignment.body.id;
+
+  const overOneFte = await req('PUT', `/assignments/${dummyAssignmentId}/allocation`, {
+    body: { month: OPEN_MONTH, dailyHours: { [WORKING_DAY]: 20 } },
+  });
+  check('C1 a dummy accepts 2.5 FTE on a day', overOneFte.status === 200, `status=${overOneFte.status} err=${overOneFte.body?.error}`);
+
+  // The approval feed must surface the dummy's kind on its row (Task 4 review
+  // finding): the page needs it to skip the saturation band/percentage for a
+  // resource that has no capacity to saturate (spec §4.3).
+  const feedWithDummy = await req('GET', `/allocation-approvals?from=${OPEN_MONTH}&to=${OPEN_MONTH}&status=all`);
+  const dummyRow = (feedWithDummy.body?.rows || []).find(r => r.resourceId === dummy.body.id);
+  check('C1 the allocation-approvals feed row for the dummy carries kind=dummy',
+    feedWithDummy.status === 200 && dummyRow?.kind === 'dummy',
+    `status=${feedWithDummy.status} row=${JSON.stringify(dummyRow)}`);
+
+  const internalOver = await req('PUT', `/assignments/${internalAssignmentId}/allocation`, {
+    body: { month: OPEN_MONTH, dailyHours: { [WORKING_DAY]: 20 } },
+  });
+  check('C1 an internal resource is still capped at 1 FTE', internalOver.status === 400 && /daily capacity/.test(internalOver.body?.error || ''), `status=${internalOver.status}`);
+
+  // Turning that dummy into an internal resource would break its own bookings.
+  const demote = await req('PUT', `/resources/${dummy.body.id}`, { body: { kind: 'internal' } });
+  check('C1 a kind change that breaks existing allocations is refused', demote.status === 400 && /exceed/i.test(demote.body?.error || ''), `status=${demote.status} err=${demote.body?.error}`);
+
+  // --- Task 6: the /capacity/monthly envelope partitions internal vs. demand.
+  // The demote above was refused, so the dummy is still 'dummy' and still
+  // carries its 20h/day booking on WORKING_DAY — checked HERE, before the
+  // zero-and-demote below removes it.
+  const cap = await req('GET', '/capacity/monthly');
+  check('C1 capacity envelope carries demandRows', Array.isArray(cap.body?.demandRows), `status=${cap.status}`);
+  const kindsInRows = (cap.body?.rows || []).map(r => r.resourceId);
+  const demandIds = (cap.body?.demandRows || []).map(r => r.resourceId);
+  check('C1 the dummy is in demandRows, not rows',
+    demandIds.includes(dummy.body.id) && !kindsInRows.includes(dummy.body.id),
+    `rows=${kindsInRows.length} demand=${demandIds.length}`);
+  const firstMonth = (cap.body?.months || [])[0];
+  check('C1 totals expose uncovered demand separately',
+    firstMonth !== undefined && typeof cap.body.totals[firstMonth]?.demandFteUncovered === 'number',
+    `totals=${JSON.stringify(cap.body?.totals?.[firstMonth])}`);
+
+  // Zero the allocation, then assert the same change now succeeds.
+  const zeroed = await req('PUT', `/assignments/${dummyAssignmentId}/allocation`, {
+    body: { month: OPEN_MONTH, dailyHours: { [WORKING_DAY]: 0 } },
+  });
+  check('C1 setup: dummy allocation zeroed before retrying the demote', zeroed.status === 200, `status=${zeroed.status}`);
+
+  const demoteOk = await req('PUT', `/resources/${dummy.body.id}`, { body: { kind: 'internal' } });
+  check('C1 the same kind change succeeds once the allocation fits', demoteOk.status === 200 && demoteOk.body?.kind === 'internal', `status=${demoteOk.status}`);
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -1850,6 +2069,15 @@ async function main() {
     await checkLegacyAllocationApproval();
   } catch (err) {
     console.log(`FAIL  legacy allocation-approval flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the C1 resource-kind
+  // validation flow never masks or blocks any of the prior section results.
+  try {
+    await checkResourceKinds();
+  } catch (err) {
+    console.log(`FAIL  resource-kinds flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

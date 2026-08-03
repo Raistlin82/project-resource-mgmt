@@ -1,4 +1,5 @@
 import { monthOf, monthlyTargetHours } from './calendar.util';
+import { countsTowardInternalCapacity, kindOf } from './resource-kind.util';
 
 export type SemaphoreBand = 'idle' | 'under' | 'healthy' | 'over';
 export const SEMAPHORE_THRESHOLDS = { idle: 50, under: 85, healthy: 105 } as const;
@@ -9,10 +10,20 @@ export interface CapacityCell {
   fteConfirmed: number; ftePlanned: number; band: SemaphoreBand;
 }
 export interface CapacityRow { resourceId: string; resourceName: string; monthly: Record<string, CapacityCell>; }
-export interface CapacityTotals { demandFteConfirmed: number; demandFtePlanned: number; capacityFte: number; resourceCount: number; }
-export interface CapacityRollup { months: string[]; rows: CapacityRow[]; totals: Record<string, CapacityTotals>; }
+export interface CapacityTotals {
+  demandFteConfirmed: number; demandFtePlanned: number; capacityFte: number; resourceCount: number;
+  /** C1: planned FTE booked on dummy/subco — capacity that does not exist yet. */
+  demandFteUncovered: number;
+}
+export interface CapacityRollup {
+  months: string[];
+  rows: CapacityRow[];
+  /** C1: dummy and subco rows. Same monthly cells, but no capacity and no band. */
+  demandRows: CapacityRow[];
+  totals: Record<string, CapacityTotals>;
+}
 
-interface RollupResource { id: string; name: string; contractHoursPerDay?: number; hireDate?: string; terminationDate?: string; }
+interface RollupResource { id: string; name: string; kind?: string; contractHoursPerDay?: number; hireDate?: string; terminationDate?: string; }
 interface RollupAssignment { id: string; resourceId: string; }
 interface RollupMonth { assignmentId: string; month: string; status: string; }
 interface RollupDay { assignmentId: string; date: string; hours: number; }
@@ -79,9 +90,18 @@ export function rollupMonthly(input: RollupInput): CapacityRollup {
   }
   const targetByMonth = new Map(months.map(m => [m, standardMonthlyHours(m, hoursPerDay, holidays)]));
   const totals: Record<string, CapacityTotals> = {};
-  for (const m of months) totals[m] = { demandFteConfirmed: 0, demandFtePlanned: 0, capacityFte: 0, resourceCount: 0 };
+  for (const m of months) {
+    totals[m] = { demandFteConfirmed: 0, demandFtePlanned: 0, capacityFte: 0, resourceCount: 0, demandFteUncovered: 0 };
+  }
   const rows: CapacityRow[] = [];
+  const demandRows: CapacityRow[] = [];
   for (const r of resources) {
+    // C1: dummy/subco represent capacity that does not exist yet — the manual
+    // excludes them from the internal KPIs (headcount, capacityFte, the
+    // confirmed/planned demand totals and the semaphore). They still get a
+    // row with the same monthly cells so the dashboard can show what is
+    // booked against them, just under `demandFteUncovered` instead.
+    const isInternal = countsTowardInternalCapacity(kindOf(r));
     const monthly: Record<string, CapacityCell> = {}; let hasAny = false;
     for (const m of months) {
       if (!isActiveInMonth(r, m)) continue;
@@ -89,16 +109,27 @@ export function rollupMonthly(input: RollupInput): CapacityRollup {
       const src = byResMonth.get(r.id)?.get(m) ?? { confirmed: 0, planned: 0 };
       const fteConfirmed = fteOf(src.confirmed, target);
       const ftePlanned = fteOf(src.planned, target);
-      monthly[m] = { confirmedHours: src.confirmed, plannedHours: src.planned, targetHours: target,
-        fteConfirmed, ftePlanned, band: semaphoreBand(ftePlanned * 100) };
       const t = totals[m];
-      t.demandFteConfirmed += fteConfirmed;
-      t.demandFtePlanned += ftePlanned;
-      t.capacityFte += fteOf(monthlyTargetHours(r.contractHoursPerDay ?? hoursPerDay, m, holidays), target);
-      t.resourceCount += 1;
+      if (isInternal) {
+        monthly[m] = { confirmedHours: src.confirmed, plannedHours: src.planned, targetHours: target,
+          fteConfirmed, ftePlanned, band: semaphoreBand(ftePlanned * 100) };
+        t.demandFteConfirmed += fteConfirmed;
+        t.demandFtePlanned += ftePlanned;
+        t.capacityFte += fteOf(monthlyTargetHours(r.contractHoursPerDay ?? hoursPerDay, m, holidays), target);
+        t.resourceCount += 1;
+      } else {
+        // Inert placeholder band: demand rows share the CapacityCell type but
+        // are never tinted by the UI (Task 6 renders them without a band).
+        monthly[m] = { confirmedHours: src.confirmed, plannedHours: src.planned, targetHours: target,
+          fteConfirmed, ftePlanned, band: 'idle' };
+        t.demandFteUncovered += ftePlanned;
+      }
       hasAny = true;
     }
-    if (hasAny) rows.push({ resourceId: r.id, resourceName: r.name, monthly });
+    if (hasAny) {
+      const row: CapacityRow = { resourceId: r.id, resourceName: r.name, monthly };
+      if (isInternal) rows.push(row); else demandRows.push(row);
+    }
   }
-  return { months, rows, totals };
+  return { months, rows, demandRows, totals };
 }

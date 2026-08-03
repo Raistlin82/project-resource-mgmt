@@ -1,4 +1,5 @@
 import { Resource, ResourceRequest, Assignment } from './api.service';
+import { countsTowardDeliveryCapacity, kindOf } from './resource-kind.util';
 
 /**
  * Capacity / demand forecasting — a pure, framework-free module.
@@ -6,7 +7,11 @@ import { Resource, ResourceRequest, Assignment } from './api.service';
  * Heuristics (kept deliberately simple and documented):
  *  - The horizon is a contiguous run of fixed-length periods (weekly by default,
  *    optionally monthly) starting at `startISO`. Each period is [start, end).
- *  - SUPPLY for a period = Σ resource.capacity (weekly hours). For a monthly
+ *  - SUPPLY for a period = Σ resource.capacity (weekly hours) over resources that
+ *    count toward DELIVERY capacity (C1: `internal` + `subco`, excluding `dummy`
+ *    — a dummy is a placeholder for a hole to be filled, not capacity the
+ *    organisation can staff work with today; a subco IS deliverable capacity,
+ *    just not internal — see `countsTowardDeliveryCapacity`). For a monthly
  *    horizon the weekly capacity is scaled up by WEEKS_PER_MONTH so supply and
  *    demand share the same per-period unit.
  *  - COMMITTED DEMAND = booked assignment hours, spread evenly across the booking
@@ -185,8 +190,11 @@ export function capacityForecast(
   const lenDays = periodLengthDays(granularity);
   const lenMs = lenDays * MS_PER_DAY;
   // Weekly supply scaled to the period unit (×1 weekly, ×~4.33 monthly).
+  // C1: only resources that count toward DELIVERY capacity contribute —
+  // a dummy has no capacity to deliver with yet; a subco does.
   const supplyScale = granularity === 'monthly' ? WEEKS_PER_MONTH : 1;
-  const supply = sum(data.resources.map(r => finite(r.capacity))) * supplyScale;
+  const deliveryResources = data.resources.filter(r => countsTowardDeliveryCapacity(kindOf(r)));
+  const supply = sum(deliveryResources.map(r => finite(r.capacity))) * supplyScale;
 
   const requestById = new Map<string, ResourceRequest>();
   for (const r of data.requests) requestById.set(r.id, r);
@@ -244,12 +252,21 @@ function bookedHoursByResource(data: ForecastData): Map<string, number> {
  * Under-allocated ("bench") resources: utilization strictly below `thresholdPct`
  * (default 80%). Reports spare hours = max(0, capacity − booked hours), sorted by
  * most available first. Zero-capacity resources are excluded (no real capacity).
+ *
+ * C1: a dummy never appears here — it is a placeholder hole, not idle deliverable
+ * capacity — while a subco does, since it IS deliverable capacity that can sit
+ * under-allocated just like an internal resource (`countsTowardDeliveryCapacity`).
  */
 export function benchList(data: ForecastData, thresholdPct = 80): BenchEntry[] {
   const threshold = finite(thresholdPct);
   const booked = bookedHoursByResource(data);
   return data.resources
-    .filter(r => finite(r.capacity) > 0 && finite(r.utilization) < threshold)
+    .filter(
+      r =>
+        countsTowardDeliveryCapacity(kindOf(r)) &&
+        finite(r.capacity) > 0 &&
+        finite(r.utilization) < threshold,
+    )
     .map(r => {
       const capacity = finite(r.capacity);
       const availableHours = Math.max(0, capacity - finite(booked.get(r.id)));
@@ -269,12 +286,16 @@ export function benchList(data: ForecastData, thresholdPct = 80): BenchEntry[] {
  * Over-allocated resources: utilization at or above `thresholdPct` (default 110%,
  * i.e. the "over 100/110%" band). Reports hours booked beyond capacity, sorted by
  * most over first.
+ *
+ * C1: a dummy never appears here — a placeholder has no real allocation to be
+ * "over" on — while a subco does, since it IS deliverable capacity that can be
+ * over-booked just like an internal resource (`countsTowardDeliveryCapacity`).
  */
 export function overAllocated(data: ForecastData, thresholdPct = 110): OverAllocationEntry[] {
   const threshold = finite(thresholdPct);
   const booked = bookedHoursByResource(data);
   return data.resources
-    .filter(r => finite(r.utilization) >= threshold)
+    .filter(r => countsTowardDeliveryCapacity(kindOf(r)) && finite(r.utilization) >= threshold)
     .map(r => {
       const capacity = finite(r.capacity);
       const overByHours = Math.max(0, finite(booked.get(r.id)) - capacity);

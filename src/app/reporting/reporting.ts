@@ -8,6 +8,7 @@ import { AuthService } from '../services/auth.service';
 import { computeProjectFinancials, FinanceData, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, realizationMetrics, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, recognitionSchedule, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity } from '../services/finance.util';
 import { NotificationService } from '../services/notification.service';
 import { toCsv, downloadCsv } from '../services/export.util';
+import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
 import { CommandBarChartComponent, CommandTrendChartComponent, CommandDonutChartComponent, BarSeries, TrendSeries } from '../shared/charts';
 import { ListStateComponent } from '../shared/list-state.component';
 
@@ -196,8 +197,8 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
                   [showValues]="true"
                   [height]="256"
                   [format]="utilizationPctFormat"
-                  ariaLabel="Resource utilization by person"
-                  caption="Current utilization percentage per resource" />
+                  ariaLabel="Utilization by internal resource"
+                  caption="Current utilization percentage per internal resource (dummy and subco are uncovered demand, not capacity)" />
               } @else {
                 <p class="text-ink-muted text-sm">No resources to chart yet.</p>
               }
@@ -1032,8 +1033,25 @@ export class Reporting {
     this.dataRes.value().requests.filter(r => ['open', 'published'].includes((r.status ?? '').toLowerCase())).length
   );
 
+  /**
+   * C1: the resources whose saturation is worth measuring — dummy and subco are
+   * capacity that does not exist yet and are deliberately OUT of the internal
+   * capacity KPIs (spec §4.3/§4.4, same `countsTowardInternalCapacity` split
+   * `/capacity/monthly` uses to partition its rollup).
+   *
+   * This matters concretely, not just in principle: a dummy carries
+   * `utilization: 0` by construction (nothing is booked on a placeholder, and
+   * the scalar is meaningless for one anyway). Averaging it in drags the
+   * portfolio number toward zero in proportion to how many placeholders the
+   * organisation has pre-loaded, and charting it grows a flat-zero bar per
+   * placeholder. Both read as an internal-capacity problem that isn't one.
+   */
+  private internalResources = computed(() =>
+    this.dataRes.value().resources.filter(r => countsTowardInternalCapacity(kindOf(r))),
+  );
+
   private avgUtilization = computed(() => {
-    const resources = this.dataRes.value().resources;
+    const resources = this.internalResources();
     if (!resources.length) return 0;
     const total = resources.reduce((sum, r) => sum + (r.utilization ?? 0), 0);
     return total / resources.length;
@@ -1162,7 +1180,8 @@ export class Reporting {
     return `Trend ${dir} ${Math.abs(t.deltaPct).toFixed(0)}% versus prior period`;
   }
 
-  utilizationData = computed(() => this.dataRes.value().resources.map(r => ({
+  /** Per-person utilization bars. Internal only — see `internalResources()`. */
+  utilizationData = computed(() => this.internalResources().map(r => ({
     month: r.name.split(' ')[0] || r.name,
     value: Math.round(r.utilization ?? 0),
   })));
