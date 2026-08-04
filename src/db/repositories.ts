@@ -5,11 +5,9 @@
  * single, fully-typed `Repositories` object obtained via the memoized
  * `getRepositories()` accessor.
  *
- * Adapter selection (mirrors src/db/client.ts):
- *   - `process.env.DATABASE_URL` SET   -> `PgRepository(db, <table>)` per entity
- *                                         (`db` is the shared Drizzle handle).
- *   - `process.env.DATABASE_URL` UNSET -> `InMemoryRepository(<seed array>)`
- *                                         per entity (the DEV/mock store).
+ * Adapter selection uses the single validated configuration from client.ts:
+ * PostgreSQL is mandatory in production, while memory remains the explicit
+ * DEV/mock adapter. Unknown/conflicting settings fail before repositories exist.
  *
  * Two entities are NATURAL-KEY (no `id` column in the source interfaces and the
  * Drizzle schema): `languages` (keyed by `code`) and `fxRates` (keyed by
@@ -23,7 +21,7 @@
  * IMPORTANT: this module must never be imported into a browser bundle — it pulls
  * in `./client.ts` (node-postgres) and the Drizzle schema.
  */
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type {
   PgColumn,
   PgTable,
@@ -31,7 +29,7 @@ import type {
   PgUpdateSetSource,
 } from 'drizzle-orm/pg-core';
 
-import { db } from './client';
+import { db, persistenceConfig } from './client';
 import {
   InMemoryRepository,
   PgRepository,
@@ -519,14 +517,47 @@ let cached: Repositories | undefined;
 /**
  * Return the process-wide `Repositories`, building it once on first use.
  *
- * Selection is driven by `DATABASE_URL` exactly as `src/db/client.ts`:
- * when set, `db` is non-null and the Postgres adapters are used; otherwise the
- * in-memory (seeded) adapters are used. The result is memoized so every caller
+ * Selection uses the already-validated adapter from `src/db/client.ts`; it never
+ * infers a fallback from client availability. The result is memoized so every caller
  * shares the same repository instances (and, for the in-memory adapters, the
  * same backing stores) for the lifetime of the process.
  */
 export function getRepositories(): Repositories {
   if (cached) return cached;
-  cached = db ? buildPgRepositories(db) : buildInMemoryRepositories();
+  if (persistenceConfig.adapter === 'postgresql') {
+    if (!db) throw new Error('PostgreSQL persistence selected but the database client is unavailable');
+    cached = buildPgRepositories(db);
+  } else {
+    cached = buildInMemoryRepositories();
+  }
   return cached;
+}
+
+/**
+ * Run a compound repository operation in one PostgreSQL transaction.
+ *
+ * Development uses the process-wide in-memory repositories; compound-write
+ * helpers provide compensating rollback there. In production, transaction-
+ * scoped repositories ensure all writes commit or roll back together at the
+ * database boundary.
+ */
+export async function withRepositoriesTransaction<R>(
+  operation: (repositories: Repositories) => Promise<R>,
+  options?: { advisoryLockKeys?: readonly string[] },
+): Promise<R> {
+  if (persistenceConfig.adapter === 'memory') return operation(getRepositories());
+  if (!db) throw new Error('PostgreSQL persistence selected but the database client is unavailable');
+  return db.transaction(async transaction => {
+    // Transaction-scoped advisory locks close the gap left by the server's
+    // process-local async mutex when multiple Node workers share PostgreSQL.
+    // Sort/dedupe so callers that need more than one logical key can never
+    // acquire the same lock set in opposing orders.
+    const keys = [...new Set(options?.advisoryLockKeys ?? [])].sort();
+    for (const key of keys) {
+      await transaction.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`,
+      );
+    }
+    return operation(buildPgRepositories(transaction as unknown as DrizzleDb));
+  });
 }

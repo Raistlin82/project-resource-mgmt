@@ -6,9 +6,9 @@
  * reads filesystem CA certs and process env, and pulls in the `pg` driver.
  *
  * Connection lifecycle mirrors src/server.ts exactly:
- *   - A Pool is created ONLY when DATABASE_URL is set; otherwise both exports
- *     are null (the app then runs on the in-memory mock state, as the SSR
- *     server already does).
+ *   - Adapter selection is validated by persistence-config.util. Production
+ *     cannot fall back to memory, unknown explicit values fail startup, and a
+ *     Pool is created only for the resolved PostgreSQL adapter.
  *   - TLS is hardened identically: when PGSSL === 'true' we always verify the
  *     server certificate (rejectUnauthorized: true), optionally pinning a
  *     trusted CA bundle supplied via PG_CA_CERT. Certificate verification is
@@ -20,8 +20,10 @@
 import { readFileSync } from 'node:fs';
 import { Pool, type PoolConfig } from 'pg';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
+import { resolvePersistenceConfig } from './persistence-config.util';
 
-const databaseUrl = process.env['DATABASE_URL'];
+/** Validated once at module load so no caller can select a different adapter. */
+export const persistenceConfig = resolvePersistenceConfig(process.env);
 
 /**
  * Build the node-postgres Pool options, replicating the TLS-safe configuration
@@ -44,14 +46,16 @@ function buildPoolConfig(connectionString: string): PoolConfig {
 }
 
 /**
- * Shared node-postgres connection Pool, or null when DATABASE_URL is unset.
+ * Shared node-postgres connection Pool, or null for the validated memory mode.
  * Exported so migrations / scripts can reuse the same pool and TLS options.
  */
-export const pool: Pool | null = databaseUrl ? new Pool(buildPoolConfig(databaseUrl)) : null;
+export const pool: Pool | null = persistenceConfig.adapter === 'postgresql'
+  ? new Pool(buildPoolConfig(persistenceConfig.databaseUrl))
+  : null;
 
 /**
  * Drizzle ORM database handle bound to the shared Pool, or null when
- * DATABASE_URL is unset. Type is the schema-less NodePgDatabase; once
+ * memory mode is selected. Type is the schema-less NodePgDatabase; once
  * src/db/schema.ts exists, callers may pass it via `drizzle({ client, schema })`
  * (or this can be widened) for fully-typed relational queries.
  */

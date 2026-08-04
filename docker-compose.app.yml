@@ -11,15 +11,9 @@
 #   * The BROWSER talks to Keycloak at http://localhost:8081/realms/psa (host
 #     port 8081; host 8080 is owned by openHAB). Tokens it obtains carry
 #     iss=http://localhost:8081/realms/psa.
-#   * The SSR server (this 'app' container) ALSO verifies those tokens, fetching
-#     the realm JWKS from OIDC_ISSUER. The issuer string MUST byte-match the
-#     token's `iss`, so OIDC_ISSUER stays http://localhost:8081/realms/psa.
-#   * Inside a container, "localhost" is the container itself, so we add
-#     extra_hosts host.docker.internal -> host-gateway and rely on the host's
-#     published 8081 to reach Keycloak. On Docker Desktop (macOS/Windows)
-#     "localhost" from a container already routes to the host gateway for
-#     published ports; the extra_hosts entry makes the same reachability
-#     explicit and portable to Linux engines.
+#   * The API validates the public issuer value but fetches keys from the
+#     internal OIDC_JWKS_URI (`keycloak:8080`), which is resolvable on the
+#     Compose network and avoids the container-localhost trap.
 #   * For a SINGLE-HOST local deploy this works because the tokens are
 #     browser-obtained and the issuer stays localhost:8081 for both sides. A real
 #     MULTI-HOST production deploy needs a STABLE EXTERNAL issuer URL (a DNS name
@@ -40,6 +34,9 @@ services:
       # Reaches the 'postgres' service by name; the APP database is
       # project_resource_mgmt (Keycloak uses its own 'keycloak' db).
       DATABASE_URL: "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-project_resource_mgmt}"
+      PERSISTENCE_ADAPTER: "postgresql"
+      # Fresh production databases stay empty unless demo seed is explicitly opted in.
+      SEED_DEMO_DATA: "${SEED_DEMO_DATA:-false}"
       # Local docker Postgres has no TLS; never set PGSSL=true here.
       PGSSL: "false"
 
@@ -48,10 +45,10 @@ services:
       # See the issuer caveat above for why this stays localhost, not the
       # 'keycloak' service name.
       OIDC_ISSUER: "${OIDC_ISSUER:-http://localhost:8081/realms/psa}"
-      # Optional: pin the expected audience. The SPA client is 'psa-web'; set this
-      # only once tokens carry a matching `aud` (else leave empty to skip the
-      # audience check — issuer + signature are still verified).
-      OIDC_AUDIENCE: "${OIDC_AUDIENCE:-}"
+      OIDC_PUBLIC_ISSUER: "${OIDC_PUBLIC_ISSUER:-http://localhost:8081/realms/psa}"
+      OIDC_CLIENT_ID: "${OIDC_CLIENT_ID:-psa-web}"
+      OIDC_AUDIENCE: "${OIDC_AUDIENCE:-psa-web}"
+      OIDC_JWKS_URI: "${OIDC_JWKS_URI:-http://keycloak:8080/realms/psa/protocol/openid-connect/certs}"
       # PRODUCTION SAFETY: never trust the spoofable X-User-* demo headers in a
       # containerized deploy. Identity comes from verified JWTs only.
       AUTH_TRUST_HEADERS: "false"

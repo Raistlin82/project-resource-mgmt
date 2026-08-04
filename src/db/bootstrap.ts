@@ -2,31 +2,29 @@
  * Persistence bootstrap (SERVER-ONLY).
  *
  * `initPersistence()` is called ONCE at server boot (by WF-2, from src/server.ts)
- * and brings the database to a ready, seeded state:
+ * and brings the selected database to a ready state:
  *
- *   - When `DATABASE_URL` is SET (so `db`/`pool` from ./client.ts are non-null):
- *       1. Run all PENDING Drizzle migrations from the `./drizzle` folder against
- *          the shared connection (drizzle-orm/node-postgres migrator). `migrate()`
- *          is itself idempotent — already-applied migrations are skipped.
- *       2. SEED the core tables from ./seed.ts, but ONLY when empty: each table is
- *          guarded by its own `count(*) === 0` check, so calling this repeatedly
- *          never duplicates rows. Inserts run parent-before-child so foreign keys
- *          are satisfied.
+ *   - PostgreSQL: one advisory-lock-protected transaction applies pending
+ *     migrations, optional demo seed, and additive backfills. Concurrent process
+ *     starts serialize at the database boundary.
+ *   - Demo seed runs only when the validated seed policy enables it; production
+ *     defaults it off and therefore cannot be contaminated implicitly.
  *
- *   - When `DATABASE_URL` is UNSET: NO-OP. The in-memory repositories returned by
+ *   - Validated memory mode: NO-OP. The in-memory repositories returned by
  *     getRepositories() are already constructed from the same seed arrays, so
  *     there is nothing to migrate or seed.
  *
- * Safe to call once at boot; the migration step and the per-table count guard
- * also make repeat calls harmless. No `any` is used.
+ * Safe to retry: the locked transaction, empty checks, and conflict-safe inserts
+ * make repeat/concurrent calls idempotent. No `any` is used.
  *
  * IMPORTANT: server-only — pulls in ./client.ts (node-postgres) and the schema.
  */
-import { count } from 'drizzle-orm';
+import { count, sql } from 'drizzle-orm';
 import type { PgTable, PgInsertValue } from 'drizzle-orm/pg-core';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 
-import { db } from './client';
+import { db, persistenceConfig } from './client';
+import { runSeedDataPhase } from './bootstrap-policy.util';
 import { type DrizzleDb } from './repository';
 import * as schema from './schema';
 import * as seed from './seed';
@@ -37,6 +35,7 @@ import * as seed from './seed';
  * project root) at server boot, exactly like the drizzle-kit CLI.
  */
 const MIGRATIONS_FOLDER = './drizzle';
+const BOOTSTRAP_DATA_LOCK = 'project-resource-mgmt:bootstrap-data:v1';
 
 /**
  * Insert `rows` into `table` only if the table is currently empty
@@ -71,10 +70,12 @@ async function seedIfEmpty<T extends PgTable>(
   // insert model, which cannot be tied to the generic `T` statically. The seed
   // arrays are the matching shapes by construction, so the cast (via `unknown`)
   // is confined to this one argument.
-  await database
+  const inserted = await database
     .insert(tbl)
-    .values(rows as unknown as PgInsertValue<PgTable>[]);
-  return rows.length;
+    .values(rows as unknown as PgInsertValue<PgTable>[])
+    .onConflictDoNothing()
+    .returning();
+  return inserted.length;
 }
 
 /**
@@ -112,28 +113,18 @@ async function backfillAssignmentMonths(database: DrizzleDb): Promise<number> {
     });
   }
   if (rows.length === 0) return 0;
-  await database.insert(schema.assignmentMonths).values(rows);
-  return rows.length;
+  const inserted = await database
+    .insert(schema.assignmentMonths)
+    .values(rows)
+    .onConflictDoNothing()
+    .returning({ id: schema.assignmentMonths.id });
+  return inserted.length;
 }
 
-/**
- * Initialize persistence at server boot.
- *
- * - `DATABASE_URL` set   -> migrate, then seed empty core tables.
- * - `DATABASE_URL` unset -> no-op (in-memory repos are already seeded).
- */
-export async function initPersistence(): Promise<void> {
-  // No DATABASE_URL -> db is null (see ./client.ts). In-memory adapters are
-  // already seeded from ./seed.ts, so there is nothing to do.
-  if (!db) {
-    return;
-  }
-  const database: DrizzleDb = db;
-
-  // 1) Apply any pending migrations. Idempotent: applied migrations are skipped.
-  await migrate(database, { migrationsFolder: MIGRATIONS_FOLDER });
-
-  // 2) Seed core tables when empty, parent-before-child so FKs are satisfied.
+/** Seed demo rows parent-before-child so every FK is satisfied. */
+async function seedDemoDatabase(database: DrizzleDb): Promise<void> {
+  // Each entry is guarded independently by its own count(*) === 0 check. The
+  // caller holds the cross-process bootstrap advisory lock for this transaction.
   //    Each entry is guarded independently by its own count(*) === 0 check.
   // Roots (no outgoing FKs to other seeded tables).
   await seedIfEmpty(database, schema.customers, seed.customers);
@@ -216,8 +207,6 @@ export async function initPersistence(): Promise<void> {
   await seedIfEmpty(database, schema.assignments, seed.assignments); // -> requests, resources
   await seedIfEmpty(database, schema.assignmentDays, seed.assignmentDays); // -> assignments
   await seedIfEmpty(database, schema.assignmentMonths, seed.assignmentMonths); // -> assignments
-  await backfillAssignmentMonths(database); // B3: month rows for pre-existing day rows
-
   // Commercial chain.
   await seedIfEmpty(database, schema.orders, seed.orders); // -> contracts, projectPartners
   await seedIfEmpty(database, schema.timeEntries, seed.timeEntries); // -> assignments, requests, resources, projects
@@ -229,4 +218,35 @@ export async function initPersistence(): Promise<void> {
 
   // auditLogs is intentionally append-only and seeded empty -> nothing to insert.
   await seedIfEmpty(database, schema.auditLogs, seed.auditLogs);
+}
+
+/**
+ * Initialize persistence at server boot.
+ *
+ * Migrations remain idempotent. All data bootstrap work then runs in one
+ * PostgreSQL transaction under a transaction-scoped advisory lock, serializing
+ * concurrent process starts. Production demo seed runs only when the validated
+ * `SEED_DEMO_DATA=true` policy explicitly enables it; additive backfills always
+ * run so upgraded real databases still receive required derived rows.
+ */
+export async function initPersistence(): Promise<void> {
+  if (persistenceConfig.adapter === 'memory') return;
+  if (!db) throw new Error('PostgreSQL persistence selected but the database client is unavailable');
+  const database: DrizzleDb = db;
+
+  await runSeedDataPhase<DrizzleDb>(persistenceConfig.seedDemoData, {
+    runExclusiveTransaction: operation => database.transaction(async transaction => {
+      await transaction.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${BOOTSTRAP_DATA_LOCK}, 0))`,
+      );
+      const transactionDatabase = transaction as unknown as DrizzleDb;
+      // Drizzle's migrator uses a nested transaction/savepoint here. Keeping it
+      // under the same advisory lock serializes migrations and seed across all
+      // app processes, while PostgreSQL transactional DDL preserves rollback.
+      await migrate(transactionDatabase, { migrationsFolder: MIGRATIONS_FOLDER });
+      await operation(transactionDatabase);
+    }),
+    seedDemoData: seedDemoDatabase,
+    backfill: async transaction => { await backfillAssignmentMonths(transaction); },
+  });
 }

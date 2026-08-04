@@ -107,8 +107,10 @@ npm run lint            # lint
 ## ⚙️ Configuration
 
 Copy `.env.example` and set the values for your target environment. Key
-variables: `DATABASE_URL` (switches the API to PostgreSQL), `OIDC_ISSUER` /
-`OIDC_AUDIENCE` (Keycloak), `AUTH_TRUST_HEADERS` (must be `false` in production),
+variables: `PERSISTENCE_ADAPTER` (`memory`/`postgresql`), `DATABASE_URL`,
+`SEED_DEMO_DATA` (production defaults off), `OIDC_ISSUER` /
+`OIDC_PUBLIC_ISSUER` / `OIDC_JWKS_URI` / `OIDC_AUDIENCE` (Keycloak),
+`AUTH_TRUST_HEADERS` (must be `false` in production),
 and the `POSTGRES_*` / `KC_*` settings used by Docker Compose. The full reference
 is in [Deployment & Operations](docs/architecture/06-deployment-operations.md).
 

@@ -31,6 +31,9 @@ echo
 # Force demo mode regardless of any .env in the environment:
 #   -u DATABASE_URL → no Postgres → in-memory seeded repository.
 exec env -u DATABASE_URL \
+  NODE_ENV=development \
+  PERSISTENCE_ADAPTER=memory \
+  SEED_DEMO_DATA=true \
   PORT="$PORT" \
   HOST="$HOST" \
   AUTH_TRUST_HEADERS=true \

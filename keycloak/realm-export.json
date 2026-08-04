@@ -58,6 +58,31 @@
         "pkce.code.challenge.method": "S256",
         "post.logout.redirect.uris": "http://localhost:3000/*"
       },
+      "protocolMappers": [
+        {
+          "name": "resource-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "resource_id",
+            "claim.name": "resource_id",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "psa-web-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "psa-web",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ],
       "defaultClientScopes": [
         "web-origins",
         "acr",
@@ -78,6 +103,7 @@
       "firstName": "Julie",
       "lastName": "Delivery",
       "email": "julie@example.com",
+      "attributes": { "resource_id": ["1"] },
       "credentials": [
         { "type": "password", "value": "julie", "temporary": false }
       ],
@@ -90,6 +116,7 @@
       "firstName": "John",
       "lastName": "Finance",
       "email": "john@example.com",
+      "attributes": { "resource_id": ["2"] },
       "credentials": [
         { "type": "password", "value": "john", "temporary": false }
       ],
@@ -102,6 +129,7 @@
       "firstName": "Alice",
       "lastName": "Manager",
       "email": "alice@example.com",
+      "attributes": { "resource_id": ["3"] },
       "credentials": [
         { "type": "password", "value": "alice", "temporary": false }
       ],

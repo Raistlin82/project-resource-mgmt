@@ -12,9 +12,9 @@
 # script runs. server.mjs binds to PORT/HOST and mounts /api, /<static>, and the
 # Angular SSR catch-all.
 #
-# Migrations are NOT baked in: initPersistence() runs drizzle migrate + an
-# idempotent seed at boot (src/db/bootstrap.ts) when DATABASE_URL is set, so the
-# generated SQL under ./drizzle must be present at runtime. It is copied below.
+# Migrations are NOT baked in: initPersistence() runs them at boot and optionally
+# applies demo seed only when SEED_DEMO_DATA=true. Generated SQL under ./drizzle
+# must therefore be present at runtime. It is copied below.
 
 # --- Stage 1: build -----------------------------------------------------------
 # Pinned to Node 22 (LTS) — Angular 21 / @angular/build require Node 20.19+ or 22.

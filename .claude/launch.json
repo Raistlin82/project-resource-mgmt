@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ng-serve",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["ng", "serve"],
+      "port": 4200
+    },
+    {
+      "name": "ng-serve-demo",
+      "runtimeExecutable": "env",
+      "runtimeArgs": ["AUTH_TRUST_HEADERS=true", "npx", "ng", "serve"],
+      "port": 4200
+    },
+    {
+      "name": "start-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "start:dev"],
+      "port": 4000
+    }
+  ]
+}
