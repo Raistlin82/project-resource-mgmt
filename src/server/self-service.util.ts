@@ -1,22 +1,22 @@
 import type { Assignment, Resource, ResourceRequest } from '../app/services/api.service';
 
-export type SelfProfile = Omit<
-  Resource,
-  'costRate' | 'billRate' | 'costRateOverride' | 'billRateOverride' | 'costRateDay' | 'billRateDay'
->;
+/** Rate fields an employee must never receive about themselves. */
+const SENSITIVE_RATE_FIELDS = [
+  'costRate', 'billRate', 'costRateOverride', 'billRateOverride', 'costRateDay', 'billRateDay',
+] as const;
 
-/** Strip organization-sensitive rate data from the employee-facing profile. */
+export type SelfProfile = Omit<Resource, (typeof SENSITIVE_RATE_FIELDS)[number]>;
+
+/**
+ * Strip organization-sensitive rate data from the employee-facing profile.
+ * Filtered from ONE list rather than a discarded destructure, so the omitted keys
+ * and the `SelfProfile` type can never drift apart.
+ */
 export function toSelfProfile(resource: Resource): SelfProfile {
-  const {
-    costRate: _costRate,
-    billRate: _billRate,
-    costRateOverride: _costRateOverride,
-    billRateOverride: _billRateOverride,
-    costRateDay: _costRateDay,
-    billRateDay: _billRateDay,
-    ...self
-  } = resource;
-  return self;
+  const omitted: readonly string[] = SENSITIVE_RATE_FIELDS;
+  return Object.fromEntries(
+    Object.entries(resource).filter(([key]) => !omitted.includes(key)),
+  ) as SelfProfile;
 }
 
 /** Only fields owned by the employee profile workflow may cross /self/profile. */

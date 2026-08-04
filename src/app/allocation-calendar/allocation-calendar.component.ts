@@ -87,7 +87,11 @@ function daysByMonth(days: AssignmentDay[]): Record<string, Record<string, numbe
   imports: [MatIconModule, FormsModule, ResourceKindBadgeComponent],
   host: { class: 'contents' },
   template: `
+    <!-- tabindex="-1": the dialog container is programmatically focusable (never
+         tab-reachable) so Escape is handled here before the ancestor modal
+         directive can close past the unsaved-changes check. -->
     <div class="command-card w-full max-w-5xl max-h-[92vh] overflow-hidden flex flex-col"
+         tabindex="-1"
          (keydown.escape)="onEscape($event)">
       <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] flex items-start justify-between bg-gradient-to-br from-surface-muted to-transparent">
         <div>

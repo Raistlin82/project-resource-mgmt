@@ -4783,6 +4783,10 @@ apiRouter.post('/orders/with-line', async (req, res, next) => {
         createOrderWithLineWrite({
           orders: transactionRepos.orders,
           orderLines: transactionRepos.orderLines,
+          // `projects` is read to reject a line whose project belongs to a
+          // different contract than the order, BEFORE either row is written.
+          // Same transaction as the writes it guards.
+          projects: transactionRepos.projects,
           createOrder,
         }, request)));
     res.json(result);

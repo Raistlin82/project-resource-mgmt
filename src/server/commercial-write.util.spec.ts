@@ -5,7 +5,6 @@ import {
   createOrderWithLine,
   generateBillingInvoice,
   markBillingInvoicePaid,
-  type BillingInvoiceWriteDependencies,
   type OrderWithLineWriteDependencies,
 } from './commercial-write.util';
 

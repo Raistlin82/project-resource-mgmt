@@ -90,8 +90,14 @@ interface NavState {
       </header>
 
       @if (isMobileMenuOpen()) {
+        <!-- Decorative scrim: tap-to-dismiss for pointer users only. It is
+             aria-hidden and tabindex="-1" (programmatically focusable, never
+             tab-reachable) — keyboard users close the drawer with Escape or its
+             own Close button, which is why this is NOT a role="button" with a
+             keydown handler as it used to be. -->
         <div
           class="fixed inset-0 bg-scrim/40 backdrop-blur-sm z-40 lg:hidden transition-opacity"
+          tabindex="-1"
           (click)="closeMenu(true)"
           aria-hidden="true">
         </div>
@@ -103,6 +109,7 @@ interface NavState {
         class="command-sidebar fixed inset-y-0 left-0 z-50 w-72 flex flex-col transform transition-transform duration-300 ease-in-out lg:translate-x-0 overflow-y-auto shadow-2xl lg:shadow-none"
         [cdkTrapFocus]="isMobileMenuOpen()"
         [cdkTrapFocusAutoCapture]="isMobileMenuOpen()"
+        tabindex="-1"
         (keydown.escape)="closeMenu(true)"
         [class.-translate-x-full]="!isMobileMenuOpen()"
         [class.translate-x-0]="isMobileMenuOpen()"
