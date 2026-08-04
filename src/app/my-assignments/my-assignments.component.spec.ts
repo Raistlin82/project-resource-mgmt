@@ -1,6 +1,6 @@
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { of, Subject } from 'rxjs';
+import { of, Subject, throwError } from 'rxjs';
 import { MyAssignmentsComponent } from './my-assignments.component';
 import {
   ApiService,
@@ -107,11 +107,17 @@ describe('MyAssignmentsComponent time entry submission', () => {
     fixture.componentInstance.timeEntryHours.set(8);
     fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
 
+    // EXPECTATION UPDATED (not relaxed): the payload now also carries the
+    // idempotencyKey the server derives the entry id from, so a retry after a
+    // lost response returns the same entry instead of logging the hours twice.
     expect(createMyTimeEntry).toHaveBeenCalledWith({
       assignmentId: 'A1',
       date: '2026-09-01',
       hours: 8,
       notes: '',
+      idempotencyKey: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      ),
     });
     expect(createMyTimeEntry).toHaveBeenCalledWith(expect.not.objectContaining({
       status: expect.anything(),
@@ -120,6 +126,37 @@ describe('MyAssignmentsComponent time entry submission', () => {
       projectId: expect.anything(),
     }));
     expect(notifications.show).toHaveBeenCalledWith('Time entry submitted for approval.', 'success');
+  });
+
+  it('keeps the idempotency key stable across a retry and rotates it for the next entry', async () => {
+    // The key is the whole point of the server change: same key -> the server
+    // returns the SAME row. Reuse it for a different entry and the hours would be
+    // silently swallowed, so it must rotate once the form closes. Both halves
+    // fail if `??=` becomes `=`, or if cancelTimeEntry() stops clearing it.
+    const { fixture, createMyTimeEntry } = setup({
+      createMyTimeEntry: vi.fn(() => throwError(() => new Error('network'))),
+    });
+    await flush(fixture);
+
+    fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
+    fixture.componentInstance.timeEntryDate.set('2026-09-01');
+    fixture.componentInstance.timeEntryHours.set(8);
+    fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
+    fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);   // the user retries
+
+    const firstKey = createMyTimeEntry.mock.calls[0][0].idempotencyKey;
+    const retryKey = createMyTimeEntry.mock.calls[1][0].idempotencyKey;
+    expect(createMyTimeEntry).toHaveBeenCalledTimes(2);
+    expect(retryKey).toBe(firstKey);
+
+    // Form closed: the next submission is a different entry.
+    fixture.componentInstance['cancelTimeEntry']();
+    fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
+    fixture.componentInstance.timeEntryDate.set('2026-09-02');
+    fixture.componentInstance.timeEntryHours.set(4);
+    fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
+
+    expect(createMyTimeEntry.mock.calls[2][0].idempotencyKey).not.toBe(firstKey);
   });
 
   it('blocks duplicate creates while a time entry is being saved', async () => {

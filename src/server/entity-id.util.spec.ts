@@ -1,4 +1,4 @@
-import { newEntityId } from './entity-id.util';
+import { isUuidV4, newEntityId } from './entity-id.util';
 
 describe('collision-safe entity identifiers', () => {
   it('uses UUID identifiers with no process-local sequence', () => {
@@ -9,11 +9,30 @@ describe('collision-safe entity identifiers', () => {
       .toBe(true);
   });
 
-  it('remains compatible with the existing prefixed string-id conventions', () => {
-    const fixed = '123e4567-e89b-42d3-a456-426614174000';
+  /**
+   * REPLACES A TAUTOLOGY. The previous case asserted
+   * `newEntityId(() => fixed) === fixed` — the function's entire body — and
+   * `` `TE${fixed}` === `TE${fixed}` ``, a concatenation performed inside the
+   * test itself. Neither could fail. What is actually worth pinning is the shape
+   * a client-supplied key must satisfy before it becomes the uuid segment of a
+   * stored id (POST /self/time-entries), because that is the one place an id is
+   * not generated here.
+   */
+  it('accepts only a canonical v4 UUID as an externally supplied id segment', () => {
+    expect(isUuidV4(newEntityId())).toBe(true);
+    expect(isUuidV4('123e4567-e89b-42d3-a456-426614174000')).toBe(true);
 
-    expect(newEntityId(() => fixed)).toBe(fixed);
-    expect(`TE${newEntityId(() => fixed)}`).toBe(`TE${fixed}`);
-    expect(`AL${newEntityId(() => fixed)}`).toBe(`AL${fixed}`);
+    // Wrong version nibble (v1), wrong variant nibble, uppercase, truncated,
+    // padded, non-hex, and non-strings must all be refused: each of these would
+    // otherwise be spliced straight into a primary key.
+    expect(isUuidV4('123e4567-e89b-12d3-a456-426614174000')).toBe(false);
+    expect(isUuidV4('123e4567-e89b-42d3-7456-426614174000')).toBe(false);
+    expect(isUuidV4('123E4567-E89B-42D3-A456-426614174000')).toBe(false);
+    expect(isUuidV4('123e4567-e89b-42d3-a456-42661417400')).toBe(false);
+    expect(isUuidV4('123e4567-e89b-42d3-a456-426614174000 ')).toBe(false);
+    expect(isUuidV4('../../etc/passwd')).toBe(false);
+    expect(isUuidV4('')).toBe(false);
+    expect(isUuidV4(undefined)).toBe(false);
+    expect(isUuidV4(42)).toBe(false);
   });
 });

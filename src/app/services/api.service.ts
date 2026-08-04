@@ -962,7 +962,13 @@ export class ApiService {
   }
 
   /** Create and submit an own time entry; ownership is derived server-side. */
-  createMyTimeEntry(entry: Partial<TimeEntry>): Observable<TimeEntry> {
+  /**
+   * `idempotencyKey` must be a v4 UUID and becomes the uuid segment of the
+   * stored id, so a retry after a lost response targets the SAME row instead of
+   * inserting a second time entry. Keep it stable across retries of one
+   * submission and generate a new one per submission.
+   */
+  createMyTimeEntry(entry: Partial<TimeEntry> & { idempotencyKey?: string }): Observable<TimeEntry> {
     return this.http.post<TimeEntry>(`${this.baseUrl}/self/time-entries`, entry);
   }
 

@@ -5004,6 +5004,197 @@ async function checkAccountableApproverRules() {
 }
 
 /**
+ * /self/* — P0-02 and P0-05, the two release blockers this suite could not see.
+ *
+ * WHY THIS EXISTS. Before this section the suite had 448 req(...) assertions and
+ * not one touched /self/*. P0-05's server-side field whitelist and P0-02's
+ * create-and-submit were verified by READING the code; P0-02's issue text asks
+ * explicitly for an end-to-end test. self-service.util.spec.ts covers the pure
+ * helpers, which cannot see the wiring: whether the route exists, whether the
+ * whitelist is actually applied to the request body, whether the target id is
+ * really taken from the principal rather than the payload.
+ *
+ * Identity: X-User-Id '2' maps through the seeded user directory to resource '2'
+ * (John Miller). Every assertion below is about resource '2' NEVER being able to
+ * name another resource, and about rate fields never crossing the boundary in
+ * either direction.
+ *
+ * Restores every profile field it touches.
+ */
+async function checkSelfService() {
+  const SELF = { 'X-User-Id': '2', 'X-User-Role': 'employee' };
+  const SELF_RESOURCE = '2';
+
+  // --- P0-05 READ: rate data must not cross the boundary --------------------
+  const profile = await req('GET', '/self/profile', { headers: SELF });
+  const profileOk = check(
+    'GET /self/profile -> 200 for the signed-in resource (never a client-named id)',
+    profile.status === 200 && profile.body?.id === SELF_RESOURCE,
+    `status=${profile.status} id=${profile.body?.id}`,
+  );
+  if (!profileOk) return;
+
+  const RATE_FIELDS = ['costRate', 'billRate', 'costRateOverride', 'billRateOverride', 'costRateDay', 'billRateDay'];
+  const leaked = RATE_FIELDS.filter(field => field in (profile.body ?? {}));
+  check(
+    'GET /self/profile strips every rate field (P0-05 read side)',
+    leaked.length === 0,
+    leaked.length ? `leaked=${leaked.join(',')}` : 'none of the 6 present',
+  );
+  // The SAME resource read through the privileged collection DOES carry them —
+  // otherwise the assertion above could pass because the seed has no rates.
+  const asAdmin = await req('GET', `/resources/${SELF_RESOURCE}`);
+  check(
+    'control: the privileged /resources view of the same row DOES carry a billRate',
+    asAdmin.status === 200 && typeof asAdmin.body?.billRate === 'number',
+    `status=${asAdmin.status} billRate=${asAdmin.body?.billRate}`,
+  );
+
+  // --- P0-05 WRITE: the whitelist ------------------------------------------
+  const before = asAdmin.body;
+  // The resource the escalating body NAMES, captured before the write. Compared
+  // field-by-field afterwards rather than probed for a sentinel value: resource 1
+  // already seeds 'Senior Developer', so a `not.toContain` there would pass for
+  // the wrong reason.
+  const namedVictimBefore = (await req('GET', '/resources/1')).body;
+  const escalation = await req('PUT', '/self/profile', {
+    headers: SELF,
+    body: {
+      // The one allowed field, so the request is a legitimate profile edit...
+      projectRoles: ['Senior Developer'],
+      // ...carrying every escalation the whitelist must drop.
+      id: '1',
+      resourceId: '1',
+      costRate: 1, billRate: 9999, costRateOverride: 1, billRateOverride: 9999,
+      costRateDay: 1, billRateDay: 9999,
+      managerId: '3', resourceOrganizationId: 'ORG-9', capacity: 999,
+      kind: 'dummy', vendorId: 'V1', role: 'admin', utilization: 1,
+      hireDate: '1999-01-01', terminationDate: '1999-12-31', contractHoursPerDay: 24,
+    },
+  });
+  check('PUT /self/profile with an escalating body -> 200 (the allowed field applies)', escalation.status === 200, `status=${escalation.status} error=${escalation.body?.error ?? ''}`);
+  check(
+    'PUT /self/profile applied the whitelisted field',
+    Array.isArray(escalation.body?.projectRoles) && escalation.body.projectRoles.includes('Senior Developer'),
+    `projectRoles=${JSON.stringify(escalation.body?.projectRoles)}`,
+  );
+
+  const after = await req('GET', `/resources/${SELF_RESOURCE}`);
+  const changed = [
+    'costRate', 'billRate', 'costRateOverride', 'billRateOverride', 'costRateDay', 'billRateDay',
+    'managerId', 'resourceOrganizationId', 'capacity', 'kind', 'vendorId', 'role', 'utilization',
+    'hireDate', 'terminationDate', 'contractHoursPerDay',
+  ].filter(field => JSON.stringify(after.body?.[field]) !== JSON.stringify(before?.[field]));
+  check(
+    'PUT /self/profile changed NONE of the 16 privileged fields it was handed (P0-05 write side)',
+    changed.length === 0,
+    changed.length ? `mutated=${changed.join(',')}` : 'all unchanged',
+  );
+  // And it did not write to the resource the body NAMED instead of the principal.
+  const namedVictimAfter = (await req('GET', '/resources/1')).body;
+  check(
+    'PUT /self/profile ignored the body\'s id/resourceId and left resource 1 byte-identical',
+    JSON.stringify(namedVictimAfter) === JSON.stringify(namedVictimBefore),
+    `before=${JSON.stringify(namedVictimBefore?.projectRoles)} after=${JSON.stringify(namedVictimAfter?.projectRoles)}`,
+  );
+  // Restore.
+  await req('PUT', '/self/profile', { headers: SELF, body: { projectRoles: before?.projectRoles ?? [] } });
+
+  // --- Fail-closed: no principal, and a principal with no resource ---------
+  const anonymous = await req('GET', '/self/profile', { headers: { 'X-User-Id': '', 'X-User-Role': '' } });
+  check('GET /self/profile with no application role -> 401/403, never a default resource', anonymous.status === 401 || anonymous.status === 403, `status=${anonymous.status}`);
+  const unlinked = await req('GET', '/self/profile', { headers: { 'X-User-Id': 'nobody-in-the-directory', 'X-User-Role': 'employee' } });
+  check(
+    'GET /self/profile for an identity that maps to NO resource -> 403 (never resource 1)',
+    unlinked.status === 403,
+    `status=${unlinked.status} body=${JSON.stringify(unlinked.body)}`,
+  );
+
+  // --- Self-scoped collections --------------------------------------------
+  const assignments = await req('GET', '/self/assignments', { headers: SELF });
+  check(
+    'GET /self/assignments returns ONLY the signed-in resource\'s assignments',
+    assignments.status === 200 && Array.isArray(assignments.body)
+      && assignments.body.every(a => a.resourceId === SELF_RESOURCE),
+    `status=${assignments.status} resourceIds=${JSON.stringify([...new Set((assignments.body || []).map(a => a.resourceId))])}`,
+  );
+  const selfEntriesBefore = await req('GET', '/self/time-entries', { headers: SELF });
+  check(
+    'GET /self/time-entries returns ONLY the signed-in resource\'s entries',
+    selfEntriesBefore.status === 200 && (selfEntriesBefore.body || []).every(e => e.resourceId === SELF_RESOURCE),
+    `status=${selfEntriesBefore.status} resourceIds=${JSON.stringify([...new Set((selfEntriesBefore.body || []).map(e => e.resourceId))])}`,
+  );
+
+  // --- P0-02: create-and-submit, end to end -------------------------------
+  const ownAssignment = (assignments.body || [])[0];
+  if (!check('P0-02 setup: the signed-in resource has at least one assignment', Boolean(ownAssignment), `assignments=${(assignments.body || []).length}`)) return;
+
+  const KEY = '9f1c2b7e-4d3a-4c5b-9e8f-0a1b2c3d4e5f';
+  const DATE = '2026-06-16';
+  const submitted = await req('POST', '/self/time-entries', {
+    headers: SELF,
+    body: { assignmentId: ownAssignment.id, date: DATE, hours: 3, notes: 'smoke self-service', idempotencyKey: KEY, status: 'Approved', resourceId: '1', projectId: 'P9' },
+  });
+  check(
+    'POST /self/time-entries -> 201 Submitted in ONE call (P0-02: never left as a Draft)',
+    submitted.status === 201 && submitted.body?.status === 'Submitted',
+    `status=${submitted.status} entryStatus=${submitted.body?.status} error=${submitted.body?.error ?? ''}`,
+  );
+  check(
+    'POST /self/time-entries pins resourceId/projectId server-side and ignores a client status',
+    submitted.body?.resourceId === SELF_RESOURCE && submitted.body?.projectId !== 'P9' && submitted.body?.status === 'Submitted',
+    `resourceId=${submitted.body?.resourceId} projectId=${submitted.body?.projectId} status=${submitted.body?.status}`,
+  );
+
+  // IDEMPOTENCY (P1-21): the same key must return the same row, not a second one.
+  const countFor = async () => {
+    const list = await req('GET', '/self/time-entries', { headers: SELF });
+    return (list.body || []).filter(e => e.date === DATE && e.assignmentId === ownAssignment.id).length;
+  };
+  const afterFirst = await countFor();
+  const replay = await req('POST', '/self/time-entries', {
+    headers: SELF,
+    body: { assignmentId: ownAssignment.id, date: DATE, hours: 3, notes: 'smoke self-service', idempotencyKey: KEY },
+  });
+  const afterReplay = await countFor();
+  check(
+    'POST /self/time-entries replayed with the SAME idempotencyKey -> 200, same id, NO duplicate',
+    replay.status === 200 && replay.body?.id === submitted.body?.id && afterReplay === afterFirst,
+    `status=${replay.status} id=${replay.body?.id} expected=${submitted.body?.id} count ${afterFirst}->${afterReplay}`,
+  );
+  const reused = await req('POST', '/self/time-entries', {
+    headers: SELF,
+    body: { assignmentId: ownAssignment.id, date: DATE, hours: 7, idempotencyKey: KEY },
+  });
+  check(
+    'POST /self/time-entries reusing a key for DIFFERENT hours -> 409 (a lost submission is not hidden)',
+    reused.status === 409,
+    `status=${reused.status} error=${reused.body?.error ?? ''}`,
+  );
+  const badKey = await req('POST', '/self/time-entries', {
+    headers: SELF,
+    body: { assignmentId: ownAssignment.id, date: DATE, hours: 1, idempotencyKey: '../../etc/passwd' },
+  });
+  check('POST /self/time-entries with a malformed idempotencyKey -> 400', badKey.status === 400, `status=${badKey.status} error=${badKey.body?.error ?? ''}`);
+
+  // Someone else's assignment must be refused even with a valid own principal.
+  const foreign = (await req('GET', '/assignments')).body?.find(a => a.resourceId !== SELF_RESOURCE);
+  if (foreign) {
+    const stolen = await req('POST', '/self/time-entries', {
+      headers: SELF,
+      body: { assignmentId: foreign.id, date: DATE, hours: 1 },
+    });
+    check(
+      "POST /self/time-entries against another resource's assignment -> 403",
+      stolen.status === 403,
+      `status=${stolen.status} error=${stolen.body?.error ?? ''}`,
+    );
+  }
+
+  await req('DELETE', `/time-entries/${submitted.body?.id}`);
+}
+
+/**
  * THE RETARGET DOOR AROUND THE PER-DAY CAPACITY GATE.
  *
  * `AssignmentDay` carries only assignmentId, so day rows travel wholesale when
@@ -5629,6 +5820,15 @@ async function main() {
     await checkNegotiatedRates();
   } catch (err) {
     console.log(`FAIL  negotiated-rates integrity flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the /self/* section never
+  // masks or blocks any of the prior section results.
+  try {
+    await checkSelfService();
+  } catch (err) {
+    console.log(`FAIL  /self/* self-service flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

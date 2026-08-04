@@ -22,7 +22,7 @@ import type { FxRate, RateCard } from './app/services/api.service';
 import { isResourceKind, RESOURCE_KINDS, kindOf, dailyCapFor } from './app/services/resource-kind.util';
 import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, scopeOf, accountableApproversOf, nodeManagersAbove, isTerminatedAsOf, type OrgLevel } from './app/services/org-scope.util';
 import { maxIdSeq } from './server/id-seq.util';
-import { newEntityId } from './server/entity-id.util';
+import { isUuidV4, newEntityId } from './server/entity-id.util';
 import {
   applicationRoles,
   authorizeRead,
@@ -2077,6 +2077,18 @@ apiRouter.post('/self/time-entries', async (req, res) => {
     res.status(400).json({ error: 'date must be an ISO date string' });
     return;
   }
+  // IDEMPOTENCY (P1-21). The key is the id's uuid segment, so a replayed request
+  // targets the SAME row instead of inserting a second one, and the stored id
+  // keeps the exact `TE<uuid-v4>` shape every other time entry has. Optional:
+  // without a key the endpoint stays create-only (any older client keeps
+  // working), which is why the client always sends one.
+  const rawKey = (req.body as Record<string, unknown> | undefined)?.['idempotencyKey'];
+  if (rawKey !== undefined && !isUuidV4(rawKey)) {
+    res.status(400).json({ error: 'idempotencyKey must be a v4 UUID' });
+    return;
+  }
+  const entryId = `TE${typeof rawKey === 'string' ? rawKey : newId()}`;
+
   const assignment = await repos.assignments.get(body.assignmentId);
   if (!assignment || !isOwnAssignment([assignment], body.assignmentId, resourceId)) {
     res.status(403).json({ error: 'The assignment does not belong to the signed-in resource' });
@@ -2088,20 +2100,45 @@ apiRouter.post('/self/time-entries', async (req, res) => {
     return;
   }
 
-  const draft = await repos.timeEntries.create({
-    id: `TE${newId()}`,
-    assignmentId: assignment.id,
-    requestId: request.id,
-    resourceId,
-    projectId: request.projectId,
-    date: body.date,
-    hours: body.hours,
-    notes: body.notes,
-    status: 'Draft',
-  } as TimeEntry);
-  const submitted = await repos.timeEntries.update(draft.id, { status: 'Submitted' });
-  if (!submitted) { res.status(500).json({ error: 'Could not submit time entry' }); return; }
-  res.status(201).json(submitted);
+  // ONE WRITE, not create-then-transition. The previous shape was two repo calls
+  // with no transaction and no compensation: if the second failed, a 'Draft'
+  // orphan was left AND the retry created a SECOND entry — the duplicate P1-21
+  // asked to prevent. A single create with the server-pinned status reaches the
+  // same end state (a Submitted entry) and has no partial state to leave behind.
+  // `status` is not in the pick() list above, so it can never be client-supplied.
+  const submit = async (): Promise<{ status: number; body: unknown }> => {
+    const existing = await repos.timeEntries.get(entryId);
+    if (existing) {
+      // REPLAY, not a conflict — as long as it is the same entry. A key reused
+      // for a different entry is a client bug, and silently returning the old
+      // row would hide a lost submission.
+      const sameEntry = existing.resourceId === resourceId
+        && existing.assignmentId === assignment.id
+        && existing.date === body.date
+        && existing.hours === body.hours;
+      if (!sameEntry) {
+        return { status: 409, body: { error: 'idempotencyKey already identifies a different time entry' } };
+      }
+      return { status: 200, body: existing };
+    }
+    const created = await repos.timeEntries.create({
+      id: entryId,
+      assignmentId: assignment.id,
+      requestId: request.id,
+      resourceId,
+      projectId: request.projectId,
+      date: body.date,
+      hours: body.hours,
+      notes: body.notes,
+      status: 'Submitted',
+    } as TimeEntry);
+    return { status: 201, body: created };
+  };
+  // Serialize the get-then-create against a concurrent double submit of the SAME
+  // key (a double click, or a retry racing the original): without it both callers
+  // read "absent" and both create.
+  const result = await withLock(`self-time-entry:${entryId}`, submit);
+  res.status(result.status).json(result.body);
 });
 
 const REQUEST_FIELDS = ['name', 'requiredRole', 'requiredEffort', 'skills', 'description', 'startDate', 'endDate', 'status', 'requesterId', 'projectId'] as const;
