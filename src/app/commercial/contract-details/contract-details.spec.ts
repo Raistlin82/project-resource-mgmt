@@ -1,7 +1,7 @@
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { of, Subject } from 'rxjs';
+import { of, Subject, throwError } from 'rxjs';
 import { ContractDetails } from './contract-details';
 import {
   ApiService,
@@ -117,5 +117,128 @@ describe('ContractDetails — recognition figure gating (Task 4, round 3)', () =
     expect(resolvedText).toContain('Total Recognized');
     expect(resolvedText).toMatch(/10,000\.00/);
     expect(resolvedText).not.toMatch(/15,000\.00/);
+  });
+});
+
+describe('ContractDetails — Negotiated Rates table (Task 5)', () => {
+  const contract: Contract = {
+    id: 'CT1', customerId: 'C1', name: 'Framework Agreement', type: 'T&M', totalValue: 0,
+    currency: 'EUR', status: 'Active', startDate: '2026-01-01', endDate: '2026-12-31',
+  };
+  const customer: Customer = { id: 'C1', name: 'Acme Co' };
+  const resource: Resource = {
+    id: 'R1', name: 'Dev One', role: 'Developer', skills: [], projectRoles: [],
+    externalExperience: [], utilization: 80, capacity: 40, billRate: 1200,
+  };
+
+  /** Every read this component makes, all synchronous, so a single tick() settles the DOM. */
+  function baseStub(overrides: Partial<Record<string, () => unknown>> = {}) {
+    return {
+      getContracts: () => of([contract]),
+      getCustomers: () => of([customer]),
+      getProjects: () => of([]),
+      getOrders: () => of([]),
+      getOrderLines: () => of([]),
+      getRequests: () => of([]),
+      getAssignments: () => of([]),
+      getResources: () => of([resource]),
+      getProjectFinancials: () => of([]),
+      getTimeEntries: () => of([]),
+      getBillingPlanItems: () => of([]),
+      getMilestones: () => of([]),
+      getFxRates: () => of([]),
+      getNegotiatedRates: () => of([]),
+      ...overrides,
+    } as unknown as ApiService;
+  }
+
+  async function setUp(apiStub: ApiService): Promise<ComponentFixture<ContractDetails>> {
+    const authStub = { authReady: signal(true), canApproveFinancials: signal(true) } as unknown as AuthService;
+    const notifyStub = { show: vi.fn() } as unknown as NotificationService;
+    TestBed.configureTestingModule({
+      imports: [ContractDetails],
+      providers: [
+        provideRouter([]),
+        { provide: ApiService, useValue: apiStub },
+        { provide: AuthService, useValue: authStub },
+        { provide: NotificationService, useValue: notifyStub },
+      ],
+    });
+    await TestBed.compileComponents();
+    const fixture: ComponentFixture<ContractDetails> = TestBed.createComponent(ContractDetails);
+    fixture.componentRef.setInput('id', 'CT1');
+    await tick(fixture);
+    return fixture;
+  }
+
+  it('lists the negotiated rates of the contract', async () => {
+    const rate: NegotiatedRate = { id: 'NR1', contractId: 'CT1', role: 'Developer', currency: 'EUR', billRate: 1000 };
+    const fixture = await setUp(baseStub({ getNegotiatedRates: () => of([rate]) }));
+
+    const rows = host(fixture).querySelectorAll('[data-test="negotiated-rate-row"]');
+    expect(rows.length).toBe(1);
+    expect(rows[0].textContent).toContain('Developer');
+    expect(rows[0].textContent).toContain('1000');
+  });
+
+  it('sends contractId and never projectId when adding on a contract', async () => {
+    const createSpy = vi.fn().mockReturnValue(of({ id: 'NR9', contractId: 'CT1', role: 'Developer', currency: 'EUR', billRate: 950 }));
+    const fixture = await setUp(baseStub({ createNegotiatedRate: createSpy }));
+    const h = host(fixture);
+
+    const addButton = [...h.querySelectorAll('button')].find(b => b.textContent?.trim().includes('Add Rate'));
+    expect(addButton).toBeTruthy();
+    addButton!.click();
+    await tick(fixture);
+
+    const roleSelect = h.querySelector<HTMLSelectElement>('#rateRole');
+    expect(roleSelect).toBeTruthy();
+    roleSelect!.value = 'Developer';
+    roleSelect!.dispatchEvent(new Event('change'));
+
+    const billRateInput = h.querySelector<HTMLInputElement>('#rateBillRate');
+    expect(billRateInput).toBeTruthy();
+    billRateInput!.value = '950';
+    billRateInput!.dispatchEvent(new Event('input'));
+    await tick(fixture);
+
+    const saveButton = [...h.querySelectorAll('button')].find(b => b.textContent?.trim() === 'Save Rate');
+    expect(saveButton).toBeTruthy();
+    saveButton!.click();
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    const payload = createSpy.mock.calls[0][0];
+    expect(payload).toEqual(expect.objectContaining({ contractId: 'CT1', role: 'Developer', currency: 'EUR', billRate: 950 }));
+    expect('projectId' in payload).toBe(false);
+  });
+
+  it('surfaces the server refusal without closing the form', async () => {
+    const existing: NegotiatedRate = { id: 'NR1', contractId: 'CT1', role: 'Developer', currency: 'EUR', billRate: 1000 };
+    const createSpy = vi.fn().mockReturnValue(
+      throwError(() => ({ error: { error: 'a negotiated rate already exists for this key (existing id NR1)' } })),
+    );
+    const fixture = await setUp(baseStub({ getNegotiatedRates: () => of([existing]), createNegotiatedRate: createSpy }));
+    const h = host(fixture);
+
+    const addButton = [...h.querySelectorAll('button')].find(b => b.textContent?.trim().includes('Add Rate'));
+    addButton!.click();
+    await tick(fixture);
+
+    const roleSelect = h.querySelector<HTMLSelectElement>('#rateRole');
+    roleSelect!.value = 'Developer';
+    roleSelect!.dispatchEvent(new Event('change'));
+    const billRateInput = h.querySelector<HTMLInputElement>('#rateBillRate');
+    billRateInput!.value = '900';
+    billRateInput!.dispatchEvent(new Event('input'));
+    await tick(fixture);
+
+    const saveButton = [...h.querySelectorAll('button')].find(b => b.textContent?.trim() === 'Save Rate');
+    saveButton!.click();
+    await tick(fixture);
+
+    // The form must still be open, and the exact server message rendered.
+    expect(h.querySelector('#rateRole')).toBeTruthy();
+    const errorEl = h.querySelector('[data-test="negotiated-rate-error"]');
+    expect(errorEl?.textContent).toContain('a negotiated rate already exists for this key (existing id NR1)');
   });
 });

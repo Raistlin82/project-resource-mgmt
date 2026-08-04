@@ -15,6 +15,7 @@ import { ProjectCostCenters } from '../project-cost-centers/project-cost-centers
 import { ProjectTasks } from '../project-tasks/project-tasks';
 import { ProjectIssues } from '../project-issues/project-issues';
 import { ChangeRequests } from '../change-requests/change-requests';
+import { ProjectRates } from '../project-rates/project-rates';
 
 @Component({
   selector: 'app-project-details',
@@ -32,7 +33,8 @@ import { ChangeRequests } from '../change-requests/change-requests';
     ProjectCostCenters,
     ProjectTasks,
     ProjectIssues,
-    ChangeRequests
+    ChangeRequests,
+    ProjectRates
   ],
   template: `
     <div class="command-page space-y-6">
@@ -218,6 +220,9 @@ import { ChangeRequests } from '../change-requests/change-requests';
         @if (activeTab() === 'cost-centers') {
           <app-project-cost-centers [projectId]="project()?.id" />
         }
+        @if (activeTab() === 'rates') {
+          <app-project-rates [projectId]="project()?.id" />
+        }
         @if (activeTab() === 'tasks') {
           <app-project-tasks [projectId]="project()?.id" />
         }
@@ -334,6 +339,11 @@ export class ProjectDetailsComponent {
           { id: 'cost-centers', label: 'Cost Centers' },
         ]
       : []),
+    // Negotiated rates (design spec §7) are commercial config, gated the same
+    // as /negotiated-rates itself (src/server.ts: sales/finance/
+    // delivery-executive/admin) — canManageCommercial() matches that role set
+    // exactly, so a non-commercial role never even sees the tab.
+    ...(this.auth.canManageCommercial() ? [{ id: 'rates', label: 'Rates' }] : []),
     { id: 'tasks', label: 'Tasks' },
     { id: 'issues', label: 'Issues' },
     { id: 'changes', label: 'Changes' },

@@ -191,6 +191,109 @@ interface BillingControlRow {
           </div>
         </div>
 
+        <!-- Negotiated Rates (design spec §7) -->
+        <div class="command-card overflow-hidden">
+          <div class="command-card-header">
+            <div>
+              <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Negotiated Rates</h2>
+              <p class="mt-1 text-sm text-[var(--cc-muted)]">Per-profile sell price for Time &amp; Materials revenue on this contract. A project under this contract can override any row.</p>
+            </div>
+            <button type="button" (click)="openRateForm()" class="command-button">
+              <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon>
+              Add Rate
+            </button>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="command-data-table">
+              <thead>
+                <tr>
+                  <th>Role</th>
+                  <th>Currency</th>
+                  <th class="text-right">Bill rate (€/day)</th>
+                  <th class="text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (rate of contractNegotiatedRates(); track rate.id) {
+                  <tr data-test="negotiated-rate-row">
+                    <td class="font-medium">{{ rate.role }}</td>
+                    <td class="font-mono text-ink-secondary">{{ rate.currency }}</td>
+                    <td class="text-right font-mono tabular-nums">{{ rate.billRate }}</td>
+                    <td class="text-right">
+                      <button type="button" (click)="openRateForm(rate)" [attr.aria-label]="'Edit rate for ' + rate.role" class="text-ink-muted hover:text-accent-text p-1.5 rounded-lg transition-colors">
+                        <mat-icon class="text-[18px] w-[18px] h-[18px]">edit</mat-icon>
+                      </button>
+                      <button type="button" (click)="deleteRate(rate)" [attr.aria-label]="'Delete rate for ' + rate.role" class="text-ink-muted hover:text-critical-text p-1.5 rounded-lg transition-colors ml-1">
+                        <mat-icon class="text-[18px] w-[18px] h-[18px]">delete</mat-icon>
+                      </button>
+                    </td>
+                  </tr>
+                }
+                @if (!contractNegotiatedRates().length) {
+                  <tr>
+                    <td colspan="4" class="px-6 sm:px-8 py-10 text-center text-ink-muted">
+                      No negotiated rates for this contract. T&amp;M revenue prices at each profile's reference rate card.
+                    </td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        @if (showRateForm()) {
+          <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+               appModal ariaLabelledby="rateModalTitle" (dismiss)="closeRateForm()">
+            <div class="command-card w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
+              <div class="command-card-header">
+                <h2 id="rateModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">
+                  {{ editingRateId() ? 'Edit Negotiated Rate' : 'Add Negotiated Rate' }}
+                </h2>
+                <button type="button" (click)="closeRateForm()" aria-label="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
+                  <mat-icon>close</mat-icon>
+                </button>
+              </div>
+              <div class="p-6 sm:p-8 overflow-y-auto flex-1 space-y-6">
+                <div>
+                  <label for="rateRole" class="block text-sm font-semibold text-ink-secondary mb-1.5">Role *</label>
+                  <!-- Never [value] on a <select> whose <option>s come from an @for — the
+                       write lands before Angular has inserted the options and is silently
+                       dropped. Per-option [selected], driven by a plain (change) handler. -->
+                  <select id="rateRole" (change)="onRateRoleChange($event)" class="command-select">
+                    <option value="" [selected]="rateRole() === ''">Select a role...</option>
+                    @for (role of roleOptions(); track role) {
+                      <option [value]="role" [selected]="role === rateRole()">{{ role }}</option>
+                    }
+                  </select>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                  <div>
+                    <label for="rateCurrency" class="block text-sm font-semibold text-ink-secondary mb-1.5">Currency *</label>
+                    <select id="rateCurrency" (change)="onRateCurrencyChange($event)" class="command-select">
+                      @for (code of rateCurrencyOptions(); track code) {
+                        <option [value]="code" [selected]="code === rateCurrency()">{{ code }}</option>
+                      }
+                    </select>
+                  </div>
+                  <div>
+                    <label for="rateBillRate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Bill rate (€/day) *</label>
+                    <input id="rateBillRate" type="number" min="0" step="1" [value]="rateBillRate()" (input)="onRateBillRateChange($event)" class="command-input" placeholder="e.g. 1000">
+                  </div>
+                </div>
+                @if (rateError(); as err) {
+                  <p role="alert" data-test="negotiated-rate-error" class="text-xs text-critical-text">{{ err }}</p>
+                }
+              </div>
+              <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
+                <button type="button" (click)="closeRateForm()" class="command-button secondary">Cancel</button>
+                <button type="button" (click)="saveRate(c)" [disabled]="!rateFormValid()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                  Save Rate
+                </button>
+              </div>
+            </div>
+          </div>
+        }
+
         <!-- Billing expected vs actual -->
         <div class="command-card overflow-hidden">
           <div class="command-card-header">
@@ -860,6 +963,95 @@ export class ContractDetails {
   contractProjects = computed(() => this.projects().filter(p => p.contractId === this.id()));
 
   contractOrders = computed(() => this.orders().filter(o => o.contractId === this.id()));
+
+  // --- Negotiated Rates (design spec §7) --------------------------------
+
+  contractNegotiatedRates = computed(() => this.negotiatedRates().filter(r => r.contractId === this.id()));
+
+  /** Role options for the rate form's select: distinct roles actually held by a resource today. */
+  roleOptions = computed<string[]>(() => [...new Set(this.resources().map(r => r.role))].sort());
+
+  /** Currency options for the rate form's select: base currency + every configured fx-rate currency. */
+  rateCurrencyOptions = computed<string[]>(() => [...new Set([BASE_CURRENCY, ...this.fxRates().map(r => r.currency)])]);
+
+  showRateForm = signal(false);
+  editingRateId = signal<string | null>(null);
+  rateRole = signal('');
+  rateCurrency = signal(BASE_CURRENCY);
+  rateBillRate = signal<number | null>(null);
+  rateError = signal<string | null>(null);
+
+  rateFormValid = computed(() => !!this.rateRole() && !!this.rateCurrency() && this.rateBillRate() !== null && this.rateBillRate()! >= 0);
+
+  onRateRoleChange(event: Event): void {
+    this.rateRole.set((event.target as HTMLSelectElement).value);
+  }
+
+  onRateCurrencyChange(event: Event): void {
+    this.rateCurrency.set((event.target as HTMLSelectElement).value);
+  }
+
+  onRateBillRateChange(event: Event): void {
+    const raw = (event.target as HTMLInputElement).value;
+    this.rateBillRate.set(raw === '' ? null : Number(raw));
+  }
+
+  openRateForm(existing?: NegotiatedRate): void {
+    this.rateError.set(null);
+    if (existing) {
+      this.editingRateId.set(existing.id);
+      this.rateRole.set(existing.role);
+      this.rateCurrency.set(existing.currency);
+      this.rateBillRate.set(existing.billRate);
+    } else {
+      this.editingRateId.set(null);
+      this.rateRole.set('');
+      this.rateCurrency.set(BASE_CURRENCY);
+      this.rateBillRate.set(null);
+    }
+    this.showRateForm.set(true);
+  }
+
+  closeRateForm(): void {
+    this.showRateForm.set(false);
+    this.editingRateId.set(null);
+    this.rateError.set(null);
+  }
+
+  saveRate(contract: Contract): void {
+    if (!this.rateFormValid()) return;
+    // contractId ONLY — projectId is never sent from this surface (spec §3's xor).
+    const payload: Partial<NegotiatedRate> = {
+      contractId: contract.id,
+      role: this.rateRole(),
+      currency: this.rateCurrency(),
+      billRate: this.rateBillRate() ?? 0,
+    };
+    const id = this.editingRateId();
+    const done = () => {
+      this.negotiatedRatesRes.reload();
+      this.notification.show('Negotiated rate saved', 'success');
+      this.closeRateForm();
+    };
+    // Surface the server's own refusal text (400s from validateNegotiatedRate,
+    // src/server.ts) INLINE, and do NOT close the form — the coordinator's
+    // requirement, not just the generic toast the error interceptor also fires.
+    const fail = (e: unknown) => {
+      this.rateError.set((e as { error?: { error?: string } })?.error?.error ?? 'Could not save the negotiated rate.');
+    };
+    if (id) {
+      this.api.updateNegotiatedRate(id, payload).subscribe({ next: done, error: fail });
+    } else {
+      this.api.createNegotiatedRate(payload).subscribe({ next: done, error: fail });
+    }
+  }
+
+  deleteRate(rate: NegotiatedRate): void {
+    this.api.deleteNegotiatedRate(rate.id).subscribe(() => {
+      this.negotiatedRatesRes.reload();
+      this.notification.show('Negotiated rate deleted', 'success');
+    });
+  }
 
   contractBillingPlan = computed(() =>
     this.billingPlanItems()
