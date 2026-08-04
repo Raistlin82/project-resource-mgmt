@@ -24,9 +24,11 @@ const REMOTE_LOCATION = 'Remote';
           <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">My Collaborative Projects</h1>
           <p class="mt-2 text-sm text-[var(--cc-muted)]">Manage and track all your ongoing and completed projects.</p>
         </div>
-        <button (click)="openCreateForm()" class="command-button w-full sm:w-auto">
-          <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon> Create Project
-        </button>
+        @if (canManageProjects()) {
+          <button (click)="openCreateForm()" class="command-button w-full sm:w-auto">
+            <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon> Create Project
+          </button>
+        }
       </div>
 
       <!-- Search and Filter -->
@@ -89,14 +91,16 @@ const REMOTE_LOCATION = 'Remote';
               </div>
             </div>
 
-            <div class="px-6 py-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity focus-within:opacity-100 relative z-10">
-              <button (click)="editProject(project); $event.stopPropagation()" class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-colors" aria-label="Edit project">
-                <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
-              </button>
-              <button (click)="deleteProject(project.id); $event.stopPropagation()" class="p-2 text-ink-muted hover:text-critical-text hover:bg-critical-tint rounded-lg transition-colors" aria-label="Delete project">
-                <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
-              </button>
-            </div>
+            @if (canManageProjects()) {
+              <div class="px-6 py-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-2 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 relative z-10">
+                <button (click)="editProject(project); $event.stopPropagation()" class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-colors" aria-label="Edit project">
+                  <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
+                </button>
+                <button (click)="deleteProject(project.id); $event.stopPropagation()" class="p-2 text-ink-muted hover:text-critical-text hover:bg-critical-tint rounded-lg transition-colors" aria-label="Delete project">
+                  <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
+                </button>
+              </div>
+            }
           </div>
         }
         @if (!filteredProjects().length) {
@@ -227,15 +231,17 @@ const REMOTE_LOCATION = 'Remote';
                   }
                 </div>
 
-                <div class="sm:col-span-2">
-                  <label for="projectContract" class="block text-sm font-semibold text-ink-secondary mb-1.5">Contract</label>
-                  <select id="projectContract" formControlName="contractId" class="command-select">
-                    <option value="">No contract linked</option>
-                    @for (contract of contracts(); track contract.id) {
-                      <option [value]="contract.id">{{ contract.name }}</option>
-                    }
-                  </select>
-                </div>
+                @if (canReadCommercial()) {
+                  <div class="sm:col-span-2">
+                    <label for="projectContract" class="block text-sm font-semibold text-ink-secondary mb-1.5">Contract</label>
+                    <select id="projectContract" formControlName="contractId" class="command-select">
+                      <option value="">No contract linked</option>
+                      @for (contract of contracts(); track contract.id) {
+                        <option [value]="contract.id">{{ contract.name }}</option>
+                      }
+                    </select>
+                  </div>
+                }
 
                 <div class="sm:col-span-2">
                   <label for="projectDescription" class="block text-sm font-semibold text-ink-secondary mb-1.5">Description</label>
@@ -256,7 +262,7 @@ const REMOTE_LOCATION = 'Remote';
     }
 
     <!-- Delete Confirmation Modal -->
-    @if (deletingId()) {
+    @if (deletingId() && canManageProjects()) {
       <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
            appModal ariaLabelledby="projectDeleteTitle" (dismiss)="cancelDelete()">
         <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col transform transition-all">
@@ -285,12 +291,14 @@ export class ProjectsComponent {
   // /contracts is principal-gated in READ_RULES; wait for the restored bearer
   // token before loading it so SSR/deep reloads don't latch ResourceValueError.
   private contractsRes = rxResource<Contract[], boolean>({
-    params: () => this.auth.authReady(),
-    stream: ({ params: ready }) => (ready ? this.api.getContracts() : of<Contract[]>([])),
+    params: () => this.auth.authReady() && this.auth.canReadCommercial(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getContracts() : of<Contract[]>([])),
     defaultValue: [] as Contract[],
   });
   projects = this.projectsRes.value;
   contracts = this.contractsRes.value;
+  readonly canManageProjects = this.auth.canManageProjects;
+  readonly canReadCommercial = this.auth.canReadCommercial;
   showForm = signal(false);
   editingId = signal<string | null>(null);
   deletingId = signal<string | null>(null);
@@ -300,15 +308,23 @@ export class ProjectsComponent {
   // catalog (Phase D). /resources is a principal-gated read, so key the load on
   // authReady to avoid a 401 race that would latch the option list empty.
   private resourcesRes = rxResource<Resource[], boolean>({
-    params: () => this.auth.authReady(),
-    stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
+    params: () => this.auth.authReady() && this.auth.canManageProjects(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getResources() : of<Resource[]>([])),
     defaultValue: [] as Resource[],
   });
   resourceOptions = this.resourcesRes.value;
 
   // Location = Country + City (Phase F2). Both catalogs are open reads.
-  private countriesRes = rxResource({ stream: () => this.api.getCountries(), defaultValue: [] as Country[] });
-  private citiesRes = rxResource({ stream: () => this.api.getCities(), defaultValue: [] as City[] });
+  private countriesRes = rxResource<Country[], boolean>({
+    params: () => this.auth.authReady() && this.auth.canManageProjects(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getCountries() : of<Country[]>([])),
+    defaultValue: [] as Country[],
+  });
+  private citiesRes = rxResource<City[], boolean>({
+    params: () => this.auth.authReady() && this.auth.canManageProjects(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getCities() : of<City[]>([])),
+    defaultValue: [] as City[],
+  });
   countryOptions = this.countriesRes.value;
   cityOptions = this.citiesRes.value;
 
@@ -385,6 +401,7 @@ export class ProjectsComponent {
   }
 
   editProject(project: Project) {
+    if (!this.canManageProjects()) return;
     this.editingId.set(project.id);
     this.countryOverride.set(null); // derive the country from the stored location
     this.projectForm.patchValue({
@@ -401,7 +418,7 @@ export class ProjectsComponent {
   }
 
   saveProject() {
-    if (this.projectForm.invalid) return;
+    if (!this.canManageProjects() || this.projectForm.invalid) return;
 
     // ownerId is a real resource-id reference chosen in the Owner SELECT (no longer a
     // hardcoded mock id). The required validator guarantees it is set here.
@@ -425,10 +442,12 @@ export class ProjectsComponent {
   }
 
   deleteProject(id: string) {
+    if (!this.canManageProjects()) return;
     this.deletingId.set(id);
   }
 
   confirmDelete() {
+    if (!this.canManageProjects()) return;
     const id = this.deletingId();
     if (id) {
       this.api.deleteProject(id)
@@ -446,6 +465,7 @@ export class ProjectsComponent {
 
   /** Open the create form, defaulting the owner to the signed-in user's resource id. */
   openCreateForm() {
+    if (!this.canManageProjects()) return;
     this.editingId.set(null);
     this.countryOverride.set('');
     this.projectForm.reset({ status: 'In Planning', ownerId: this.auth.userId(), contractId: '', location: '' });

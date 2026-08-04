@@ -11,6 +11,7 @@ import {
 } from '@angular/core';
 import { NavigationEnd, Router, RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
 import { MatIconModule, MatIconRegistry } from '@angular/material/icon';
+import { CdkTrapFocus } from '@angular/cdk/a11y';
 import { rxResource, toSignal } from '@angular/core/rxjs-interop';
 import { forkJoin, of } from 'rxjs';
 import { catchError, filter, map } from 'rxjs/operators';
@@ -53,7 +54,7 @@ interface NavState {
 @Component({
   changeDetection: ChangeDetectionStrategy.OnPush,
   selector: 'app-root',
-  imports: [RouterOutlet, RouterLink, RouterLinkActive, MatIconModule],
+  imports: [RouterOutlet, RouterLink, RouterLinkActive, MatIconModule, CdkTrapFocus],
   template: `
     <div class="command-shell min-h-screen flex flex-col lg:flex-row font-sans">
       <a
@@ -75,7 +76,15 @@ interface NavState {
             <div class="text-[11px] text-ink-muted">Portfolio command center</div>
           </div>
         </div>
-        <button (click)="toggleMenu()" class="grid size-10 place-items-center rounded-md border border-line text-ink-secondary hover:text-ink hover:bg-surface-muted transition-colors" aria-label="Toggle navigation">
+        <button
+          #mobileMenuButton
+          data-testid="mobile-menu-toggle"
+          type="button"
+          (click)="toggleMenu()"
+          class="grid size-10 place-items-center rounded-md border border-line text-ink-secondary hover:text-ink hover:bg-surface-muted transition-colors"
+          aria-label="Toggle navigation"
+          aria-controls="primary-navigation"
+          [attr.aria-expanded]="isMobileMenuOpen()">
           <mat-icon>{{ isMobileMenuOpen() ? 'close' : 'menu' }}</mat-icon>
         </button>
       </header>
@@ -83,20 +92,33 @@ interface NavState {
       @if (isMobileMenuOpen()) {
         <div
           class="fixed inset-0 bg-scrim/40 backdrop-blur-sm z-40 lg:hidden transition-opacity"
-          (click)="closeMenu()"
-          (keydown.enter)="closeMenu()"
-          tabindex="0"
-          role="button"
-          aria-label="Close menu">
+          (click)="closeMenu(true)"
+          aria-hidden="true">
         </div>
       }
 
       <aside
+        id="primary-navigation"
+        aria-label="Primary navigation"
         class="command-sidebar fixed inset-y-0 left-0 z-50 w-72 flex flex-col transform transition-transform duration-300 ease-in-out lg:translate-x-0 overflow-y-auto shadow-2xl lg:shadow-none"
+        [cdkTrapFocus]="isMobileMenuOpen()"
+        [cdkTrapFocusAutoCapture]="isMobileMenuOpen()"
+        (keydown.escape)="closeMenu(true)"
         [class.-translate-x-full]="!isMobileMenuOpen()"
         [class.translate-x-0]="isMobileMenuOpen()"
         [class.lg:relative]="desktopSidebarOpen()"
         [class.lg:hidden]="!desktopSidebarOpen()">
+        <div class="flex items-center justify-between border-b border-line bg-surface px-4 py-3 lg:hidden">
+          <span class="text-sm font-semibold text-ink">Navigation</span>
+          <button
+            data-testid="mobile-menu-close"
+            type="button"
+            (click)="closeMenu(true)"
+            class="grid size-10 place-items-center rounded-md border border-line text-ink-secondary hover:bg-surface-muted hover:text-ink"
+            aria-label="Close navigation">
+            <mat-icon>close</mat-icon>
+          </button>
+        </div>
         <div class="hidden lg:block sticky top-0 z-10 border-b border-line bg-surface px-5 py-5">
           <div class="flex items-center gap-3 text-ink">
             <span class="grid size-10 place-items-center rounded-md border border-accent bg-accent-tint text-accent-text ring-1 ring-accent">
@@ -110,11 +132,13 @@ interface NavState {
               <div class="mt-1 text-xs text-ink-muted">Professional Services Automation</div>
             </div>
           </div>
-          <div class="mt-4 grid grid-cols-4 gap-2 text-center">
-            <div class="rounded-md border border-line bg-surface-muted px-2 py-2 ring-1 ring-black/5">
-              <div class="font-mono tabular-nums text-sm font-semibold text-accent-text">{{ openRequestsBadge() }}</div>
-              <div class="text-[10px] text-ink-muted">REQ</div>
-            </div>
+          <div class="mt-4 grid grid-cols-2 gap-2 text-center" [class.grid-cols-4]="canReadStaffing()">
+            @if (canReadStaffing()) {
+              <div class="rounded-md border border-line bg-surface-muted px-2 py-2 ring-1 ring-black/5">
+                <div class="font-mono tabular-nums text-sm font-semibold text-accent-text">{{ openRequestsBadge() }}</div>
+                <div class="text-[10px] text-ink-muted">REQ</div>
+              </div>
+            }
             <div class="rounded-md border border-line bg-surface-muted px-2 py-2 ring-1 ring-black/5">
               <div class="font-mono tabular-nums text-sm font-semibold text-accent-text">{{ riskBadge() }}</div>
               <div class="text-[10px] text-ink-muted">RISK</div>
@@ -123,10 +147,12 @@ interface NavState {
               <div class="font-mono tabular-nums text-sm font-semibold text-accent-text">{{ changesBadge() }}</div>
               <div class="text-[10px] text-ink-muted">CR</div>
             </div>
-            <div class="rounded-md border border-line bg-surface-muted px-2 py-2 ring-1 ring-black/5">
-              <div class="font-mono tabular-nums text-sm font-semibold text-accent-text">{{ overbookedBadge() }}</div>
-              <div class="text-[10px] text-ink-muted">LOAD</div>
-            </div>
+            @if (canReadStaffing()) {
+              <div class="rounded-md border border-line bg-surface-muted px-2 py-2 ring-1 ring-black/5">
+                <div class="font-mono tabular-nums text-sm font-semibold text-accent-text">{{ overbookedBadge() }}</div>
+                <div class="text-[10px] text-ink-muted">LOAD</div>
+              </div>
+            }
           </div>
         </div>
 
@@ -156,7 +182,7 @@ interface NavState {
                 type="button"
                 class="command-nav-group-header"
                 [attr.aria-expanded]="isGroupOpen(group.label)"
-                [attr.aria-controls]="'navgroup-' + group.label"
+                [attr.aria-controls]="navGroupId(group.label)"
                 [attr.aria-label]="'Toggle ' + group.label + ' navigation group'"
                 (click)="toggleGroup(group.label)">
                 <span class="command-section-label">{{ group.label }}</span>
@@ -165,7 +191,7 @@ interface NavState {
               <div
                 class="command-nav-group-body"
                 [class.open]="isGroupOpen(group.label)"
-                [id]="'navgroup-' + group.label"
+                [id]="navGroupId(group.label)"
                 [inert]="!isGroupOpen(group.label)">
                 <div class="space-y-1 pt-1">
                   @for (item of group.items; track item.route) {
@@ -244,7 +270,7 @@ interface NavState {
         </div>
       </aside>
 
-      <main id="main-content" tabindex="-1" class="flex-1 overflow-y-auto lg:h-screen outline-none">
+      <main id="main-content" tabindex="-1" [inert]="isMobileMenuOpen()" class="flex-1 overflow-y-auto lg:h-screen outline-none">
         <!-- Desktop top bar: hamburger to collapse/expand the left navigation. -->
         <div class="hidden lg:flex items-center gap-3 sticky top-0 z-30 border-b border-line bg-canvas/85 backdrop-blur px-4 py-2">
           <button
@@ -270,7 +296,7 @@ interface NavState {
         user is told immediately that an action failed; success/info are polite.
         Both sit in the same fixed wrapper so the visual stack is unchanged.
       -->
-      <div class="fixed bottom-4 right-4 z-[100] flex w-full max-w-sm flex-col pointer-events-none">
+      <div class="fixed bottom-4 left-4 right-4 z-[100] flex max-h-[calc(100dvh-2rem)] w-auto max-w-sm flex-col overflow-y-auto pointer-events-none sm:left-auto sm:w-full">
         <div role="alert" aria-live="assertive" class="flex flex-col gap-2">
           @for (toast of errorToasts(); track toast.id) {
             <div class="pointer-events-auto flex items-start gap-3 rounded-md border p-4 text-sm font-semibold shadow-lg ring-1 animate-in bg-critical-tint border-critical ring-critical text-critical-text">
@@ -312,6 +338,7 @@ export class App {
 
   // Nav search input, used by the global ⌘K shortcut to focus the filter.
   private navSearch = viewChild<ElementRef<HTMLInputElement>>('navSearch');
+  private mobileMenuButton = viewChild<ElementRef<HTMLButtonElement>>('mobileMenuButton');
 
   // Theme state surfaced to the toggle control (light-first; dark is opt-in).
   readonly isDark = computed(() => this.theme.theme() === 'dark');
@@ -389,7 +416,7 @@ export class App {
         { label: 'Documents', icon: 'description', route: '/project-documents' },
         { label: 'Project Partners', icon: 'handshake', route: '/project-partners' },
         { label: 'Financial Plans', icon: 'payments', route: '/financial-plans' },
-        { label: 'Cost Centers', icon: 'account_balance', route: '/project-cost-centers' },
+        { label: 'Project Cost Centers', icon: 'account_balance', route: '/project-cost-centers' },
       ],
     },
     {
@@ -420,7 +447,7 @@ export class App {
         { label: 'Proficiency Sets', icon: 'military_tech', route: '/config/proficiency-sets', compact: true },
         { label: 'Manage Skills', icon: 'psychology', route: '/config/skills', compact: true },
         { label: 'Project Roles', icon: 'badge', route: '/config/project-roles', compact: true },
-        { label: 'Cost Centers', icon: 'account_balance', route: '/config/cost-centers', compact: true },
+        { label: 'Organization Cost Centers', icon: 'account_balance', route: '/config/cost-centers', compact: true },
         { label: 'Service Orgs', icon: 'business', route: '/config/service-orgs', compact: true },
         { label: 'Resource Orgs', icon: 'domain', route: '/config/resource-orgs', compact: true },
         { label: 'Locations', icon: 'public', route: '/config/locations', compact: true },
@@ -439,10 +466,15 @@ export class App {
   // they would actually navigate. Finance-grade project/config pages expose
   // budget/cost data; approvals expose routed workflow items.
   readonly navGroups = computed<NavGroup[]>(() => {
-    const canCommercial = this.auth.canManageCommercial();
-    const canFinance = this.auth.canApproveFinancials();
+    const canReadStaffing = this.auth.canReadStaffing();
+    const canManageStaffing = this.auth.canManageStaffing();
+    const canManageResources = this.auth.canManageResources();
+    const canCommercial = this.auth.canReadCommercial();
+    const canFinance = this.auth.canReadFinancials();
+    const canManageProjects = this.auth.canManageProjects();
+    const canManageConfiguration = this.auth.canManageConfiguration();
+    const canViewPortfolio = this.auth.canViewPortfolioDashboard();
     const canApproveWorkflow = this.auth.hasAnyRole(['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin']);
-    const canSchedule = this.auth.hasAnyRole(['pm', 'resource-manager', 'delivery-executive', 'admin']);
     // Capacity nav visibility uses the SAME role set as capacityGuard (imported
     // CAPACITY_ROLES) — a dedicated local so it can never desync from the route
     // gate, and stays independent of the (semantically different) approvals gate.
@@ -453,12 +485,11 @@ export class App {
     const canViewAllocationApprovals = this.auth.hasAnyRole([...ALLOCATION_APPROVAL_ROLES]);
     // Resources (people lifecycle) mirrors its roleGuard — visible only to the
     // roles that own resource master data (resource-manager/delivery-executive/admin).
-    const canManageResources = this.auth.hasAnyRole(['resource-manager', 'delivery-executive', 'admin']);
     return this.allNavGroups
       .map(group => {
         if (group.label === 'Resource Control') {
           const items = group.items.filter(item => {
-            if (item.route === '/schedule') return canSchedule;
+            if (item.route === '/requests' || item.route === '/staffing' || item.route === '/schedule') return canManageStaffing;
             if (item.route === '/resources') return canManageResources;
             if (item.route === '/approvals') return canApproveWorkflow;
             return true;
@@ -468,7 +499,8 @@ export class App {
         if (group.label === 'Project Control') {
           const items = group.items.filter(item => {
             if (item.route === '/financial-plans' || item.route === '/project-cost-centers') return canFinance;
-            return true;
+            if (item.route === '/projects') return true;
+            return canManageProjects;
           });
           return { label: group.label, items };
         }
@@ -480,12 +512,11 @@ export class App {
           return { label: group.label, items };
         }
         if (group.label === 'Analytics') {
-          // Capacity mirrors its capacityGuard (staffing-grade roles); the other
-          // Analytics links stay open to any verified actor.
           const items = group.items.filter(item => {
             if (item.route === '/capacity') return canViewCapacity;
             if (item.route === '/allocation-approvals') return canViewAllocationApprovals;
-            return true;
+            if (item.route === '/reporting') return canViewPortfolio;
+            return canReadStaffing;
           });
           return { label: group.label, items };
         }
@@ -503,8 +534,9 @@ export class App {
             if (item.route === '/config/integrations') return canFinance;
             if (item.route === '/config/cost-centers') return canFinance;
             if (item.route === '/config/rate-cards') return canManageRateCards;
+            if (item.route === '/config/availability') return canManageResources;
             if (catalogRoutes.has(item.route)) return canManageCatalogs;
-            return true;
+            return canManageConfiguration;
           });
           return { label: group.label, items };
         }
@@ -517,15 +549,18 @@ export class App {
   // principal-gated read, so firing before the post-redirect token is attached
   // 401s and latches the badges at 0 until a manual reload (the same latch the
   // page components fixed). authReady false->true re-runs the stream.
-  private navRes = rxResource<NavState, boolean>({
-    params: () => this.auth.authReady(),
-    stream: ({ params: ready }) =>
-      ready
+  private navRes = rxResource<NavState, { ready: boolean; canReadStaffing: boolean }>({
+    params: () => ({
+      ready: this.auth.authReady(),
+      canReadStaffing: this.auth.canReadStaffing(),
+    }),
+    stream: ({ params }) =>
+      params.ready
         ? forkJoin({
-            requests: this.api.getRequests(),
+            requests: params.canReadStaffing ? this.api.getRequests() : of<ResourceRequest[]>([]),
             issues: this.api.getProjectIssues(),
             changes: this.api.getChangeRequests(),
-            resources: this.api.getResources(),
+            resources: params.canReadStaffing ? this.api.getResources() : of<Resource[]>([]),
           }).pipe(
             // Resilience: a failure of the badge-data endpoints (e.g. a transient
             // 401/403 or outage) must NOT throw out of the resource value — that
@@ -541,6 +576,7 @@ export class App {
   readonly isAuthenticated = this.auth.isAuthenticated;
   readonly displayName = this.auth.displayName;
   readonly role = this.auth.role;
+  readonly canReadStaffing = this.auth.canReadStaffing;
 
   isMobileMenuOpen = signal(false);
   /** Desktop-only: whether the left nav is expanded (lg+). Toggled by the top-bar
@@ -587,7 +623,12 @@ export class App {
     const q = this.navFilter().trim().toLowerCase();
     if (!q) return this.navGroups();
     return this.navGroups()
-      .map(group => ({ label: group.label, items: group.items.filter(i => i.label.toLowerCase().includes(q)) }))
+      .map(group => ({
+        label: group.label,
+        items: group.label.toLowerCase().includes(q)
+          ? group.items
+          : group.items.filter(i => i.label.toLowerCase().includes(q)),
+      }))
       .filter(group => group.items.length > 0);
   });
 
@@ -613,11 +654,16 @@ export class App {
   );
 
   toggleMenu() {
-    this.isMobileMenuOpen.update(v => !v);
+    if (this.isMobileMenuOpen()) {
+      this.closeMenu(true);
+    } else {
+      this.isMobileMenuOpen.set(true);
+    }
   }
 
-  closeMenu() {
+  closeMenu(restoreFocus = false) {
     this.isMobileMenuOpen.set(false);
+    if (restoreFocus) this.mobileMenuButton()?.nativeElement.focus();
   }
 
   toggleDesktopSidebar() {
@@ -645,6 +691,10 @@ export class App {
     if (this.userHasToggled()) return this.expandedGroups().has(label);
     // Default: only the group containing the active route is open.
     return this.activeGroupLabel() === label;
+  }
+
+  navGroupId(label: string): string {
+    return `navgroup-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}`;
   }
 
   onFilterInput(event: Event): void {
