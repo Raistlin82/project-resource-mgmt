@@ -1,4 +1,41 @@
 @import "tailwindcss";
+@import "@fontsource-variable/hanken-grotesk/wght.css";
+@import "@fontsource-variable/schibsted-grotesk/wght.css";
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
+@import "@fontsource/ibm-plex-mono/latin-600.css";
+@import "@fontsource/ibm-plex-mono/latin-700.css";
+@import "@fontsource/material-icons/index.css";
+
+/* ------------------------------------------------------------
+   Material Icons ligature class (P3-02).
+
+   `@fontsource/material-icons` ships ONLY the @font-face rules. The
+   `.material-icons` CLASS — which binds the family and enables the `liga`
+   feature so <mat-icon>check</mat-icon> renders a glyph instead of the literal
+   word "check" — used to come from the Google `icon?family=Material+Icons`
+   stylesheet that self-hosting removed. No Angular Material theme CSS is
+   loaded either (angular.json ships src/styles.css only), so this rule is the
+   single source of that binding. `MatIconRegistry.setDefaultFontSetClass(
+   'material-icons', 'mat-ligature-font')` in app.ts puts the class on every
+   icon element. Removing this rule turns every icon in the app into text.
+   ------------------------------------------------------------ */
+.material-icons {
+  font-family: "Material Icons", sans-serif;
+  font-weight: normal;
+  font-style: normal;
+  font-size: 24px;
+  line-height: 1;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  letter-spacing: normal;
+  text-transform: none;
+  font-feature-settings: "liga";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
 
 /* ============================================================
    DESIGN SYSTEM — "Ledger"
@@ -17,8 +54,8 @@
    ============================================================ */
 
 @theme {
-  --font-sans: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
-  --font-display: "Schibsted Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Hanken Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Schibsted Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   /* ---- Semantic surfaces (light) ---- */
