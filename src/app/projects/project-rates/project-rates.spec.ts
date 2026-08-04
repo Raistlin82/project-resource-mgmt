@@ -68,7 +68,8 @@ describe('ProjectRates — inherited vs override (Task 5)', () => {
     const inherited = h.querySelectorAll('[data-test="inherited-rate"]');
     expect(inherited.length).toBe(1);
     expect(inherited[0].textContent).toContain('Developer');
-    expect(inherited[0].textContent).toContain('1000');
+    // Rendered through `number:'1.0-2'` (two-decimal display rule) — locale grouping applies.
+    expect(inherited[0].textContent).toContain('1,000');
     // Greyed: the row carries the muted styling, not the plain default row.
     expect(inherited[0].className).toContain('text-ink-muted');
   });
@@ -84,7 +85,8 @@ describe('ProjectRates — inherited vs override (Task 5)', () => {
     const overrideRows = h.querySelectorAll('[data-test="project-rate-row"]');
     expect(overrideRows.length).toBe(1);
     expect(overrideRows[0].textContent).toContain('Developer');
-    expect(overrideRows[0].textContent).toContain('1150');
+    // Rendered through `number:'1.0-2'` (two-decimal display rule) — locale grouping applies.
+    expect(overrideRows[0].textContent).toContain('1,150');
   });
 
   it('surfaces the server refusal without closing the form', async () => {
@@ -119,5 +121,48 @@ describe('ProjectRates — inherited vs override (Task 5)', () => {
     expect(h.querySelector('#projectRateRole')).toBeTruthy();
     const errorEl = h.querySelector('[data-test="negotiated-rate-error"]');
     expect(errorEl?.textContent).toContain('a negotiated rate already exists for this key (existing id NR2)');
+  });
+
+  it('opens the plain "Add Override" entry point with no role pre-selected (Task 5 review, Finding 2)', async () => {
+    const fixture = await setUp(baseStub());
+    const h = host(fixture);
+
+    const addButton = [...h.querySelectorAll('button')].find(b => b.textContent?.trim().includes('Add Override'));
+    addButton!.click();
+    await tick(fixture);
+
+    // Defaulting to roleOptions()[0] let a user save a rate keyed to the wrong role
+    // without ever touching the field — the select must open on the placeholder.
+    const roleSelect = h.querySelector<HTMLSelectElement>('#projectRateRole');
+    expect(roleSelect!.value).toBe('');
+  });
+
+  it('still pre-fills the role when "Add Override" is seeded from an inherited row', async () => {
+    const fixture = await setUp(baseStub());
+    const h = host(fixture);
+
+    const editInheritedButton = h.querySelector<HTMLButtonElement>('[aria-label="Override rate for Developer"]');
+    expect(editInheritedButton).toBeTruthy();
+    editInheritedButton!.click();
+    await tick(fixture);
+
+    const roleSelect = h.querySelector<HTMLSelectElement>('#projectRateRole');
+    expect(roleSelect!.value).toBe('Developer');
+  });
+
+  it('flags a non-EUR rate as not applied, since sellRateFor only ever reads EUR (Task 5 review, Finding 1)', async () => {
+    const usdOverride: NegotiatedRate = { id: 'NR3', projectId: 'P2', role: 'Developer', currency: 'USD', billRate: 950 };
+    const fixture = await setUp(baseStub({ getNegotiatedRates: () => of([contractRate, usdOverride]) }));
+    const h = host(fixture);
+
+    // The EUR contract row is still shown, inherited, alongside the USD override —
+    // (role, currency) pairing means neither hides the other.
+    const inherited = h.querySelectorAll('[data-test="inherited-rate"]');
+    expect(inherited.length).toBe(1);
+    expect(inherited[0].textContent).not.toContain('Not applied');
+
+    const overrideRows = h.querySelectorAll('[data-test="project-rate-row"]');
+    expect(overrideRows.length).toBe(1);
+    expect(overrideRows[0].textContent).toContain('Not applied');
   });
 });

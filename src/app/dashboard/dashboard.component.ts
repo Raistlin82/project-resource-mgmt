@@ -424,7 +424,7 @@ interface ProjectCommandRow {
                     </div>
                     <div class="rounded-md bg-[var(--cc-panel-muted)] px-3 py-2">
                       <div class="command-kpi-label">Schedule</div>
-                      <div class="font-mono font-semibold">{{ change.impactScheduleDays }}d</div>
+                      <div class="font-mono font-semibold">{{ change.impactScheduleDays | number:'1.0-1' }}d</div>
                     </div>
                   </div>
                 </div>

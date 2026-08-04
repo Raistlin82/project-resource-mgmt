@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, inject, input, signal } from '@angular/core';
-import { CurrencyPipe, DatePipe } from '@angular/common';
+import { CurrencyPipe, DatePipe, DecimalPipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { RouterLink } from '@angular/router';
 import { rxResource, toSignal } from '@angular/core/rxjs-interop';
@@ -59,7 +59,7 @@ interface BillingControlRow {
 @Component({
   selector: 'app-contract-details',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CurrencyPipe, DatePipe, MatIconModule, ReactiveFormsModule, RouterLink, ModalDialogDirective],
+  imports: [CurrencyPipe, DatePipe, DecimalPipe, MatIconModule, ReactiveFormsModule, RouterLink, ModalDialogDirective],
   template: `
     <div class="command-page space-y-6 p-4 sm:p-6 lg:p-8">
       @if (contract(); as c) {
@@ -216,9 +216,14 @@ interface BillingControlRow {
               <tbody>
                 @for (rate of contractNegotiatedRates(); track rate.id) {
                   <tr data-test="negotiated-rate-row">
-                    <td class="font-medium">{{ rate.role }}</td>
+                    <td class="font-medium">
+                      {{ rate.role }}
+                      @if (rate.currency !== BASE_CURRENCY) {
+                        <span class="command-status amber ml-1.5" title="sellRateFor only reads EUR-denominated rates; this row is not yet applied to any invoice.">Not applied (EUR only)</span>
+                      }
+                    </td>
                     <td class="font-mono text-ink-secondary">{{ rate.currency }}</td>
-                    <td class="text-right font-mono tabular-nums">{{ rate.billRate }}</td>
+                    <td class="text-right font-mono tabular-nums">{{ rate.billRate | number:'1.0-2' }}</td>
                     <td class="text-right">
                       <button type="button" (click)="openRateForm(rate)" [attr.aria-label]="'Edit rate for ' + rate.role" class="text-ink-muted hover:text-accent-text p-1.5 rounded-lg transition-colors">
                         <mat-icon class="text-[18px] w-[18px] h-[18px]">edit</mat-icon>
@@ -799,6 +804,9 @@ export class ContractDetails {
   private notification = inject(NotificationService);
   private auth = inject(AuthService);
 
+  /** Exposed for the template's "not applied" check — sellRateFor only ever reads a BASE_CURRENCY row. */
+  readonly BASE_CURRENCY = BASE_CURRENCY;
+
   id = input.required<string>();
 
   // Principal-gated reads (contracts, customers, orders, order-lines, resources,
@@ -1331,15 +1339,15 @@ export class ContractDetails {
       case 'Recurring':
         return item.recurrence ?? 'Recurring';
       case 'Progress':
-        return item.progressPct != null ? `${item.progressPct}% complete` : 'Progress';
+        return item.progressPct != null ? `${item.progressPct.toFixed(0)}% complete` : 'Progress';
       case 'Capped':
-        return item.capAmount != null ? `Capped @ ${item.capAmount}` : 'Capped';
+        return item.capAmount != null ? `Capped @ ${item.capAmount.toFixed(2)}` : 'Capped';
       case 'TimeAndMaterials':
         return 'Time & Materials';
       case 'Advance':
         return 'Advance';
       case 'Expense':
-        return item.markupPct != null ? `Expense +${item.markupPct}%` : 'Expense';
+        return item.markupPct != null ? `Expense +${item.markupPct.toFixed(1)}%` : 'Expense';
       case 'CreditNote':
         return 'Credit Note';
       default:

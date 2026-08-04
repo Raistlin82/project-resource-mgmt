@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, input, signal } from '@angular/core';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { DecimalPipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { of } from 'rxjs';
 import { ApiService, BASE_CURRENCY, FxRate, NegotiatedRate, Project, Resource } from '../../services/api.service';
@@ -25,7 +26,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 @Component({
   selector: 'app-project-rates',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, ModalDialogDirective],
+  imports: [MatIconModule, ModalDialogDirective, DecimalPipe],
   template: `
     <div class="command-card overflow-hidden">
       <div class="command-card-header">
@@ -57,8 +58,13 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               <tr data-test="project-rate-row">
                 <td class="font-medium">{{ rate.role }}</td>
                 <td class="font-mono text-ink-secondary">{{ rate.currency }}</td>
-                <td class="text-right font-mono tabular-nums">{{ rate.billRate }}</td>
-                <td><span class="command-status green">Override</span></td>
+                <td class="text-right font-mono tabular-nums">{{ rate.billRate | number:'1.0-2' }}</td>
+                <td>
+                  <span class="command-status green">Override</span>
+                  @if (rate.currency !== BASE_CURRENCY) {
+                    <span class="command-status amber ml-1.5" title="sellRateFor only reads EUR-denominated rates; this row is not yet applied to any invoice.">Not applied (EUR only)</span>
+                  }
+                </td>
                 <td class="text-right">
                   <button type="button" (click)="openRateForm(rate)" [attr.aria-label]="'Edit override for ' + rate.role" class="text-ink-muted hover:text-accent-text p-1.5 rounded-lg transition-colors">
                     <mat-icon class="text-[18px] w-[18px] h-[18px]">edit</mat-icon>
@@ -73,8 +79,13 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               <tr data-test="inherited-rate" class="bg-surface-muted text-ink-muted italic">
                 <td class="font-medium">{{ rate.role }}</td>
                 <td class="font-mono">{{ rate.currency }}</td>
-                <td class="text-right font-mono tabular-nums">{{ rate.billRate }}</td>
-                <td><span class="command-status">Inherited from contract</span></td>
+                <td class="text-right font-mono tabular-nums">{{ rate.billRate | number:'1.0-2' }}</td>
+                <td>
+                  <span class="command-status">Inherited from contract</span>
+                  @if (rate.currency !== BASE_CURRENCY) {
+                    <span class="command-status amber ml-1.5" title="sellRateFor only reads EUR-denominated rates; this row is not yet applied to any invoice.">Not applied (EUR only)</span>
+                  }
+                </td>
                 <td class="text-right">
                   <button type="button" (click)="openRateForm(undefined, rate)" [attr.aria-label]="'Override rate for ' + rate.role" class="text-ink-muted hover:text-accent-text p-1.5 rounded-lg transition-colors not-italic">
                     <mat-icon class="text-[18px] w-[18px] h-[18px]">edit</mat-icon>
@@ -153,6 +164,9 @@ export class ProjectRates {
   private auth = inject(AuthService);
   private notification = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
+
+  /** Exposed for the template's "not applied" check — sellRateFor only ever reads a BASE_CURRENCY row. */
+  readonly BASE_CURRENCY = BASE_CURRENCY;
 
   projectId = input<string>();
 
@@ -248,7 +262,10 @@ export class ProjectRates {
       this.rateBillRate.set(existing.billRate);
     } else {
       this.editingRateId.set(null);
-      this.rateRole.set(seed?.role ?? this.roleOptions()[0] ?? '');
+      // Plain "Add Override" (no seed) must force an explicit role pick — defaulting to
+      // roleOptions()[0] let a user save a rate keyed to the wrong role without noticing
+      // (Task 5 review, Finding 2). Only the seeded-from-an-inherited-row path pre-fills.
+      this.rateRole.set(seed?.role ?? '');
       this.rateCurrency.set(seed?.currency ?? BASE_CURRENCY);
       this.rateBillRate.set(seed?.billRate ?? null);
     }

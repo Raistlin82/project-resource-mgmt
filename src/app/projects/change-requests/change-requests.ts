@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, inject, input, signal } from '@angular/core';
-import { CurrencyPipe } from '@angular/common';
+import { CurrencyPipe, DecimalPipe } from '@angular/common';
 import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { rxResource, toSignal } from '@angular/core/rxjs-interop';
@@ -12,7 +12,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 @Component({
   selector: 'app-change-requests',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CurrencyPipe, MatIconModule, ReactiveFormsModule, ModalDialogDirective],
+  imports: [CurrencyPipe, DecimalPipe, MatIconModule, ReactiveFormsModule, ModalDialogDirective],
   template: `
     <div [class]="projectId() ? '' : 'command-page space-y-6'">
       <div class="space-y-6">
@@ -49,7 +49,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
           </div>
           <div class="command-kpi">
             <p class="command-kpi-label">Schedule Impact</p>
-            <p class="command-kpi-value">{{ approvedScheduleImpact() }}d</p>
+            <p class="command-kpi-value">{{ approvedScheduleImpact() | number:'1.0-1' }}d</p>
           </div>
           <div class="command-kpi" [class.danger]="severeCount() > 0">
             <p class="command-kpi-label">High/Critical</p>
@@ -101,7 +101,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                       {{ change.impactBudget | currency:'EUR':'symbol':'1.0-0' }}
                     </td>
                     <td class="px-6 py-5 text-right font-semibold font-mono tabular-nums text-ink" [class.text-critical-text]="change.impactScheduleDays > 0" [class.text-positive-text]="change.impactScheduleDays < 0">
-                      {{ change.impactScheduleDays }}d
+                      {{ change.impactScheduleDays | number:'1.0-1' }}d
                     </td>
                     <td class="px-6 py-5">
                       <span class="inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-bold ring-1"

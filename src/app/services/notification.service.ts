@@ -9,9 +9,13 @@ export interface AppNotification {
   type: NotificationType;
 }
 
-/** How long non-error toasts stay on screen before auto-dismissing (ms).
- *  Errors are sticky so backend/auth failures do not disappear before they are read. */
+/** How long a non-error toast stays on screen before auto-dismissing (ms). */
 const AUTO_DISMISS_MS = 5000;
+
+/** How long an error toast stays on screen before auto-dismissing (ms).
+ *  Every toast now disappears on its own; an error just gets more time to be
+ *  read than a success does, since a success only needs a glimpse. */
+const ERROR_AUTO_DISMISS_MS = 12000;
 
 /** Lightweight global toast/notification store backed by a signal. */
 @Injectable({ providedIn: 'root' })
@@ -24,9 +28,13 @@ export class NotificationService {
   show(message: string, type: NotificationType = 'info'): void {
     const id = ++this.seq;
     this._items.update(list => [...list, { id, message, type }]);
-    // Browser-only: no SSR timers. Errors are intentionally sticky.
-    if (this.isBrowser && type !== 'error') {
-      setTimeout(() => this.dismiss(id), AUTO_DISMISS_MS);
+    // Browser-only: no SSR timers (there is no DOM/timer clock to auto-dismiss into
+    // during SSR, and a timer scheduled there would just leak). Every toast
+    // auto-dismisses; errors get a longer timeout because they must be read, not
+    // just glimpsed.
+    if (this.isBrowser) {
+      const delay = type === 'error' ? ERROR_AUTO_DISMISS_MS : AUTO_DISMISS_MS;
+      setTimeout(() => this.dismiss(id), delay);
     }
   }
 

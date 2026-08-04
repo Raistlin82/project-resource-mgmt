@@ -453,7 +453,7 @@ export class Forecast {
       { key: 'committed', header: 'Committed' },
       { key: 'pipeline', header: 'Pipeline' },
       { key: 'demand', header: 'Demand' },
-      { key: 'utilizationPct', header: 'Utilization %' },
+      { key: 'utilizationPct', header: 'Utilization %', map: r => r.utilizationPct.toFixed(1) },
       { key: 'gap', header: 'Gap' },
     ];
     downloadCsv(`capacity-timeline-${this.horizon()}w.csv`, toCsv(this.periods(), columns));

@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, PLATFORM_ID, signal } from '@angular/core';
-import { CurrencyPipe, DatePipe, isPlatformBrowser, PercentPipe } from '@angular/common';
+import { CurrencyPipe, DatePipe, DecimalPipe, isPlatformBrowser, PercentPipe } from '@angular/common';
 import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
@@ -91,7 +91,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
 @Component({
   selector: 'app-billing',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CurrencyPipe, DatePipe, PercentPipe, MatIconModule, ReactiveFormsModule, ModalDialogDirective],
+  imports: [CurrencyPipe, DatePipe, DecimalPipe, PercentPipe, MatIconModule, ReactiveFormsModule, ModalDialogDirective],
   template: `
     <div class="command-page space-y-6 p-4 sm:p-6 lg:p-8">
       <!-- HEADER -->
@@ -678,7 +678,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
               <footer class="mt-10 pt-4 border-t border-line text-xs text-ink-muted">
                 <p>Invoice {{ inv.invoiceNumber }} &middot; {{ issuer.name }} &middot; VAT {{ issuer.vatId }}</p>
                 @if (inv.item.paymentTermsDays) {
-                  <p class="mt-0.5">Payment terms: net {{ inv.item.paymentTermsDays }} days.</p>
+                  <p class="mt-0.5">Payment terms: net {{ inv.item.paymentTermsDays | number:'1.0-0' }} days.</p>
                 }
               </footer>
             </article>
@@ -1171,11 +1171,11 @@ export class Billing {
       { key: 'contract', header: 'Contract', map: r => r.contractName },
       { key: 'project', header: 'Project', map: r => r.projectName },
       { key: 'trigger', header: 'Trigger', map: r => r.trigger },
-      { key: 'amount', header: 'Amount', map: r => r.item.amount },
+      { key: 'amount', header: 'Amount', map: r => r.item.amount.toFixed(2) },
       { key: 'currency', header: 'Currency', map: r => r.item.currency },
-      { key: 'taxPct', header: 'Tax %', map: r => r.item.taxRatePct ?? 0 },
-      { key: 'retentionPct', header: 'Retention %', map: r => r.item.retentionPct ?? 0 },
-      { key: 'netPayable', header: 'Net Payable', map: r => r.netPayable },
+      { key: 'taxPct', header: 'Tax %', map: r => (r.item.taxRatePct ?? 0).toFixed(2) },
+      { key: 'retentionPct', header: 'Retention %', map: r => (r.item.retentionPct ?? 0).toFixed(2) },
+      { key: 'netPayable', header: 'Net Payable', map: r => r.netPayable.toFixed(2) },
       { key: 'status', header: 'Status', map: r => r.item.status },
       { key: 'due', header: 'Due', map: r => r.due ?? '' },
     ];

@@ -1321,7 +1321,7 @@ export class Reporting {
     const csv = toCsv(this.arBuckets(), [
       { key: 'bucket', header: 'Bucket (days)' },
       { key: 'count', header: 'Invoices' },
-      { key: 'amount', header: `Amount (${this.baseCurrency} base)` },
+      { key: 'amount', header: `Amount (${this.baseCurrency} base)`, map: r => r.amount.toFixed(2) },
     ]);
     downloadCsv('AR_Aging.csv', csv);
     this.notificationService.show('A/R aging exported', 'success');
@@ -1332,8 +1332,8 @@ export class Reporting {
     if (!isPlatformBrowser(this.platformId)) return;
     const csv = toCsv(this.arByCustomer(), [
       { key: 'customerName', header: 'Customer' },
-      { key: 'totalOutstanding', header: `Outstanding (${this.baseCurrency} base)` },
-      { key: 'overdue', header: `Overdue (${this.baseCurrency} base)` },
+      { key: 'totalOutstanding', header: `Outstanding (${this.baseCurrency} base)`, map: r => r.totalOutstanding.toFixed(2) },
+      { key: 'overdue', header: `Overdue (${this.baseCurrency} base)`, map: r => r.overdue.toFixed(2) },
       { key: 'oldestBucket', header: 'Oldest Bucket (days)' },
     ]);
     downloadCsv('AR_By_Customer.csv', csv);
@@ -1346,14 +1346,14 @@ export class Reporting {
     const cur = this.baseCurrency;
     const csv = toCsv(this.marginRows(), [
       { key: 'name', header: 'Project' },
-      { key: 'revenue', header: `Revenue (${cur} base)` },
-      { key: 'laborCost', header: `Labor (${cur} base)` },
-      { key: 'externalCost', header: `External (${cur} base)` },
-      { key: 'expenseCost', header: `Expense (${cur} base)` },
-      { key: 'margin', header: `Margin (${cur} base)` },
+      { key: 'revenue', header: `Revenue (${cur} base)`, map: r => r.revenue.toFixed(2) },
+      { key: 'laborCost', header: `Labor (${cur} base)`, map: r => r.laborCost.toFixed(2) },
+      { key: 'externalCost', header: `External (${cur} base)`, map: r => r.externalCost.toFixed(2) },
+      { key: 'expenseCost', header: `Expense (${cur} base)`, map: r => r.expenseCost.toFixed(2) },
+      { key: 'margin', header: `Margin (${cur} base)`, map: r => r.margin.toFixed(2) },
       { key: 'marginPct', header: 'Margin %', map: r => r.marginPct.toFixed(1) },
-      { key: 'eac', header: `EAC (${cur} base)` },
-      { key: 'vac', header: `VAC (${cur} base)` },
+      { key: 'eac', header: `EAC (${cur} base)`, map: r => r.eac.toFixed(2) },
+      { key: 'vac', header: `VAC (${cur} base)`, map: r => r.vac.toFixed(2) },
       { key: 'burnPct', header: 'Burn %', map: r => r.burnPct.toFixed(0) },
     ]);
     downloadCsv('Margin_And_Variance.csv', csv);
@@ -1366,9 +1366,9 @@ export class Reporting {
     const cur = this.baseCurrency;
     const csv = toCsv(this.customerRows(), [
       { key: 'customerName', header: 'Customer' },
-      { key: 'revenue', header: `Revenue (${cur} base)` },
-      { key: 'cost', header: `Cost (${cur} base)` },
-      { key: 'margin', header: `Margin (${cur} base)` },
+      { key: 'revenue', header: `Revenue (${cur} base)`, map: r => r.revenue.toFixed(2) },
+      { key: 'cost', header: `Cost (${cur} base)`, map: r => r.cost.toFixed(2) },
+      { key: 'margin', header: `Margin (${cur} base)`, map: r => r.margin.toFixed(2) },
       { key: 'marginPct', header: 'Margin %', map: r => r.marginPct.toFixed(1) },
       { key: 'sharePct', header: 'Revenue Share %', map: r => r.sharePct.toFixed(1) },
       { key: 'projectIds', header: 'Projects', map: r => String(r.projectIds.length) },
@@ -1385,8 +1385,8 @@ export class Reporting {
       { key: 'scope', header: 'Scope' },
       { key: 'name', header: 'Name', map: a => a.name ?? a.id },
       { key: 'severity', header: 'Severity', map: a => this.severityLabel(a.severity) },
-      { key: 'revenue', header: `Revenue (${cur} base)` },
-      { key: 'cost', header: `Cost (${cur} base)` },
+      { key: 'revenue', header: `Revenue (${cur} base)`, map: a => a.revenue.toFixed(2) },
+      { key: 'cost', header: `Cost (${cur} base)`, map: a => a.cost.toFixed(2) },
       { key: 'marginPct', header: 'Margin %', map: a => a.marginPct.toFixed(1) },
       { key: 'gapPts', header: 'Gap (pts)', map: a => a.gapPts.toFixed(1) },
       { key: 'reasons', header: 'Reasons', map: a => a.reasons.join('; ') },

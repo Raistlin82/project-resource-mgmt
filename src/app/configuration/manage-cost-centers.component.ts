@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, signal } from '@angular/core';
 import { rxResource, toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { of } from 'rxjs';
+import { CurrencyPipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { ApiService, CostCenter, Resource } from '../services/api.service';
@@ -10,7 +11,7 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 @Component({
   selector: 'app-manage-cost-centers',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective],
+  imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective, CurrencyPipe],
   template: `
     <div class="max-w-5xl mx-auto space-y-8">
       <div class="flex items-center justify-between">
@@ -50,8 +51,8 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
               <tr>
                 <td class="font-bold">{{ cc.name }}</td>
                 <td>{{ cc.manager }}</td>
-                <td class="text-right"><span class="text-accent-text">{{ cc.allocated }}</span></td>
-                <td class="text-right">{{ cc.actual }}</td>
+                <td class="text-right"><span class="text-accent-text">{{ cc.allocated | currency:'EUR':'symbol':'1.0-0' }}</span></td>
+                <td class="text-right">{{ cc.actual | currency:'EUR':'symbol':'1.0-0' }}</td>
                 <td class="text-right">
                   <button type="button" (click)="openForm(cc)" [attr.aria-label]="'Edit ' + cc.name" [attr.title]="'Edit ' + cc.name" class="text-ink-muted hover:text-accent-text transition-colors p-1">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>

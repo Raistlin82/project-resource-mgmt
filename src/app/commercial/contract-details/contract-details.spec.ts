@@ -178,7 +178,8 @@ describe('ContractDetails — Negotiated Rates table (Task 5)', () => {
     const rows = host(fixture).querySelectorAll('[data-test="negotiated-rate-row"]');
     expect(rows.length).toBe(1);
     expect(rows[0].textContent).toContain('Developer');
-    expect(rows[0].textContent).toContain('1000');
+    // Rendered through `number:'1.0-2'` (two-decimal display rule) — locale grouping applies.
+    expect(rows[0].textContent).toContain('1,000');
   });
 
   it('sends contractId and never projectId when adding on a contract', async () => {
