@@ -4191,6 +4191,15 @@ async function checkScopedApprovalFeed() {
  * The suite deliberately never made the proposer a decider, which is exactly
  * why this was outside its coverage.
  *
+ * (C) THE RULE (A) CANNOT DISTINGUISH — the shortcut must fire only where a
+ * deadlock is actually possible, i.e. where the node manager is the resource's
+ * ONLY accountable approver. (A)'s target has no personal manager and no seeded
+ * resource has both a personal manager and a managed node above it, so (A) is
+ * equally consistent with "auto-approve whenever you manage a node above" — a
+ * rule that would delete a working human review step wherever a direct people
+ * manager exists, and would let a `pm` who manages a node self-approve across
+ * their whole subtree. (C) is the fixture that pins which rule is intended.
+ *
  * (B) CRITICAL #1, SECOND TRIGGER — a manager who has LEFT must not suppress
  * the role fallback. Nothing revisits a stored `managerId` when a
  * `terminationDate` is set and there is no `DELETE /resources`, so the stale id
@@ -4209,6 +4218,9 @@ async function checkScopedApprovalFeed() {
 async function checkAccountableApproverRules() {
   const JOHN = { 'X-User-Id': '2', 'X-User-Role': 'resource-manager' };   // -> resource '2'
   const PROPOSER = { 'X-User-Id': '3', 'X-User-Role': 'pm' };             // -> resource '3'
+  // Same principal as PROPOSER, named for the role it plays in (C): the DIRECT
+  // people manager, who gets in as the step's named approver rather than by role.
+  const ALICE = { 'X-User-Id': '3', 'X-User-Role': 'pm' };                // -> resource '3'
   // Maps to no user row, so `actorResourceId` falls back to the raw id: a
   // resource-manager who manages nobody and no node — the §3.5 "stranger".
   const STRANGER = { 'X-User-Id': '99', 'X-User-Role': 'resource-manager' };
@@ -4218,6 +4230,7 @@ async function checkAccountableApproverRules() {
   const MONTH = '2026-09';         // Open, and left Open by every earlier section
   const DAY_A = '2026-09-08';      // Tuesday, not a seeded holiday
   const DAY_B = '2026-09-15';      // Tuesday, not a seeded holiday
+  const DAY_C = '2026-09-22';      // Tuesday, not a seeded holiday
 
   /** Book 1h in MONTH on `day` and submit it as `headers`; returns the month row. */
   async function bookAndSubmit(label, assignmentId, day, headers) {
@@ -4282,6 +4295,86 @@ async function checkAccountableApproverRules() {
         );
       }
     }
+    // --- (C) THE DISTINGUISHING CASE, run while John still manages the node ---
+    // (A) above only proves the rule where the node manager is the resource's
+    // ONLY accountable approver ('5' has no personal managerId — the fixture
+    // says so explicitly), and NO seeded resource has both a personal manager
+    // and a managed node above it. So (A) alone cannot tell "auto-approve when
+    // you are the sole approver" from "auto-approve whenever you manage a node
+    // above" — and the broad rule would have shipped on the narrow rule's
+    // evidence. This is that missing fixture.
+    //
+    // A resource under 'Consulting' (so John, its node manager, is accountable)
+    // that ALSO has a direct people manager, Alice ('3'). John submits. Before
+    // this narrowing the month auto-approved and ALICE NEVER SAW IT: a working
+    // human review step silently deleted, in a case that was never admin-only —
+    // `allocationApproverStep` pins `approverId` to the direct manager, and she
+    // faces neither an SoD conflict nor a scope refusal. Worst shape: a `pm` who
+    // manages a node granting themselves unreviewed approval across their whole
+    // subtree, having been unable to decide an allocation at all before D.
+    if (grantOk) {
+      const stamp = Date.now();
+      const managed = await req('POST', '/resources', {
+        headers: RBAC_HEADERS,
+        body: {
+          name: `D-R4 Has Both Managers ${stamp}`, role: 'Developer', kind: 'internal',
+          skills: [], projectRoles: [], externalExperience: [],
+          capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8,
+          organization: 'Consulting', managerId: '3',
+        },
+      });
+      const managedOk = check(
+        "D-R4(C) setup: a resource under 'Consulting' (node manager John '2') that ALSO has a direct people manager, Alice '3'",
+        managed.status === 201 && managed.body?.managerId === '3' && managed.body?.organization === 'Consulting',
+        `status=${managed.status}, body=${JSON.stringify(managed.body)}`,
+      );
+      if (managedOk) {
+        const request = await req('POST', '/requests', {
+          headers: JOHN,
+          body: { name: 'D-R4 node manager is not the only approver', requiredRole: 'Developer', requiredEffort: 1, skills: [] },
+        });
+        const assig = request.status === 200 && typeof request.body?.id === 'string'
+          ? await req('POST', '/assignments', { headers: JOHN, body: { requestId: request.body.id, resourceId: managed.body.id, assignedHours: 0 } })
+          : { status: 0, body: undefined };
+        const setupOk = check(
+          'D-R4(C) setup: John creates a request + an assignment on that resource',
+          assig.status === 200 && typeof assig.body?.id === 'string',
+          `request=${request.status}/${JSON.stringify(request.body?.id)}, assignment=${assig.status}/${JSON.stringify(assig.body)}`,
+        );
+        if (setupOk) {
+          const submitted = await bookAndSubmit('D-R4(C) setup', assig.body.id, DAY_C, JOHN);
+          const submitOk = check(
+            "D-R4(C) a node manager who is NOT the only accountable approver does NOT auto-approve — a real approval opens, pinned to the direct manager '3'",
+            submitted !== undefined && submitted.status === 200 && submitted.body?.status === 'Requested'
+            && typeof submitted.body?.approvalId === 'string',
+            `status=${submitted?.status}, monthStatus=${submitted?.body?.status}, approvalId=${JSON.stringify(submitted?.body?.approvalId)}`,
+          );
+          if (submitOk) {
+            // There is no `GET /approval-requests/:id` — the collection is
+            // list-only on the read side — so find it in the list.
+            const list = await req('GET', '/approval-requests', { headers: RBAC_HEADERS });
+            const ar = (Array.isArray(list.body) ? list.body : []).find((a) => a.id === submitted.body.approvalId);
+            check(
+              "D-R4(C) the approval really is routed to the direct people manager (step.approverId === '3'), which is why nothing was stranded",
+              list.status === 200 && ar?.steps?.[0]?.approverId === '3' && ar?.requestedBy === '2',
+              `status=${list.status}, approval=${JSON.stringify(ar)}`,
+            );
+            // ...and the review step actually WORKS: Alice decides it. Her role
+            // is 'pm', which no allocation step is routed to — she gets in as the
+            // step's NAMED approver, and SoD passes because John requested it.
+            const decided = await req('PUT', `/approval-requests/${submitted.body.approvalId}/decision`, {
+              headers: ALICE, body: { decision: 'Approved', note: 'D-R4(C) smoke' },
+            });
+            check(
+              'D-R4(C) and the direct manager can still decide it -> 200 (the human review step the broad rule would have deleted)',
+              decided.status === 200 && decided.body?.status === 'Approved',
+              `status=${decided.status}, body=${JSON.stringify(decided.body)}`,
+            );
+          }
+        }
+      }
+    }
+
     // RESTORE the seeded shape whatever happened above: resource '5' must go
     // back to having no accountable manager anywhere.
     const restore = await req('PUT', `/resource-organizations/${CONSULTING_ID}`, {

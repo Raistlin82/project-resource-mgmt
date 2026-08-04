@@ -408,14 +408,30 @@ routed to.
 the requester can never decide their own item. Scope is checked on top of it,
 not instead of it. That is precisely why the **auto-approval shortcut**
 (`autoApprovesAllocation`) exists: when the person proposing an allocation is the
-one competent to approve it, opening a real approval would deadlock it — they
-cannot decide it (SoD) and nobody else is competent (scope) — so the month is
-approved implicitly on submit, landing `Allocated` with no `approvalId`. The
-shortcut fires for the resource's **direct people manager** and for the **manager
-of a node above it** — the two positions that can be a single point of failure.
-It deliberately does *not* fire for a merely **transitive** org-chart manager:
-their proposal is still decidable by the direct manager, so it opens a real
-approval, exactly as it always has.
+*only* one competent to approve it, opening a real approval would deadlock it —
+they cannot decide it (SoD) and nobody else is competent (scope) — so the month is
+approved implicitly on submit, landing `Allocated` with no `approvalId`.
+
+**It reaches exactly as far as a deadlock can, and no further.** It fires when the
+proposer is:
+
+- the resource's **direct people manager** (`Resource.managerId`) — unchanged
+  since before D; or
+- an **accountable manager with nobody else accountable alongside them**, which is
+  how a Capability Leader / Practice Manager confirms the placeholders they just
+  planned under their own node.
+
+It deliberately does **not** fire in two adjacent cases, because neither can
+strand:
+
+- a merely **transitive** org-chart manager — the direct manager can still decide
+  it, so a real approval opens, exactly as it always has;
+- a **node manager when the resource also has a direct people manager**. That
+  approval is pinned to the direct manager by `allocationApproverStep`, faces no
+  SoD conflict and no scope refusal, and is decided by a human. Auto-approving
+  there would not resolve a deadlock — it would silently delete a working review
+  step, and (since D admits any accountable manager) would let a `pm` who manages
+  a node self-approve across their whole subtree.
 
 **Where else the same rule applies:**
 

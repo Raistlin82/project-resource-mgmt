@@ -1367,10 +1367,17 @@ async function withdrawAllocationApproval(approvalId: string | undefined, reason
  * month. The org-tree axis now grants the SAME shortcut the org chart already
  * did.
  *
- * SCOPE OF THE WIDENING — deliberately the tree axis and nothing else:
+ * SCOPE OF THE WIDENING. The DEFECT being fixed is the DEADLOCK, so the widening
+ * reaches exactly as far as a deadlock can, and no further. Two consequences,
+ * both of them narrowings I had to be talked down to — recorded so the next
+ * reader can see which rule is intended rather than inferring it from a test
+ * that cannot tell the two apart:
+ *
  *  - the ORG-CHART case is preserved BIT-FOR-BIT and answered FIRST (a direct
  *    `managerId` match short-circuits before any extra I/O, and is unaffected by
- *    the termination filter, exactly as today);
+ *    both the termination filter and the sole-approver test below, exactly as
+ *    today);
+ *
  *  - the TRANSITIVE chart chain is NOT included, even though `decideOneApproval`
  *    admits it. A grand-manager's own proposal has never auto-approved and must
  *    not start: it cannot deadlock, because the DIRECT manager can still decide
@@ -1378,10 +1385,23 @@ async function withdrawAllocationApproval(approvalId: string | undefined, reason
  *    forcing re-approval whenever a senior manager made the edit — a live smoke
  *    check (`checkTimePhasedAllocation`, assignment 4 edited by resource '1',
  *    Alice's grand-manager) pins exactly that, and it caught this when the first
- *    cut of this fix over-reached.
- * The rule this leaves is: auto-approve iff the proposer is an accountable
- * manager who is ALSO the closest thing to a single point of failure on one of
- * the two axes — the direct people manager, or a manager of a node above.
+ *    cut of this fix over-reached;
+ *
+ *  - THE SAME REASONING ONE STEP FURTHER (review round 4, follow-up), and the
+ *    sentence above is the argument: a node manager only faces a deadlock when
+ *    they are the ONLY accountable approver. Where the resource ALSO has a direct
+ *    people manager `M`, submitting used to open an approval that
+ *    `allocationApproverStep` pinned to `M`, and `M` decided it — no SoD
+ *    conflict, no scope refusal, nothing admin-only. Auto-approving there does
+ *    not resolve a deadlock; it DELETES A WORKING HUMAN REVIEW STEP, and `M`
+ *    never sees the month. Worst shape: a `pm` who manages a node would grant
+ *    themselves unreviewed approval across their whole subtree, having been
+ *    unable to decide an allocation at all before this wave. So the tree branch
+ *    additionally requires the accountable set MINUS the proposer to be empty.
+ *
+ * The rule this leaves: auto-approve iff the proposer is the resource's DIRECT
+ * people manager, or is an accountable manager with nobody else accountable
+ * alongside them. Exactly the cases where a real approval would strand.
  */
 async function autoApprovesAllocation(req: Request, resourceId: string): Promise<boolean> {
   const resource = await repos.resources.get(resourceId);
@@ -1391,18 +1411,29 @@ async function autoApprovesAllocation(req: Request, resourceId: string): Promise
   // ORG CHART — unchanged behaviour, unchanged cost.
   if (resource.managerId !== undefined && resource.managerId === proposerResourceId) return true;
   // ORG TREE — the axis D added.
-  const nodeManagers = nodeManagersAbove(resource, await repos.resourceOrganizations.list());
+  const nodes = await repos.resourceOrganizations.list();
+  const nodeManagers = nodeManagersAbove(resource, nodes);
   // Nobody is their own approver, so being the manager of your OWN node cannot
   // be an implicit self-approval either (`scopedApproversOf` removes the target
   // from its own set for the same reason).
   nodeManagers.delete(resource.id);
   if (!nodeManagers.has(proposerResourceId)) return false;
+  const today = todayIso();
   // ALIGNMENT WITH THE DECISION: `accountableApproversOf` drops a terminated
   // manager, so one cannot decide explicitly — they must not receive an IMPLICIT
   // approval here either. An id that resolves to no resource fails open, the
-  // same way it does in the approver set.
+  // same way it does in the approver set. MUST stay ABOVE the sole-approver test
+  // below: a terminated sole node manager is absent from the accountable set, so
+  // that test would find it empty and wave them through.
   const proposer = await repos.resources.get(proposerResourceId);
-  return proposer === undefined || !isTerminatedAsOf(proposer, todayIso());
+  if (proposer !== undefined && isTerminatedAsOf(proposer, today)) return false;
+  // ...AND ONLY IF THERE IS NOBODY ELSE. See the SOLE-APPROVER note above: this
+  // is the whole difference between resolving the deadlock and quietly deleting
+  // a working human review step.
+  const resources = await repos.resources.list();
+  const { managerIds } = accountableApproversOf(resource, resources, nodes, today);
+  managerIds.delete(proposerResourceId);
+  return managerIds.size === 0;
 }
 
 // ---------------------------------------------------------------------------
