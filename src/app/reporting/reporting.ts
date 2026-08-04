@@ -3,7 +3,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { isPlatformBrowser, CurrencyPipe, DecimalPipe } from '@angular/common';
 import { forkJoin, of } from 'rxjs';
 import { rxResource } from '@angular/core/rxjs-interop';
-import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, OrderLine, FinancialItem, TimeEntry, Issue, ChangeRequest, Milestone, BillingPlanItem, Contract, Customer, FxRate, BASE_CURRENCY } from '../services/api.service';
+import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, OrderLine, FinancialItem, TimeEntry, Issue, ChangeRequest, Milestone, BillingPlanItem, Contract, Customer, FxRate, NegotiatedRate, BASE_CURRENCY } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { computeProjectFinancials, FinanceData, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, realizationMetrics, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, recognitionSchedule, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity } from '../services/finance.util';
 import { NotificationService } from '../services/notification.service';
@@ -40,6 +40,7 @@ interface ReportingData {
   billingItems: BillingPlanItem[];
   contracts: Contract[];
   customers: Customer[];
+  negotiatedRates: NegotiatedRate[];
 }
 
 interface ArAgingBarRow extends ArAgingBucketTotal {
@@ -826,9 +827,15 @@ export class Reporting {
             billingItems: this.api.getBillingPlanItems(),
             contracts: this.api.getContracts(),
             customers: this.api.getCustomers(),
+            // Negotiated sell rates (design spec §4/§6) feed the as-incurred T&M
+            // branch of recognitionSchedule via financeData() below. Loaded in
+            // the SAME forkJoin as every other principal-gated collection here —
+            // never a second independent load — so it settles at the same tick
+            // and never makes a figure change under the user's eyes after paint.
+            negotiatedRates: this.api.getNegotiatedRates(),
           })
-        : of<ReportingData>({ resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [] }),
-    defaultValue: { resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [] },
+        : of<ReportingData>({ resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [], negotiatedRates: [] }),
+    defaultValue: { resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [], negotiatedRates: [] },
   });
 
   /**
@@ -886,7 +893,7 @@ export class Reporting {
 
   private financeData = computed<FinanceData>(() => {
     const d = this.dataRes.value();
-    return { requests: d.requests, assignments: d.assignments, resources: d.resources, orders: d.orders, orderLines: d.orderLines, financials: d.financials, timeEntries: d.timeEntries, changeRequests: d.changeRequests, projects: d.projects, billingItems: d.billingItems, contracts: d.contracts, customers: d.customers, milestones: d.milestones, fxRates: this.fxRes.value() };
+    return { requests: d.requests, assignments: d.assignments, resources: d.resources, orders: d.orders, orderLines: d.orderLines, financials: d.financials, timeEntries: d.timeEntries, changeRequests: d.changeRequests, projects: d.projects, billingItems: d.billingItems, contracts: d.contracts, customers: d.customers, milestones: d.milestones, fxRates: this.fxRes.value(), negotiatedRates: d.negotiatedRates };
   });
 
   /** Real per-project profitability (revenue/margin) from the commercial + finance data. */

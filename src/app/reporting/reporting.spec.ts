@@ -2,9 +2,14 @@ import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
 import { Reporting } from './reporting';
-import { ApiService, Resource } from '../services/api.service';
+import { ApiService, BillingPlanItem, Contract, NegotiatedRate, Project, Resource, TimeEntry } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
+
+/** Cast an Angular fixture host to a typed element so `.querySelector<T>` compiles. */
+function host(fixture: { nativeElement: unknown }): HTMLElement {
+  return fixture.nativeElement as HTMLElement;
+}
 
 /**
  * C1 regression pin: dummy and subco are capacity that does NOT exist yet, so
@@ -24,7 +29,7 @@ const RESOURCES: Resource[] = [
   { id: '6', name: 'Subco — Mediolanum Senior Developer', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'subco', vendorId: 'V4' },
 ];
 
-async function setup(resources: Resource[] = RESOURCES) {
+async function setup(resources: Resource[] = RESOURCES, overrides: Partial<ApiService> = {}) {
   const empty = () => of([]);
   const apiStub = {
     getResources: vi.fn(() => of(resources)),
@@ -42,6 +47,8 @@ async function setup(resources: Resource[] = RESOURCES) {
     getContracts: empty,
     getCustomers: empty,
     getFxRates: empty,
+    getNegotiatedRates: empty,
+    ...overrides,
   } as unknown as ApiService;
   const authStub = { authReady: signal(true), isAuthenticated: signal(true) } as unknown as AuthService;
   const notifyStub = { show: vi.fn() } as unknown as NotificationService;
@@ -93,5 +100,40 @@ describe('Reporting — internal-capacity KPIs (C1)', () => {
     await flush(fixture);
     expect(utilizationKpi(fixture)).toBe('0%');
     expect(fixture.componentInstance.utilizationChartCategories()).toEqual([]);
+  });
+});
+
+describe('Reporting — negotiated sell rates reach the rendered T&M figure (Task 4, round 2)', () => {
+  it('renders the Recognised Revenue Trend at the negotiated rate, not the resource\'s own (higher) reference billRate', async () => {
+    // Anchored on the real current month so it always lands inside the trailing
+    // 12-month window recentPeriods(12) computes from `new Date()` — no fixture
+    // date ever goes stale.
+    const now = new Date();
+    const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+
+    const project: Project = { id: 'P2', name: 'Project Beta', location: 'Remote', startDate: '2020-01-01', endDate: '2030-12-31', status: 'Active', contractId: 'CT2' };
+    const contract: Contract = { id: 'CT2', customerId: 'C1', name: 'T&M Framework', type: 'T&M', totalValue: 0, currency: 'USD', status: 'Active', startDate: '2020-01-01', endDate: '2030-12-31' };
+    const rate: NegotiatedRate = { id: 'nr1', contractId: 'CT2', role: 'Developer', currency: 'EUR', billRate: 1000 };
+    // Reference billRate (1500) is ABOVE the negotiated rate (1000) — a personal
+    // override must never beat a negotiated price (design spec §4/§6).
+    const resource: Resource = { id: 'R1', name: 'Dev One', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 80, capacity: 40, billRate: 1500 };
+    const entry: TimeEntry = { id: 'TE1', assignmentId: 'a1', requestId: 'r1', resourceId: 'R1', projectId: 'P2', date, hours: 10, status: 'Approved' };
+    const item: BillingPlanItem = { id: 'BP1', contractId: 'CT2', projectId: 'P2', type: 'TimeAndMaterials', label: 'T&M', amount: 0, currency: 'EUR', status: 'Ready' };
+
+    const fixture = await setup([resource], {
+      getProjects: () => of([project]),
+      getContracts: () => of([contract]),
+      getNegotiatedRates: () => of([rate]),
+      getTimeEntries: () => of([entry]),
+      getBillingPlanItems: () => of([item]),
+    });
+    await flush(fixture);
+
+    // 10h x negotiated 1000 = 10000, compact-formatted "€10K" by the trend chart's
+    // own `eurCompact` formatter. 10h x the reference 1500 would render "€15K" —
+    // asserted on the RENDERED DOM (not a signal) so this pins what a user actually sees.
+    const text = host(fixture).textContent ?? '';
+    expect(text).toContain('€10K');
+    expect(text).not.toContain('€15K');
   });
 });

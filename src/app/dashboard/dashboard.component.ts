@@ -11,9 +11,11 @@ import {
   BASE_CURRENCY,
   BillingPlanItem,
   ChangeRequest,
+  Contract,
   FinancialItem,
   FxRate,
   Issue,
+  NegotiatedRate,
   Order,
   OrderLine,
   Project,
@@ -53,6 +55,8 @@ interface DashboardData {
   billingItems: BillingPlanItem[];
   issues: Issue[];
   changeRequests: ChangeRequest[];
+  contracts: Contract[];
+  negotiatedRates: NegotiatedRate[];
 }
 
 type DeliveryHealth = 'green' | 'amber' | 'red';
@@ -527,6 +531,8 @@ export class DashboardComponent {
     billingItems: [],
     issues: [],
     changeRequests: [],
+    contracts: [],
+    negotiatedRates: [],
   };
 
   // FX rates feed FinanceData so portfolio rollups (margin, revenue, EAC, VAC)
@@ -561,6 +567,17 @@ export class DashboardComponent {
             billingItems: this.api.getBillingPlanItems(),
             issues: this.api.getProjectIssues(),
             changeRequests: this.api.getChangeRequests(),
+            // Negotiated sell rates (design spec §4/§6) need BOTH `contracts`
+            // (previously not fetched here at all) and `negotiatedRates` to
+            // resolve via sellRateFor: without `contracts`, a project's own
+            // contract can never be found, `projectPeriodOk` resolves false,
+            // and every as-incurred entry silently falls back to the reference
+            // billRate — the negotiated price would never surface here even
+            // though `negotiatedRates` was present. Both added to this SAME
+            // forkJoin (never a second independent load) so they settle at the
+            // same tick as everything else.
+            contracts: this.api.getContracts(),
+            negotiatedRates: this.api.getNegotiatedRates(),
           })
         : of(DashboardComponent.EMPTY_DATA),
     defaultValue: DashboardComponent.EMPTY_DATA,
@@ -584,6 +601,10 @@ export class DashboardComponent {
       // CR-adjusted budgets feed burn/EAC/VAC; projects label the alert rows.
       changeRequests: d.changeRequests,
       projects: d.projects,
+      // Contract periods + negotiated rates feed the as-incurred T&M branch of
+      // recognitionSchedule via sellRateFor (design spec §4/§6).
+      contracts: d.contracts,
+      negotiatedRates: d.negotiatedRates,
       // Normalise multi-currency amounts to base for portfolio money rollups.
       fxRates: this.fxRates(),
     };

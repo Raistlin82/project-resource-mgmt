@@ -15,6 +15,7 @@ import {
   FinancialItem,
   FxRate,
   Milestone,
+  NegotiatedRate,
   Order,
   OrderLine,
   Project,
@@ -732,6 +733,16 @@ export class ContractDetails {
     stream: ({ params: ready }) => (ready ? this.api.getBillingPlanItems() : of<BillingPlanItem[]>([])),
     defaultValue: [] as BillingPlanItem[],
   });
+  // Negotiated sell rates (design spec §4/§6) feed the as-incurred T&M branch of
+  // recognitionSchedule via sellRateFor (see `data` below). /negotiated-rates is
+  // principal-gated server-side the same way contracts/customers/orders are, so
+  // this follows THAT gated idiom (keyed on auth.authReady()) rather than the
+  // ungated one used for the open reads (projects, milestones).
+  private negotiatedRatesRes = rxResource<NegotiatedRate[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getNegotiatedRates() : of<NegotiatedRate[]>([])),
+    defaultValue: [] as NegotiatedRate[],
+  });
   private milestonesRes = rxResource({ stream: () => this.api.getMilestones(), defaultValue: [] as Milestone[] });
   // REFERENCE-DATA INTEGRITY (Phase B): `currency` is a config-value FK to the
   // configured currency set (fx-rates). Gated on authReady() with the other
@@ -755,6 +766,7 @@ export class ContractDetails {
   billingPlanItems = this.billingPlanRes.value;
   milestones = this.milestonesRes.value;
   fxRates = this.fxRatesRes.value;
+  negotiatedRates = this.negotiatedRatesRes.value;
 
   /** Canonical recurrence enum (matches BillingPlanItem['recurrence'] and billing's RECURRENCES). */
   readonly recurrences: readonly NonNullable<BillingPlanItem['recurrence']>[] = ['Monthly', 'Quarterly', 'Annual'];
@@ -811,6 +823,15 @@ export class ContractDetails {
     timeEntries: this.timeEntries(),
     billingItems: this.billingPlanItems(),
     milestones: this.milestones(),
+    // `projects`/`contracts` were already loaded (contractProjects/contractOrders
+    // below use them) but not previously fed into FinanceData. Both are REQUIRED
+    // for sellRateFor's project-override / contract-period precedence (design
+    // spec §4/§6) to resolve correctly, not merely to carry `negotiatedRates`:
+    // without `contracts` here, a project's own contract can never be found and
+    // every negotiated rate silently falls back to the reference billRate.
+    projects: this.projects(),
+    contracts: this.contracts(),
+    negotiatedRates: this.negotiatedRates(),
   }));
 
   contractProjects = computed(() => this.projects().filter(p => p.contractId === this.id()));
