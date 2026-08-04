@@ -1,0 +1,135 @@
+import { signal } from '@angular/core';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { of } from 'rxjs';
+import { Billing } from './billing';
+import {
+  ApiService, BillingPlanItem, Contract, Customer, NegotiatedRate, Project, Resource, TimeEntry,
+} from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
+import { NotificationService } from '../../services/notification.service';
+
+/**
+ * FINAL REVIEW, finding 3 — the T&M Accrued KPI must price at the NEGOTIATED
+ * sell rate, like the four surfaces already wired to `sellRateFor`.
+ *
+ * This file is a new harness: billing.ts had no spec, so the tile could disagree
+ * with the dashboard, reporting and contract-details about the identical hours
+ * and nothing would notice. It is deliberately narrow — one KPI tile, asserted on
+ * the RENDERED DOM — rather than an attempt to cover a ~1500-line screen.
+ *
+ * UNITS ARE PART OF THE FIXTURE: a NegotiatedRate.billRate is EUR per DAY, a
+ * Resource.billRate as /api/resources serves it is EUR per HOUR. 800 €/day over
+ * an 8h day is 100 €/h, against a reference of 200 €/h.
+ */
+function host(fixture: { nativeElement: unknown }): HTMLElement {
+  return fixture.nativeElement as HTMLElement;
+}
+
+/** The T&M Accrued tile itself, so no other KPI can satisfy the assertion. */
+function tmAccruedTile(fixture: ComponentFixture<Billing>): HTMLElement {
+  const tile = [...host(fixture).querySelectorAll('article')]
+    .find(a => a.textContent?.includes('T&M Accrued'));
+  expect(tile, 'the T&M Accrued KPI tile must be rendered').toBeTruthy();
+  return tile as HTMLElement;
+}
+
+async function tick(fixture: ComponentFixture<Billing>, microtasks = 5): Promise<void> {
+  fixture.detectChanges();
+  for (let i = 0; i < microtasks; i++) await Promise.resolve();
+  fixture.detectChanges();
+}
+
+describe('Billing — T&M Accrued prices at the negotiated sell rate (final review, finding 3)', () => {
+  const contract: Contract = {
+    id: 'CT2', customerId: 'C1', name: 'T&M Framework', type: 'T&M', totalValue: 0,
+    currency: 'EUR', status: 'Active', startDate: '2026-01-01', endDate: '2026-12-31',
+  };
+  const customer: Customer = { id: 'C1', name: 'Acme Co' };
+  const project: Project = {
+    id: 'P2', name: 'Project Beta', location: 'Remote', startDate: '2026-01-01',
+    endDate: '2026-12-31', status: 'Active', contractId: 'CT2',
+  };
+  /** 200 EUR per HOUR (the equivalent of a 1600 €/day override). */
+  const resource: Resource = {
+    id: 'R1', name: 'Dev One', role: 'Developer', skills: [], projectRoles: [],
+    externalExperience: [], utilization: 80, capacity: 40, billRate: 200,
+  };
+  /** 800 EUR per DAY -> 100 EUR per hour at the 8h working day below. */
+  const rate: NegotiatedRate = { id: 'NR1', contractId: 'CT2', role: 'Developer', currency: 'EUR', billRate: 800 };
+  const entry: TimeEntry = {
+    id: 'TE1', assignmentId: 'a1', requestId: 'r1', resourceId: 'R1',
+    projectId: 'P2', date: '2026-05-01', hours: 10, status: 'Approved',
+  };
+  /** 'Planned', so the project is NOT treated as already billed and the hours accrue. */
+  const item: BillingPlanItem = {
+    id: 'BP1', contractId: 'CT2', projectId: 'P2', type: 'TimeAndMaterials',
+    label: 'T&M', amount: 0, currency: 'EUR', status: 'Planned',
+  };
+
+  function baseStub(overrides: Partial<Record<string, () => unknown>> = {}) {
+    return {
+      getBillingPlanItems: () => of([item]),
+      getContracts: () => of([contract]),
+      getCustomers: () => of([customer]),
+      getProjects: () => of([project]),
+      getMilestones: () => of([]),
+      getOrders: () => of([]),
+      getTimeEntries: () => of([entry]),
+      getResources: () => of([resource]),
+      getFxRates: () => of([]),
+      getNegotiatedRates: () => of([rate]),
+      getHoursPerDay: () => of({ value: 8 }),
+      ...overrides,
+    } as unknown as ApiService;
+  }
+
+  async function setUp(apiStub: ApiService): Promise<ComponentFixture<Billing>> {
+    const authStub = {
+      authReady: signal(true),
+      canManageCommercial: signal(true),
+      canApproveFinancials: signal(true),
+      role: signal('finance'),
+      userId: signal('1'),
+    } as unknown as AuthService;
+    const notifyStub = { show: vi.fn() } as unknown as NotificationService;
+    TestBed.configureTestingModule({
+      imports: [Billing],
+      providers: [
+        { provide: ApiService, useValue: apiStub },
+        { provide: AuthService, useValue: authStub },
+        { provide: NotificationService, useValue: notifyStub },
+      ],
+    });
+    await TestBed.compileComponents();
+    const fixture: ComponentFixture<Billing> = TestBed.createComponent(Billing);
+    await tick(fixture);
+    return fixture;
+  }
+
+  it('accrues 10 approved hours at the negotiated 100/h, not the reference 200/h', async () => {
+    const fixture = await setUp(baseStub());
+    const text = tmAccruedTile(fixture).textContent ?? '';
+
+    // 10h x 100 €/h = 1,000. The reference rate would render 2,000, and the
+    // un-converted day rate (the C1 unit bug) 8,000.
+    expect(text).toContain('€1,000');
+    expect(text).not.toContain('€2,000');
+    expect(text).not.toContain('€8,000');
+  });
+
+  it('falls back to the reference rate when nothing is negotiated — the no-regression case', async () => {
+    const fixture = await setUp(baseStub({ getNegotiatedRates: () => of([]) }));
+    const text = tmAccruedTile(fixture).textContent ?? '';
+
+    // Exactly what this tile showed before the feature existed: 10h x 200 €/h.
+    expect(text).toContain('€2,000');
+  });
+
+  it('does not apply a negotiated rate to hours dated outside the contract period', async () => {
+    const outside: TimeEntry = { ...entry, date: '2027-06-01' }; // CT2 ends 2026-12-31
+    const fixture = await setUp(baseStub({ getTimeEntries: () => of([outside]) }));
+    const text = tmAccruedTile(fixture).textContent ?? '';
+
+    expect(text).toContain('€2,000');
+  });
+});

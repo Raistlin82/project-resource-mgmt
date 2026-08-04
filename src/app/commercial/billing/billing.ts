@@ -13,6 +13,7 @@ import {
   Customer,
   FxRate,
   Milestone,
+  NegotiatedRate,
   Order,
   Project,
   Resource,
@@ -21,6 +22,7 @@ import {
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { convertToBase, daysOverdue } from '../../services/finance.util';
+import { sellRateFor, DEFAULT_HOURS_PER_DAY } from '../../services/sell-rate.util';
 import { CsvColumn, downloadCsv, toCsv } from '../../services/export.util';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
@@ -147,8 +149,13 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
         </article>
         <article class="command-kpi info">
           <p class="command-kpi-label">T&amp;M Accrued</p>
-          <p class="command-kpi-value">{{ kpis().tmAccrued | currency: baseCurrency : 'symbol' : '1.0-0' }}</p>
-          <p class="command-kpi-note">Unbilled approved hours × bill rate</p>
+          @if (tmAccruedReady()) {
+            <p class="command-kpi-value">{{ kpis().tmAccrued | currency: baseCurrency : 'symbol' : '1.0-0' }}</p>
+            <p class="command-kpi-note">Unbilled approved hours × negotiated sell rate</p>
+          } @else {
+            <p class="command-kpi-value">—</p>
+            <p class="command-kpi-note">Loading rate data…</p>
+          }
         </article>
         <article class="command-kpi warning">
           <p class="command-kpi-label">Retention Held</p>
@@ -783,6 +790,18 @@ export class Billing {
     stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
     defaultValue: [] as Resource[],
   });
+  // Negotiated sell rates + the org's working hours/day: the T&M Accrued KPI
+  // prices approved hours through `sellRateFor` exactly like recognitionSchedule
+  // does, so it needs the same two inputs (a rate is stored in EUR/DAY and is
+  // converted to EUR/HOUR with the divisor). /negotiated-rates is principal-gated
+  // to the commercial role set — the SAME rule as /billing-plan-items, which this
+  // screen already reads — so it follows that idiom and is keyed on authReady().
+  private readonly negotiatedRatesRes = rxResource<NegotiatedRate[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getNegotiatedRates() : of<NegotiatedRate[]>([])),
+    defaultValue: [] as NegotiatedRate[],
+  });
+  private readonly hoursPerDayRes = rxResource({ stream: () => this.api.getHoursPerDay(), defaultValue: { value: DEFAULT_HOURS_PER_DAY } });
   /** FX rate table (base-currency value of 1 unit of each currency); normalises mixed-currency KPI rollups. Keyed on auth readiness so it re-runs with the gated data load. */
   private readonly fxRatesRes = rxResource<FxRate[], boolean>({
     params: () => this.auth.authReady(),
@@ -799,6 +818,25 @@ export class Billing {
   readonly timeEntries = this.timeEntriesRes.value;
   readonly resources = this.resourcesRes.value;
   readonly fxRates = this.fxRatesRes.value;
+  readonly negotiatedRates = this.negotiatedRatesRes.value;
+
+  /**
+   * True once every read the T&M Accrued tile prices with has resolved. A MONEY
+   * FIGURE MUST NEVER RENDER FROM A PARTIAL ENVELOPE: with time entries and
+   * resources landed but negotiatedRates still in flight, `sellRateFor` falls
+   * through to the reference rate and the tile shows a BELIEVABLE WRONG number
+   * that later jumps — worse than a dash, which reads as "still loading". Same
+   * rule, same treatment as contract-details.ts's recognitionDataReady().
+   */
+  protected readonly tmAccruedReady = computed<boolean>(() =>
+    !this.itemsRes.isLoading()
+    && !this.timeEntriesRes.isLoading()
+    && !this.resourcesRes.isLoading()
+    && !this.negotiatedRatesRes.isLoading()
+    && !this.projectsRes.isLoading()
+    && !this.contractsRes.isLoading()
+    && !this.hoursPerDayRes.isLoading(),
+  );
 
   /** Reporting/base currency the aggregate KPI strip is denominated in. */
   readonly baseCurrency = BASE_CURRENCY;
@@ -987,7 +1025,22 @@ export class Billing {
     return { planned, ready, invoiced, paid, tmAccrued: this.tmAccrued(), retentionHeld, tax, overdueAmount, overdueCount };
   });
 
-  /** T&M accrued = approved hours × resource bill rate, for hours not yet captured by an Invoiced/Paid item. */
+  /**
+   * T&M accrued = approved hours × the NEGOTIATED SELL RATE, for hours not yet
+   * captured by an Invoiced/Paid item.
+   *
+   * Priced through the SAME `sellRateFor` resolution as recognitionSchedule
+   * (design spec §4/§6) — project override, else the project's contract rate for
+   * hours dated inside that contract's period, else the resource's own reference
+   * billRate. It used to read `resource.billRate` directly, so for any project
+   * with a negotiated rate this tile reported a different number than the
+   * dashboard, reporting and contract-details reported for the identical hours.
+   * One price prices T&M everywhere is the whole premise of the feature.
+   *
+   * UNITS: `sellRateFor` returns €/HOUR on every path (it divides a stored €/day
+   * negotiated rate by hoursPerDay), which is what multiplying by raw `t.hours`
+   * requires.
+   */
   private tmAccrued(): number {
     const resources = this.resourcesById();
     // Projects already covered by an invoiced/paid billing item are considered billed.
@@ -996,9 +1049,26 @@ export class Billing {
         .filter(i => (i.status === 'Invoiced' || i.status === 'Paid') && i.projectId)
         .map(i => i.projectId as string),
     );
+    const rates = this.negotiatedRates();
+    const projects = this.projects();
+    const contracts = this.contracts();
+    const hoursPerDay = this.hoursPerDayRes.value().value;
     return this.timeEntries()
       .filter(t => t.status === 'Approved' && !billedProjects.has(t.projectId))
-      .reduce((s, t) => s + t.hours * (resources.get(t.resourceId)?.billRate ?? 0), 0);
+      .reduce((s, t) => {
+        const resource = resources.get(t.resourceId);
+        const rate = sellRateFor({
+          projectId: t.projectId,
+          role: resource?.role,
+          date: t.date,
+          referenceBillRate: resource?.billRate,
+          hoursPerDay,
+          rates,
+          projects,
+          contracts,
+        }) ?? 0;
+        return s + t.hours * rate;
+      }, 0);
   }
 
   private taxOf(i: BillingPlanItem): number {
