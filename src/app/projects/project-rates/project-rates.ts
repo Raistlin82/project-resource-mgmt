@@ -201,8 +201,26 @@ export class ProjectRates {
   roleOptions = computed<string[]>(() => [...new Set(this.resourcesRes.value().map(r => r.role))].sort());
   currencyOptions = computed<string[]>(() => [...new Set([BASE_CURRENCY, ...this.fxRatesRes.value().map(r => r.currency)])]);
 
-  /** This project's own override rows — full CRUD, never greyed. */
-  projectRates = computed(() => this.negotiatedRates().filter(r => r.projectId === this.projectId()));
+  /**
+   * This project's own override rows — full CRUD, never greyed.
+   *
+   * MEMBERSHIP IS DECIDED BY THE FIELD, NEVER BY TWO ABSENCES AGREEING. This
+   * tab renders even with no resolved project (the tab strip in
+   * project-details.ts sits outside its `@if (project(); as p)`), so
+   * `projectId()` — an `input<string>()` with no default — can be `undefined`;
+   * a CONTRACT-level rate has no `projectId` either. Written as
+   * `r.projectId === this.projectId()` the filter therefore matched
+   * `undefined === undefined` and claimed every contract-scoped rate in the
+   * system as this project's own override, complete with a live edit and a
+   * DELETE wired to the real contract rate's id — one click from destroying a
+   * negotiated contract price from a phantom project's tab. No project, no
+   * overrides.
+   */
+  projectRates = computed(() => {
+    const pId = this.projectId();
+    if (!pId) return [];
+    return this.negotiatedRates().filter(r => r.projectId === pId);
+  });
 
   /** Every rate on this project's contract (empty when the project has no contract). */
   private contractRatesForProject = computed<NegotiatedRate[]>(() => {

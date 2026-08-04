@@ -150,6 +150,60 @@ describe('ProjectRates — inherited vs override (Task 5)', () => {
     expect(roleSelect!.value).toBe('Developer');
   });
 
+  /**
+   * FINAL REVIEW, finding 2 — the tab renders unconditionally
+   * (project-details.ts's tab strip sits OUTSIDE its `@if (project(); as p)`),
+   * so it can be shown with NO resolved project: a deep link to a project id
+   * that does not exist, or the tick before the ungated getProjects() read
+   * lands. `projectId` is `input<string>()` with no default, i.e. `undefined` —
+   * and a CONTRACT-level rate has no `projectId` either, so a filter written as
+   * `r.projectId === this.projectId()` matched `undefined === undefined` and
+   * claimed every contract-scoped rate in the system as THIS project's own
+   * override: green "Override" badge, live edit, and a delete button wired to
+   * the real contract rate's id. Membership must be decided by the FIELD, never
+   * by two absences agreeing.
+   */
+  async function setUpWithoutProjectId(apiStub: ApiService): Promise<ComponentFixture<ProjectRates>> {
+    const authStub = { authReady: signal(true), canManageCommercial: signal(true) } as unknown as AuthService;
+    const notifyStub = { show: vi.fn() } as unknown as NotificationService;
+    TestBed.configureTestingModule({
+      imports: [ProjectRates],
+      providers: [
+        { provide: ApiService, useValue: apiStub },
+        { provide: AuthService, useValue: authStub },
+        { provide: NotificationService, useValue: notifyStub },
+      ],
+    });
+    await TestBed.compileComponents();
+    // projectId is deliberately NEVER set — the phantom-project case.
+    const fixture: ComponentFixture<ProjectRates> = TestBed.createComponent(ProjectRates);
+    await tick(fixture);
+    return fixture;
+  }
+
+  it('claims NO contract-level rate as an override when there is no project (final review, finding 2)', async () => {
+    const fixture = await setUpWithoutProjectId(baseStub());
+    const h = host(fixture);
+
+    // The contract rate must not appear as this project's own row...
+    expect(h.querySelectorAll('[data-test="project-rate-row"]').length).toBe(0);
+    // ...nor as an inherited one (no project => no contract to inherit from)...
+    expect(h.querySelectorAll('[data-test="inherited-rate"]').length).toBe(0);
+    // ...and above all, no DELETE aimed at a real contract rate's id.
+    expect(h.querySelector('[aria-label="Delete override for Developer"]')).toBeNull();
+    expect(h.textContent).toContain('No negotiated rates apply to this project');
+  });
+
+  it('claims NO contract-level rate as an override for a project id that does not exist', async () => {
+    const fixture = await setUp(baseStub());
+    fixture.componentRef.setInput('projectId', 'NOPE');
+    await tick(fixture);
+    const h = host(fixture);
+
+    expect(h.querySelectorAll('[data-test="project-rate-row"]').length).toBe(0);
+    expect(h.querySelectorAll('[data-test="inherited-rate"]').length).toBe(0);
+  });
+
   it('flags a non-EUR rate as not applied, since sellRateFor only ever reads EUR (Task 5 review, Finding 1)', async () => {
     const usdOverride: NegotiatedRate = { id: 'NR3', projectId: 'P2', role: 'Developer', currency: 'USD', billRate: 950 };
     const fixture = await setUp(baseStub({ getNegotiatedRates: () => of([contractRate, usdOverride]) }));
