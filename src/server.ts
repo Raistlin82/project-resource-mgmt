@@ -9,7 +9,7 @@ import { db } from './db/client';
 import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
-import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter, AllocationApprovalRow, AllocationApprovalItem, SubstitutionMonthOutcome, SubstitutionResult } from './app/services/api.service';
+import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter, AllocationApprovalRow, AllocationApprovalItem, SubstitutionMonthOutcome, SubstitutionResult, NegotiatedRate } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, decisionToAssignmentStatus, allocationApproverStep } from './app/services/staffing.util';
 import { deriveAssignmentStatus, monthRowId, parseMonthRowId, monthlyAggregateHours, type MonthStatus } from './app/services/allocation-month.util';
 import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity, monthlyTargetHours } from './app/services/calendar.util';
@@ -523,7 +523,7 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
   }
 
   const rules: { test: (path: string) => boolean; roles: UserRole[] }[] = [
-    { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
+    { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items', '/negotiated-rates'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
     { test: p => ['/project-financials', '/project-cost-centers', '/cost-centers'].some(prefix => p.startsWith(prefix)), roles: ['finance', 'delivery-executive', 'admin'] },
     // Sensitive financial rates (costRate/billRate) live on resources; restrict who may rewrite them.
     { test: p => p.startsWith('/resources'), roles: ['resource-manager', 'delivery-executive', 'admin'] },
@@ -579,7 +579,7 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
  */
 const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   { test: p => p.startsWith('/audit-logs'), roles: ['admin', 'delivery-executive'] },
-  { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
+  { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items', '/negotiated-rates'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
   // Internal budget/cost-center plans expose financial planning data and must
   // match their finance-grade mutation rule. Commercial users can still read
   // billing-plan items through the commercial rule above.
@@ -4581,6 +4581,153 @@ apiRouter.put('/billing-plan-items/:id', async (req, res) => {
 });
 apiRouter.delete('/billing-plan-items/:id', async (req, res) => {
   await repos.billingPlanItems.remove(req.params.id);
+  res.status(204).send();
+});
+
+// --- Negotiated sell rates (Task 3, design spec §5) -------------------------
+//
+// `/negotiated-rates` is a bespoke handler set, NOT mounted with `crud()` — it
+// carries referential-integrity rules `crud()` cannot express, following the
+// same shape as `/resource-organizations` above: a required-field list
+// declared ONCE (`REQUIRED_NEGOTIATED_RATE_FIELDS`) so the pick()-forwards-null
+// class (see the note at `REQUIRED_ORG_FIELDS`) is rejected for the whole class
+// of notNull columns rather than a hand-picked subset, a single validator
+// called from both POST and PUT, and the SAME `pick()` allow-list literally
+// duplicated in both handlers (a field missing from one list is not writable
+// through that verb and fails SILENTLY — see the note at
+// `/resource-organizations`'s POST/PUT for the exact same trap).
+//
+// No cross-record lock (unlike ORG_TREE_LOCK above): the org-tree guard reasons
+// over the WHOLE tree (parent/child/level, a graph), so an unserialized
+// concurrent write can leave the graph inconsistent. This validator reasons
+// over a single collection's own uniqueness key, the same shape as
+// `/contracts`/`/orders`/`/order-lines` above (none of which lock either) — a
+// race here would at worst let two near-simultaneous POSTs both insert the
+// same key, and `sellRateFor` (src/app/services/sell-rate.util.ts) already
+// resolves that deterministically (first match), so no data is corrupted.
+
+/** Every notNull column on negotiated_rates (src/db/schema.ts), declared ONCE
+ *  so the null-rejection covers the class rather than a hand-picked subset. */
+const REQUIRED_NEGOTIATED_RATE_FIELDS = ['role', 'currency', 'billRate'] as const;
+
+/**
+ * Validate a `/negotiated-rates` body against every rule in design spec §5, in
+ * the order the spec lists them: the null-rejection loop first, then
+ * contractId XOR projectId, then FK existence (whichever side is supplied),
+ * then role existence, then same-key uniqueness (self-excluded on PUT), then
+ * the numeric check. Returns a 400-suitable message, or null when the body is
+ * acceptable. Both POST and PUT call this same function so the rule can never
+ * drift between the two verbs.
+ *
+ * `ctx.id` is the record's own id on PUT (absent on POST) — mirrors
+ * `validateOrgTreeNode`'s signature above. A field omitted from `body` (POST
+ * of a full row, or a partial PUT patch) falls back to the EXISTING row's
+ * value so a partial PUT is validated against its full, post-merge shape —
+ * exactly what check 9 in the smoke suite (PUT changing only billRate) needs
+ * to keep passing its own xor/FK/role/uniqueness checks unchanged.
+ *
+ * ROLE CHECK — DECIDED HERE, NOT SPELLED OUT VERBATIM IN THE BRIEF: spec §5
+ * says a role "che nessuna risorsa possiede" (that NO RESOURCE holds) is
+ * rejected as a typo, not a valid-but-unstaffed configuration. That is a
+ * DIFFERENT check from `validateRoleRefs` above, which validates `role`
+ * against the project-roles CONFIG CATALOG (used for staffing
+ * requests/required roles — a role can be a legitimate catalog entry before
+ * anyone is ever staffed against it). A negotiated rate prices an actual
+ * profile someone is billed AS, so this checks against the roles ACTUALLY
+ * held by a resource today (`repos.resources`), not the catalog.
+ */
+async function validateNegotiatedRate(
+  body: Partial<NegotiatedRate>,
+  ctx?: { id?: string },
+): Promise<string | null> {
+  // 1. Null-rejection loop — every notNull column, rejected as a class BEFORE
+  // anything below (the `??` merges, the xor, the uniqueness key) ever sees a
+  // masked corruption: pick() forwards an explicit JSON null (it filters only
+  // undefined), and a naive `body.role ?? existing?.role` cannot tell "the
+  // client didn't touch this field" from "the client sent null" — it would
+  // fall back to the EXISTING value for every check below while the object
+  // handed to the repo still carries the literal null, corrupting the row
+  // in-memory (repository.ts's explicit-null-clears rule deletes the key) and
+  // raising an unmapped NOT NULL violation (23502) as an opaque 500 on
+  // Postgres — the two adapters silently disagreeing.
+  for (const field of REQUIRED_NEGOTIATED_RATE_FIELDS) {
+    if (body[field] === null) return `${field} is required and cannot be cleared`;
+  }
+
+  const all = await repos.negotiatedRates.list();
+  const existing = ctx?.id === undefined ? undefined : all.find(r => r.id === ctx.id);
+
+  // 2. contractId XOR projectId — exactly one, never neither, never both.
+  const contractId = body.contractId === undefined ? existing?.contractId : body.contractId;
+  const projectId = body.projectId === undefined ? existing?.projectId : body.projectId;
+  const hasContract = typeof contractId === 'string' && contractId.length > 0;
+  const hasProject = typeof projectId === 'string' && projectId.length > 0;
+  if (hasContract === hasProject) {
+    return 'exactly one of contractId or projectId is required';
+  }
+
+  // 3. FK existence — only the side actually carrying a value is checked.
+  if (hasContract && !(await existsRepo(repos.contracts, contractId))) {
+    return 'contractId must reference an existing contract';
+  }
+  if (hasProject && !(await existsRepo(repos.projects, projectId))) {
+    return 'projectId must reference an existing project';
+  }
+
+  // 4. Role existence — against resources actually holding it (see doc comment above).
+  const role = body.role === undefined ? existing?.role : body.role;
+  if (role !== undefined) {
+    const resources = await repos.resources.list();
+    if (!resources.some(r => r.role === role)) {
+      return 'role must match a role held by an existing resource';
+    }
+  }
+
+  // 5. Same-key uniqueness on (contractId|projectId, role, currency), self-excluded on PUT.
+  const currency = body.currency === undefined ? existing?.currency : body.currency;
+  if (role !== undefined && currency !== undefined) {
+    const dupe = all.find(r =>
+      r.id !== ctx?.id
+      && r.role === role
+      && r.currency === currency
+      && (hasContract ? r.contractId === contractId : r.projectId === projectId),
+    );
+    if (dupe) return `a negotiated rate already exists for this key (existing id ${dupe.id})`;
+  }
+
+  // 6. Numeric — billRate must be a finite, non-negative number.
+  const billRate = body.billRate === undefined ? existing?.billRate : body.billRate;
+  if (billRate !== undefined && !isNonNegNumber(billRate)) {
+    return 'billRate must be a non-negative number';
+  }
+
+  return null;
+}
+
+apiRouter.get('/negotiated-rates', async (_req, res) => { res.json(await repos.negotiatedRates.list()); });
+apiRouter.post('/negotiated-rates', async (req, res) => {
+  const body = pick<NegotiatedRate>(req.body, [
+    'contractId', 'projectId', 'role', 'currency', 'billRate',
+  ]);
+  const err = await validateNegotiatedRate(body);
+  if (err) { res.status(400).json({ error: err }); return; }
+  const item = { id: newId(), ...body } as NegotiatedRate;
+  const created = await repos.negotiatedRates.create(item);
+  res.json(created);
+});
+apiRouter.put('/negotiated-rates/:id', async (req, res) => {
+  const existing = await repos.negotiatedRates.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const body = pick<NegotiatedRate>(req.body, [
+    'contractId', 'projectId', 'role', 'currency', 'billRate',
+  ]);
+  const err = await validateNegotiatedRate(body, { id: req.params.id });
+  if (err) { res.status(400).json({ error: err }); return; }
+  const updated = await repos.negotiatedRates.update(req.params.id, body);
+  res.json(updated);
+});
+apiRouter.delete('/negotiated-rates/:id', async (req, res) => {
+  await repos.negotiatedRates.remove(req.params.id);
   res.status(204).send();
 });
 

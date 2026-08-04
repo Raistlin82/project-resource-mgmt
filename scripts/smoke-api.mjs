@@ -3776,6 +3776,216 @@ async function checkOrgTreeIntegrity() {
 }
 
 /**
+ * Task 3 (negotiated sell rates, design spec §5) — write-side integrity on the
+ * bespoke `/negotiated-rates` handlers (src/server.ts, NOT mounted with
+ * `crud()`, following the `/resource-organizations` shape exercised above):
+ * contractId XOR projectId, FK existence on whichever side is supplied, a role
+ * check against roles ACTUALLY held by a resource (not the project-roles
+ * catalog — a price for a role nobody holds is a typo, spec §5), same-key
+ * uniqueness on (contractId|projectId, role, currency), the numeric guard on
+ * billRate, and the pick()-forwards-null class proven again here (spec §5's
+ * own callback to the D block's REQUIRED_ORG_FIELDS fix).
+ *
+ * SEED FIXTURES relied on (src/db/seed.ts) — none of these are mutated by
+ * earlier smoke sections:
+ *   - contract 'CT1' exists and carries NO 'Developer'/EUR negotiated rate
+ *     (the seeded pair is on 'CT2' and project '2') — safe for checks 1/7/8/10
+ *     to create/duplicate/mutate against without colliding with seed rows.
+ *   - resource '1' (Julie Armstrong) has role 'Developer'; resource '3' (Alice
+ *     Smith) has role 'Designer'; resource '2' (John Miller) has role
+ *     'Consultant' — all three are real, held roles used below so the
+ *     role-existence check is exercised against genuine data, not a fixture
+ *     invented for the test.
+ *   - no resource anywhere holds the literal role 'Nobody Has This' (check 6).
+ *
+ * Every "expect 400" check below deliberately uses a FRESH, otherwise-unique
+ * (contractId, role, currency) key of its own (never CT1+Developer+EUR, which
+ * check 1 owns) so a check that wrongly returns 200 pre-implementation cannot
+ * leave a row behind that later collides with — or is mistaken for evidence
+ * for — a different check.
+ */
+async function checkNegotiatedRates() {
+  const EMPLOYEE_HEADERS = { 'X-User-Id': '9', 'X-User-Role': 'employee' };
+  const CONTRACT_ID = 'CT1';
+
+  // 1) POST a valid contract-level rate -> 200, response carries all four fields.
+  const created = await req('POST', '/negotiated-rates', {
+    headers: RBAC_HEADERS,
+    body: { contractId: CONTRACT_ID, role: 'Developer', currency: 'EUR', billRate: 900 },
+  });
+  check(
+    "POST /api/negotiated-rates {contractId:'CT1', role:'Developer', currency:'EUR', billRate:900} -> 200, all four fields carried through",
+    created.status === 200 && created.body?.contractId === CONTRACT_ID && created.body?.role === 'Developer'
+      && created.body?.currency === 'EUR' && created.body?.billRate === 900,
+    `status=${created.status}, body=${JSON.stringify(created.body)}`,
+  );
+  // Keep the id even if the assertion above failed, so later checks (9-11),
+  // which are independently meaningful, can still run against something.
+  const createdId = typeof created.body?.id === 'string' ? created.body.id : undefined;
+
+  // 2) Neither contractId nor projectId -> 400.
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { role: 'Developer', currency: 'EUR', billRate: 800 },
+    });
+    check(
+      'POST /api/negotiated-rates with neither contractId nor projectId -> 400',
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+  }
+
+  // 3) Both contractId and projectId -> 400.
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: CONTRACT_ID, projectId: '1', role: 'Developer', currency: 'EUR', billRate: 800 },
+    });
+    check(
+      'POST /api/negotiated-rates with BOTH contractId and projectId -> 400',
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+  }
+
+  // 4) A contractId that does not exist -> 400.
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: 'NOPE_CONTRACT', role: 'Developer', currency: 'EUR', billRate: 800 },
+    });
+    check(
+      "POST /api/negotiated-rates {contractId:'NOPE_CONTRACT'} -> 400 (does not reference an existing contract)",
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+  }
+
+  // 5) A projectId that does not exist -> 400.
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { projectId: 'NOPE_PROJECT', role: 'Developer', currency: 'EUR', billRate: 800 },
+    });
+    check(
+      "POST /api/negotiated-rates {projectId:'NOPE_PROJECT'} -> 400 (does not reference an existing project)",
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+  }
+
+  // 6) A role nobody holds -> 400 (a typo, not a valid-but-unstaffed configuration).
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: CONTRACT_ID, role: 'Nobody Has This', currency: 'EUR', billRate: 800 },
+    });
+    check(
+      "POST /api/negotiated-rates {role:'Nobody Has This'} -> 400 (no resource holds this role)",
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+  }
+
+  // 7) Duplicating check 1's (contractId, role, currency) key -> 400 naming the existing id.
+  {
+    const dup = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: CONTRACT_ID, role: 'Developer', currency: 'EUR', billRate: 950 },
+    });
+    check(
+      "POST /api/negotiated-rates duplicating check 1's (contractId:'CT1', role:'Developer', currency:'EUR') -> 400, naming the existing id",
+      dup.status === 400 && (createdId === undefined || (typeof dup.body?.error === 'string' && dup.body.error.includes(createdId))),
+      `status=${dup.status}, body=${JSON.stringify(dup.body)}, expectedId=${createdId}`,
+    );
+  }
+
+  // 8) billRate: -1 -> 400; billRate: null -> 400. Each uses its OWN unique
+  // (role, currency) key on CONTRACT_ID so the uniqueness check (7, above in
+  // the validator's own order) cannot mask what this check exists to prove.
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: CONTRACT_ID, role: 'Designer', currency: 'EUR', billRate: -1 },
+    });
+    check(
+      "POST /api/negotiated-rates {billRate: -1} -> 400",
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+  }
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: CONTRACT_ID, role: 'Consultant', currency: 'EUR', billRate: null },
+    });
+    check(
+      "POST /api/negotiated-rates {billRate: null} -> 400 (the pick()-forwards-null class, not merely 'not a number')",
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+  }
+
+  // 9) PUT changing ONLY billRate on the row from check 1 -> 200, new value, other fields intact.
+  if (createdId !== undefined) {
+    const updated = await req('PUT', `/negotiated-rates/${createdId}`, {
+      headers: RBAC_HEADERS,
+      body: { billRate: 975 },
+    });
+    check(
+      `PUT /api/negotiated-rates/${createdId} {billRate:975} -> 200, new value, contractId/role/currency intact`,
+      updated.status === 200 && updated.body?.billRate === 975 && updated.body?.contractId === CONTRACT_ID
+        && updated.body?.role === 'Developer' && updated.body?.currency === 'EUR',
+      `status=${updated.status}, body=${JSON.stringify(updated.body)}`,
+    );
+  } else {
+    check('PUT changing only billRate on the check-1 row -> 200 (skipped: check 1 did not yield an id)', false, 'no createdId');
+  }
+
+  // 10) PUT with role: null -> 400 (pick() forwards a literal null; the row must not be corrupted).
+  if (createdId !== undefined) {
+    const bad = await req('PUT', `/negotiated-rates/${createdId}`, {
+      headers: RBAC_HEADERS,
+      body: { role: null },
+    });
+    check(
+      `PUT /api/negotiated-rates/${createdId} {role: null} -> 400 (rejected, not masked by a ?? fallback)`,
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+  } else {
+    check('PUT {role: null} on the check-1 row -> 400 (skipped: check 1 did not yield an id)', false, 'no createdId');
+  }
+
+  // 11) DELETE the row from check 1 -> 204, and a subsequent GET no longer lists it.
+  if (createdId !== undefined) {
+    const del = await req('DELETE', `/negotiated-rates/${createdId}`, { headers: RBAC_HEADERS });
+    check(`DELETE /api/negotiated-rates/${createdId} -> 204`, del.status === 204, `status=${del.status}`);
+    const { status, body } = await req('GET', '/negotiated-rates');
+    const stillListed = Array.isArray(body) && body.some(r => r.id === createdId);
+    check(
+      `GET /api/negotiated-rates no longer lists ${createdId} after DELETE`,
+      status === 200 && !stillListed,
+      `status=${status}, stillListed=${stillListed}`,
+    );
+  } else {
+    check('DELETE the check-1 row -> 204 (skipped: check 1 did not yield an id)', false, 'no createdId');
+    check('GET /api/negotiated-rates no longer lists the check-1 row (skipped: check 1 did not yield an id)', false, 'no createdId');
+  }
+
+  // 12) RBAC — 'employee' is outside the commercial read set -> 403.
+  {
+    const { status, body } = await req('GET', '/negotiated-rates', { headers: EMPLOYEE_HEADERS });
+    check(
+      "GET /api/negotiated-rates as an 'employee' -> 403",
+      status === 403,
+      `status=${status}, body=${JSON.stringify(body)}`,
+    );
+  }
+}
+
+/**
  * D task 5 — THE SCOPED ALLOCATION DECISION (design spec §3.3, §3.4, §3.5).
  *
  * Until D, `decideOneApproval` admitted ANY actor holding the step's role, so
@@ -4890,6 +5100,15 @@ async function main() {
     await checkAccountableApproverRules();
   } catch (err) {
     console.log(`FAIL  accountable-manager rules — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the Task 3 negotiated-rates
+  // integrity flow never masks or blocks any of the prior section results.
+  try {
+    await checkNegotiatedRates();
+  } catch (err) {
+    console.log(`FAIL  negotiated-rates integrity flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 
