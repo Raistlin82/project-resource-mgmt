@@ -35,6 +35,7 @@ import {
   RecognitionPeriod,
 } from '../../services/finance.util';
 import { NotificationService } from '../../services/notification.service';
+import { todayLocalIso } from '../../services/local-date.util';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { DEFAULT_HOURS_PER_DAY } from '../../services/sell-rate.util';
 
@@ -732,7 +733,7 @@ interface BillingControlRow {
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
                     <div>
                       <label for="billingProject" class="block text-sm font-semibold text-ink-secondary mb-1.5">Project</label>
-                      <select id="billingProject" formControlName="projectId" class="command-select">
+                      <select id="billingProject" formControlName="projectId" (change)="onBillingProjectChange()" class="command-select">
                         <option value="">Contract level</option>
                         @for (project of contractProjects(); track project.id) {
                           <option [value]="project.id">{{ project.name }}</option>
@@ -740,14 +741,26 @@ interface BillingControlRow {
                       </select>
                     </div>
 
-                    <div>
-                      <label for="billingRecurrence" class="block text-sm font-semibold text-ink-secondary mb-1.5">Recurrence *</label>
-                      <select id="billingRecurrence" formControlName="recurrence" class="command-select">
-                        @for (recurrence of recurrences; track recurrence) {
-                          <option [value]="recurrence">{{ recurrence }}</option>
-                        }
-                      </select>
-                    </div>
+                    @if (c.type === 'T&M') {
+                      <div>
+                        <label for="billingRecurrence" class="block text-sm font-semibold text-ink-secondary mb-1.5">Recurrence *</label>
+                        <select id="billingRecurrence" formControlName="recurrence" class="command-select">
+                          @for (recurrence of recurrences; track recurrence) {
+                            <option [value]="recurrence">{{ recurrence }}</option>
+                          }
+                        </select>
+                      </div>
+                    } @else {
+                      <div>
+                        <label for="billingMilestone" class="block text-sm font-semibold text-ink-secondary mb-1.5">Milestone *</label>
+                        <select id="billingMilestone" formControlName="milestoneId" class="command-select">
+                          <option value="">Select a milestone...</option>
+                          @for (milestone of billingMilestoneOptions(); track milestone.id) {
+                            <option [value]="milestone.id">{{ milestone.name }}</option>
+                          }
+                        </select>
+                      </div>
+                    }
 
                     <div>
                       <label for="billingExpectedDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Expected Date *</label>
@@ -926,7 +939,18 @@ export class ContractDetails {
     amount: new FormControl<number | null>(null, { validators: Validators.required }),
     currency: new FormControl(BASE_CURRENCY, { nonNullable: true, validators: Validators.required }),
     recurrence: new FormControl<BillingPlanItem['recurrence']>('Monthly', { nonNullable: true, validators: Validators.required }),
+    milestoneId: new FormControl('', { nonNullable: true }),
     status: new FormControl<BillingPlanItem['status']>('Planned', { nonNullable: true, validators: Validators.required }),
+  });
+
+  private billingProjectValue = toSignal(this.billingPlanForm.controls.projectId.valueChanges, {
+    initialValue: this.billingPlanForm.controls.projectId.value,
+  });
+  billingMilestoneOptions = computed(() => {
+    const projectId = this.billingProjectValue();
+    const contractProjectIds = new Set(this.contractProjects().map(project => project.id));
+    return this.milestones().filter(milestone => contractProjectIds.has(milestone.projectId)
+      && (!projectId || milestone.projectId === projectId));
   });
 
   // --- currency options (Phase B) ---
@@ -1001,8 +1025,8 @@ export class ContractDetails {
    */
   roleOptions = computed<string[]>(() => [...new Set(this.rolesRes.value().map(r => r.name))].sort());
 
-  /** Currency options for the rate form's select: base currency + every configured fx-rate currency. */
-  rateCurrencyOptions = computed<string[]>(() => [...new Set([BASE_CURRENCY, ...this.fxRates().map(r => r.currency)])]);
+  /** Negotiated rates are stored in the reporting base currency only. */
+  rateCurrencyOptions = computed<string[]>(() => [BASE_CURRENCY]);
 
   showRateForm = signal(false);
   editingRateId = signal<string | null>(null);
@@ -1011,7 +1035,11 @@ export class ContractDetails {
   rateBillRate = signal<number | null>(null);
   rateError = signal<string | null>(null);
 
-  rateFormValid = computed(() => !!this.rateRole() && !!this.rateCurrency() && this.rateBillRate() !== null && this.rateBillRate()! >= 0);
+  rateFormValid = computed(() => !!this.rateRole()
+    && this.rateCurrency() === BASE_CURRENCY
+    && this.rateBillRate() !== null
+    && Number.isFinite(this.rateBillRate())
+    && this.rateBillRate()! >= 0);
 
   onRateRoleChange(event: Event): void {
     this.rateRole.set((event.target as HTMLSelectElement).value);
@@ -1031,8 +1059,21 @@ export class ContractDetails {
     if (existing) {
       this.editingRateId.set(existing.id);
       this.rateRole.set(existing.role);
+      // Legacy non-base rows were accepted but are never consumed by sellRateFor.
+      // Keep the STORED currency rather than rewriting it to EUR on open: the
+      // amount is denominated in that currency, so silently relabelling 950 USD
+      // as 950 EUR would change the negotiated price by the FX spread without
+      // anyone deciding to. `rateFormValid` refuses to save it and the message
+      // below says what to do instead.
       this.rateCurrency.set(existing.currency);
       this.rateBillRate.set(existing.billRate);
+      if (existing.currency !== BASE_CURRENCY) {
+        this.rateError.set(
+          `This rate is stored in ${existing.currency}, which no invoice ever prices at `
+          + `(sellRateFor reads ${BASE_CURRENCY} only). Delete it and add the agreed `
+          + `${BASE_CURRENCY} figure — re-labelling the same number would change the price.`,
+        );
+      }
     } else {
       this.editingRateId.set(null);
       this.rateRole.set('');
@@ -1145,7 +1186,7 @@ export class ContractDetails {
       row.actualSources = [row.actualSources, `${event.orderId} ${event.status}`].filter(Boolean).join(', ');
     }
 
-    const todayPeriod = this.periodKey(new Date().toISOString().slice(0, 10));
+    const todayPeriod = this.periodKey(todayLocalIso());
     return [...rows.values()]
       .map(row => {
         const variance = row.actual - row.expected;
@@ -1159,7 +1200,7 @@ export class ContractDetails {
   });
 
   expectedBillingToDate = computed(() => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayLocalIso();
     return this.contractBillingPlan()
       .filter(i => !!i.expectedDate && i.expectedDate <= today)
       .reduce((sum, i) => sum + i.amount, 0);
@@ -1313,6 +1354,9 @@ export class ContractDetails {
   journalTotalsRow = computed(() => journalTotals(this.journalEntries()));
 
   openBillingPlanForm(contract: Contract): void {
+    const isRecurring = contract.type === 'T&M';
+    this.billingPlanForm.controls.recurrence.setValidators(isRecurring ? Validators.required : []);
+    this.billingPlanForm.controls.milestoneId.setValidators(isRecurring ? [] : Validators.required);
     this.billingPlanForm.reset({
       projectId: this.contractProjects()[0]?.id ?? '',
       label: contract.type === 'T&M' ? 'Monthly T&M billing' : 'Milestone billing',
@@ -1320,9 +1364,16 @@ export class ContractDetails {
       amount: null,
       currency: contract.currency,
       recurrence: 'Monthly',
+      milestoneId: '',
       status: 'Planned',
     });
+    this.billingPlanForm.controls.recurrence.updateValueAndValidity();
+    this.billingPlanForm.controls.milestoneId.updateValueAndValidity();
     this.showBillingPlanForm.set(true);
+  }
+
+  onBillingProjectChange(): void {
+    this.billingPlanForm.controls.milestoneId.setValue('');
   }
 
   closeBillingPlanForm(): void {
@@ -1342,6 +1393,7 @@ export class ContractDetails {
       amount: raw.amount ?? 0,
       currency: raw.currency,
       recurrence: type === 'Recurring' ? raw.recurrence : undefined,
+      milestoneId: type === 'Milestone' ? raw.milestoneId : undefined,
       status: raw.status,
     }).subscribe({
       next: () => {

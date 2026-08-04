@@ -212,6 +212,25 @@ describe('ContractDetails — Negotiated Rates table (Task 5)', () => {
     expect(options).toContain('Project Manager');   // in the catalog, held by nobody
   });
 
+  it('offers only the EUR base currency even when the FX catalog contains other currencies', async () => {
+    const fixture = await setUp(baseStub({
+      getFxRates: () => of([
+        { currency: 'EUR', rateToBase: 1 },
+        { currency: 'USD', rateToBase: 0.91 },
+      ]),
+    }));
+    const h = host(fixture);
+
+    const addButton = [...h.querySelectorAll('button')].find(b => b.textContent?.trim().includes('Add Rate'));
+    expect(addButton).toBeTruthy();
+    addButton!.click();
+    await tick(fixture);
+
+    const currencies = [...h.querySelectorAll<HTMLOptionElement>('#rateCurrency option')]
+      .map(option => option.value);
+    expect(currencies).toEqual(['EUR']);
+  });
+
   it('sends contractId and never projectId when adding on a contract', async () => {
     const createSpy = vi.fn().mockReturnValue(of({ id: 'NR9', contractId: 'CT1', role: 'Developer', currency: 'EUR', billRate: 950 }));
     const fixture = await setUp(baseStub({ createNegotiatedRate: createSpy }));
