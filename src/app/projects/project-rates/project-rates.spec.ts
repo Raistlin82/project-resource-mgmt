@@ -233,6 +233,22 @@ describe('ProjectRates — inherited vs override (Task 5)', () => {
     expect(options).toContain('Project Manager');   // in the catalog, held by nobody
   });
 
+  it('offers only the base currency, so no inert non-EUR rate can be created (P1-12)', async () => {
+    // sellRateFor reads nothing but a BASE_CURRENCY row, so an FX-driven picker
+    // offered a save that was guaranteed to move no revenue. Existing non-EUR
+    // rows are still RENDERED (with the "Not applied" badge, asserted below) —
+    // only creating a new one is closed off.
+    const fixture = await setUp(baseStub());
+    const h = host(fixture);
+
+    const addButton = [...h.querySelectorAll('button')].find(b => b.textContent?.trim().includes('Add Override'));
+    addButton!.click();
+    await tick(fixture);
+
+    const currencies = [...h.querySelectorAll<HTMLOptionElement>('#projectRateCurrency option')].map(o => o.value);
+    expect(currencies).toEqual(['EUR']);
+  });
+
   it('flags a non-EUR rate as not applied, since sellRateFor only ever reads EUR (Task 5 review, Finding 1)', async () => {
     const usdOverride: NegotiatedRate = { id: 'NR3', projectId: 'P2', role: 'Developer', currency: 'USD', billRate: 950 };
     const fixture = await setUp(baseStub({ getNegotiatedRates: () => of([contractRate, usdOverride]) }));

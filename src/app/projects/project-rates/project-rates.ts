@@ -3,7 +3,7 @@ import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { DecimalPipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { of } from 'rxjs';
-import { ApiService, BASE_CURRENCY, FxRate, NegotiatedRate, Project, ProjectRole } from '../../services/api.service';
+import { ApiService, BASE_CURRENCY, NegotiatedRate, Project, ProjectRole } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
@@ -202,15 +202,27 @@ export class ProjectRates {
     stream: ({ params: ready }) => (ready ? this.api.getProjectRoles() : of<ProjectRole[]>([])),
     defaultValue: [] as ProjectRole[],
   });
-  private fxRatesRes = rxResource<FxRate[], boolean>({
-    params: () => this.auth.authReady(),
-    stream: ({ params: ready }) => (ready ? this.api.getFxRates() : of<FxRate[]>([])),
-    defaultValue: [] as FxRate[],
-  });
+  /**
+   * Catalog role NAMES — the stored value on a rate, matching what the server
+   * checks. Any role already stored on an existing rate is kept in the list even
+   * if the catalog no longer contains it, so editing a legacy row cannot blank
+   * its own role on open.
+   */
+  roleOptions = computed<string[]>(() => [...new Set([
+    ...this.rolesRes.value().map(r => r.name),
+    ...this.negotiatedRates().map(rate => rate.role),
+  ])].filter(Boolean).sort());
 
-  /** Catalog role NAMES — the stored value on a rate, matching what the server checks. */
-  roleOptions = computed<string[]>(() => [...new Set(this.rolesRes.value().map(r => r.name))].sort());
-  currencyOptions = computed<string[]>(() => [...new Set([BASE_CURRENCY, ...this.fxRatesRes.value().map(r => r.currency)])]);
+  /**
+   * NEW RATES ARE BASE-CURRENCY ONLY (P1-12). `sellRateFor` reads nothing but a
+   * BASE_CURRENCY row, so an FX-driven picker offered the user a save that was
+   * guaranteed to be inert — a visible, persisted rate that moved no revenue.
+   * The picker is therefore [BASE_CURRENCY], enforced server-side by
+   * `negotiatedRateCurrencyError`. Rows already stored in another currency are
+   * NOT hidden: they still render with the "Not applied (EUR only)" badge above,
+   * so existing data stays visible and explicable rather than silently trusted.
+   */
+  readonly currencyOptions = computed<string[]>(() => [BASE_CURRENCY]);
 
   /**
    * This project's own override rows — full CRUD, never greyed.
