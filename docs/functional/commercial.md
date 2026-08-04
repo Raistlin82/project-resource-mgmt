@@ -301,6 +301,13 @@ flowchart TD
 3. **Resolution precedence** (`sellRateFor`,
    `src/app/services/sell-rate.util.ts`) — first match wins, evaluated **per
    hour, at that hour's own date**:
+   - **Units.** What you enter and what the tables show is a **€/day** price,
+     like a rate card. What resolution returns is a **€/hour** price: the day
+     rate is divided by the configured working hours/day (Configuration →
+     Rate Cards → *hours per day*, 8 by default) before it is multiplied by
+     the hours logged. So a 1000 €/day rate bills one 8-hour day as 1000 €,
+     not 8000 €. The resource's reference rate needs no conversion — it is
+     already hourly by the time any screen sees it.
    1. a rate on **this project** for the role, if the hours' date falls inside
       the project's contract's period (or the project has no contract at
       all);
@@ -339,7 +346,9 @@ flowchart TD
 
 **Fixed Price and Milestone revenue is unaffected.** A negotiated rate only
 ever prices **as-incurred** billing — `TimeAndMaterials`, `Capped`, `Expense`
-— because those are the only billing types whose revenue is `hours × rate`
+— because those are the only billing types whose revenue is
+`hours × the resolved hourly rate` (see **Units** above: the negotiated €/day
+price is converted first)
 (`recognitionSchedule` in `src/app/services/finance.util.ts`, via
 `sellRateFor`). `Milestone` (SAL) and `Progress` (POC) revenue is recognized
 as a share of the billing item's own fixed `amount`/`capAmount` and never

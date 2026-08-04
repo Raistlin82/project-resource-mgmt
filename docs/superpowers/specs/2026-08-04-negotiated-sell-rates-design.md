@@ -47,7 +47,7 @@ Una tabella nuova, `negotiatedRates`:
 | `projectId` | `text`, nullable, FK → `projects.id` | la tariffa vale per quel solo progetto (override) |
 | `role` | `text`, notNull | il profilo: **`Resource.role`**, la stessa chiave delle rate card |
 | `currency` | `text`, notNull | come `rateCards.currency` |
-| `billRate` | `doublePrecision`, notNull | prezzo di vendita in **€/giorno**, come le card |
+| `billRate` | `doublePrecision`, notNull | prezzo di vendita in **€/GIORNO**, come le card. **Il valore memorizzato NON è quello consumato**: la conversione in €/ora avviene alla risoluzione — vedi §4.2 |
 
 **`contractId` e `projectId` sono mutuamente esclusivi**: esattamente uno dei due è presente. È un invariante di scrittura (§5), non un vincolo di schema, perché nessun `CHECK` esprime bene «xor» in modo portabile fra i due adapter di questo progetto.
 
@@ -68,6 +68,19 @@ Dato un progetto e un `role`, il prezzo di vendita è il **primo** che esiste:
 Il punto 3 è la garanzia di non-regressione: un progetto senza tariffe negoziate fattura come adesso, e un sistema con la tabella vuota è indistinguibile dal sistema attuale.
 
 **L'override per persona non vince sul prezzo negoziato.** Se il cliente ha firmato 1.000, si fattura 1.000 anche se quella persona ha un override a 1.200. L'override resta ciò che è — un default aziendale — non un prezzo di vendita. Va scritto nel codice accanto alla precedenza, perché è la regola che un lettore futuro è più tentato di invertire.
+
+### 4.2 Unità: il valore memorizzato è €/giorno, la risoluzione restituisce €/ORA
+
+**Questa sezione corregge un errore di questa specifica.** La §3 dice — correttamente — che `billRate` si memorizza in **€/giorno**, come le rate card. Non diceva che deve essere **convertito nel punto di consumo**, e la prima implementazione ha quindi restituito il valore grezzo: `sellRateFor` tornava €/giorno quando vinceva una tariffa negoziata e €/ora quando vinceva il fallback, perché il `referenceBillRate` del punto 3 arriva da `Resource.billRate`, che `withEffectiveRates` (`src/server.ts`) ha **già** diviso per `hoursPerDay`. L'unico consumatore moltiplica quel risultato per le **ore grezze**, quindi 8 ore a un override di 1.150 €/giorno venivano prezzate **9.200 €** invece di 1.150: un'inflazione del ricavo pari esattamente a `hoursPerDay` su ogni superficie T&M, non vista da nessun gate.
+
+Le regole, adesso vincolanti:
+
+- **`NegotiatedRate.billRate` è €/GIORNO** — sulla colonna, nel seed, nelle due form (etichetta «Bill rate (€/day)») e nelle due tabelle. Nessuna conversione in scrittura, nessuna in lettura dall'API: `GET /negotiated-rates` restituisce il valore memorizzato, ed è quello che le tabelle mostrano.
+- **`sellRateFor` restituisce €/ORA su OGNI ramo di return.** È l'unità che il suo unico consumatore moltiplica per le ore e quella in cui il fallback già si trova. Una funzione con più rami di return deve restituire una sola unità.
+- **La conversione avviene dentro `sellRateFor`** (`src/app/services/sell-rate.util.ts`), ai livelli 1 e 2 della precedenza: `billRate / hoursPerDay`. Il livello 3 (`referenceBillRate`) passa **inalterato**, perché è già oraria. L'asimmetria è il punto: due unità in ingresso, una in uscita.
+- **`hoursPerDay` è un PARAMETRO esplicito**, come `date`: il layer puro non legge né un orologio né un setting. Chi chiama fornisce il valore del setting `hoursPerDay` (`FinanceData.hoursPerDay`, riempito da ogni builder; `getHoursPerDay()` sul server). Un divisore inutilizzabile (0, NaN, negativo) ricade su `DEFAULT_HOURS_PER_DAY = 8`, lo stesso fallback di `getHoursPerDay()`, invece di dividere per zero.
+
+Il costo di non averlo scritto qui la prima volta è la lezione da tenere: la specifica dichiarava l'unità del **dato** e non quella dell'**interfaccia**, e nessun fixture dei test codificava l'unità dei numeri che usava, quindi la precedenza era pinnata e l'aritmetica no.
 
 **Valuta:** una tariffa la cui `currency` non è la valuta base viene **ignorata** dalla risoluzione, esattamente come `pickRateCard` fa oggi (`src/server.ts:1470` filtra su `RATE_BASE_CURRENCY`, che è `'EUR'` a `:1449`). Non introduciamo conversione qui.
 
@@ -109,7 +122,7 @@ Sulla nota `null`: `pick()` inoltra un `null` letterale (filtra solo `undefined`
 
 Due, entrambi in `src/app/services/finance.util.ts`:
 
-- **il ricavo as-incurred** (`:681`, regola descritta a `:623`) — oggi `ore × billRate della risorsa`, diventa `ore × sellRateFor(progetto, role)`. È il punto che rende corretti i ricavi T&M e i margini di progetto;
+- **il ricavo as-incurred** (`:681`, regola descritta a `:623`) — oggi `ore × billRate della risorsa`, diventa `ore × sellRateFor(progetto, role)`. È il punto che rende corretti i ricavi T&M e i margini di progetto. **Entrambi i fattori sono orari** (§4.2): `sellRateFor` restituisce €/ora, quindi il builder di `FinanceData` deve passare `hoursPerDay` — senza di esso si prezza con la giornata di default (8h) invece di quella configurata;
 - **la billability company-wide** (`:208-214`) — **resta** sul `billRate` di riferimento. Non ha un progetto: è una misura aziendale «quanto vale il nostro tempo», non una fattura. Va commentato nel codice, altrimenti qualcuno la "correggerà" credendo di aver trovato un'incoerenza.
 
 Il layer puro riceve le tariffe come dato: chi lo chiama fornisce la lista, come già accade per le rate card.
@@ -133,13 +146,16 @@ L'ordine è stato deciso così deliberatamente: questo blocco fissa la forma def
 
 `scripts/negotiated-rate-impact.mjs`, dependency-free, sulla falsariga di `scripts/smoke-api.mjs`: interroga un server avviato, ricalcola il ricavo as-incurred **con** e **senza** le tariffe negoziate, e stampa solo i progetti il cui totale cambia — progetto, ricavo prima, ricavo dopo, delta in euro.
 
-**Su un sistema senza tariffe inserite deve stampare zero righe.** Quello è il gate: se stampa qualcosa a tabella vuota, la non-regressione di §4 punto 3 è rotta, e il merge non parte.
+**Su un sistema senza tariffe inserite deve stampare zero righe.** Se stampa qualcosa a tabella vuota, la non-regressione di §4 punto 3 è rotta.
+
+**Ma quello zero, da solo, non è un gate** — ed è il secondo errore di questa specifica. A tabella vuota le due chiamate sono la stessa funzione pura sugli stessi argomenti, quindi i due totali sono identici *per costruzione*: zero righe è dimostrabile senza eseguire alcuna risoluzione. Il gate vero richiede **anche** il caso positivo: **una time entry approvata sul progetto che porta la tariffa negoziata**, nel seed, così che la risoluzione venga davvero eseguita e il report stampi un delta **non nullo e aritmeticamente verificabile**. Senza quella riga di seed il difetto di §4.2 è passato attraverso ogni gate verde del branch: il report diceva zero perché nessun dato esercitava il codice, non perché il calcolo fosse giusto.
 
 Con tariffe inserite, il report è ciò che si guarda **prima** di attivarle su dati reali.
 
 ## 10. Verifica
 
 - **Unit sul layer puro** (`sell-rate.util.spec.ts`): progetto batte contratto batte persona; un progetto senza contratto; un `role` senza tariffa; una tariffa in valuta non base ignorata; una tabella vuota che restituisce esattamente il `billRate` di riferimento.
+- **Le unità vanno pinnate una contro l'altra** (§4.2): i test di precedenza da soli non bastano, perché ognuno esercita **un** ramo isolato e un errore di unità per-ramo resta invisibile. Serve un caso che, **sullo stesso fixture**, confronti il ramo negoziato con il ramo di fallback e verifichi che siano nella stessa unità e nel rapporto atteso — sotto il difetto quel rapporto era sbagliato esattamente di `hoursPerDay`. E ogni fixture deve rendere visibile l'unità dei suoi numeri (una tariffa negoziata è €/giorno, un `Resource.billRate` è €/ora), altrimenti certifica l'aritmetica sbagliata.
 - **Il caso che conta più di tutti:** un **override per persona più alto** del prezzo negoziato **non** deve alzare la fattura. Va pinnato sia nel layer puro sia nello smoke, perché è il difetto che si scoprirebbe solo a fine mese, su una fattura sbagliata.
 - **Smoke live**: inserire una tariffa di contratto e vedere il ricavo T&M di quel progetto cambiare del delta atteso; un override di progetto che vince sul contratto; le sette regole di integrità di §5, ognuna **rossa prima** del fix.
 - **Gate completi** su entrambi gli adapter, con il run su **Postgres fresco** obbligatorio: c'è una migration, e questo progetto ha già spedito una volta un server che non si avviava su un database vuoto.
