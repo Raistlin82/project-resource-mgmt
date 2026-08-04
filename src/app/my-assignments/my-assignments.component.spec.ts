@@ -126,7 +126,43 @@ describe('MyAssignmentsComponent time entry submission', () => {
     expect(notifications.show).toHaveBeenCalledWith('Time entry submitted for approval.', 'success');
   });
 
-  it('rotates the idempotency key when the user edits the payload after a failure', async () => {
+  it('reuses the idempotency key when only the NOTES change after a failure', async () => {
+    // ROUND 3, THE DUPLICATE P1-21 EXISTS TO PREVENT. The server's dedup is
+    // entirely KEYED (repos.timeEntries.get(entryId)); its four-field comparison
+    // only guards against reusing one key for a different row. So a NEW key with
+    // the same assignment/date/hours creates a SECOND entry with nothing to stop
+    // it. With `notes` in the fingerprint: submit, response lost after the server
+    // committed, the error message invites "review the details", the user fixes a
+    // typo in the notes only -> new key -> a second time entry with identical date
+    // and hours. Hours double-booked on a billable record.
+    //
+    // Put `notes` back into timeEntryFingerprint() and this test fails.
+    const { fixture, createMyTimeEntry } = setup({
+      createMyTimeEntry: vi.fn(() => throwError(() => new Error('lost response'))),
+    });
+    await flush(fixture);
+
+    fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
+    fixture.componentInstance.timeEntryDate.set('2026-09-01');
+    fixture.componentInstance.timeEntryHours.set(8);
+    fixture.componentInstance.timeEntryNotes.set('Backend wrok');
+    fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
+
+    // The user reviews the details and fixes the typo — in the notes ONLY.
+    fixture.componentInstance.timeEntryNotes.set('Backend work');
+    fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
+
+    const first = createMyTimeEntry.mock.calls[0][0];
+    const second = createMyTimeEntry.mock.calls[1][0];
+    expect(second.notes).toBe('Backend work');
+    expect(second.hours).toBe(8);
+    expect(second.date).toBe('2026-09-01');
+    // SAME key: the server replays the row it already has instead of logging the
+    // 8 hours twice. The notes edit is dropped, which is the trade.
+    expect(second.idempotencyKey).toBe(first.idempotencyKey);
+  });
+
+  it('rotates the idempotency key when the HOURS change after a failure', async () => {
     // ROUND 2. The error text says "review the details and try again". With a key
     // bound to the FORM SESSION rather than to the payload, correcting the hours
     // and retrying resent the SAME key with DIFFERENT hours — which the server

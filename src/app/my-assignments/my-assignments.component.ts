@@ -595,13 +595,33 @@ export class MyAssignmentsComponent {
     return aStart <= bEnd && bStart <= aEnd;
   }
 
-  /** Identity of the submission: the same four fields the server compares. */
+  /**
+   * Identity of the submission, and it MUST match the server's discriminants
+   * exactly: assignmentId, date, hours (resourceId is constant for the session).
+   *
+   * `notes` IS DELIBERATELY ABSENT, and including it was a duplicate-creating
+   * bug. The server's dedup is entirely KEYED — `repos.timeEntries.get(entryId)`
+   * — and its four-field comparison is only a guard against reusing one key for a
+   * different row (`!sameEntry` -> 409). There is no content-based dedup, so a
+   * NEW key with the same assignment/date/hours creates a second row with nothing
+   * to stop it. With `notes` in the fingerprint the path was: submit (D, H, N1),
+   * response lost after the server committed, the error message invites "review
+   * the details", the user fixes a typo in the NOTES only, the fingerprint
+   * changes, a new key is minted, the server finds nothing under it -> a second
+   * time entry with identical date and hours. Hours double-booked on a billable
+   * record, through the exact flow the message invites.
+   *
+   * The consequence of leaving it out is intended: on a lost response the key is
+   * reused, the server returns 200 with the row it already has, and the notes edit
+   * is silently dropped. A dropped typo fix beats a double-booked day, and the
+   * reload on the error path surfaces what was actually recorded. Changing hours
+   * or date still mints a new key, which is a genuinely different submission.
+   */
   private timeEntryFingerprint(assignment: Assignment): string {
     return JSON.stringify([
       assignment.id,
       this.timeEntryDate(),
       this.timeEntryHours(),
-      this.timeEntryNotes(),
     ]);
   }
 
