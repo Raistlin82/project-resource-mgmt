@@ -16,6 +16,7 @@ import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity, monthlyTar
 import { planSubstitution, planGiveBack, planSubstitutionBooking, type SubstitutionPlan } from './app/services/substitution.util';
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
+import { sellRateFor } from './app/services/sell-rate.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { isResourceKind, RESOURCE_KINDS, kindOf, dailyCapFor } from './app/services/resource-kind.util';
 import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, scopeOf, accountableApproversOf, nodeManagersAbove, isTerminatedAsOf, type OrgLevel } from './app/services/org-scope.util';
@@ -4390,24 +4391,57 @@ function isCappedNature(item: Pick<BillingPlanEntry, 'type' | 'capAmount'>): boo
 const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
 
 /**
- * Accrued T&M for a project, DERIVED as Σ(approved time-entry hours × resource
- * billRate) — the same as-incurred rule the finance util's recognitionSchedule
- * uses. Resource billRates are denominated in the base currency (EUR), so the
- * returned accrual is a BASE-currency figure; the caller converts a per-item cap
- * into base before comparing. Returns undefined when accrual is not derivable
- * (no projectId), so the caller can skip the accrued<=cap check rather than
- * treat "no data" as zero accrual.
+ * Accrued T&M for a project, DERIVED as Σ(approved time-entry hours × the
+ * NEGOTIATED SELL RATE) — the same as-incurred rule the finance util's
+ * `recognitionSchedule` applies, resolved through the very same `sellRateFor`
+ * (project override -> the project's contract rate for hours dated inside that
+ * contract's period -> the resource's own effective billRate). That parity claim
+ * used to be stated here and was false: this function summed
+ * `hours × resource.billRate` while recognitionSchedule priced at the negotiated
+ * rate, and THIS figure is what decides whether the `[CAP-EXCEEDED]`
+ * not-to-exceed flag is written into a billing item's notes. A negotiated
+ * discount therefore fired the flag on an accrual the customer will never be
+ * billed, and a negotiated premium let a genuine breach of a not-to-exceed
+ * ceiling pass unflagged.
+ *
+ * UNITS: `resolveResourceRates` yields an EUR/HOUR reference rate and
+ * `sellRateFor` returns EUR/HOUR on every path (dividing a stored EUR/DAY
+ * negotiated rate by the configured hours/day), so both factors of the
+ * multiplication below are hourly.
+ *
+ * Rates are EUR (the base currency) — `sellRateFor` only ever resolves a
+ * base-currency row — so the returned accrual is a BASE-currency figure; the
+ * caller converts a per-item cap into base before comparing. Returns undefined
+ * when accrual is not derivable (no projectId), so the caller can skip the
+ * accrued<=cap check rather than treat "no data" as zero accrual.
  */
 async function accruedTAndM(item: Pick<BillingPlanEntry, 'projectId'>): Promise<number | undefined> {
   if (!item.projectId) return undefined;
-  const [entries, rawResources] = await Promise.all([repos.timeEntries.list(), repos.resources.list()]);
+  const [entries, rawResources, projects, contracts, negotiatedRates, hoursPerDay] = await Promise.all([
+    repos.timeEntries.list(),
+    repos.resources.list(),
+    repos.projects.list(),
+    repos.contracts.list(),
+    repos.negotiatedRates.list(),
+    getHoursPerDay(),
+  ]);
   // Phase E: use EFFECTIVE bill rates (override ?? rate card), not the raw column.
   const resources = await resolveResourceRates(rawResources);
-  const billRateById = new Map(resources.map(r => [r.id, r.billRate ?? 0]));
+  const resourceById = new Map(resources.map(r => [r.id, r]));
   let accrued = 0;
   for (const t of entries) {
     if (t.status !== 'Approved' || t.projectId !== item.projectId) continue;
-    const rate = billRateById.get(t.resourceId) ?? 0;
+    const resource = resourceById.get(t.resourceId);
+    const rate = sellRateFor({
+      projectId: t.projectId,
+      role: resource?.role,
+      date: t.date,
+      referenceBillRate: resource?.billRate,
+      hoursPerDay,
+      rates: negotiatedRates as unknown as NegotiatedRate[],
+      projects: projects as unknown as { id: string; contractId?: string }[],
+      contracts: contracts as unknown as { id: string; startDate: string; endDate?: string }[],
+    }) ?? 0;
     const hours = Number.isFinite(t.hours) ? t.hours : 0;
     accrued += hours * rate;
   }

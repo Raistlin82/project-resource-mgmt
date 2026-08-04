@@ -4210,6 +4210,112 @@ async function checkNegotiatedRates() {
       check('check 16 cleanup (skipped: the POST did not yield an id)', false, 'no id');
     }
   }
+
+  // 17a-b) FINAL REVIEW, finding 4 — THE [CAP-EXCEEDED] NOT-TO-EXCEED FLAG MUST
+  // BE PRICED AT THE NEGOTIATED RATE. `accruedTAndM` (src/server.ts) summed
+  // `hours × resource.billRate` while its own doc comment claimed it applied
+  // "the same as-incurred rule the finance util's recognitionSchedule uses" —
+  // true before this branch, false after it. That figure decides whether a cap
+  // is REPORTED AS BREACHED, so a wrong rate mis-flags a contract to whoever
+  // reads the billing plan: a negotiated DISCOUNT fires the flag on an accrual
+  // the customer will never be billed, and a negotiated PREMIUM lets a genuine
+  // breach pass unflagged. Both directions are checked, and each cap is placed
+  // BETWEEN the reference-priced and negotiated-priced accrual so the check can
+  // only pass with the right one — a check that merely calls the endpoint would
+  // pass either way.
+  //
+  // Project '1' is used because it carries approved seeded hours AND no
+  // cap-bearing billing item, which `enforceCappedBilling` requires (the flag is
+  // only attributed when a project has exactly ONE cap). The two accruals are
+  // computed from LIVE data, never hard-coded, so a change to the seeded hours
+  // cannot silently turn this into a tautology.
+  {
+    const CAP_PROJECT = '1';
+    const [entriesRes, resourcesRes, hpdRes] = await Promise.all([
+      req('GET', '/time-entries'),
+      req('GET', '/resources'),
+      req('GET', '/settings/hours-per-day'),
+    ]);
+    const entries = (entriesRes.body || []).filter(t => t.projectId === CAP_PROJECT && t.status === 'Approved');
+    const byId = new Map((resourcesRes.body || []).map(r => [r.id, r]));
+    // /resources serves an HOURLY billRate (withEffectiveRates already divided).
+    const refAccrual = entries.reduce((sum, t) => sum + t.hours * (byId.get(t.resourceId)?.billRate ?? 0), 0);
+    const hoursPerDay = Number(hpdRes.body?.value) || 8;
+    const roles = new Set(entries.map(t => byId.get(t.resourceId)?.role));
+    const setupOk = check(
+      `finding 4 setup: project '${CAP_PROJECT}' has approved hours priced at a non-zero reference accrual, all one role`,
+      refAccrual > 0 && roles.size === 1 && roles.has('Developer'),
+      `refAccrual=${refAccrual} roles=${JSON.stringify([...roles])} entries=${entries.length}`,
+    );
+
+    /** POST a Capped item on the project and return its stored notes (''-safe). */
+    const capItemNotes = async (capAmount, label) => {
+      const created = await req('POST', '/billing-plan-items', {
+        headers: RBAC_HEADERS,
+        body: {
+          contractId: 'CT1', projectId: CAP_PROJECT, type: 'Capped', label,
+          amount: 100, capAmount, currency: 'EUR', status: 'Planned', expectedDate: '2026-09-30',
+        },
+      });
+      const notes = typeof created.body?.notes === 'string' ? created.body.notes : '';
+      if (typeof created.body?.id === 'string') {
+        await req('DELETE', `/billing-plan-items/${created.body.id}`, { headers: RBAC_HEADERS });
+      }
+      return { status: created.status, notes };
+    };
+
+    if (setupOk) {
+      // (a) FALSE BREACH — a negotiated DISCOUNT at HALF the reference hourly
+      // price. Cap sits between the two accruals, so the reference-priced
+      // accrual breaches it and the negotiated one does not.
+      const discountDayRate = (refAccrual / entries.reduce((h, t) => h + t.hours, 0)) * hoursPerDay / 2;
+      const rate = await req('POST', '/negotiated-rates', {
+        headers: RBAC_HEADERS,
+        body: { projectId: CAP_PROJECT, role: 'Developer', currency: 'EUR', billRate: discountDayRate },
+      });
+      const rateId = typeof rate.body?.id === 'string' ? rate.body.id : undefined;
+      check(
+        `finding 4 setup: a project-level DISCOUNT rate (${discountDayRate}/day = half the reference hourly) is created`,
+        rate.status === 200 && rateId !== undefined,
+        `status=${rate.status} body=${JSON.stringify(rate.body)}`,
+      );
+
+      const midCap = (refAccrual / 2 + refAccrual) / 2; // between negotiated and reference
+      const discounted = await capItemNotes(midCap, 'finding 4 — discount must not flag');
+      check(
+        `POST /api/billing-plan-items Capped capAmount=${Math.round(midCap)} with a negotiated DISCOUNT -> NO [CAP-EXCEEDED] (the reference-priced accrual ${Math.round(refAccrual)} would have flagged it)`,
+        discounted.status === 200 && !discounted.notes.includes('[CAP-EXCEEDED]'),
+        `status=${discounted.status} notes="${discounted.notes}"`,
+      );
+
+      // (b) MISSED BREACH — the same rate raised to a PREMIUM at double the
+      // reference hourly price, with a cap above the reference accrual but below
+      // the negotiated one. The flag MUST fire; pre-fix it did not.
+      if (rateId !== undefined) {
+        const premiumDayRate = (refAccrual / entries.reduce((h, t) => h + t.hours, 0)) * hoursPerDay * 2;
+        const bumped = await req('PUT', `/negotiated-rates/${rateId}`, {
+          headers: RBAC_HEADERS,
+          body: { billRate: premiumDayRate },
+        });
+        check(
+          `finding 4 setup: the same rate is raised to a PREMIUM (${premiumDayRate}/day = double the reference hourly)`,
+          bumped.status === 200 && bumped.body?.billRate === premiumDayRate,
+          `status=${bumped.status} body=${JSON.stringify(bumped.body)}`,
+        );
+
+        const highCap = (refAccrual + refAccrual * 2) / 2; // above reference, below negotiated
+        const premium = await capItemNotes(highCap, 'finding 4 — premium must flag');
+        check(
+          `POST /api/billing-plan-items Capped capAmount=${Math.round(highCap)} with a negotiated PREMIUM -> [CAP-EXCEEDED] IS flagged (the reference-priced accrual ${Math.round(refAccrual)} would have missed the breach)`,
+          premium.status === 200 && premium.notes.includes('[CAP-EXCEEDED]'),
+          `status=${premium.status} notes="${premium.notes}"`,
+        );
+
+        const cleanup = await req('DELETE', `/negotiated-rates/${rateId}`, { headers: RBAC_HEADERS });
+        check(`finding 4 cleanup: DELETE /api/negotiated-rates/${rateId} -> 204`, cleanup.status === 204, `status=${cleanup.status}`);
+      }
+    }
+  }
 }
 
 /**
