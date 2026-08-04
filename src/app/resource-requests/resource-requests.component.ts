@@ -8,6 +8,7 @@ import { DecimalPipe } from '@angular/common';
 import { forkJoin, of } from 'rxjs';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 import { AllocationCalendarComponent } from '../allocation-calendar/allocation-calendar.component';
+import { endNotBeforeStart } from '../services/date-range.validator';
 
 interface RequestsData {
   requests: ResourceRequest[];
@@ -563,7 +564,9 @@ export class ResourceRequestsComponent {
     description: new FormControl(''),
     startDate: new FormControl(''),
     endDate: new FormControl('')
-  });
+    // P2-35: dates are optional here, but an inverted pair is still refused by
+    // resourceRequestUpdateError server-side.
+  }, { validators: endNotBeforeStart('startDate', 'endDate') });
 
   trackRequest(req: ResourceRequest) {
     this.trackingRequestId.set(req.id);

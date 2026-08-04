@@ -9,6 +9,7 @@ import { NotificationService } from '../../services/notification.service';
 import { AuthService } from '../../services/auth.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { authGatedResource } from '../../services/auth-gated-resource.util';
+import { endNotBeforeStart } from '../../services/date-range.validator';
 
 @Component({
   selector: 'app-project-plans',
@@ -406,12 +407,14 @@ export class ProjectPlans {
     date: new FormControl('', Validators.required)
   });
 
+  // P2-35: a work package is the "piani" half of the issue — both the create and
+  // the edit form, since either can invert the pair.
   wpForm = new FormGroup({
     name: new FormControl('', Validators.required),
     startDate: new FormControl('', Validators.required),
     endDate: new FormControl('', Validators.required),
     assignee: new FormControl('', Validators.required)
-  });
+  }, { validators: endNotBeforeStart('startDate', 'endDate') });
 
   editWpForm = new FormGroup({
     name: new FormControl('', Validators.required),
@@ -420,7 +423,7 @@ export class ProjectPlans {
     assignee: new FormControl('', Validators.required),
     status: new FormControl<WorkPackage['status']>('Planned', Validators.required),
     progress: new FormControl(0, Validators.required)
-  });
+  }, { validators: endNotBeforeStart('startDate', 'endDate') });
 
   // ORPHAN VALUES: a stored assignee that isn't a current resource name (and isn't the
   // 'Unassigned' sentinel) is surfaced as a disabled option so editing never drops it.

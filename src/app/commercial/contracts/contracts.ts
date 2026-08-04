@@ -9,6 +9,7 @@ import { ApiService, BASE_CURRENCY, Contract, Customer, FxRate } from '../../ser
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { endNotBeforeStart } from '../../services/date-range.validator';
 
 @Component({
   selector: 'app-contracts',
@@ -208,7 +209,8 @@ export class Contracts {
     status: new FormControl<Contract['status']>('Draft', { nonNullable: true, validators: Validators.required }),
     startDate: new FormControl('', { nonNullable: true, validators: Validators.required }),
     endDate: new FormControl('', { nonNullable: true, validators: Validators.required })
-  });
+  // P2-35: same cross-field rule the server enforces on /contracts.
+  }, { validators: endNotBeforeStart('startDate', 'endDate') });
 
   // Mirror the currency control so an orphan value (not in the configured set)
   // can be surfaced as a disabled option rather than silently dropped on edit.

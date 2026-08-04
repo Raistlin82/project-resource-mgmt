@@ -9,6 +9,7 @@ import { ApiService, Project, Contract, Resource, Country, City } from '../../se
 import { AuthService } from '../../services/auth.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { authGatedResource } from '../../services/auth-gated-resource.util';
+import { endNotBeforeStart } from '../../services/date-range.validator';
 
 /** Allowed location sentinel for fully-remote projects (mirrors the server + seed). */
 const REMOTE_LOCATION = 'Remote';
@@ -192,7 +193,9 @@ const REMOTE_LOCATION = 'Remote';
                          [attr.aria-invalid]="projectForm.controls.endDate.invalid && (projectForm.controls.endDate.touched || projectForm.controls.endDate.dirty)"
                          [attr.aria-describedby]="projectForm.controls.endDate.invalid && (projectForm.controls.endDate.touched || projectForm.controls.endDate.dirty) ? 'projectEndDateError' : null">
                   @if (projectForm.controls.endDate.invalid && (projectForm.controls.endDate.touched || projectForm.controls.endDate.dirty)) {
-                    <p id="projectEndDateError" class="command-field-error" role="alert">End date is required.</p>
+                    <p id="projectEndDateError" class="command-field-error" role="alert">
+                      {{ projectForm.controls.endDate.hasError('endBeforeStart') ? 'End date cannot be before the start date.' : 'End date is required.' }}
+                    </p>
                   }
                 </div>
 
@@ -341,7 +344,9 @@ export class ProjectsComponent {
     ownerId: new FormControl('', Validators.required),
     contractId: new FormControl(''),
     description: new FormControl('')
-  });
+  // P2-35: the server has always refused end < start; the form used to let you
+  // fill it in and only find out from a 400.
+  }, { validators: endNotBeforeStart('startDate', 'endDate') });
 
   // ORPHAN VALUE: a stored ownerId that isn't a current resource id is surfaced as a
   // disabled option (showing the raw id) so editing never silently discards it.
