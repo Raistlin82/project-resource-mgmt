@@ -17,14 +17,14 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
     <div [class]="projectId() ? '' : 'command-page space-y-6'">
       <div class="space-y-8">
         <!-- Header -->
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-4">
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div class="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
             @if (!projectId()) {
               <div>
                 <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Project Schedule & Plans</h2>
                 <p class="text-sm text-[var(--cc-muted)] mt-2">Manage work packages, scheduling, and key milestones.</p>
               </div>
-              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
+              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block w-full min-w-0 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)] sm:w-auto">
                 <option value="" disabled>Select a project...</option>
                 @for (p of projects(); track p.id) {
                   <option [value]="p.id">{{ p.name }}</option>
@@ -37,7 +37,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               </div>
             }
           </div>
-          <div class="flex gap-3">
+          <div class="flex flex-wrap gap-3">
             <button (click)="openMilestoneForm()" class="command-button secondary">
               <mat-icon class="text-sm">flag</mat-icon> Add Milestone
             </button>
@@ -61,8 +61,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               <mat-icon class="text-accent-text">account_tree</mat-icon> Work Packages
             </h3>
 
-            <div class="command-card overflow-hidden">
-              <table class="command-data-table">
+            <div class="command-card overflow-x-auto">
+              <table class="command-data-table min-w-[48rem]">
                 <thead>
                   <tr>
                     <th class="py-3 px-4">WBS / Name</th>
@@ -108,7 +108,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                       </div>
                     </td>
                     <td class="py-4 px-4 text-right">
-                      <button type="button" (click)="openEditWpForm(wp)" [attr.aria-label]="'Edit ' + wp.name" [attr.title]="'Edit ' + wp.name" class="text-ink-muted hover:text-accent-text transition-colors opacity-0 group-hover:opacity-100">
+                      <button type="button" (click)="openEditWpForm(wp)" [attr.aria-label]="'Edit ' + wp.name" [attr.title]="'Edit ' + wp.name" class="text-ink-muted hover:text-accent-text transition-colors opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100">
                         <mat-icon class="text-sm">edit</mat-icon>
                       </button>
                     </td>

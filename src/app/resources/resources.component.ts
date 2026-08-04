@@ -19,10 +19,11 @@ import { ListStateComponent } from '../shared/list-state.component';
 import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
 import { RESOURCE_KINDS, RESOURCE_KIND_LABELS, countsTowardInternalCapacity, kindOf, type ResourceKind } from '../services/resource-kind.util';
 import { dimensionsOf } from '../services/org-scope.util';
+import { todayLocalIso } from '../services/local-date.util';
 
 /** Today as an ISO 'YYYY-MM-DD' string, used for status derivation + the terminate default. */
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  return todayLocalIso();
 }
 
 /** Allowed location sentinel for fully-remote staff (mirrors the server + seed). */
@@ -130,6 +131,7 @@ const REMOTE_LOCATION = 'Remote';
           skeleton="table-rows" [rows]="6" [columns]="6"
           label="resources"
           (retry)="resourcesRes.reload()">
+          <ng-template>
           <table class="command-data-table">
             <thead>
               <tr>
@@ -189,6 +191,7 @@ const REMOTE_LOCATION = 'Remote';
               }
             </tbody>
           </table>
+          </ng-template>
         </app-list-state>
       </div>
 

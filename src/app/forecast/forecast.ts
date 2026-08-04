@@ -16,6 +16,7 @@ import {
   skillGap,
 } from '../services/forecast.util';
 import { toCsv, downloadCsv, CsvColumn } from '../services/export.util';
+import { todayLocalIso } from '../services/local-date.util';
 import {
   CommandBarChartComponent,
   CommandTrendChartComponent,
@@ -82,7 +83,7 @@ interface PeriodRow extends CapacityPeriod {
             <p class="command-kpi-value">{{ totalSupply() | number: '1.0-0' }}</p>
             <p class="command-kpi-note">Capacity hours / week</p>
           </div>
-          <div class="command-kpi" [class.danger]="totalDemand() > totalSupply()">
+          <div class="command-kpi" [class.danger]="peakDemand() > totalSupply()">
             <p class="command-kpi-label">Total Demand</p>
             <p class="command-kpi-value">{{ peakDemand() | number: '1.0-0' }}</p>
             <p class="command-kpi-note">Peak weekly hours</p>
@@ -361,7 +362,7 @@ export class Forecast {
   });
 
   /** Horizon start = today (UTC midnight), so periods line up with calendar weeks. */
-  private readonly horizonStartIso = computed<string>(() => new Date().toISOString().slice(0, 10));
+  private readonly horizonStartIso = computed<string>(() => todayLocalIso());
 
   /** Raw rolling capacity forecast for the selected horizon. */
   private readonly periods = computed<CapacityPeriod[]>(() =>

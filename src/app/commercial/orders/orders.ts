@@ -103,7 +103,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
         <div class="command-card w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
           <div class="command-card-header">
             <h2 id="orderModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">New Order</h2>
-            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-ink-muted hover:text-ink-secondary hover:bg-surface-muted transition-colors">
+            <button type="button" (click)="closeForm()" [disabled]="saving()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-ink-muted hover:text-ink-secondary hover:bg-surface-muted transition-colors disabled:opacity-50">
               <mat-icon>close</mat-icon>
             </button>
           </div>
@@ -189,9 +189,9 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
           </div>
 
           <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
-            <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
-            <button type="button" (click)="saveOrder()" [disabled]="orderForm.invalid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
-              Create Order
+            <button type="button" (click)="closeForm()" [disabled]="saving()" class="command-button secondary">Cancel</button>
+            <button type="button" (click)="saveOrder()" [disabled]="orderForm.invalid || saving()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+              {{ saving() ? 'Creating…' : 'Create Order' }}
             </button>
           </div>
         </div>
@@ -244,6 +244,8 @@ export class Orders {
   fxRates = this.fxRatesRes.value;
 
   showForm = signal(false);
+  saving = signal(false);
+  private orderSubmissionKey: string | null = null;
 
   orderForm = new FormGroup({
     contractId: new FormControl('', { nonNullable: true, validators: Validators.required }),
@@ -342,7 +344,7 @@ export class Orders {
   }
 
   saveOrder(): void {
-    if (this.orderForm.invalid) return;
+    if (this.orderForm.invalid || this.saving()) return;
 
     const raw = this.orderForm.getRawValue();
     const payload: Partial<Order> = {
@@ -357,29 +359,36 @@ export class Orders {
       payload.partnerId = raw.partnerId;
     }
 
-    this.api.createOrder(payload).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
-      next: (order) => {
-        this.api.createOrderLine({
-          orderId: order.id,
-          projectId: raw.projectId,
-          description: raw.lineDescription || `${raw.type} order imputation`,
-          amount: raw.amount ?? 0,
-        }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
-          next: () => {
-            this.ordersRes.reload();
-            this.orderLinesRes.reload();
-            this.notifications.show('Order created and imputed to project.', 'success');
-            this.closeForm();
-          },
-          error: () => this.notifications.show('Order created, but project imputation failed.', 'error'),
-        });
+    this.orderSubmissionKey ??= globalThis.crypto?.randomUUID?.()
+      ?? `order-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    this.saving.set(true);
+    this.api.createOrderWithLine({
+      idempotencyKey: this.orderSubmissionKey,
+      order: payload,
+      line: {
+        projectId: raw.projectId,
+        description: raw.lineDescription || `${raw.type} order imputation`,
+        amount: raw.amount ?? 0,
       },
-      error: () => this.notifications.show('Failed to create order.', 'error')
+    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {
+        this.ordersRes.reload();
+        this.orderLinesRes.reload();
+        this.notifications.show('Order created and imputed to project.', 'success');
+        this.saving.set(false);
+        this.closeForm();
+      },
+      error: () => {
+        this.saving.set(false);
+        this.notifications.show('Failed to create order. You can safely retry.', 'error');
+      },
     });
   }
 
   closeForm(): void {
+    if (this.saving()) return;
     this.showForm.set(false);
+    this.orderSubmissionKey = null;
     this.orderForm.reset({ contractId: '', type: 'Customer', partnerId: '', amount: null, projectId: '', lineDescription: '', currency: BASE_CURRENCY, status: 'Open', orderDate: '' });
   }
 }
