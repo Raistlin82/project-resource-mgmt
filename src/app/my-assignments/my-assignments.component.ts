@@ -379,8 +379,10 @@ export class MyAssignmentsComponent {
   timeEntryNotes = signal('');
   protected savingTimeEntryAssignmentId = signal<string | null>(null);
   protected timeEntrySubmissionError = signal('');
-  /** Stable idempotency key for the in-flight submission; see saveTimeEntry(). */
+  /** Idempotency key for the current PAYLOAD; see saveTimeEntry(). */
   private timeEntrySubmissionKey: string | undefined;
+  /** The payload fingerprint the key above was minted for; rotates the key when it changes. */
+  private timeEntrySubmissionKeyFor: string | undefined;
 
   // 0 = current period, negative = past, positive = future.
   periodOffset = signal(0);
@@ -593,6 +595,16 @@ export class MyAssignmentsComponent {
     return aStart <= bEnd && bStart <= aEnd;
   }
 
+  /** Identity of the submission: the same four fields the server compares. */
+  private timeEntryFingerprint(assignment: Assignment): string {
+    return JSON.stringify([
+      assignment.id,
+      this.timeEntryDate(),
+      this.timeEntryHours(),
+      this.timeEntryNotes(),
+    ]);
+  }
+
   private roundHours(value: number): number {
     return Math.round(value * 10) / 10;
   }
@@ -642,6 +654,7 @@ export class MyAssignmentsComponent {
     // different entry and must not replay this one. A retry of the CURRENT
     // submission keeps the key, because the error path never comes through here.
     this.timeEntrySubmissionKey = undefined;
+    this.timeEntrySubmissionKeyFor = undefined;
   }
 
   protected timeEntryValidationMessage(assignment: Assignment): string {
@@ -659,12 +672,24 @@ export class MyAssignmentsComponent {
 
     this.savingTimeEntryAssignmentId.set(assignment.id);
     this.timeEntrySubmissionError.set('');
-    // STABLE ACROSS RETRIES, new per submission (`??=`, cleared in
-    // cancelTimeEntry() on success): the server derives the entry's id from it,
-    // so a retry after a lost response returns the SAME entry instead of logging
-    // the hours twice. The pending-state guard above only stops a double click in
-    // this tab; it cannot stop a retry of a request whose response never arrived.
-    this.timeEntrySubmissionKey ??= globalThis.crypto?.randomUUID?.();
+    // THE KEY BELONGS TO THE PAYLOAD, NOT TO THE FORM SESSION.
+    //
+    // The server derives the entry's id from this key, so resending the SAME
+    // payload must reuse it (that is the replay dedup: a retry after a lost
+    // response returns the entry already recorded instead of logging the hours
+    // twice — the pending-state guard above only stops a double click in this tab).
+    //
+    // But the server answers 409 when a key is reused for DIFFERENT hours, and it
+    // is right to: silently returning the old row would hide a lost submission. So
+    // a key that never rotates turns the error message's own advice — "Review the
+    // details and try again" — into a dead end: correct the hours, retry, 409,
+    // forever. Rotating on a changed payload keeps both properties: same payload
+    // collapses, edited payload is a new submission.
+    const fingerprint = this.timeEntryFingerprint(assignment);
+    if (this.timeEntrySubmissionKey === undefined || this.timeEntrySubmissionKeyFor !== fingerprint) {
+      this.timeEntrySubmissionKey = globalThis.crypto?.randomUUID?.();
+      this.timeEntrySubmissionKeyFor = fingerprint;
+    }
     this.api.createMyTimeEntry({
       assignmentId: assignment.id,
       date: this.timeEntryDate(),
@@ -680,7 +705,11 @@ export class MyAssignmentsComponent {
       },
       error: () => {
         this.savingTimeEntryAssignmentId.set(null);
-        const message = 'Could not submit the time entry. Review the details and try again.';
+        // A response can be lost AFTER the server committed. Reload, so an entry
+        // that IS already recorded appears below instead of the user being invited
+        // to retry a submission that already succeeded.
+        this.dataRes.reload();
+        const message = 'Could not submit the time entry. Check the list below — if the entry is already there it was recorded; otherwise review the details and try again.';
         this.timeEntrySubmissionError.set(message);
         this.notifications.show(message, 'error');
       },

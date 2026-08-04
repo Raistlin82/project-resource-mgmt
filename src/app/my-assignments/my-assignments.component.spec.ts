@@ -86,7 +86,7 @@ function setup(overrides: {
     ],
   });
   const fixture = TestBed.createComponent(MyAssignmentsComponent);
-  return { fixture, createMyTimeEntry, notifications };
+  return { fixture, api, createMyTimeEntry, notifications };
 }
 
 async function flush(fixture: { detectChanges: () => void; whenStable: () => Promise<unknown> }) {
@@ -126,7 +126,53 @@ describe('MyAssignmentsComponent time entry submission', () => {
     expect(notifications.show).toHaveBeenCalledWith('Time entry submitted for approval.', 'success');
   });
 
-  it('keeps the idempotency key stable across a retry and rotates it for the next entry', async () => {
+  it('rotates the idempotency key when the user edits the payload after a failure', async () => {
+    // ROUND 2. The error text says "review the details and try again". With a key
+    // bound to the FORM SESSION rather than to the payload, correcting the hours
+    // and retrying resent the SAME key with DIFFERENT hours — which the server
+    // answers 409, correctly and forever. The advice was a dead end.
+    const { fixture, createMyTimeEntry } = setup({
+      createMyTimeEntry: vi.fn(() => throwError(() => new Error('network'))),
+    });
+    await flush(fixture);
+
+    fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
+    fixture.componentInstance.timeEntryDate.set('2026-09-01');
+    fixture.componentInstance.timeEntryHours.set(8);
+    fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
+
+    // The user corrects the hours the message told them to review.
+    fixture.componentInstance.timeEntryHours.set(6);
+    fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
+
+    const first = createMyTimeEntry.mock.calls[0][0];
+    const second = createMyTimeEntry.mock.calls[1][0];
+    expect(second.hours).toBe(6);
+    expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
+  });
+
+  it('reloads after a failed submission so an already-recorded entry becomes visible', async () => {
+    // A response can be lost AFTER the server committed. Without the reload the
+    // user is told to retry a submission that already succeeded, and the entry
+    // that exists is nowhere on screen.
+    const { fixture, api } = setup({
+      createMyTimeEntry: vi.fn(() => throwError(() => new Error('lost response'))),
+    });
+    await flush(fixture);
+    const before = (api.getMyTimeEntries as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+
+    fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
+    fixture.componentInstance.timeEntryDate.set('2026-09-01');
+    fixture.componentInstance.timeEntryHours.set(8);
+    fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
+    await flush(fixture);
+
+    expect((api.getMyTimeEntries as unknown as { mock: { calls: unknown[] } }).mock.calls.length)
+      .toBeGreaterThan(before);
+    expect(fixture.componentInstance['timeEntrySubmissionError']()).toContain('already there');
+  });
+
+  it('keeps the idempotency key stable across a retry of the SAME payload, and rotates it for the next entry', async () => {
     // The key is the whole point of the server change: same key -> the server
     // returns the SAME row. Reuse it for a different entry and the hours would be
     // silently swallowed, so it must rotate once the form closes. Both halves
