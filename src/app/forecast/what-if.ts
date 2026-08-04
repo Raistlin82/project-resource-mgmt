@@ -12,6 +12,7 @@ import { forkJoin, of } from 'rxjs';
 import { ApiService, Resource, ResourceRequest, Project } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
+import { todayLocalIso } from '../services/local-date.util';
 import {
   ForecastData,
   CapacityPeriod,
@@ -19,6 +20,8 @@ import {
   capacityForecast,
   benchList,
   skillGap,
+  isCompleteForecastWindow,
+  utilizationChangeTone,
 } from '../services/forecast.util';
 import {
   CommandBarChartComponent,
@@ -169,14 +172,17 @@ interface TimelineRow {
               </div>
               <div class="grid grid-cols-2 gap-3">
                 <div>
-                  <label for="dealStart" class="block text-sm font-semibold text-ink-secondary mb-1.5">Start</label>
+                  <label for="dealStart" class="block text-sm font-semibold text-ink-secondary mb-1.5">Start *</label>
                   <input id="dealStart" type="date" formControlName="startDate" class="command-input">
                 </div>
                 <div>
-                  <label for="dealEnd" class="block text-sm font-semibold text-ink-secondary mb-1.5">End</label>
+                  <label for="dealEnd" class="block text-sm font-semibold text-ink-secondary mb-1.5">End *</label>
                   <input id="dealEnd" type="date" formControlName="endDate" class="command-input">
                 </div>
               </div>
+              @if ((dealForm.controls.startDate.touched || dealForm.controls.endDate.touched) && dealForm.hasError('invalidDateWindow')) {
+                <p role="alert" class="text-xs text-critical-text">Enter a complete date range with end on or after start.</p>
+              }
             </div>
             <div class="mt-auto flex justify-end border-t border-[var(--cc-line)] p-4">
               <button type="submit" class="command-button" [disabled]="dealForm.invalid">Add deal</button>
@@ -461,7 +467,7 @@ export class WhatIf {
   // --- Horizon + forecasts on BOTH base and scenario --------------------------
 
   /** Horizon start = today (UTC midnight), so periods line up with calendar weeks. */
-  private readonly horizonStartIso = computed<string>(() => new Date().toISOString().slice(0, 10));
+  private readonly horizonStartIso = computed<string>(() => todayLocalIso());
 
   private readonly basePeriods = computed<CapacityPeriod[]>(() =>
     capacityForecast(this.baseData(), this.horizonStartIso(), HORIZON_WEEKS, 'weekly'),
@@ -612,7 +618,7 @@ export class WhatIf {
   readonly slippableProjects = computed<Project[]>(() => {
     const datedProjectIds = new Set(
       this.baseData().requests
-        .filter(r => r.projectId && (r.startDate || r.endDate))
+        .filter(r => r.projectId && isCompleteForecastWindow(r.startDate ?? '', r.endDate ?? ''))
         .map(r => r.projectId as string),
     );
     return this.projectsRes.value().filter(p => datedProjectIds.has(p.id));
@@ -631,9 +637,9 @@ export class WhatIf {
       validators: [Validators.required, Validators.min(1)],
     }),
     skills: new FormControl('', { nonNullable: true }),
-    startDate: new FormControl('', { nonNullable: true }),
-    endDate: new FormControl('', { nonNullable: true }),
-  });
+    startDate: new FormControl('', { nonNullable: true, validators: Validators.required }),
+    endDate: new FormControl('', { nonNullable: true, validators: Validators.required }),
+  }, { validators: WhatIf.validDealWindow });
 
   readonly hireForm = new FormGroup({
     role: new FormControl('', { nonNullable: true, validators: Validators.required }),
@@ -671,8 +677,8 @@ export class WhatIf {
       staffedEffort: 0,
       status: 'Open',
       skills,
-      startDate: v.startDate || undefined,
-      endDate: v.endDate || undefined,
+      startDate: v.startDate,
+      endDate: v.endDate,
     };
     this.scenario.update(s => ({ ...s, requests: [...s.requests, request] }));
     this.notify.show(`Added open request for ${request.requiredRole} (${request.requiredEffort}h).`, 'success');
@@ -748,11 +754,13 @@ export class WhatIf {
   }
 
   deltaIsGood(k: KpiDelta): boolean {
+    if (k.label === 'Avg Utilization') return utilizationChangeTone(k.base, k.scenario) === 'good';
     if (k.delta === 0) return false;
     return k.better === 'up' ? k.delta > 0 : k.delta < 0;
   }
 
   deltaIsBad(k: KpiDelta): boolean {
+    if (k.label === 'Avg Utilization') return utilizationChangeTone(k.base, k.scenario) === 'bad';
     if (k.delta === 0) return false;
     return k.better === 'up' ? k.delta < 0 : k.delta > 0;
   }
@@ -816,6 +824,14 @@ export class WhatIf {
       if (original && (original.startDate !== r.startDate || original.endDate !== r.endDate)) count++;
     }
     return count;
+  }
+
+  /** Validator: the slip amount must be a non-zero number of weeks. */
+  private static validDealWindow(control: AbstractControl): ValidationErrors | null {
+    const value = control.value as { startDate?: unknown; endDate?: unknown } | null;
+    const start = typeof value?.startDate === 'string' ? value.startDate : '';
+    const end = typeof value?.endDate === 'string' ? value.endDate : '';
+    return isCompleteForecastWindow(start, end) ? null : { invalidDateWindow: true };
   }
 
   /** Validator: the slip amount must be a non-zero number of weeks. */

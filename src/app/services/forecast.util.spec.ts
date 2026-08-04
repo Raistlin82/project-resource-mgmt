@@ -3,6 +3,8 @@ import {
   benchList,
   overAllocated,
   skillGap,
+  isCompleteForecastWindow,
+  utilizationChangeTone,
   ForecastData,
 } from './forecast.util';
 import { Resource, ResourceRequest, Assignment } from './api.service';
@@ -45,8 +47,14 @@ function req(
   };
 }
 
-function assign(id: string, requestId: string, resourceId: string, hours: number): Assignment {
-  return { id, requestId, resourceId, assignedHours: hours, status: 'Allocated' };
+function assign(
+  id: string,
+  requestId: string,
+  resourceId: string,
+  hours: number,
+  status: Assignment['status'] = 'Allocated',
+): Assignment {
+  return { id, requestId, resourceId, assignedHours: hours, status };
 }
 
 describe('forecast.util — capacityForecast', () => {
@@ -185,6 +193,38 @@ describe('forecast.util — capacityForecast', () => {
     const rows = capacityForecast(data, '2026-06-08', 1);
     // internal (10) + subco (40) = 50; the dummy's 20 must NOT be counted.
     expect(rows[0].supply).toBe(50);
+  });
+
+  it('counts only approved allocations as committed demand', () => {
+    const data: ForecastData = {
+      resources: [res('1', 40, 0)],
+      requests: [req('r1', 0, 'Open')],
+      assignments: [
+        assign('allocated', 'r1', '1', 20, 'Allocated'),
+        assign('draft', 'r1', '1', 30, 'Draft'),
+        assign('requested', 'r1', '1', 40, 'Requested'),
+        assign('rejected', 'r1', '1', 50, 'Rejected'),
+      ],
+    };
+
+    expect(capacityForecast(data, '2026-06-08', 1)[0].committed).toBe(20);
+    expect(benchList(data)[0].availableHours).toBe(20);
+  });
+});
+
+describe('forecast.util — scenario validation and KPI tone', () => {
+  it('requires a complete, ordered demand window', () => {
+    expect(isCompleteForecastWindow('', '')).toBe(false);
+    expect(isCompleteForecastWindow('2026-08-04', '')).toBe(false);
+    expect(isCompleteForecastWindow('', '2026-08-05')).toBe(false);
+    expect(isCompleteForecastWindow('2026-08-06', '2026-08-05')).toBe(false);
+    expect(isCompleteForecastWindow('2026-08-04', '2026-08-05')).toBe(true);
+  });
+
+  it('judges utilization changes by distance from the healthy band', () => {
+    expect(utilizationChangeTone(95, 140)).toBe('bad');
+    expect(utilizationChangeTone(120, 90)).toBe('good');
+    expect(utilizationChangeTone(90, 95)).toBe('neutral');
   });
 });
 
@@ -343,5 +383,25 @@ describe('forecast.util — skillGap', () => {
   it('returns an empty list when there is no open demand', () => {
     const data: ForecastData = { resources: [res('1', 40, 50)], requests: [], assignments: [] };
     expect(skillGap(data)).toEqual([]);
+  });
+
+  it('does not treat dummy skills as deliverable coverage', () => {
+    const data: ForecastData = {
+      resources: [
+        res('dummy', 40, 0, [{ name: 'Kubernetes', level: 3 }], 'dummy'),
+        res('subco', 40, 0, [{ name: 'Angular', level: 3 }], 'subco'),
+      ],
+      requests: [req('r1', 40, 'Open', { skills: ['Kubernetes', 'Angular'] })],
+      assignments: [],
+    };
+
+    expect(skillGap(data).find(gap => gap.skill === 'Kubernetes')).toMatchObject({
+      supplyCount: 0,
+      shortage: true,
+    });
+    expect(skillGap(data).find(gap => gap.skill === 'Angular')).toMatchObject({
+      supplyCount: 1,
+      shortage: false,
+    });
   });
 });

@@ -99,6 +99,46 @@ const WEEKS_PER_MONTH = 52 / 12;
 const finite = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 const sum = (xs: number[]): number => xs.reduce((a, b) => a + finite(b), 0);
 
+function strictIsoDay(iso: string): number | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const ms = Date.UTC(year, month - 1, day);
+  const roundTrip = new Date(ms).toISOString().slice(0, 10);
+  return roundTrip === iso ? ms : null;
+}
+
+/** A what-if demand must have both valid bounds in chronological order. */
+export function isCompleteForecastWindow(startIso: string, endIso: string): boolean {
+  const start = strictIsoDay(startIso);
+  const end = strictIsoDay(endIso);
+  return start !== null && end !== null && end >= start;
+}
+
+export type UtilizationChangeTone = 'good' | 'bad' | 'neutral';
+
+/** Compare utilization by distance from the healthy 80–100% operating band. */
+export function utilizationChangeTone(
+  basePct: number,
+  scenarioPct: number,
+  healthyMin = 80,
+  healthyMax = 100,
+): UtilizationChangeTone {
+  const distance = (value: number) => {
+    const pct = finite(value);
+    if (pct < healthyMin) return healthyMin - pct;
+    if (pct > healthyMax) return pct - healthyMax;
+    return 0;
+  };
+  const baseDistance = distance(basePct);
+  const scenarioDistance = distance(scenarioPct);
+  if (scenarioDistance < baseDistance) return 'good';
+  if (scenarioDistance > baseDistance) return 'bad';
+  return 'neutral';
+}
+
 /** Parse an ISO date to epoch ms, or null when unparseable. */
 function parseMs(iso: string | undefined): number | null {
   if (!iso) return null;
@@ -171,6 +211,11 @@ function isOpenRequest(r: ResourceRequest): boolean {
   return !closed && unstaffedEffort(r) > 0;
 }
 
+/** Only approved monthly rollups are committed; proposals are pipeline/planned. */
+function isCommittedAssignment(assignment: Assignment): boolean {
+  return assignment.status === 'Allocated';
+}
+
 /**
  * Build a rolling capacity forecast: `periods` rows of fixed length starting at
  * `startISO`. Supply, committed demand, pipeline demand, utilization and gap are
@@ -200,7 +245,7 @@ export function capacityForecast(
   for (const r of data.requests) requestById.set(r.id, r);
 
   // Pre-resolve committed bookings (assignment hours + its window).
-  const committedBookings = data.assignments.map(a => {
+  const committedBookings = data.assignments.filter(isCommittedAssignment).map(a => {
     const req = requestById.get(a.requestId);
     const win = resolveWindow(req?.startDate, req?.endDate, horizonStart);
     return { hours: finite(a.assignedHours), win };
@@ -242,7 +287,7 @@ export function capacityForecast(
 /** Total booked (assignment) hours for a resource across all assignments. */
 function bookedHoursByResource(data: ForecastData): Map<string, number> {
   const booked = new Map<string, number>();
-  for (const a of data.assignments) {
+  for (const a of data.assignments.filter(isCommittedAssignment)) {
     booked.set(a.resourceId, finite(booked.get(a.resourceId)) + finite(a.assignedHours));
   }
   return booked;
@@ -323,7 +368,7 @@ export function skillGap(data: ForecastData): SkillGapEntry[] {
 
   // Supply: resources possessing each skill (case-insensitive match).
   const supplyBySkill = new Map<string, number>();
-  for (const res of data.resources) {
+  for (const res of data.resources.filter(r => countsTowardDeliveryCapacity(kindOf(r)))) {
     for (const s of res.skills ?? []) {
       const key = (s?.name ?? '').toLowerCase();
       if (!key) continue;
