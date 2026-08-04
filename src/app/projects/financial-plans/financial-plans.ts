@@ -5,23 +5,24 @@ import { CurrencyPipe } from '@angular/common';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { of } from 'rxjs';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Project, FinancialItem, CostCategory } from '../../services/api.service';
+import { ApiService, BASE_CURRENCY, Project, FinancialItem, CostCategory } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { ListStateComponent } from '../../shared/list-state.component';
 
 @Component({
   selector: 'app-financial-plans',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, CurrencyPipe, FormsModule, ReactiveFormsModule, ModalDialogDirective],
+  imports: [MatIconModule, CurrencyPipe, FormsModule, ReactiveFormsModule, ModalDialogDirective, ListStateComponent],
   template: `
     <div [class]="projectId() ? '' : 'command-page space-y-6'">
       <div class="space-y-6">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-4">
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div class="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
             @if (!projectId()) {
               <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Financial Plans</h2>
-              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
+              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block w-full min-w-0 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)] sm:w-auto">
                 <option value="" disabled>Select a project...</option>
                 @for (p of projects(); track p.id) {
                   <option [value]="p.id">{{ p.name }}</option>
@@ -31,7 +32,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               <h2 class="font-display text-lg font-semibold text-[var(--cc-ink)]">Financial Plans</h2>
             }
           </div>
-          <button (click)="openForm()" class="command-button">
+          <button (click)="openForm()" class="command-button self-start sm:self-auto">
             <mat-icon class="text-sm">add</mat-icon> Create Financial Plan
           </button>
         </div>
@@ -43,23 +44,27 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <p class="text-[var(--cc-muted)] mt-1">Please select a project from the dropdown above to view financial plans.</p>
           </div>
         } @else {
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+        <app-list-state [loading]="financialDataLoading()" [error]="financialsRes.status() === 'error'"
+                        skeleton="table-rows" [rows]="5" [columns]="4" label="financial plans"
+                        (retry)="financialsRes.reload()">
+          <ng-template>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6" aria-label="Financial plan metrics">
           <div class="command-kpi">
             <h3 class="command-kpi-label">Total Budget</h3>
-            <p class="command-kpi-value">{{ totalBudget() | currency:'USD':'symbol':'1.0-0' }}</p>
+            <p class="command-kpi-value">{{ totalBudget() | currency:baseCurrency:'symbol':'1.0-0' }}</p>
           </div>
           <div class="command-kpi">
             <h3 class="command-kpi-label">Spent</h3>
-            <p class="command-kpi-value">{{ totalSpent() | currency:'USD':'symbol':'1.0-0' }}</p>
+            <p class="command-kpi-value">{{ totalSpent() | currency:baseCurrency:'symbol':'1.0-0' }}</p>
           </div>
-          <div class="command-kpi green">
+          <div class="command-kpi" [class.green]="remaining() > 0" [class.danger]="remaining() < 0">
             <h3 class="command-kpi-label">Remaining</h3>
-            <p class="command-kpi-value">{{ totalBudget() - totalSpent() | currency:'USD':'symbol':'1.0-0' }}</p>
+            <p class="command-kpi-value">{{ remaining() | currency:baseCurrency:'symbol':'1.0-0' }}</p>
           </div>
         </div>
 
-        <div class="command-card overflow-hidden">
-          <table class="command-data-table">
+        <div class="command-card overflow-x-auto">
+          <table class="command-data-table min-w-[48rem]">
             <thead>
               <tr>
                 <th class="px-6 py-4">Category</th>
@@ -73,10 +78,10 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               @for (item of filteredFinancials(); track item.id) {
                 <tr class="hover:bg-surface-muted transition-colors">
                   <td class="px-6 py-4 font-medium text-[var(--cc-ink)]">{{ item.category }}</td>
-                  <td class="px-6 py-4 text-right text-[var(--cc-muted)] font-mono tabular-nums">{{ item.budget | currency:'USD':'symbol':'1.0-0' }}</td>
-                  <td class="px-6 py-4 text-right text-[var(--cc-muted)] font-mono tabular-nums">{{ item.actual | currency:'USD':'symbol':'1.0-0' }}</td>
+                  <td class="px-6 py-4 text-right text-[var(--cc-muted)] font-mono tabular-nums">{{ item.budget | currency:baseCurrency:'symbol':'1.0-0' }}</td>
+                  <td class="px-6 py-4 text-right text-[var(--cc-muted)] font-mono tabular-nums">{{ item.actual | currency:baseCurrency:'symbol':'1.0-0' }}</td>
                   <td class="px-6 py-4 text-right font-mono tabular-nums" [class.text-positive-text]="item.budget - item.actual > 0" [class.text-critical-text]="item.budget - item.actual < 0" [class.text-ink-secondary]="item.budget - item.actual === 0">
-                    {{ item.budget - item.actual > 0 ? '+' : '' }}{{ item.budget - item.actual | currency:'USD':'symbol':'1.0-0' }}
+                    {{ item.budget - item.actual > 0 ? '+' : '' }}{{ item.budget - item.actual | currency:baseCurrency:'symbol':'1.0-0' }}
                   </td>
                   <td class="px-6 py-4 text-right">
                     <div class="flex items-center justify-end gap-2">
@@ -98,6 +103,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             </tbody>
           </table>
         </div>
+          </ng-template>
+        </app-list-state>
         }
       </div>
 
@@ -131,11 +138,11 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 
                 <div class="grid grid-cols-2 gap-4">
                   <div>
-                    <label for="finBudget" class="block text-sm font-semibold text-ink-secondary mb-1.5">Budget ($) *</label>
+                    <label for="finBudget" class="block text-sm font-semibold text-ink-secondary mb-1.5">Budget ({{ baseCurrency }}) *</label>
                     <input id="finBudget" type="number" formControlName="budget" class="command-input" placeholder="0">
                   </div>
                   <div>
-                    <label for="finActual" class="block text-sm font-semibold text-ink-secondary mb-1.5">Actual Spent ($) *</label>
+                    <label for="finActual" class="block text-sm font-semibold text-ink-secondary mb-1.5">Actual Spent ({{ baseCurrency }}) *</label>
                     <input id="finActual" type="number" formControlName="actual" class="command-input" placeholder="0">
                   </div>
                 </div>
@@ -143,9 +150,12 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             </div>
             
             <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
-              <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
-              <button type="button" (click)="savePlan()" [disabled]="!finForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
-                Save
+              @if (saveError(); as error) {
+                <p role="alert" class="mr-auto self-center text-xs text-critical-text">{{ error }}</p>
+              }
+              <button type="button" (click)="closeForm()" [disabled]="saving()" class="command-button secondary disabled:opacity-50">Cancel</button>
+              <button type="button" (click)="savePlan()" [disabled]="!finForm.valid || saving()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                {{ saving() ? 'Saving…' : 'Save' }}
               </button>
             </div>
           </div>
@@ -155,6 +165,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
   `
 })
 export class FinancialPlans {
+  readonly baseCurrency = BASE_CURRENCY;
   projectId = input<string>();
   private api = inject(ApiService);
   private auth = inject(AuthService);
@@ -170,6 +181,8 @@ export class FinancialPlans {
 
   showForm = signal(false);
   editingId = signal<string | null>(null);
+  saving = signal(false);
+  saveError = signal<string | null>(null);
 
   finForm = new FormGroup({
     category: new FormControl('', Validators.required),
@@ -189,11 +202,12 @@ export class FinancialPlans {
     return this.categoryOptions().some(c => c.name === current) ? null : current;
   });
 
-  private financialsRes = rxResource<FinancialItem[], boolean>({
+  protected financialsRes = rxResource<FinancialItem[], boolean>({
     params: () => this.auth.authReady() && this.auth.canApproveFinancials(),
     stream: ({ params: canLoad }) => (canLoad ? this.api.getProjectFinancials() : of<FinancialItem[]>([])),
     defaultValue: [] as FinancialItem[]
   });
+  protected financialDataLoading = computed(() => !this.auth.authReady() || this.financialsRes.isLoading());
   financials = this.financialsRes.value;
 
   filteredFinancials = computed(() => {
@@ -204,6 +218,7 @@ export class FinancialPlans {
 
   totalBudget = computed(() => this.filteredFinancials().reduce((sum, item) => sum + item.budget, 0));
   totalSpent = computed(() => this.filteredFinancials().reduce((sum, item) => sum + item.actual, 0));
+  remaining = computed(() => this.totalBudget() - this.totalSpent());
 
   openForm() {
     const pId = this.projectId() || this.selectedProjectId();
@@ -212,11 +227,13 @@ export class FinancialPlans {
       return;
     }
     this.editingId.set(null);
+    this.saveError.set(null);
     this.showForm.set(true);
   }
 
   editPlan(item: FinancialItem) {
     this.editingId.set(item.id);
+    this.saveError.set(null);
     this.finForm.setValue({
       category: item.category,
       budget: item.budget,
@@ -233,39 +250,44 @@ export class FinancialPlans {
   }
 
   closeForm() {
+    if (this.saving()) return;
     this.showForm.set(false);
     this.editingId.set(null);
     this.finForm.reset();
   }
 
   savePlan() {
-    if (this.finForm.invalid) return;
+    if (this.finForm.invalid || this.saving()) return;
     const pId = this.projectId() || this.selectedProjectId();
     if (!pId) return;
 
     const v = this.finForm.getRawValue();
     const id = this.editingId();
-    if (id) {
-      this.api.updateProjectFinancial(id, {
+    const payload = {
         projectId: pId,
         category: v.category ?? '',
         budget: v.budget ?? 0,
         actual: v.actual ?? 0,
-      }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => {
+    };
+    this.saving.set(true);
+    this.saveError.set(null);
+    const request = id
+      ? this.api.updateProjectFinancial(id, payload)
+      : this.api.createProjectFinancial(payload);
+    request.pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {
+        this.saving.set(false);
         this.financialsRes.reload();
-        this.notificationService.show('Financial plan updated', 'success');
-      });
-    } else {
-      this.api.createProjectFinancial({
-        projectId: pId,
-        category: v.category ?? '',
-        budget: v.budget ?? 0,
-        actual: v.actual ?? 0,
-      }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => {
-        this.financialsRes.reload();
-        this.notificationService.show('Financial plan created', 'success');
-      });
-    }
-    this.closeForm();
+        this.notificationService.show(id ? 'Financial plan updated' : 'Financial plan created', 'success');
+        this.closeForm();
+      },
+      error: (error: unknown) => {
+        this.saving.set(false);
+        this.saveError.set(
+          (error as { error?: { error?: string } })?.error?.error
+            ?? 'Could not save the financial plan. Review the values and try again.',
+        );
+      },
+    });
   }
 }

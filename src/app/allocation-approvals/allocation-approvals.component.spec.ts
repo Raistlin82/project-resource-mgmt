@@ -200,6 +200,22 @@ describe('AllocationApprovalsComponent', () => {
       expect(names).not.toContain('John Miller'); // on Consulting
     });
 
+    it('drops selected resources that become hidden by an organization filter', async () => {
+      const { fixture } = setup(true, { orgNodes: ORG_NODES, feed: ORG_FEED });
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      host.querySelectorAll<HTMLInputElement>('[data-test="select-resource"]').forEach(cb => cb.click());
+      fixture.detectChanges();
+      expect([...fixture.componentInstance.selectedResourceIds()]).toEqual(['r10', 'r11']);
+
+      fixture.componentInstance.capabilityFilter.set('Engineering');
+      fixture.detectChanges();
+
+      expect([...fixture.componentInstance.selectedResourceIds()]).toEqual(['r10']);
+      expect((host.querySelector('[data-test="multi-approve"]') as HTMLButtonElement).disabled).toBe(true);
+    });
+
     it('keeps the Pending Project-Months KPI consistent with the filtered grid', async () => {
       // Regression: pendingMonths must be reduced over the SAME filtered row set
       // rows() draws its grid from, not the raw unfiltered feed — otherwise the

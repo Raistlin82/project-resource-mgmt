@@ -219,6 +219,7 @@ function shiftMonth(month: string, delta: number): string {
       </div>
 
       <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="6" [columns]="4" label="capacity" (retry)="reload()">
+        <ng-template>
         @if (rows().length > 0) {
           <div class="command-card overflow-hidden">
             <div class="overflow-x-auto">
@@ -287,6 +288,7 @@ function shiftMonth(month: string, delta: number): string {
             <p class="text-xs text-ink-muted">Confirm assignments or widen the month range to populate the grid.</p>
           </div>
         }
+        </ng-template>
       </app-list-state>
 
       <!-- Uncovered demand (C1): dummy/subco resources have no capacity of their

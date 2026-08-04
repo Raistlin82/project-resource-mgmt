@@ -28,6 +28,7 @@ import { ListStateComponent } from '../../shared/list-state.component';
 
       <!-- Customers Table -->
       <app-list-state [loading]="customersRes.isLoading()" [error]="customersRes.status() === 'error'" label="customers" (retry)="customersRes.reload()">
+      <ng-template>
       <div class="command-card overflow-hidden">
         <div class="overflow-x-auto">
           <table class="command-data-table">
@@ -67,6 +68,7 @@ import { ListStateComponent } from '../../shared/list-state.component';
           </table>
         </div>
       </div>
+      </ng-template>
       </app-list-state>
     </div>
 

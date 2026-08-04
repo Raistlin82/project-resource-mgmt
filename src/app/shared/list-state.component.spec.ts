@@ -7,7 +7,9 @@ import { ListStateComponent } from './list-state.component';
   imports: [ListStateComponent],
   template: `
     <app-list-state [loading]="loading()" [error]="error()" label="customers" (retry)="retried = retried + 1">
-      <div data-test="content">projected content</div>
+      <ng-template>
+        <div data-test="content">projected content</div>
+      </ng-template>
     </app-list-state>
   `,
 })
@@ -15,6 +17,27 @@ class HostComponent {
   loading = signal(false);
   error = signal(false);
   retried = 0;
+}
+
+/**
+ * Models the real rxResource failure mode: reading value() while the resource is
+ * in its error state throws. The list-state wrapper must not instantiate this
+ * content until the resource has resolved successfully.
+ */
+@Component({
+  imports: [ListStateComponent],
+  template: `
+    <app-list-state [error]="true" label="customers">
+      <ng-template>
+        <span data-test="dangerous">{{ failedResourceValue() }}</span>
+      </ng-template>
+    </app-list-state>
+  `,
+})
+class FailedResourceHostComponent {
+  failedResourceValue(): never {
+    throw new Error('projected resource value evaluated');
+  }
 }
 
 describe('ListStateComponent', () => {
@@ -42,6 +65,16 @@ describe('ListStateComponent', () => {
     expect(fixture.nativeElement.querySelector('.command-skeleton')).not.toBeNull();
     // The misleading "empty / add your first" content must not flash during load.
     expect(html(fixture)).not.toContain('projected content');
+  });
+
+  it('announces the loading state to assistive technology', () => {
+    const fixture = setup();
+    fixture.componentInstance.loading.set(true);
+    fixture.detectChanges();
+
+    const status = fixture.nativeElement.querySelector('[role="status"]') as HTMLElement | null;
+    expect(status).not.toBeNull();
+    expect(status?.textContent).toContain('Loading customers');
   });
 
   it('shows an error panel with Retry and hides content on error (no contradictory empty state)', () => {
@@ -73,5 +106,13 @@ describe('ListStateComponent', () => {
 
     expect(fixture.nativeElement.querySelector('.command-skeleton')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('does not evaluate resource-backed content while showing an error', () => {
+    const fixture = TestBed.createComponent(FailedResourceHostComponent);
+
+    expect(() => fixture.detectChanges()).not.toThrow();
+    expect(fixture.nativeElement.querySelector('[role="alert"]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-test="dangerous"]')).toBeNull();
   });
 });

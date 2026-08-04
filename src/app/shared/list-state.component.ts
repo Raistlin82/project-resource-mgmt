@@ -1,4 +1,13 @@
-import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
+import { NgTemplateOutlet } from '@angular/common';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  TemplateRef,
+  computed,
+  contentChild,
+  input,
+  output,
+} from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 
 /** Skeleton placeholder shape rendered while a resource is loading. */
@@ -20,7 +29,9 @@ export type ListStateSkeleton = 'block' | 'table-rows' | 'cards';
  * Wire it from a component with an rxResource/resource:
  *   <app-list-state [loading]="res.isLoading()"
  *                   [error]="res.status() === 'error'"
- *                   (retry)="res.reload()"> ...content... </app-list-state>
+ *                   (retry)="res.reload()">
+ *     <ng-template>...content...</ng-template>
+ *   </app-list-state>
  *
  * For list/table screens, pick the matching skeleton shape so the placeholder
  * mirrors the real layout instead of a generic block:
@@ -32,10 +43,11 @@ export type ListStateSkeleton = 'block' | 'table-rows' | 'cards';
 @Component({
   selector: 'app-list-state',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule],
+  imports: [MatIconModule, NgTemplateOutlet],
   template: `
     @if (loading()) {
-      <div class="space-y-3" aria-busy="true" [attr.aria-label]="loadingLabel()">
+      <div class="space-y-3" role="status" aria-live="polite" aria-busy="true">
+        <span class="sr-only">{{ loadingLabel() }}</span>
         @switch (skeleton()) {
           @case ('table-rows') {
             @if (columns(); as cols) {
@@ -89,11 +101,21 @@ export type ListStateSkeleton = 'block' | 'table-rows' | 'cards';
         </button>
       </div>
     } @else {
-      <ng-content />
+      @if (contentTemplate(); as content) {
+        <ng-container [ngTemplateOutlet]="content" />
+      }
     }
   `,
 })
 export class ListStateComponent {
+  /**
+   * Resource-backed content must be supplied as an inert template. Angular
+   * eagerly evaluates ordinary projected bindings even when an `@if` branch
+   * hides `<ng-content>`, which lets `rxResource.value()` throw before the
+   * error panel can render. Instantiating this template only in the resolved
+   * branch keeps loading/error states safe.
+   */
+  protected readonly contentTemplate = contentChild(TemplateRef<unknown>);
   /** Whether the underlying resource is loading or reloading. */
   readonly loading = input(false);
   /** Whether the underlying resource is in its error state. */

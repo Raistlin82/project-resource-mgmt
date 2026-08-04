@@ -227,6 +227,7 @@ function shiftMonth(month: string, delta: number): string {
       </div>
 
       <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="6" [columns]="4" label="allocation approvals" (retry)="reload()">
+        <ng-template>
         @if (rows().length > 0) {
           <div class="command-card overflow-hidden">
             <div class="overflow-x-auto">
@@ -299,6 +300,7 @@ function shiftMonth(month: string, delta: number): string {
             <p class="text-xs text-ink-muted">Widen the month range or switch the status filter to All.</p>
           </div>
         }
+        </ng-template>
       </app-list-state>
 
       <!-- Approval modal (Task 11 single-resource, Task 12 multi-resource): the
@@ -442,6 +444,18 @@ export class AllocationApprovalsComponent {
       untracked(() => {
         if (this.from() === null) this.from.set(months[0]);
         if (this.to() === null) this.to.set(months[months.length - 1]);
+      });
+    });
+
+    // Selection belongs to the visible result set. Whenever a range, status,
+    // organization or manager filter removes a row, prune its id so the toolbar
+    // count and multi-approve payload cannot include an invisible resource.
+    effect(() => {
+      const visibleIds = new Set(this.filteredFeedRows().map(row => row.resourceId));
+      untracked(() => {
+        const current = this.selectedResourceIds();
+        const next = new Set([...current].filter(id => visibleIds.has(id)));
+        if (next.size !== current.size) this.selectedResourceIds.set(next);
       });
     });
   }

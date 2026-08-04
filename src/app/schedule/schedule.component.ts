@@ -248,6 +248,7 @@ interface WeekColumn {
         skeleton="table-rows"
         [rows]="6"
         (retry)="data.reload()">
+        <ng-template>
         @if (anchorMs() === null) {
           <!-- SSR / pre-hydration: the visible week range is browser-derived. -->
           <div class="command-card p-12 text-center text-sm text-ink-muted" aria-busy="true">
@@ -353,6 +354,7 @@ interface WeekColumn {
             </div>
           </div>
         }
+        </ng-template>
       </app-list-state>
     </div>
   `,
