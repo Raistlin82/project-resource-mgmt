@@ -1,4 +1,5 @@
 import { Assignment, Resource, ResourceRequest, Order, OrderLine, FinancialItem, TimeEntry, BillingPlanItem, Contract, Customer, Milestone, ChangeRequest, Project, FxRate, NegotiatedRate, BASE_CURRENCY } from './api.service';
+import { customerFacingBillingAmount } from './billing-validation.util';
 import { sellRateFor, hoursPerDayOrDefault } from './sell-rate.util';
 
 /** All raw data needed to compute financial rollups. */
@@ -251,6 +252,15 @@ export function resourceBillability(resourceId: string, d: FinanceData): { cost:
 /** Statuses on a BillingPlanItem that represent money actually billed to the customer. */
 const BILLED_STATUSES: ReadonlySet<BillingPlanItem['status']> = new Set<BillingPlanItem['status']>(['Invoiced', 'Paid']);
 
+/** Customer-facing amount; Expense stores the pass-through cost plus a separate markup. */
+function billableAmount(item: BillingPlanItem): number {
+  return finite(customerFacingBillingAmount(item));
+}
+
+function billableAmountInBase(item: BillingPlanItem, data: FinanceData): number {
+  return convertToBase(billableAmount(item), item.currency, data.fxRates);
+}
+
 /** Items belonging to a project (optionally filtered). Items with no projectId are ignored for project rollups. */
 function billingItemsForProject(projectId: string, d: FinanceData): BillingPlanItem[] {
   return (d.billingItems ?? []).filter(i => i.projectId === projectId);
@@ -274,7 +284,7 @@ export function billedToDate(projectId: string, d: FinanceData): number {
   return sum(
     billingItemsForProject(projectId, d)
       .filter(i => BILLED_STATUSES.has(i.status))
-      .map(i => convertToBase(i.amount, i.currency, d.fxRates)),
+      .map(i => billableAmountInBase(i, d)),
   );
 }
 
@@ -295,7 +305,7 @@ export function recognizedRevenue(projectId: string, d: FinanceData): number {
       }
       if (i.type === 'Advance') return 0;
       return BILLED_STATUSES.has(i.status) || i.status === 'Ready'
-        ? convertToBase(i.amount, i.currency, d.fxRates)
+        ? billableAmountInBase(i, d)
         : 0;
     }),
   );
@@ -318,7 +328,7 @@ export function retentionHeld(projectId: string, d: FinanceData): number {
       .filter(i => i.status !== 'Paid')
       .map(i => {
         const pct = Number.isFinite(i.retentionPct) ? (i.retentionPct as number) : 0;
-        return convertToBase(i.amount * (pct / 100), i.currency, d.fxRates);
+        return convertToBase(billableAmount(i) * (pct / 100), i.currency, d.fxRates);
       }),
   );
 }
@@ -330,7 +340,7 @@ export function taxTotal(projectId: string, d: FinanceData): number {
       .filter(i => BILLED_STATUSES.has(i.status))
       .map(i => {
         const pct = Number.isFinite(i.taxRatePct) ? (i.taxRatePct as number) : 0;
-        return convertToBase(i.amount * (pct / 100), i.currency, d.fxRates);
+        return convertToBase(billableAmount(i) * (pct / 100), i.currency, d.fxRates);
       }),
   );
 }
@@ -440,7 +450,7 @@ export function arAging(items: readonly BillingPlanItem[], today: string, rates?
   let overdue = 0;
   for (const item of items) {
     if (!isOutstanding(item)) continue;
-    const amount = convertToBase(item.amount, item.currency, rates);
+    const amount = convertToBase(billableAmount(item), item.currency, rates);
     const days = daysOverdue(item, today);
     const bucket = buckets[bucketForDaysOverdue(days)];
     bucket.count += 1;
@@ -512,7 +522,7 @@ export function dsoOutstanding(items: readonly BillingPlanItem[], today: string,
   let total = 0;
   for (const item of items) {
     if (!isOutstanding(item) || !item.issuedDate) continue;
-    const amount = convertToBase(item.amount, item.currency, rates);
+    const amount = convertToBase(billableAmount(item), item.currency, rates);
     weighted += amount * daysBetween(item.issuedDate, today);
     total += amount;
   }
@@ -525,7 +535,8 @@ export function dsoOutstanding(items: readonly BillingPlanItem[], today: string,
 // obligation pattern, deterministically and without reference to "now":
 //   • Fixed Price (Milestone / Progress)  -> percentage-of-completion (POC)
 //   • Recurring                            -> straight-line over the periods
-//   • TimeAndMaterials / Capped / Expense  -> as-incurred (approved time × billRate)
+//   • TimeAndMaterials / Capped            -> as-incurred (approved time × billRate)
+//   • Expense                              -> pass-through amount plus configured markup
 //   • Advance                              -> deferred; recognized as work progresses
 //   • CreditNote                           -> recognized (negative) in its period
 // Output rows cover exactly the requested `periods`; amounts that fall outside
@@ -595,18 +606,21 @@ function clampPeriod(p: string, periods: string[]): string {
 }
 
 /** Recognized amount for a single item under its obligation pattern (period-agnostic total). */
-function itemRecognizedTotal(item: BillingPlanItem): number {
+function itemRecognizedTotal(item: BillingPlanItem, data: FinanceData): number {
+  let amount: number;
   switch (item.type) {
     case 'Progress': {
       const pct = Number.isFinite(item.progressPct) ? (item.progressPct as number) : 0;
-      return finite(item.amount) * (pct / 100);
+      amount = finite(item.amount) * (pct / 100);
+      break;
     }
     case 'Advance':
       // recognized via work progress, never on its own line
       return 0;
     default:
-      return BILLED_STATUSES.has(item.status) || item.status === 'Ready' ? finite(item.amount) : 0;
+      amount = BILLED_STATUSES.has(item.status) || item.status === 'Ready' ? billableAmount(item) : 0;
   }
+  return convertToBase(amount, item.currency, data.fxRates);
 }
 
 /**
@@ -637,6 +651,18 @@ function recurrenceMonths(rec: BillingPlanItem['recurrence']): number {
   }
 }
 
+function isAsIncurredItem(item: BillingPlanItem): boolean {
+  return item.type === 'TimeAndMaterials' || item.type === 'Capped';
+}
+
+function isRecognizableStatus(item: BillingPlanItem): boolean {
+  return BILLED_STATUSES.has(item.status) || item.status === 'Ready';
+}
+
+function asIncurredScope(item: BillingPlanItem): string {
+  return item.projectId ? `project:${item.projectId}` : `contract:${item.contractId}`;
+}
+
 interface ScheduleOpts {
   /** Filter billing items to a single project. */
   projectId?: string;
@@ -651,8 +677,9 @@ interface ScheduleOpts {
  * Per-pattern placement:
  *   • Recurring: straight-line — amount split evenly across the recurrence
  *     window starting at its anchor period, with each slice clamped into range.
- *   • TimeAndMaterials / Capped / Expense: as-incurred — approved time entries
+ *   • TimeAndMaterials / Capped: as-incurred — approved time entries
  *     (hours × resource billRate) booked in the entry's month, Capped to capAmount.
+ *   • Expense: pass-through amount plus markup in its recognition period.
  *   • Everything else (Milestone, Progress, CreditNote, ...): the item's
  *     recognized total lands in its single recognition period.
  *   • Advance: never recognized directly; it inflates deferred revenue until
@@ -677,6 +704,27 @@ export function recognitionSchedule(
 
   const items = (data.billingItems ?? []).filter(matches);
 
+  // Time entries are not linked to a particular billing condition. Treat one
+  // active condition as the deterministic owner of each project/contract scope,
+  // otherwise two Ready rows would recognize the same approved hour twice.
+  // A project-specific condition wins over a broader contract-level condition.
+  const asIncurredOwnerByScope = new Map<string, string>();
+  const activeAsIncurred = items
+    .filter(item => isAsIncurredItem(item) && isRecognizableStatus(item))
+    .sort((a, b) => {
+      const typeRank = Number(a.type === 'Capped') - Number(b.type === 'Capped');
+      return typeRank || a.id.localeCompare(b.id);
+    });
+  for (const item of activeAsIncurred) {
+    const scope = asIncurredScope(item);
+    if (!asIncurredOwnerByScope.has(scope)) asIncurredOwnerByScope.set(scope, item.id);
+  }
+  const projectSpecificAsIncurred = new Set(
+    activeAsIncurred
+      .filter(item => item.projectId && asIncurredOwnerByScope.get(asIncurredScope(item)) === item.id)
+      .map(item => item.projectId as string),
+  );
+
   const addAt = (period: string, amount: number) => {
     const i = index.get(clampPeriod(period, periodList));
     if (i !== undefined) recognizedByPeriod[i] += finite(amount);
@@ -690,13 +738,15 @@ export function recognitionSchedule(
       if (BILLED_STATUSES.has(item.status)) {
         const p = clampPeriod(recognitionPeriodFor(item, data), periodList);
         const i = index.get(p);
-        if (i !== undefined) advanceBilledByPeriod[i] += finite(item.amount);
+        if (i !== undefined) {
+          advanceBilledByPeriod[i] += convertToBase(item.amount, item.currency, data.fxRates);
+        }
       }
       continue; // not recognized directly
     }
 
     if (item.type === 'Recurring') {
-      const total = itemRecognizedTotal(item);
+      const total = itemRecognizedTotal(item, data);
       if (total === 0) continue;
       const months = recurrenceMonths(item.recurrence);
       const slice = total / months;
@@ -709,7 +759,10 @@ export function recognitionSchedule(
       continue;
     }
 
-    if (item.type === 'TimeAndMaterials' || item.type === 'Capped' || item.type === 'Expense') {
+    if (item.type === 'TimeAndMaterials' || item.type === 'Capped') {
+      if (!isRecognizableStatus(item) || asIncurredOwnerByScope.get(asIncurredScope(item)) !== item.id) {
+        continue;
+      }
       // As-incurred: approved time entries for the obligation × billRate. Scope to
       // the item's project when set; otherwise to every project on the item's
       // contract — never company-wide (an undated/cross-contract leak would let one
@@ -717,14 +770,18 @@ export function recognitionSchedule(
       // contract with no resolvable projects recognizes nothing.
       const projectIds = item.projectId
         ? new Set([item.projectId])
-        : new Set((data.projects ?? []).filter(p => p.contractId === item.contractId).map(p => p.id));
+        : new Set((data.projects ?? [])
+          .filter(p => p.contractId === item.contractId && !projectSpecificAsIncurred.has(p.id))
+          .map(p => p.id));
       const entries = (data.timeEntries ?? [])
         .filter(t => t.status === 'Approved' && projectIds.has(t.projectId))
         // Fill the cap chronologically (earliest hours first) so the dated schedule
         // is independent of time-entry array order.
         .sort((a, b) => (Date.parse(a.date) || 0) - (Date.parse(b.date) || 0));
       let booked = 0;
-      const cap = Number.isFinite(item.capAmount) ? (item.capAmount as number) : Infinity;
+      const cap = Number.isFinite(item.capAmount)
+        ? convertToBase(item.capAmount as number, item.currency, data.fxRates)
+        : Infinity;
       for (const t of entries) {
         // Price this entry at the negotiated SELL rate (design spec §4/§6): a
         // project override on t.projectId, else the project's contract rate
@@ -755,7 +812,7 @@ export function recognitionSchedule(
     }
 
     // Milestone / Progress / CreditNote / fallback: single-period recognition.
-    const total = itemRecognizedTotal(item);
+    const total = itemRecognizedTotal(item, data);
     if (total !== 0) addAt(recognitionPeriodFor(item, data), total);
   }
 
@@ -966,18 +1023,18 @@ export function portfolioTotalsInBase(d: FinanceData): PortfolioTotals {
   let recognized = 0;
   let retention = 0;
   for (const i of d.billingItems ?? []) {
-    if (BILLED_STATUSES.has(i.status)) billed += convertToBase(i.amount, i.currency, d.fxRates);
+    if (BILLED_STATUSES.has(i.status)) billed += billableAmountInBase(i, d);
 
     if (i.type === 'Progress') {
       const pct = Number.isFinite(i.progressPct) ? (i.progressPct as number) : 0;
       recognized += convertToBase(i.amount * (pct / 100), i.currency, d.fxRates);
     } else if (i.type !== 'Advance' && (BILLED_STATUSES.has(i.status) || i.status === 'Ready')) {
-      recognized += convertToBase(i.amount, i.currency, d.fxRates);
+      recognized += billableAmountInBase(i, d);
     }
 
     if (i.status !== 'Paid') {
       const pct = Number.isFinite(i.retentionPct) ? (i.retentionPct as number) : 0;
-      retention += convertToBase(i.amount * (pct / 100), i.currency, d.fxRates);
+      retention += convertToBase(billableAmount(i) * (pct / 100), i.currency, d.fxRates);
     }
   }
 
@@ -1063,9 +1120,8 @@ function balancedPair(debitAccount: string, creditAccount: string, amount: numbe
 /**
  * Per-period advance amounts billed (Invoiced/Paid) within the schedule window,
  * using the SAME placement rule as recognitionSchedule (recognitionPeriodFor,
- * clamped into range) and the SAME raw-amount basis (the schedule itself is
- * currency-naive — it sums item amounts as-is — so the journal stays exactly
- * reconciled with it). Returned aligned to `periodList`.
+ * clamped into range) and the SAME base-currency basis as the schedule, so the
+ * journal stays exactly reconciled with it. Returned aligned to `periodList`.
  */
 function advanceBilledByPeriod(data: FinanceData, periodList: readonly string[], opts: ScheduleOpts): number[] {
   const out = new Array<number>(periodList.length).fill(0);
@@ -1080,7 +1136,7 @@ function advanceBilledByPeriod(data: FinanceData, periodList: readonly string[],
   for (const item of items) {
     const p = clampPeriod(recognitionPeriodFor(item, data), [...periodList]);
     const i = index.get(p);
-    if (i !== undefined) out[i] += finite(item.amount);
+    if (i !== undefined) out[i] += billableAmountInBase(item, data);
   }
   return out;
 }
@@ -1089,11 +1145,9 @@ function advanceBilledByPeriod(data: FinanceData, periodList: readonly string[],
  * Build a balanced double-entry journal PREVIEW for the rev-rec schedule over
  * `periods` (an explicit YYYY-MM list, or a {from,to} pair). One entry per
  * period that has movement; periods with no recognition and no advance activity
- * are omitted. Amounts use the SAME basis as recognitionSchedule — which sums
- * billing-item amounts as-is — so the per-period revenue here reconciles exactly
- * with recognitionSchedule run over the same window/filters. (Per the source's
- * design, the dated schedule is currency-naive; FX normalisation lives in the
- * snapshot rollups such as recognizedRevenue / portfolioTotalsInBase.)
+ * are omitted. Amounts use the SAME base-currency basis as recognitionSchedule,
+ * so the per-period revenue here reconciles exactly with the schedule over the
+ * same window and filters.
  *
  * Guarantee: Σ of all debits === Σ of all credits (see journalIsBalanced).
  */
@@ -1579,7 +1633,7 @@ export function billedAmountInWindow(
   let amount = 0;
   for (const i of billedIssued) {
     const at = Date.parse(i.issuedDate as string);
-    if (Number.isFinite(at) && at >= from && at < to) amount += convertToBase(i.amount, i.currency, d.fxRates);
+    if (Number.isFinite(at) && at >= from && at < to) amount += billableAmountInBase(i, d);
   }
   return finite(amount);
 }
@@ -1664,7 +1718,7 @@ function hasDatedDataInPeriods(d: FinanceData, periods: readonly string[], opts:
     const p = recognitionPeriodFor(i, d);
     if (p && set.has(p)) return true;
   }
-  // T&M/Expense recognition is driven by time entries; check those too.
+  // T&M/Capped recognition is driven by time entries; check those too.
   for (const t of d.timeEntries ?? []) {
     if (t.status !== 'Approved') continue;
     if (opts.projectId !== undefined && t.projectId !== opts.projectId) continue;

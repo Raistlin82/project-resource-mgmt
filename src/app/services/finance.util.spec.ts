@@ -165,6 +165,26 @@ describe('finance.util billing rollups', () => {
     ],
   };
 
+  it('uses the customer-facing expense amount, including markup, across billing rollups', () => {
+    const d: FinanceData = {
+      ...data,
+      billingItems: [bill('expense', 'P', 'Expense', 1_000, 'Invoiced', {
+        markupPct: 10,
+        retentionPct: 5,
+        taxRatePct: 22,
+        issuedDate: '2026-01-10',
+      })],
+    };
+
+    expect(billedToDate('P', d)).toBe(1_100);
+    expect(recognizedRevenue('P', d)).toBe(1_100);
+    expect(retentionHeld('P', d)).toBe(55);
+    expect(taxTotal('P', d)).toBe(242);
+    expect(arAging(d.billingItems ?? [], '2026-02-15').totalOutstanding).toBe(1_100);
+    expect(billedAmountInWindow('P', d, '2026-01-01', '2026-02-01')).toBe(1_100);
+    expect(portfolioTotalsInBase(d)).toMatchObject({ billed: 1_100, recognized: 1_100, retentionHeld: 55 });
+  });
+
   it('billedToDate sums only Invoiced + Paid items', () => {
     expect(billedToDate('P', billingData)).toBe(15000); // 10000 + 5000
   });
@@ -371,6 +391,43 @@ describe('finance.util A/R aging', () => {
 describe('finance.util recognitionSchedule', () => {
   const periods = ['2026-01', '2026-02', '2026-03', '2026-04'];
 
+  it('normalises fixed-price and advance movements to base currency', () => {
+    const d: FinanceData = {
+      ...data,
+      billingItems: [
+        billC('usd-milestone', 'CT', 'P', 'Milestone', 10_000, 'Invoiced', {
+          currency: 'USD', issuedDate: '2026-01-10',
+        }),
+        billC('usd-advance', 'CT', 'P', 'Advance', 2_000, 'Paid', {
+          currency: 'USD', issuedDate: '2026-01-05',
+        }),
+      ],
+      fxRates: fx(),
+    };
+
+    const rows = recognitionSchedule(d, periods, { projectId: 'P' });
+    expect(rows[0].recognized).toBeCloseTo(9_000, 6);
+    expect(rows[0].deferred).toBe(0);
+    const journal = recognitionJournal(d, periods, { projectId: 'P' });
+    expect(journalTotals(journal)).toMatchObject({ debit: 12_600, credit: 12_600, balanced: true });
+  });
+
+  it('recognises an expense condition from its amount plus markup, not unrelated time entries', () => {
+    const d: FinanceData = {
+      ...data,
+      timeEntries: [time('unrelated', 'a1', 'r1', '1', 'P', 99, 'Approved')],
+      billingItems: [
+        billC('expense', 'CT', 'P', 'Expense', 1_000, 'Ready', {
+          currency: 'USD', markupPct: 10, expectedDate: '2026-02-10',
+        }),
+      ],
+      fxRates: fx(),
+    };
+
+    const rows = recognitionSchedule(d, periods, { projectId: 'P' });
+    expect(rows.map(row => row.recognized)).toEqual([0, 990, 0, 0]);
+  });
+
   it('returns one row per period with running cumulative', () => {
     const d: FinanceData = {
       ...data,
@@ -456,6 +513,33 @@ describe('finance.util recognitionSchedule', () => {
     const rows = recognitionSchedule(d, periods, { projectId: 'P' });
     expect(rows.map(r => r.recognized)).toEqual([1400, 0, 2800, 0]);
     expect(rows[3].cumulative).toBe(4200);
+  });
+
+  it('does not recognize Planned or Blocked as-incurred conditions', () => {
+    const d: FinanceData = {
+      ...data,
+      timeEntries: [time('t1', 'a1', 'r1', '1', 'P', 10, 'Approved')],
+      billingItems: [
+        bill('tm-planned', 'P', 'TimeAndMaterials', 0, 'Planned'),
+        bill('tm-blocked', 'P', 'TimeAndMaterials', 0, 'Blocked'),
+      ],
+    };
+
+    expect(recognitionSchedule(d, periods, { projectId: 'P' }).map(row => row.recognized))
+      .toEqual([0, 0, 0, 0]);
+  });
+
+  it('recognizes each approved hour once when active as-incurred conditions share a scope', () => {
+    const d: FinanceData = {
+      ...data,
+      timeEntries: [time('t1', 'a1', 'r1', '1', 'P', 10, 'Approved')],
+      billingItems: [
+        bill('tm-a', 'P', 'TimeAndMaterials', 0, 'Ready'),
+        bill('tm-b', 'P', 'TimeAndMaterials', 0, 'Invoiced'),
+      ],
+    };
+
+    expect(recognitionSchedule(d, periods, { projectId: 'P' })[0].recognized).toBe(1_400);
   });
 
   it('Capped T&M does not recognize beyond capAmount', () => {

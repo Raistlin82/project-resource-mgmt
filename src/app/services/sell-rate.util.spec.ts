@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sellRateFor, DEFAULT_HOURS_PER_DAY, hoursPerDayOrDefault, type NegotiatedRate, type SellRateContract, type SellRateProject } from './sell-rate.util';
+import { sellRateFor, negotiatedRateCurrencyError, DEFAULT_HOURS_PER_DAY, hoursPerDayOrDefault, type NegotiatedRate, type SellRateContract, type SellRateProject } from './sell-rate.util';
 
 // UNITS ARE PART OF THIS FIXTURE, DELIBERATELY. Every `billRate` on a
 // NegotiatedRate below is EUR per DAY (what the column stores); every
@@ -147,5 +147,13 @@ describe('sellRateFor — units (EUR/hour on every return path)', () => {
     expect(call({ hoursPerDay: -8 })).toBe(125);
     expect(hoursPerDayOrDefault(undefined)).toBe(8);
     expect(hoursPerDayOrDefault(6)).toBe(6);
+  });
+});
+
+describe('negotiated-rate currency contract', () => {
+  it('accepts only the base currency so a saved rate can never be silently ignored', () => {
+    expect(negotiatedRateCurrencyError('EUR')).toBeNull();
+    expect(negotiatedRateCurrencyError('USD')).toBe('negotiated rates must use the base currency EUR');
+    expect(negotiatedRateCurrencyError('')).toBe('currency is required');
   });
 });

@@ -53,6 +53,18 @@ export interface SellRateContract { id: string; startDate: string; endDate?: str
 export const SELL_RATE_BASE_CURRENCY = 'EUR';
 
 /**
+ * Negotiated sell rates are persisted and consumed in the reporting base
+ * currency. Rejecting any other currency is safer than accepting a row that the
+ * resolver would later ignore (or interpreting its number without FX context).
+ */
+export function negotiatedRateCurrencyError(currency: unknown): string | null {
+  if (typeof currency !== 'string' || currency.length === 0) return 'currency is required';
+  return currency === SELL_RATE_BASE_CURRENCY
+    ? null
+    : `negotiated rates must use the base currency ${SELL_RATE_BASE_CURRENCY}`;
+}
+
+/**
  * Fallback working hours/day used ONLY when a caller cannot supply a usable one.
  * Mirrors `getHoursPerDay()`'s own fallback in `src/server.ts` (the `hoursPerDay`
  * setting, 8 when unset/invalid) so a missing setting prices identically on both
