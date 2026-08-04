@@ -1,5 +1,5 @@
-import { ChangeDetectionStrategy, Component, inject, signal, computed } from '@angular/core';
-import { rxResource } from '@angular/core/rxjs-interop';
+import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
+import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, Assignment, ResourceRequest, Resource, TimeEntry } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
@@ -7,6 +7,8 @@ import { DecimalPipe } from '@angular/common';
 import { forkJoin, of } from 'rxjs';
 import { FormsModule } from '@angular/forms';
 import { ListStateComponent } from '../shared/list-state.component';
+import { NotificationService } from '../services/notification.service';
+import { todayLocalIso } from '../services/local-date.util';
 
 interface CalendarAssignment {
   id: string;
@@ -236,6 +238,7 @@ interface WeekDay {
         </div>
         <div class="p-6">
           <app-list-state [loading]="dataRes.isLoading()" [error]="dataRes.status() === 'error'" label="assignments" (retry)="dataRes.reload()">
+          <ng-template>
           <div class="space-y-4">
             @for (assignment of myAssignments(); track assignment.id) {
               <div class="command-card-muted p-5 hover:shadow-md transition-all">
@@ -249,27 +252,13 @@ interface WeekDay {
                   </div>
                   
                   <div class="flex items-center gap-4">
-                    @if (editingAssignmentId() === assignment.id) {
-                      <div class="flex items-center gap-2">
-                        <label [for]="editHoursInputId(assignment.id)" class="sr-only">Assigned hours for {{ getRequestName(assignment.requestId) }}</label>
-                        <input [id]="editHoursInputId(assignment.id)" type="number" [ngModel]="editHours()" (ngModelChange)="editHours.set($event)" [attr.aria-label]="'Assigned hours for ' + getRequestName(assignment.requestId)" class="command-input w-20 font-mono tabular-nums">
-                        <span class="text-sm text-ink-muted">hours</span>
-                        <button type="button" (click)="saveAssignment(assignment)" aria-label="Save hours" title="Save hours" class="p-1.5 text-positive-text hover:bg-positive-tint rounded-lg transition-colors">
-                          <mat-icon>check</mat-icon>
-                        </button>
-                        <button type="button" (click)="cancelEdit()" aria-label="Cancel editing" title="Cancel editing" class="p-1.5 text-ink-muted hover:bg-surface-muted rounded-lg transition-colors">
-                          <mat-icon>close</mat-icon>
-                        </button>
-                      </div>
-                    } @else {
-                      <div class="text-right">
-                        <div class="text-xl font-semibold text-[var(--cc-ink)] font-mono tabular-nums">{{ assignment.assignedHours }}h</div>
-                        <div class="text-xs text-[var(--cc-muted)] uppercase tracking-wider">Total Assigned</div>
-                        <div class="text-xs text-positive-text font-semibold mt-1 font-mono tabular-nums">{{ approvedHours(assignment.id) }}h approved actual</div>
-                      </div>
-                      <button type="button" (click)="startEdit(assignment)" class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-colors" aria-label="Edit Hours" title="Edit Hours">
-                        <mat-icon>edit</mat-icon>
-                      </button>
+                    <div class="text-right">
+                      <div class="text-xl font-semibold text-[var(--cc-ink)] font-mono tabular-nums">{{ assignment.assignedHours }}h</div>
+                      <div class="text-xs text-[var(--cc-muted)] uppercase tracking-wider">Total Assigned</div>
+                      <div class="text-xs text-positive-text font-semibold mt-1 font-mono tabular-nums">{{ approvedHours(assignment.id) }}h approved actual</div>
+                      <div class="text-xs text-[var(--cc-muted)] mt-1">Planned hours are edited per day in the Allocation Calendar.</div>
+                    </div>
+                    @if (canSubmitOwnTime()) {
                       <button type="button" (click)="startTimeEntry(assignment)" class="p-2 text-ink-muted hover:text-positive-text hover:bg-positive-tint rounded-lg transition-colors" aria-label="Log actual time" title="Log actual time">
                         <mat-icon>more_time</mat-icon>
                       </button>
@@ -277,26 +266,44 @@ interface WeekDay {
                   </div>
                 </div>
                 @if (timeEntryAssignmentId() === assignment.id) {
-                  <div class="mt-5 rounded-2xl border border-positive ring-1 ring-positive bg-positive-tint p-4">
+                  <form (ngSubmit)="saveTimeEntry(assignment)" class="mt-5 rounded-2xl border border-positive ring-1 ring-positive bg-positive-tint p-4">
                     <div class="grid grid-cols-1 sm:grid-cols-[160px_120px_1fr_auto] gap-3 items-end">
                       <div>
                         <label for="timeEntryDate" class="block text-xs font-bold uppercase tracking-wider text-ink-muted mb-1">Date</label>
-                        <input id="timeEntryDate" type="date" [ngModel]="timeEntryDate()" (ngModelChange)="timeEntryDate.set($event)" class="command-input">
+                        <input id="timeEntryDate" name="timeEntryDate" type="date" required
+                               [disabled]="savingTimeEntryAssignmentId() !== null"
+                               [ngModel]="timeEntryDate()" (ngModelChange)="timeEntryDate.set($event)" class="command-input">
                       </div>
                       <div>
                         <label for="timeEntryHours" class="block text-xs font-bold uppercase tracking-wider text-ink-muted mb-1">Hours</label>
-                        <input id="timeEntryHours" type="number" min="0" [ngModel]="timeEntryHours()" (ngModelChange)="timeEntryHours.set($event)" class="command-input font-mono tabular-nums">
+                        <input id="timeEntryHours" name="timeEntryHours" type="number" min="0.25" step="0.25" required
+                               [disabled]="savingTimeEntryAssignmentId() !== null"
+                               [ngModel]="timeEntryHours()" (ngModelChange)="timeEntryHours.set($event)" class="command-input font-mono tabular-nums">
                       </div>
                       <div>
                         <label for="timeEntryNotes" class="block text-xs font-bold uppercase tracking-wider text-ink-muted mb-1">Notes</label>
-                        <input id="timeEntryNotes" type="text" [ngModel]="timeEntryNotes()" (ngModelChange)="timeEntryNotes.set($event)" class="command-input" placeholder="Work performed">
+                        <input id="timeEntryNotes" name="timeEntryNotes" type="text"
+                               [disabled]="savingTimeEntryAssignmentId() !== null"
+                               [ngModel]="timeEntryNotes()" (ngModelChange)="timeEntryNotes.set($event)" class="command-input" placeholder="Work performed">
                       </div>
                       <div class="flex gap-2">
-                        <button (click)="saveTimeEntry(assignment)" class="command-button">Submit</button>
-                        <button type="button" (click)="cancelTimeEntry()" aria-label="Cancel time entry" title="Cancel time entry" class="p-2 rounded-lg text-ink-muted hover:bg-surface-muted"><mat-icon>close</mat-icon></button>
+                        <button type="submit" data-test="submit-time-entry"
+                                [disabled]="!!timeEntryValidationMessage(assignment) || savingTimeEntryAssignmentId() !== null"
+                                class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                          {{ savingTimeEntryAssignmentId() === assignment.id ? 'Submitting…' : 'Submit' }}
+                        </button>
+                        <button type="button" (click)="cancelTimeEntry()"
+                                [disabled]="savingTimeEntryAssignmentId() !== null"
+                                aria-label="Cancel time entry" title="Cancel time entry"
+                                class="p-2 rounded-lg text-ink-muted hover:bg-surface-muted disabled:opacity-50"><mat-icon>close</mat-icon></button>
                       </div>
                     </div>
-                  </div>
+                    @if (timeEntryValidationMessage(assignment); as validationMessage) {
+                      <p class="mt-3 text-sm font-medium text-critical-text" aria-live="polite">{{ validationMessage }}</p>
+                    } @else if (timeEntrySubmissionError(); as submissionError) {
+                      <p class="mt-3 text-sm font-medium text-critical-text" role="alert">{{ submissionError }}</p>
+                    }
+                  </form>
                 }
                 @if (timeEntriesForAssignment(assignment.id).length) {
                   <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -327,6 +334,7 @@ interface WeekDay {
               </div>
             }
           </div>
+          </ng-template>
           </app-list-state>
         </div>
       </div>
@@ -336,10 +344,10 @@ interface WeekDay {
 export class MyAssignmentsComponent {
   private api = inject(ApiService);
   private auth = inject(AuthService);
+  private notifications = inject(NotificationService);
+  private destroyRef = inject(DestroyRef);
 
-  // Read LIVE, never snapshot at field-init (see auth.service note): a captured
-  // value freezes the anonymous default and shows the wrong user's data on reload.
-  private get currentUserId(): string { return this.auth.userId(); }
+  protected canSubmitOwnTime = computed(() => this.auth.canSubmitOwnTime());
 
   // The resource profile (getResource) and time-entries reads are principal-gated
   // server-side (401 until the Keycloak JWT is restored). On reload the OIDC token
@@ -347,30 +355,30 @@ export class MyAssignmentsComponent {
   // on the error (page shows zeros forever). Key the load on auth readiness so it
   // fires only AFTER the OAuth bootstrap has settled and the bearer token is attached.
   protected dataRes = rxResource<{ assignments: Assignment[]; requests: ResourceRequest[]; profile: Resource | null; timeEntries: TimeEntry[] }, boolean>({
-    params: () => this.auth.authReady(),
+    params: () => this.auth.authReady() && this.auth.hasResourceIdentity(),
     stream: ({ params: ready }) => ready
       ? forkJoin({
-          assignments: this.api.getAssignments(),
-          requests: this.api.getRequests(),
-          profile: this.api.getResource(this.currentUserId),
-          timeEntries: this.api.getTimeEntries(),
+          assignments: this.api.getMyAssignments(),
+          requests: this.api.getMyRequests(),
+          profile: this.api.getMyProfile(),
+          timeEntries: this.api.getMyTimeEntries(),
         })
       : of({ assignments: [], requests: [], profile: null, timeEntries: [] }),
     defaultValue: { assignments: [], requests: [], profile: null, timeEntries: [] },
   });
 
-  myAssignments = computed(() => this.dataRes.value().assignments.filter(a => a.resourceId === this.currentUserId));
+  myAssignments = computed(() => this.dataRes.value().assignments);
   allRequests = computed(() => this.dataRes.value().requests);
   profile = computed(() => this.dataRes.value().profile);
-  timeEntries = computed(() => this.dataRes.value().timeEntries.filter(t => t.resourceId === this.currentUserId));
+  timeEntries = computed(() => this.dataRes.value().timeEntries);
 
   viewMode = signal<'week' | 'month'>('week');
-  editingAssignmentId = signal<string | null>(null);
-  editHours = signal(0);
   timeEntryAssignmentId = signal<string | null>(null);
-  timeEntryDate = signal(new Date().toISOString().slice(0, 10));
+  timeEntryDate = signal(todayLocalIso());
   timeEntryHours = signal(8);
   timeEntryNotes = signal('');
+  protected savingTimeEntryAssignmentId = signal<string | null>(null);
+  protected timeEntrySubmissionError = signal('');
 
   // 0 = current period, negative = past, positive = future.
   periodOffset = signal(0);
@@ -494,10 +502,6 @@ export class MyAssignmentsComponent {
     return `${this.toIso(win.start)} to ${this.toIso(win.end)}${suffix}`;
   }
 
-  editHoursInputId(id: string): string {
-    return `editHours-${id.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
-  }
-
   getRequestName(id: string): string {
     return this.allRequests().find(r => r.id === id)?.name || 'Unknown Project';
   }
@@ -619,52 +623,55 @@ export class MyAssignmentsComponent {
     return 'text-caution-text';
   }
 
-  startEdit(assignment: Assignment) {
-    this.editingAssignmentId.set(assignment.id);
-    this.editHours.set(assignment.assignedHours);
-  }
-
-  cancelEdit() {
-    this.editingAssignmentId.set(null);
-  }
-
   startTimeEntry(assignment: Assignment) {
+    if (!this.canSubmitOwnTime()) return;
     this.timeEntryAssignmentId.set(assignment.id);
     this.timeEntryHours.set(Math.min(8, assignment.assignedHours || 8));
-    this.timeEntryDate.set(new Date().toISOString().slice(0, 10));
+    this.timeEntryDate.set(todayLocalIso());
     this.timeEntryNotes.set('');
+    this.timeEntrySubmissionError.set('');
   }
 
   cancelTimeEntry() {
+    if (this.savingTimeEntryAssignmentId() !== null) return;
     this.timeEntryAssignmentId.set(null);
+    this.timeEntrySubmissionError.set('');
+  }
+
+  protected timeEntryValidationMessage(assignment: Assignment): string {
+    const hours = this.timeEntryHours();
+    if (!assignment.id || !this.parseIso(this.timeEntryDate()) ||
+        typeof hours !== 'number' || !Number.isFinite(hours) || hours <= 0) {
+      return 'Enter a valid date and hours greater than zero.';
+    }
+    return '';
   }
 
   saveTimeEntry(assignment: Assignment) {
-    const request = this.getRequest(assignment.requestId);
-    const hours = this.timeEntryHours();
-    if (!request?.projectId || hours <= 0) return;
-    this.api.createTimeEntry({
+    if (!this.canSubmitOwnTime() || this.savingTimeEntryAssignmentId() !== null ||
+        this.timeEntryValidationMessage(assignment)) return;
+
+    this.savingTimeEntryAssignmentId.set(assignment.id);
+    this.timeEntrySubmissionError.set('');
+    this.api.createMyTimeEntry({
       assignmentId: assignment.id,
-      requestId: assignment.requestId,
-      resourceId: assignment.resourceId,
-      projectId: request.projectId,
       date: this.timeEntryDate(),
-      hours,
-      status: 'Submitted',
+      hours: this.timeEntryHours(),
       notes: this.timeEntryNotes(),
-    }).subscribe(() => {
-      this.dataRes.reload();
-      this.cancelTimeEntry();
+    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {
+        this.savingTimeEntryAssignmentId.set(null);
+        this.dataRes.reload();
+        this.cancelTimeEntry();
+        this.notifications.show('Time entry submitted for approval.', 'success');
+      },
+      error: () => {
+        this.savingTimeEntryAssignmentId.set(null);
+        const message = 'Could not submit the time entry. Review the details and try again.';
+        this.timeEntrySubmissionError.set(message);
+        this.notifications.show(message, 'error');
+      },
     });
   }
 
-  saveAssignment(assignment: Assignment) {
-    const hours = this.editHours();
-    if (hours >= 0) {
-      this.api.updateAssignment(assignment.id, { assignedHours: hours }).subscribe(() => {
-        this.dataRes.reload();
-        this.cancelEdit();
-      });
-    }
-  }
 }

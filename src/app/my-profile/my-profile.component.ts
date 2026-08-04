@@ -36,8 +36,8 @@ import { forkJoin, of } from 'rxjs';
                   {{ profile()?.name?.charAt(0) }}
                 }
               </div>
-              <label class="absolute inset-0 bg-ink/40 backdrop-blur-sm rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-300 text-white cursor-pointer scale-95 group-hover:scale-100" aria-label="Upload profile picture">
-                <input type="file" class="hidden" accept="image/*" aria-label="Upload profile picture" (change)="onProfilePictureSelected($event)">
+              <label class="absolute inset-0 bg-ink/40 backdrop-blur-sm rounded-full flex items-center justify-center opacity-100 transition-all duration-300 text-white cursor-pointer scale-100 sm:opacity-0 sm:scale-95 sm:group-hover:opacity-100 sm:group-hover:scale-100 sm:group-focus-within:opacity-100 sm:group-focus-within:scale-100" aria-label="Upload profile picture">
+                <input type="file" class="sr-only" accept="image/*" aria-label="Upload profile picture" (change)="onProfilePictureSelected($event)">
                 <mat-icon class="text-[28px] w-[28px] h-[28px]">photo_camera</mat-icon>
               </label>
             </div>
@@ -144,7 +144,7 @@ import { forkJoin, of } from 'rxjs';
                       </div>
                     }
                   </div>
-                  <button type="button" (click)="removeSkill(skill.name)" [attr.aria-label]="'Remove ' + skill.name" [attr.title]="'Remove ' + skill.name" class="ml-2 text-ink-muted hover:text-critical-text opacity-0 group-hover:opacity-100 transition-all focus-within:opacity-100">
+                  <button type="button" (click)="removeSkill(skill.name)" [attr.aria-label]="'Remove ' + skill.name" [attr.title]="'Remove ' + skill.name" class="ml-2 text-ink-muted hover:text-critical-text opacity-100 transition-all sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100">
                     <mat-icon class="text-[16px] w-[16px] h-[16px]">close</mat-icon>
                   </button>
                 </div>
@@ -244,7 +244,7 @@ import { forkJoin, of } from 'rxjs';
             <div class="space-y-4">
               @for (exp of profile()?.externalExperience; track exp.projectName) {
                 <div class="command-card-muted p-4 relative group">
-                  <button type="button" (click)="removeExtExp(exp)" [attr.aria-label]="'Remove ' + exp.projectName" [attr.title]="'Remove ' + exp.projectName" class="absolute top-4 right-4 text-ink-muted hover:text-critical-text opacity-0 group-hover:opacity-100 transition-opacity">
+                  <button type="button" (click)="removeExtExp(exp)" [attr.aria-label]="'Remove ' + exp.projectName" [attr.title]="'Remove ' + exp.projectName" class="absolute top-4 right-4 text-ink-muted hover:text-critical-text opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100">
                     <mat-icon>delete</mat-icon>
                   </button>
                   <h4 class="font-medium text-[var(--cc-ink)]">{{ exp.projectName }}</h4>
@@ -331,23 +331,16 @@ export class MyProfileComponent {
   private notify = inject(NotificationService);
   private auth = inject(AuthService);
 
-  // Read LIVE, never snapshot at field-init (see auth.service note): at
-  // construction the OAuth bootstrap hasn't settled so userId() is still the
-  // anonymous default — capturing it would load the wrong user on deep-link/reload.
-  private get currentUserId(): string { return this.auth.userId(); }
-
-  // The resource profile read (getResource) is principal-gated server-side (401
-  // until the Keycloak JWT is restored). On reload the OIDC token restores async;
-  // firing the forkJoin immediately 401s and the rxResource latches on the error
-  // (profile never renders). Key the load on auth readiness so it fires only AFTER
-  // the OAuth bootstrap has settled and the bearer token is attached.
+  // /self derives the resource id from the verified OIDC principal server-side.
+  // Do not issue a request until the principal is both restored and linked; an
+  // unmapped identity must render empty instead of querying an arbitrary person.
   private dataRes = rxResource<{ profile: Resource | null; assignments: Assignment[]; requests: ResourceRequest[] }, boolean>({
-    params: () => this.auth.authReady(),
-    stream: ({ params: ready }) => ready
+    params: () => this.auth.authReady() && this.auth.hasResourceIdentity(),
+    stream: ({ params: canLoad }) => canLoad
       ? forkJoin({
-          profile: this.api.getResource(this.currentUserId),
-          assignments: this.api.getAssignments(),
-          requests: this.api.getRequests(),
+          profile: this.api.getMyProfile(),
+          assignments: this.api.getMyAssignments(),
+          requests: this.api.getMyRequests(),
         })
       : of({ profile: null, assignments: [], requests: [] }),
     defaultValue: { profile: null, assignments: [], requests: [] },
@@ -478,7 +471,7 @@ export class MyProfileComponent {
       const currentProfile = this.profile()!;
       const newSkill = { name: this.skillForm.value.name!, level: Number(this.skillForm.value.level!) };
       const updatedSkills = [...currentProfile.skills, newSkill];
-      this.api.updateResource(currentProfile.id, { skills: updatedSkills }).subscribe(() => {
+      this.api.updateMyProfile({ skills: updatedSkills }).subscribe(() => {
         this.dataRes.reload();
         this.skillForm.reset({ name: '', level: null });
         this.showAddSkill.set(false);
@@ -489,7 +482,7 @@ export class MyProfileComponent {
     if (this.profile()) {
       const currentProfile = this.profile()!;
       const updatedSkills = currentProfile.skills.filter(s => s.name !== skillName);
-      this.api.updateResource(currentProfile.id, { skills: updatedSkills }).subscribe(() => this.dataRes.reload());
+      this.api.updateMyProfile({ skills: updatedSkills }).subscribe(() => this.dataRes.reload());
     }
   }
 
@@ -499,7 +492,7 @@ export class MyProfileComponent {
     if (this.roleInput.valid && this.profile()) {
       const currentProfile = this.profile()!;
       const updatedRoles = [...(currentProfile.projectRoles || []), this.roleInput.value!];
-      this.api.updateResource(currentProfile.id, { projectRoles: updatedRoles }).subscribe(() => {
+      this.api.updateMyProfile({ projectRoles: updatedRoles }).subscribe(() => {
         this.dataRes.reload();
         this.roleInput.reset();
         this.showAddRole.set(false);
@@ -510,7 +503,7 @@ export class MyProfileComponent {
     if (this.profile()) {
       const currentProfile = this.profile()!;
       const updatedRoles = currentProfile.projectRoles.filter(r => r !== roleName);
-      this.api.updateResource(currentProfile.id, { projectRoles: updatedRoles }).subscribe(() => this.dataRes.reload());
+      this.api.updateMyProfile({ projectRoles: updatedRoles }).subscribe(() => this.dataRes.reload());
     }
   }
 
@@ -521,7 +514,7 @@ export class MyProfileComponent {
       const currentProfile = this.profile()!;
       const newExp = this.extExpForm.value as { projectName: string; company: string; role: string; startDate: string; endDate: string; comment?: string };
       const updatedExp = [...(currentProfile.externalExperience || []), newExp];
-      this.api.updateResource(currentProfile.id, { externalExperience: updatedExp }).subscribe(() => {
+      this.api.updateMyProfile({ externalExperience: updatedExp }).subscribe(() => {
         this.dataRes.reload();
         this.extExpForm.reset();
         this.showAddExtExp.set(false);
@@ -532,7 +525,7 @@ export class MyProfileComponent {
     if (this.profile()) {
       const currentProfile = this.profile()!;
       const updatedExp = currentProfile.externalExperience.filter(e => e.projectName !== exp.projectName);
-      this.api.updateResource(currentProfile.id, { externalExperience: updatedExp }).subscribe(() => this.dataRes.reload());
+      this.api.updateMyProfile({ externalExperience: updatedExp }).subscribe(() => this.dataRes.reload());
     }
   }
 
@@ -549,7 +542,7 @@ export class MyProfileComponent {
       const reader = new FileReader();
       reader.onload = () => {
         const base64 = reader.result as string;
-        this.api.updateResource(this.profile()!.id, { profilePicture: base64 }).subscribe(() => this.dataRes.reload());
+        this.api.updateMyProfile({ profilePicture: base64 }).subscribe(() => this.dataRes.reload());
       };
       reader.readAsDataURL(file);
     }
@@ -565,7 +558,7 @@ export class MyProfileComponent {
       const reader = new FileReader();
       reader.onload = () => {
         const base64 = reader.result as string;
-        this.api.updateResource(this.profile()!.id, { resume: base64 }).subscribe(() => this.dataRes.reload());
+        this.api.updateMyProfile({ resume: base64 }).subscribe(() => this.dataRes.reload());
       };
       reader.readAsDataURL(file);
     }
@@ -573,7 +566,7 @@ export class MyProfileComponent {
 
   removeResume() {
     if (this.profile()) {
-      this.api.updateResource(this.profile()!.id, { resume: '' }).subscribe(() => this.dataRes.reload());
+      this.api.updateMyProfile({ resume: '' }).subscribe(() => this.dataRes.reload());
     }
   }
 }
