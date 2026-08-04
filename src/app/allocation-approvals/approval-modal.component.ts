@@ -28,7 +28,7 @@ import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
 import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
-import { accountableApproversOf, isTerminatedAsOf, type ScopeResource } from '../services/org-scope.util';
+import { accountableApproversOf, dimensionsOf, isTerminatedAsOf, type ScopeResource } from '../services/org-scope.util';
 
 /** Today as ISO 'YYYY-MM-DD' — matches ResourcesComponent.isTerminated's own
  *  local helper exactly, so a candidate resource is filtered out here under
@@ -291,6 +291,7 @@ interface Line {
                     }
                   </select>
                 </div>
+                <p class="mt-1 text-xs text-[var(--cc-muted)]">Includes candidates in nested organizations.</p>
 
                 <div class="max-h-40 overflow-y-auto divide-y divide-line rounded-lg border border-line">
                   @for (cand of filteredCandidates(); track cand.id) {
@@ -756,8 +757,15 @@ export class ApprovalModalComponent {
   protected filteredCandidates = computed<Resource[]>(() => {
     const org = this.orgFilter();
     const q = this.personFilter().trim().toLowerCase();
+    const nodes = this.orgNodes();
     return this.eligibleTargets().filter(r => {
-      if (org && r.organization !== org) return false;
+      // The filter names ONE node, but a candidate anywhere BENEATH it belongs to
+      // the same branch: compare against the DERIVED dimensions, not the stored
+      // name, so a dummy on a capability still offers the practices under it.
+      if (org) {
+        const dims = dimensionsOf(r, nodes);
+        if (dims.capability !== org && dims.practice !== org && dims.competence !== org) return false;
+      }
       if (!q) return true;
       return r.name.toLowerCase().includes(q) || r.role.toLowerCase().includes(q);
     });

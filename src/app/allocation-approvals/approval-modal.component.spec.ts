@@ -591,7 +591,17 @@ describe('ApprovalModalComponent — Substitute (C2)', () => {
   });
 
   it("pre-sets the organization filter to the dummy's organization, and it stays clearable", async () => {
-    const { fixture } = setup({ rows: [ROW_DUMMY] }); // r1 (the dummy) is org 'Digital'
+    // Task 2: the org filter now matches through the DERIVED dimensions
+    // (`dimensionsOf`), not a raw string comparison, so a name absent from the
+    // tree matches nothing at all (design spec §4). This test's org filter stays
+    // set (unlike the sibling test above, which clears it first), so — unlike
+    // before Task 2 — it now needs a tree that actually contains 'Digital'/'Cloud'
+    // as flat capability nodes, or Nora's exact-org match would wrongly fail too.
+    const orgs: ResourceOrganization[] = [
+      { id: 'o1', name: 'Digital', description: '', costCenters: [], level: 'capability' },
+      { id: 'o2', name: 'Cloud', description: '', costCenters: [], level: 'capability' },
+    ];
+    const { fixture } = setup({ rows: [ROW_DUMMY], orgs }); // r1 (the dummy) is org 'Digital'
     await flush(fixture);
 
     fixture.componentInstance.openSubstitute(ROW.items[0]);
@@ -652,5 +662,43 @@ describe('ApprovalModalComponent — Substitute (C2)', () => {
     const checkboxB = host.querySelector<HTMLInputElement>('[data-test="substitute-apply-remaining"]')!;
     expect(checkboxB.checked).toBe(false);
     expect(fixture.componentInstance.applyToRemaining()).toBe(false);
+  });
+
+  it('offers a candidate nested below the pre-filtered organization', async () => {
+    // 'Digital' is a capability; 'Digital Backend' a competence beneath it.
+    const orgs: ResourceOrganization[] = [
+      { id: 'g1', name: 'Digital', description: '', costCenters: [], level: 'capability' as const },
+      { id: 'g2', name: 'Digital Platform', description: '', costCenters: [], level: 'practice' as const, parentId: 'g1' },
+      { id: 'g3', name: 'Digital Backend', description: '', costCenters: [], level: 'competence' as const, parentId: 'g2' },
+    ];
+    // Nora sits TWO levels below the dummy's own organization. A filter comparing
+    // `r.organization === 'Digital'` would drop her, so this fixture is what makes
+    // the test meaningful — a candidate attached directly to 'Digital' would pass
+    // against the old code too.
+    //
+    // FIXTURE FIX (the brief's own snippet did not survive contact — see the
+    // report): with only Dummy Ada (kind 'dummy', excluded from eligibleTargets)
+    // sitting at 'Digital' and Nora at 'Digital Backend', NO eligible candidate
+    // has organization === 'Digital', so `candidateOrganizations()` never
+    // contains 'Digital' and `defaultOrgFor` falls back to '' (no candidate
+    // qualifies for the pre-set org — see its own doc comment). An empty
+    // `orgFilter` skips the org check entirely (`if (org) {...}`), so Nora would
+    // show up REGARDLESS of whether the comparison is exact-name or
+    // derived-dimension — this test would pass against the OLD code too,
+    // proving nothing. Adding an eligible candidate directly on 'Digital' makes
+    // 'Digital' a real pre-selectable option, so the filter actually engages.
+    const resources = [
+      { ...RESOURCES[0] },                                                          // Dummy Ada, organization 'Digital' (dummy, ineligible)
+      { ...RESOURCES[1], id: 'r9a', name: 'Cap Cara', organization: 'Digital' },     // eligible, directly on 'Digital'
+      { ...RESOURCES[1], id: 'r9b', name: 'Nora Fenn', organization: 'Digital Backend' }, // nested, two levels down
+    ] as Resource[];
+    const { fixture } = setup({ rows: [{ ...ROW, kind: 'dummy' }], orgs, resources });
+    await flush(fixture);
+    fixture.componentInstance.openSubstitute(ROW.items[0]);
+    fixture.detectChanges();
+    const host = fixture.nativeElement as HTMLElement;
+    // Sanity: the pre-filter really did lock onto the dummy's own organization.
+    expect(host.querySelector<HTMLSelectElement>('[data-test="substitute-org-filter"]')!.value).toBe('Digital');
+    expect(host.textContent).toContain('Nora Fenn');
   });
 });
