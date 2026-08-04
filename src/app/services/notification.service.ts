@@ -17,6 +17,9 @@ const AUTO_DISMISS_MS = 5000;
  *  read than a success does, since a success only needs a glimpse. */
 const ERROR_AUTO_DISMISS_MS = 12000;
 
+/** Keep notifications useful without allowing a failure loop to cover the UI. */
+const MAX_VISIBLE_NOTIFICATIONS = 5;
+
 /** Lightweight global toast/notification store backed by a signal. */
 @Injectable({ providedIn: 'root' })
 export class NotificationService {
@@ -26,8 +29,17 @@ export class NotificationService {
   private seq = 0;
 
   show(message: string, type: NotificationType = 'info'): void {
+    // Interceptors and feature components can observe the same failure. Showing
+    // an identical toast twice adds noise without giving the user new action.
+    if (this._items().some(item => item.message === message && item.type === type)) return;
+
     const id = ++this.seq;
-    this._items.update(list => [...list, { id, message, type }]);
+    // Cap the visible stack: a request loop that fails once per retry must not
+    // paper over the app. The oldest toast is dropped; its pending dismiss timer
+    // is harmless because `dismiss` filters by id.
+    this._items.update(list =>
+      [...list, { id, message, type }].slice(-MAX_VISIBLE_NOTIFICATIONS),
+    );
     // Browser-only: no SSR timers (there is no DOM/timer clock to auto-dismiss into
     // during SSR, and a timer scheduled there would just leak). Every toast
     // auto-dismisses; errors get a longer timeout because they must be read, not

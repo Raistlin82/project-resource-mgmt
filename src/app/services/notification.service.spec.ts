@@ -62,6 +62,28 @@ describe('NotificationService', () => {
     expect(service.items().length).toBe(0);
   });
 
+  it('deduplicates an identical notification instead of stacking it again', () => {
+    service.error('Request failed');
+    service.error('Request failed');
+
+    expect(service.items().map(item => item.message)).toEqual(['Request failed']);
+  });
+
+  it('caps the visible stack and evicts the oldest notification', () => {
+    for (let index = 1; index <= 6; index += 1) {
+      service.error(`failure ${index}`);
+    }
+
+    expect(service.items()).toHaveLength(5);
+    expect(service.items().map(item => item.message)).toEqual([
+      'failure 2',
+      'failure 3',
+      'failure 4',
+      'failure 5',
+      'failure 6',
+    ]);
+  });
+
   it('dismiss removes a specific toast by id without disturbing others', () => {
     service.error('sticky error');
     service.show('transient', 'info');
