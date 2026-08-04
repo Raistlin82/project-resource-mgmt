@@ -25,11 +25,26 @@
  * Only the projects where the two totals differ are printed: id, name,
  * revenue before, revenue after, delta in EUR.
  *
- * THE GATE this file exists to satisfy: on a system with NO negotiated rates,
- * "before" and "after" must be identical for every project, so this script
- * must print ZERO rows. Any row printed against an empty negotiated_rates
- * table means the no-regression guarantee is broken and the branch must not
- * merge.
+ * WHAT THIS PROVES, AND WHAT IT DOES NOT — stated precisely, because the
+ * original wording of this header overclaimed and that overclaim helped a ~8x
+ * revenue defect through every green gate.
+ *   - EMPTY TABLE -> zero rows is TRUE BY CONSTRUCTION, not evidence: with
+ *     `negotiated_rates` empty, `negotiatedRates` IS `[]`, so the two calls are
+ *     the same pure function over the same arguments. Run it, but do not read
+ *     zero rows there as a passing gate; the real no-regression pin is
+ *     finance.util.spec.ts's case that fixes [1400,0,2800,0] with the field
+ *     both empty AND absent.
+ *   - NON-EMPTY TABLE -> the delta is the useful output, and it only means
+ *     something if some APPROVED time entry actually lands on a project or
+ *     contract carrying a rate. Seed row TE4 (src/db/seed.ts) exists for that:
+ *     8 hours of a Developer on project '2', which carries the 1150 €/day
+ *     override, must print `before=1120.00 after=1150.00 delta=30.00` — one 8h
+ *     day at one day rate. A four-figure delta on that row means the €/day ->
+ *     €/hour conversion in `sellRateFor` has been lost again.
+ *   - It compares this code against ITSELF (not against pre-feature code), and
+ *     it re-implements the aggregation as "Σ approved hours × rate grouped by
+ *     project" rather than calling `recognitionSchedule` — no billing-item
+ *     scoping, no capAmount, no period windowing. It is a delta REPORT.
  *
  * Usage:
  *   AUTH_TRUST_HEADERS=true npm run serve:ssr:app

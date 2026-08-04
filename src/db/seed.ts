@@ -173,6 +173,16 @@ export const requests: ResourceRequest[] = [
   { id: '3', name: 'Project Alpha - API Hardening', requiredRole: 'Developer', requiredEffort: 24, staffedEffort: 24, staffedEffortPlanned: 24, status: 'Fulfilled', skills: ['Java'], description: 'API hardening and performance work for Project Alpha', startDate: '2026-06-15', endDate: '2026-08-31', requesterId: '1', projectId: '1' },
   { id: '4', name: 'Project Beta - Platform Migration', requiredRole: 'Consultant', requiredEffort: 30, staffedEffort: 30, staffedEffortPlanned: 30, status: 'Fulfilled', skills: ['Project Management'], description: 'Lead the platform migration workstream for Project Beta', startDate: '2026-05-15', endDate: '2026-09-15', requesterId: '1', projectId: '2' },
   { id: '5', name: 'Project Beta - Design QA', requiredRole: 'Designer', requiredEffort: 10, staffedEffort: 10, staffedEffortPlanned: 10, status: 'Fulfilled', skills: ['Figma'], description: 'Design quality pass ahead of Project Beta go-live', startDate: '2026-08-01', endDate: '2026-09-30', requesterId: '1', projectId: '2' },
+  // NEGOTIATED SELL RATES — the demand row that makes the feature observable on
+  // seeded data. Project '2' carries the negotiated Developer override
+  // (NR_P2_DEV below) but had NO Developer staffed on it and therefore no
+  // Developer hours, so resolution never ran on a single seeded row: the impact
+  // report printed zero because nothing exercised the code, which is how a ~8x
+  // revenue defect passed every green gate. A Developer request on project '2'
+  // is what lets an assignment, and then an approved time entry, exist here
+  // without lying about their own identity (a time entry's project must be its
+  // assignment's request's project — that is what the Log Hours UI writes).
+  { id: '6', name: 'Project Beta - Backend Development', requiredRole: 'Developer', requiredEffort: 8, staffedEffort: 8, staffedEffortPlanned: 8, status: 'Fulfilled', skills: ['Java'], description: 'Backend workstream on Project Beta, priced at the negotiated Developer rate', startDate: '2026-06-01', endDate: '2026-06-30', requesterId: '1', projectId: '2' },
 ];
 
 // Resource Schedule (Approach B): every assignment carries an explicit booking
@@ -206,6 +216,16 @@ const assignmentsBase: readonly Omit<Assignment, 'status'>[] = [
   { id: '3', requestId: '4', resourceId: '2', assignedHours: 30, startDate: '2026-05-15', endDate: '2026-09-15', allocationPct: 100 },
   { id: '4', requestId: '2', resourceId: '3', assignedHours: 8, startDate: '2026-05-01', endDate: '2026-07-31', allocationPct: 50 },
   { id: '5', requestId: '5', resourceId: '3', assignedHours: 10, startDate: '2026-08-01', endDate: '2026-09-30', allocationPct: 50 },
+  // NEGOTIATED SELL RATES (see request '6'): Julie — the seeded Developer — booked
+  // for ONE day on Project Beta, which is where the negotiated Developer override
+  // lives. Deliberately a single working day (2026-06-01, a Monday, no holiday):
+  // 8 assigned hours == the 8 hours TE4 logs, so the demo prices exactly one day
+  // at one day rate and the arithmetic in the impact report is checkable by hand.
+  // 20% == 8h of her 40h week. It overlaps assignment '1' (60%) on that date for
+  // 80% total, deliberately UNDER 100%, so the seeded over-allocation demo stays
+  // the one it documents (A1+A2, 130% in 2026-06-15..06-30) and no new conflict
+  // is invented here.
+  { id: '6', requestId: '6', resourceId: '1', assignedHours: 8, startDate: '2026-06-01', endDate: '2026-06-01', allocationPct: 20 },
 ];
 
 // --- Time-phased allocation (B1) config --------------------------------------
@@ -320,6 +340,23 @@ export const timeEntries: TimeEntry[] = [
   { id: 'TE1', assignmentId: '1', requestId: '1', resourceId: '1', projectId: '1', date: '2026-04-06', hours: 8, status: 'Approved', notes: 'Backend integration', approvedBy: '1', approvedAt: '2026-04-07T09:00:00.000Z' },
   { id: 'TE2', assignmentId: '1', requestId: '1', resourceId: '1', projectId: '1', date: '2026-04-07', hours: 8, status: 'Approved', notes: 'API hardening', approvedBy: '1', approvedAt: '2026-04-08T09:00:00.000Z' },
   { id: 'TE3', assignmentId: '1', requestId: '1', resourceId: '1', projectId: '1', date: '2026-04-08', hours: 4, status: 'Submitted', notes: 'Defect fixing' },
+  // NEGOTIATED SELL RATES — THE ROW THAT MAKES THE GATE REAL. Every entry above
+  // is on project '1' (Fixed-Price CT1, which carries no negotiated rate), so
+  // before this row no seeded hour ever reached `sellRateFor`'s negotiated
+  // branches and a green impact report proved nothing.
+  //
+  // This one is APPROVED (only approved hours are recognized), on project '2',
+  // by resource '1' whose role is 'Developer', dated inside CT2's period
+  // (2026-03-01..2027-02-28) — the four conditions the project override
+  // NR_P2_DEV needs to win. Exact expected arithmetic, one 8h day:
+  //   reference : 1120 €/day override ÷ 8 = 140.00 €/h -> 8h = 1,120.00 €
+  //   negotiated: 1150 €/day override ÷ 8 = 143.75 €/h -> 8h = 1,150.00 €
+  //   delta = +30.00 € on project '2'. Under the €/day-vs-hours defect this was
+  //   8 × 1150 = 9,200 €, so the SIZE of this delta is itself the regression
+  //   pin: a four-figure delta here means the conversion is gone again.
+  // approvedBy is user '2' (John Miller), NOT Julie's own user — segregation of
+  // duties, which TE1/TE2 predate and violate.
+  { id: 'TE4', assignmentId: '6', requestId: '6', resourceId: '1', projectId: '2', date: '2026-06-01', hours: 8, status: 'Approved', notes: 'Beta backend — priced at the negotiated Developer rate', approvedBy: '2', approvedAt: '2026-06-02T09:00:00.000Z' },
 ];
 
 // --- Configuration ----------------------------------------------------------
@@ -643,6 +680,11 @@ export const contracts: Contract[] = [
 // makes the override demonstrable. 1000/day is BELOW the Developer card's
 // 1120/day on purpose, so the seed shows a negotiated DISCOUNT rather than a
 // figure that could be mistaken for the card's own.
+//
+// UNITS: 1000/1150 are EUR per DAY, like the cards. `sellRateFor` divides by the
+// `hoursPerDay` setting (8 below) to reach the EUR/HOUR that hours are multiplied
+// by — 1150/day is 143.75/h, NOT 1150/h. Time entry TE4 above is the seeded row
+// that exercises this: see its comment for the expected figures.
 export const negotiatedRates: NegotiatedRate[] = [
   { id: 'NR_CT2_DEV', contractId: 'CT2', role: 'Developer', currency: 'EUR', billRate: 1000 },
   { id: 'NR_P2_DEV', projectId: '2', role: 'Developer', currency: 'EUR', billRate: 1150 },
