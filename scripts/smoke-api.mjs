@@ -3903,14 +3903,16 @@ async function checkNegotiatedRates() {
     );
   }
 
-  // 6) A role nobody holds -> 400 (a typo, not a valid-but-unstaffed configuration).
+  // 6) A role absent from the project-roles catalog -> 400 (a typo). NOTE: this
+  // fails under EITHER candidate authority, so it does not discriminate between
+  // them — check 14 is the one that pins the catalog as the governing rule.
   {
     const bad = await req('POST', '/negotiated-rates', {
       headers: RBAC_HEADERS,
       body: { contractId: CONTRACT_ID, role: 'Nobody Has This', currency: 'EUR', billRate: 800 },
     });
     check(
-      "POST /api/negotiated-rates {role:'Nobody Has This'} -> 400 (no resource holds this role)",
+      "POST /api/negotiated-rates {role:'Nobody Has This'} -> 400 (absent from the project-roles catalog — see check 14 for which authority governs)",
       bad.status === 400,
       `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
     );
@@ -4118,6 +4120,94 @@ async function checkNegotiatedRates() {
     if (bad.status === 200 && typeof bad.body?.id === 'string') {
       const cleanup = await req('DELETE', `/negotiated-rates/${bad.body.id}`, { headers: RBAC_HEADERS });
       check(`check 15 cleanup: DELETE /api/negotiated-rates/${bad.body.id} -> 204`, cleanup.status === 204, `status=${cleanup.status}`);
+    }
+  }
+
+  // 16a-e) FINAL REVIEW, finding 1 — THE XOR MUST JUDGE THE VALUE THAT WILL
+  // ACTUALLY BE WRITTEN. `hasContract`/`hasProject` were computed as
+  // `typeof x === 'string' && x.length > 0`, but the object handed to create()
+  // is the picked body VERBATIM — so a present-but-unusable FK (an empty
+  // string, a number) failed the string test, was read as ABSENT by the xor,
+  // and was then persisted anyway. `{contractId:'', projectId:'2'}` returned
+  // 200 with BOTH FK columns populated in-memory (breaking the documented
+  // "exactly one of contractId/projectId" invariant), while on Postgres the
+  // same row raised a 23503 the error middleware maps to 409 — the two
+  // adapters disagreeing, which is the exact class this endpoint's validation
+  // exists to close. Rejected outright now, on either side.
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: '', projectId: '2', role: 'Consultant', currency: 'EUR', billRate: 900 },
+    });
+    check(
+      "POST /api/negotiated-rates {contractId:'', projectId:'2'} -> 400 (an empty FK is not 'absent'; it used to persist BOTH columns in-memory and 409 on Postgres)",
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+    if (bad.status === 200 && typeof bad.body?.id === 'string') {
+      await req('DELETE', `/negotiated-rates/${bad.body.id}`, { headers: RBAC_HEADERS });
+    }
+  }
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: CONTRACT_ID, projectId: '', role: 'Consultant', currency: 'EUR', billRate: 900 },
+    });
+    check(
+      "POST /api/negotiated-rates {projectId:'', contractId:'CT1'} -> 400 (the mirror side of the same hole)",
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+    if (bad.status === 200 && typeof bad.body?.id === 'string') {
+      await req('DELETE', `/negotiated-rates/${bad.body.id}`, { headers: RBAC_HEADERS });
+    }
+  }
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: 123, projectId: '2', role: 'Consultant', currency: 'EUR', billRate: 900 },
+    });
+    check(
+      'POST /api/negotiated-rates {contractId: 123} -> 400 (a non-string FK is the same hole with a different type)',
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+    if (bad.status === 200 && typeof bad.body?.id === 'string') {
+      await req('DELETE', `/negotiated-rates/${bad.body.id}`, { headers: RBAC_HEADERS });
+    }
+  }
+  // An explicit null is DIFFERENT from '' and must keep working: it is the one
+  // signal that clears a side, and it clears identically on both adapters
+  // (repository.ts's explicit-null rule on update, NULL on Postgres). On POST
+  // it is normalised to ABSENT so the in-memory row never carries a literal
+  // null while Postgres carries NULL — the response must have no contractId key.
+  {
+    const ok = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: null, projectId: '2', role: 'Consultant', currency: 'EUR', billRate: 900 },
+    });
+    check(
+      "POST /api/negotiated-rates {contractId: null, projectId:'2'} -> 200 with NO contractId in the response (null means absent, normalised so both adapters agree)",
+      ok.status === 200 && ok.body?.projectId === '2' && ok.body?.contractId === undefined,
+      `status=${ok.status}, body=${JSON.stringify(ok.body)}`,
+    );
+    // ... and a PUT that nulls the winning side while naming the other one
+    // MOVES the rate rather than ending up with both columns set.
+    if (typeof ok.body?.id === 'string') {
+      const moved = await req('PUT', `/negotiated-rates/${ok.body.id}`, {
+        headers: RBAC_HEADERS,
+        body: { projectId: null, contractId: CONTRACT_ID },
+      });
+      check(
+        `PUT /api/negotiated-rates/${ok.body.id} {projectId: null, contractId:'CT1'} -> 200, moves the rate: contractId set, projectId cleared`,
+        moved.status === 200 && moved.body?.contractId === CONTRACT_ID && moved.body?.projectId === undefined,
+        `status=${moved.status}, body=${JSON.stringify(moved.body)}`,
+      );
+      const cleanup = await req('DELETE', `/negotiated-rates/${ok.body.id}`, { headers: RBAC_HEADERS });
+      check(`check 16 cleanup: DELETE /api/negotiated-rates/${ok.body.id} -> 204`, cleanup.status === 204, `status=${cleanup.status}`);
+    } else {
+      check('check 16 PUT side-move (skipped: the POST did not yield an id)', false, `body=${JSON.stringify(ok.body)}`);
+      check('check 16 cleanup (skipped: the POST did not yield an id)', false, 'no id');
     }
   }
 }

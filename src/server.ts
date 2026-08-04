@@ -4711,7 +4711,35 @@ async function validateNegotiatedRate(
   const all = await repos.negotiatedRates.list();
   const existing = ctx?.id === undefined ? undefined : all.find(r => r.id === ctx.id);
 
-  // 2. contractId XOR projectId — exactly one, never neither, never both.
+  // 1c. THE TWO NULLABLE FKs MUST BE USABLE OR ABSENT — NOTHING IN BETWEEN.
+  // The xor below asks `typeof x === 'string' && x.length > 0`, but the object
+  // handed to create()/update() is this `body` VERBATIM: a value that FAILED
+  // that test was read as "absent" by the xor and then persisted anyway. So
+  // `{contractId: '', projectId: '2'}` used to return 200 with BOTH FK columns
+  // set in-memory — breaking the invariant that exactly one of them is ever
+  // populated (docs/architecture/03-backend-and-data.md) — while on Postgres
+  // `contract_id = ''` is a non-NULL value with no matching contracts row, so
+  // the FK raised 23503 and the error middleware mapped it to 409. Same
+  // request, two different answers: the two-adapters-disagree class the rest of
+  // this validator exists to close, left open on the only two nullable columns.
+  // `{contractId: 123}` is the same hole with a different type.
+  //
+  // An explicit `null` is deliberately NOT rejected here: it is the one signal
+  // that CLEARS a side (repository.ts drops the key in-memory, Postgres writes
+  // NULL, `nullsToUndefined` reports both as absent), which is what makes a
+  // rate movable from contract-level to project-level in one PUT. The xor
+  // already reads it as absent, which is exactly what it will become.
+  for (const field of ['contractId', 'projectId'] as const) {
+    const raw = (body as Record<string, unknown>)[field];
+    if (raw === undefined || raw === null) continue;
+    if (typeof raw !== 'string' || raw.length === 0) {
+      return `${field} must be a non-empty string referencing an existing row, or null to clear it`;
+    }
+  }
+
+  // 2. contractId XOR projectId — exactly one, never neither, never both. Safe
+  // to judge with the string test now that 1c has rejected everything that
+  // would fail it while still being written (see that note).
   const contractId = body.contractId === undefined ? existing?.contractId : body.contractId;
   const projectId = body.projectId === undefined ? existing?.projectId : body.projectId;
   const hasContract = typeof contractId === 'string' && contractId.length > 0;
@@ -4769,6 +4797,16 @@ apiRouter.post('/negotiated-rates', async (req, res) => {
   const body = pick<NegotiatedRate>(req.body, [
     'contractId', 'projectId', 'role', 'currency', 'billRate',
   ]);
+  // On a CREATE there is no previous value, so an explicit null on a nullable FK
+  // means "not set" — normalise it to ABSENT before anything else sees it.
+  // Otherwise `InMemoryRepository.create` (unlike `update`, which drops a null
+  // key) stores the literal null and serves `contractId: null` forever, while
+  // Postgres inserts NULL and `nullsToUndefined` reports it absent: the same
+  // POST, two different JSON shapes. Doing it HERE, before validation, is what
+  // makes the validator judge the object that will actually be stored.
+  for (const field of ['contractId', 'projectId'] as const) {
+    if ((body as Record<string, unknown>)[field] === null) delete body[field];
+  }
   const err = await validateNegotiatedRate(body);
   if (err) { res.status(400).json({ error: err }); return; }
   const item = { id: newId(), ...body } as NegotiatedRate;
