@@ -9,6 +9,7 @@ import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 import { ORG_LEVELS, ancestorChain, descendantOrgIds, type OrgLevel } from '../services/org-scope.util';
 import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
+import { todayLocalIso } from '../services/local-date.util';
 
 /** One rendered tree row: the node plus its indentation depth (root = 0). */
 interface OrgTreeRow {
@@ -20,7 +21,7 @@ interface OrgTreeRow {
  *  local helper exactly, so a candidate manager is filtered out here under the
  *  SAME rule the People page shows it terminated under. */
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  return todayLocalIso();
 }
 
 @Component({

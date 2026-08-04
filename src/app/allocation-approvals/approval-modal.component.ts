@@ -29,12 +29,13 @@ import { NotificationService } from '../services/notification.service';
 import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
 import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
 import { accountableApproversOf, dimensionsOf, isTerminatedAsOf, type ScopeResource } from '../services/org-scope.util';
+import { todayLocalIso } from '../services/local-date.util';
 
 /** Today as ISO 'YYYY-MM-DD' — matches ResourcesComponent.isTerminated's own
  *  local helper exactly, so a candidate resource is filtered out here under
  *  the SAME rule the People page shows it terminated under. */
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  return todayLocalIso();
 }
 
 /** One rendered line: a project's (assignment, month) item, alongside the resource

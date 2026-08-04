@@ -20,11 +20,12 @@ import { NotificationService } from '../services/notification.service';
 import { ListStateComponent } from '../shared/list-state.component';
 import { parseMonthRowId } from '../services/allocation-month.util';
 import { accountableApproversOf } from '../services/org-scope.util';
+import { todayLocalIso } from '../services/local-date.util';
 
 /** Today as ISO 'YYYY-MM-DD'. The org-scope layer is pure and takes this as a
  *  value, so the clock read lives here — same helper as the other screens. */
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  return todayLocalIso();
 }
 
 interface ApprovalsData {
@@ -117,6 +118,7 @@ const OUT_OF_SCOPE_TITLE = 'You do not manage this resource, so you cannot decid
       </div>
 
       <app-list-state [loading]="res.isLoading()" [error]="res.status() === 'error'" label="approvals" (retry)="res.reload()">
+      <ng-template>
       <div class="command-card overflow-hidden">
         <div class="overflow-x-auto">
           <table class="command-data-table min-w-[960px]">
@@ -243,6 +245,7 @@ const OUT_OF_SCOPE_TITLE = 'You do not manage this resource, so you cannot decid
           </table>
         </div>
       </div>
+      </ng-template>
       </app-list-state>
     </div>
   `,

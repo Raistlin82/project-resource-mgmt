@@ -7,6 +7,7 @@ import { ApiService, Project, Issue, Resource } from '../../services/api.service
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { todayLocalIso } from '../../services/local-date.util';
 
 @Component({
   selector: 'app-project-issues',
@@ -315,6 +316,6 @@ export class ProjectIssues {
   }
 
   isOverdue(issue: Issue): boolean {
-    return Boolean(issue.dueDate && issue.status !== 'Closed' && issue.dueDate < new Date().toISOString().slice(0, 10));
+    return Boolean(issue.dueDate && issue.status !== 'Closed' && issue.dueDate < todayLocalIso());
   }
 }
