@@ -24,13 +24,30 @@
  *      The forged-header case is what proves the server is really running
  *      untrusted (see assertHeadersUntrusted below) — without it this whole
  *      script could pass against a trusted-header server and mean nothing.
- *   C. SSR — every real route renders 200 AND the server emits no
- *      `[ui-error-boundary]` output and no `401 Unauthorized` while doing so.
- *      SSR renders with no bearer by definition, so this is the end-to-end
- *      observation of the client half: an ungated read shows up here as a
- *      401-caused render error. Requires the server's combined stdout+stderr in
- *      a file named by NOAUTH_SERVER_LOG; without it, part C FAILS rather than
- *      being skipped.
+ *   C. SSR — every real route renders 200 (SSR does not crash without a bearer)
+ *      and no render escalated to the UI error boundary. SSR renders with no
+ *      bearer by definition, so an ungated read 401s here. Requires the server's
+ *      combined stdout+stderr in a file named by NOAUTH_SERVER_LOG; without it,
+ *      part C FAILS rather than being skipped.
+ *
+ *      WHAT PART C DOES **NOT** COVER — stated because an overstated claim is
+ *      worse than a narrow one. It observes a 401 only when the 401 escalates
+ *      into an UNHANDLED render error, which is the failure mode of a screen with
+ *      no error branch. On a screen that handles read errors gracefully the SSR
+ *      output is byte-identical either way, so part C is blind. Measured, not
+ *      assumed: un-gating one read in `billing.ts` and rebuilding leaves BOTH SSR
+ *      checks green (`main`'s rendered length and its `command-*` count are
+ *      identical, because the pre-authReady loading state and the error state
+ *      render the same skeletons) while part A goes red naming the exact line.
+ *      The same holds for `contract-details.ts` and `financial-plans.ts` — 3 of
+ *      the 28 gated files.
+ *
+ *      Part A is what covers those three: it is file-agnostic and catches an
+ *      ungated field-init read anywhere under src/app, which is why it is listed
+ *      first rather than treated as a lint nicety. An earlier version of part C
+ *      also grepped the log for `401 Unauthorized`; that string is never emitted
+ *      by this server, so the grep only ever matched the same
+ *      `[ui-error-boundary]` line and credited one observation twice. It is gone.
  *
  * Usage:
  *   PORT=4173 HOST=127.0.0.1 node dist/app/server/server.mjs > /tmp/noauth.log 2>&1 &
@@ -110,11 +127,14 @@ function ungatedReads(root = 'src/app') {
 }
 
 function checkStatic() {
+  const files = walk('src/app').filter(file => readFileSync(file, 'utf8').includes('rxResource'));
   const offenders = ungatedReads();
   check(
     'static: no field-init rxResource without params (use authGatedResource)',
     offenders.length === 0,
-    offenders.length ? offenders.join(', ') : 'all reads gated',
+    offenders.length
+      ? offenders.join(', ')
+      : `all reads gated across ${files.length} file(s) that use rxResource — the level that covers the screens part C is blind on`,
   );
 }
 
@@ -252,16 +272,14 @@ async function checkSsrRoutes() {
   await sleep(500);
   const appended = logSince(before);
   const boundary = (appended.match(/ui-error-boundary/g) || []).length;
-  const unauthorized = (appended.match(/401 Unauthorized/g) || []).length;
+  // ONE observation, stated once. See the header: this detects an ungated read
+  // only on a screen whose 401 escalates to an unhandled render error. Screens
+  // that handle read errors gracefully (billing, contract-details,
+  // financial-plans) are covered by part A instead, which is file-agnostic.
   check(
-    'SSR: no render reached the error boundary',
+    'SSR: no render escalated to the UI error boundary (blind on screens that handle read errors — see part A)',
     boundary === 0,
     boundary === 0 ? 'clean' : `${boundary} [ui-error-boundary] line(s) — an ungated read 401'd during SSR`,
-  );
-  check(
-    'SSR: no /api read 401d during a render',
-    unauthorized === 0,
-    unauthorized === 0 ? 'clean' : `${unauthorized} "401 Unauthorized" line(s) in the server log`,
   );
 }
 
