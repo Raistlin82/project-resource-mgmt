@@ -185,9 +185,9 @@ interface UtilizationData {
                           }
                         </select>
                       </div>
-                      <div>
-                        <label for="assignedHours" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Hours *</label>
-                        <input id="assignedHours" type="number" formControlName="assignedHours" class="command-input">
+                      <div class="command-card-muted p-4 text-sm text-[var(--cc-muted)]">
+                        <span class="font-bold text-[var(--cc-ink)]">Hours come from daily bookings.</span>
+                        Use the Allocation Calendar on the resource request to add or change them.
                       </div>
                     </div>
                     <div class="flex justify-end gap-3 pt-2">
@@ -337,7 +337,7 @@ export class UtilizationComponent {
 
   showForm = signal(false);
   editingAssignmentId = signal<string | null>(null);
-  copiedAssignment = signal<Partial<Assignment> | null>(null);
+  copiedAssignment = signal<Pick<Assignment, 'requestId'> | null>(null);
 
   /** Which set 'My Team' means. 'direct' is the pre-D behaviour and stays the default. */
   protected teamScope = signal<'direct' | 'org'>('direct');
@@ -391,7 +391,6 @@ export class UtilizationComponent {
 
   assignmentForm = new FormGroup({
     requestId: new FormControl('', Validators.required),
-    assignedHours: new FormControl(0, [Validators.required, Validators.min(1)])
   });
 
   selectResource(res: Resource) {
@@ -406,7 +405,7 @@ export class UtilizationComponent {
   // --- Form Handling ---
   openCreateForm() {
     this.editingAssignmentId.set(null);
-    this.assignmentForm.reset({ assignedHours: 0, requestId: '' });
+    this.assignmentForm.reset({ requestId: '' });
     this.showForm.set(true);
   }
 
@@ -414,7 +413,6 @@ export class UtilizationComponent {
     this.editingAssignmentId.set(assignment.id);
     this.assignmentForm.patchValue({
       requestId: assignment.requestId,
-      assignedHours: assignment.assignedHours
     });
     this.showForm.set(true);
   }
@@ -430,15 +428,11 @@ export class UtilizationComponent {
       const val = this.assignmentForm.value;
       const requestId = val.requestId || '';
       const resourceId = this.selectedResource()!.id;
-      const assignedHours = val.assignedHours || 0;
 
       if (this.editingAssignmentId()) {
-        // Edit path never sends `status` at all (B3): `assignments.status` is no
-        // longer client-settable in any form — the server rejects any request
-        // body that carries the key with 400, regardless of value. This PUT only
-        // patches requestId/resourceId/assignedHours; the server refreshes the
-        // derived status rollup on its own after the patch lands.
-        const data: Partial<Assignment> = { requestId, resourceId, assignedHours };
+        // assignedHours/status are server-derived from assignmentDays/months.
+        // This form edits only the unbooked assignment shell.
+        const data: Partial<Assignment> = { requestId, resourceId };
         this.api.updateAssignment(this.editingAssignmentId()!, data).subscribe({
           next: () => {
             this.dataResource.reload();
@@ -447,12 +441,9 @@ export class UtilizationComponent {
           error: () => this.notifications.error('Failed to update assignment.')
         });
       } else {
-        // New assignments are always created 'Draft' by the server (B3):
-        // `status` is not client-settable at all any more, so it is never sent
-        // here — the server rejects the key outright (400) if it were. Sending
-        // the assignment for approval now happens per month, from the resource's
-        // allocation calendar, once hours are booked into an open month.
-        const data: Partial<Assignment> = { requestId, resourceId, assignedHours };
+        // The server creates a zero-hour Draft shell. Daily bookings are then
+        // persisted through the allocation calendar and rolled up server-side.
+        const data: Partial<Assignment> = { requestId, resourceId };
         this.api.createAssignment(data).subscribe({
           next: () => {
             this.dataResource.reload();
@@ -468,7 +459,6 @@ export class UtilizationComponent {
   copyAssignment(assignment: Assignment) {
     this.copiedAssignment.set({
       requestId: assignment.requestId,
-      assignedHours: assignment.assignedHours
     });
   }
 
@@ -483,7 +473,6 @@ export class UtilizationComponent {
       // a brand-new assignment (it has no month rows yet).
       const newAssignment: Partial<Assignment> = {
         requestId: copied.requestId,
-        assignedHours: copied.assignedHours,
         resourceId: resId,
       };
       this.api.createAssignment(newAssignment).subscribe({

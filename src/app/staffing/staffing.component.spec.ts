@@ -50,6 +50,29 @@ describe('StaffingComponent', () => {
     expect(names).toEqual(expect.arrayContaining(['Alice', 'Bob']));
   });
 
+  it('creates an empty assignment shell without sending derived assignedHours', async () => {
+    const request: ResourceRequest = {
+      id: 'REQ1', name: 'Apollo', requiredRole: 'Consultant', requiredEffort: 80,
+      staffedEffort: 0, skills: [], status: 'Open', startDate: '2026-09-01', endDate: '2026-09-30',
+    };
+    const { fixture, createAssignment } = setup({ requests: [request] });
+    await flush(fixture);
+
+    fixture.componentInstance.selectRequest(request);
+    fixture.componentInstance.startAssign('1');
+    fixture.detectChanges();
+    fixture.componentInstance.confirmAssign('1');
+
+    expect(createAssignment).toHaveBeenCalledWith({
+      requestId: 'REQ1',
+      resourceId: '1',
+      startDate: '2026-09-01',
+      endDate: '2026-09-30',
+      allocationPct: 100,
+    });
+    expect(createAssignment).toHaveBeenCalledWith(expect.not.objectContaining({ assignedHours: expect.anything() }));
+  });
+
   describe('org-dimension and people-manager filters (D, Task 8)', () => {
     /**
      * D (Task 8): Engineering (capability) > Platform (practice) > Backend

@@ -46,6 +46,7 @@ interface DimensionMeter {
           </div>
           <div class="overflow-y-auto flex-1">
             <app-list-state [loading]="res.isLoading()" [error]="res.status() === 'error'" label="requests" (retry)="res.reload()">
+            <ng-template>
             <div class="divide-y divide-[var(--cc-line)]">
             @for (req of openRequests(); track req.id) {
               <div class="p-6 sm:p-8 hover:bg-surface-muted transition-all cursor-pointer group relative"
@@ -78,6 +79,7 @@ interface DimensionMeter {
               <div class="p-12 text-center text-sm text-[var(--cc-muted)]">No open requests available for staffing.</div>
             }
             </div>
+            </ng-template>
             </app-list-state>
           </div>
         </div>
@@ -194,11 +196,10 @@ interface DimensionMeter {
                     <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0 w-full sm:w-auto">
                       @if (assigningResourceId() === cand.resourceId) {
                         <div class="flex flex-col gap-3 w-full sm:w-auto">
-                          <div class="grid grid-cols-2 gap-3">
-                            <label class="command-field">
-                              <span class="command-field-label">Hours</span>
-                              <input type="number" [ngModel]="assignHours()" (ngModelChange)="assignHours.set($event)" class="command-input font-mono tabular-nums" min="1" [max]="selectedRequest()?.requiredEffort || 1">
-                            </label>
+                          <div class="command-card-muted p-3 text-sm text-[var(--cc-muted)]">
+                            This creates an empty assignment. Book hours per day in the Allocation Calendar afterwards.
+                          </div>
+                          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                             <label class="command-field">
                               <span class="command-field-label">Allocation %</span>
                               <input type="number" [ngModel]="assignAllocationPct()" (ngModelChange)="assignAllocationPct.set($event)" class="command-input font-mono tabular-nums" min="0" max="100" step="5">
@@ -370,7 +371,6 @@ export class StaffingComponent {
   }
 
   assigningResourceId = signal<string | null>(null);
-  assignHours = signal<number>(0);
 
   /** Booking window + allocation for the new assignment. Default to the selected request's dates / 100% allocation. */
   assignStartDate = signal<string>('');
@@ -493,8 +493,6 @@ export class StaffingComponent {
     const req = this.selectedRequest();
     if (req) {
       this.assigningResourceId.set(resourceId);
-      const remaining = req.requiredEffort - (req.staffedEffort || 0);
-      this.assignHours.set(remaining > 0 ? remaining : req.requiredEffort);
       // Seed the booking window from the request; allocation defaults to a full 100%.
       this.assignStartDate.set(req.startDate ?? '');
       this.assignEndDate.set(req.endDate ?? '');
@@ -504,7 +502,6 @@ export class StaffingComponent {
 
   cancelAssign() {
     this.assigningResourceId.set(null);
-    this.assignHours.set(0);
     this.assignStartDate.set('');
     this.assignEndDate.set('');
     this.assignAllocationPct.set(100);
@@ -520,8 +517,7 @@ export class StaffingComponent {
   confirmAssign(resourceId: string) {
     if (this.assigning()) return;
     const req = this.selectedRequest();
-    const hours = this.assignHours();
-    if (req && hours > 0) {
+    if (req) {
       this.assigning.set(true);
       const startDate = this.assignStartDate().trim();
       const endDate = this.assignEndDate().trim();
@@ -529,7 +525,6 @@ export class StaffingComponent {
       this.api.createAssignment({
         requestId: req.id,
         resourceId: resourceId,
-        assignedHours: hours,
         // Carry the booking window + allocation; omit empty dates so the schedule
         // util falls back to the linked request's dates.
         ...(startDate ? { startDate } : {}),

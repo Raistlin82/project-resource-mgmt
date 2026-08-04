@@ -3,7 +3,14 @@ import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
 import { of, throwError } from 'rxjs';
 import { UtilizationComponent } from './utilization.component';
-import { ApiService, type Resource, type ResourceOrganization, type UserRole } from '../services/api.service';
+import {
+  ApiService,
+  type Assignment,
+  type Resource,
+  type ResourceOrganization,
+  type ResourceRequest,
+  type UserRole,
+} from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 
@@ -27,14 +34,49 @@ const RESOURCES: Resource[] = [
   { ...base, id: 'x1', name: 'Outside Otto', role: 'Developer', utilization: 90, kind: 'internal', organization: 'Consulting' },
 ] as Resource[];
 
-function setup({ resources = RESOURCES, orgs = ORGS, userId = 'm1', role = 'resource-manager' as UserRole, orgsFail = false } = {}) {
+const REQUESTS: ResourceRequest[] = [{
+  id: 'q1', name: 'Delivery', requiredRole: 'Developer', requiredEffort: 40,
+  skills: [], status: 'Open', staffedEffort: 0,
+}];
+
+const ASSIGNMENTS: Assignment[] = [{
+  id: 'a1', requestId: 'q1', resourceId: 'd1', assignedHours: 40, status: 'Draft',
+}];
+
+interface SetupOptions {
+  resources?: Resource[];
+  orgs?: ResourceOrganization[];
+  assignments?: Assignment[];
+  requests?: ResourceRequest[];
+  userId?: string;
+  role?: UserRole;
+  orgsFail?: boolean;
+}
+
+function setup({
+  resources = RESOURCES,
+  orgs = ORGS,
+  assignments = [],
+  requests = [],
+  userId = 'm1',
+  role = 'resource-manager',
+  orgsFail = false,
+}: SetupOptions = {}) {
   const apiStub = {
     getResources: vi.fn(() => of(resources)),
-    getAssignments: vi.fn(() => of([])),
-    getRequests: vi.fn(() => of([])),
+    getAssignments: vi.fn(() => of(assignments)),
+    getRequests: vi.fn(() => of(requests)),
     getTimeEntries: vi.fn(() => of([])),
     getResourceOrganizations: vi.fn(() => orgsFail ? throwError(() => new Error('tree endpoint down')) : of(orgs)),
-  } as unknown as ApiService;
+    createAssignment: vi.fn((data: Partial<Assignment>) => of({
+      id: 'created', assignedHours: 0, status: 'Draft', ...data,
+    } as Assignment)),
+    updateAssignment: vi.fn((id: string, data: Partial<Assignment>) => of({
+      ...ASSIGNMENTS[0], id, ...data,
+    } as Assignment)),
+    deleteAssignment: vi.fn(() => of(undefined)),
+    updateTimeEntry: vi.fn(),
+  };
   const authStub = {
     authReady: signal(true), isAuthenticated: signal(true),
     role: signal(role), userId: signal(userId),
@@ -43,14 +85,14 @@ function setup({ resources = RESOURCES, orgs = ORGS, userId = 'm1', role = 'reso
 
   TestBed.configureTestingModule({
     providers: [
-      { provide: ApiService, useValue: apiStub },
+      { provide: ApiService, useValue: apiStub as unknown as ApiService },
       { provide: AuthService, useValue: authStub },
       { provide: NotificationService, useValue: notifyStub },
     ],
   });
   const fixture = TestBed.createComponent(UtilizationComponent);
   fixture.detectChanges();
-  return { fixture, host: fixture.nativeElement as HTMLElement };
+  return { fixture, component: fixture.componentInstance, host: fixture.nativeElement as HTMLElement, apiStub };
 }
 
 const names = (host: HTMLElement): string[] =>
@@ -220,5 +262,43 @@ describe('UtilizationComponent — team scope', () => {
     expect(avgEl.textContent).not.toContain('0%');
     expect(avgEl.className).not.toContain('text-critical-text');
     expect(host.querySelector('[data-test="kpi-internal-note"]')).not.toBeNull();
+  });
+});
+
+describe('UtilizationComponent — assignment write integrity', () => {
+  beforeEach(() => TestBed.resetTestingModule());
+
+  it('does not offer assignedHours as an editable assignment field', async () => {
+    const { fixture, component, host } = setup({ assignments: ASSIGNMENTS, requests: REQUESTS });
+    await flush(fixture);
+    component.selectResource(RESOURCES[0]);
+    component.openCreateForm();
+    fixture.detectChanges();
+
+    expect(component.assignmentForm.contains('assignedHours')).toBe(false);
+    expect(host.querySelector('#assignedHours')).toBeNull();
+    expect(host.textContent).toContain('Allocation Calendar');
+  });
+
+  it('creates, edits and copies assignment shells without writing derived hours', async () => {
+    const { fixture, component, apiStub } = setup({ assignments: ASSIGNMENTS, requests: REQUESTS });
+    await flush(fixture);
+    component.selectResource(RESOURCES[0]);
+
+    component.openCreateForm();
+    component.assignmentForm.patchValue({ requestId: 'q1' });
+    component.saveAssignment();
+    expect(apiStub.createAssignment).toHaveBeenCalledWith({ requestId: 'q1', resourceId: 'd1' });
+
+    component.openEditForm(ASSIGNMENTS[0]);
+    component.saveAssignment();
+    expect(apiStub.updateAssignment).toHaveBeenCalledWith('a1', { requestId: 'q1', resourceId: 'd1' });
+
+    component.copyAssignment(ASSIGNMENTS[0]);
+    component.pasteAssignment();
+    expect(apiStub.createAssignment).toHaveBeenLastCalledWith({ requestId: 'q1', resourceId: 'd1' });
+    for (const [payload] of apiStub.createAssignment.mock.calls) {
+      expect(payload).not.toHaveProperty('assignedHours');
+    }
   });
 });
