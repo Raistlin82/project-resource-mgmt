@@ -388,18 +388,23 @@ export class AllocationApprovalsComponent {
 
   /**
    * Distinct People Managers actually present among the (unfiltered) feed
-   * rows, name-sorted. A manager's display name is resolved by looking for
-   * their OWN row in the same feed (`resourceId === managerId`) — no separate
-   * fetch — falling back to the raw id on the (typical) case where the
-   * manager themselves has no row here (`reportsClosure`/the feed's own scope
-   * lists reports, not the manager).
+   * rows, name-sorted. D (Task 8, round 3): the display name is now served
+   * directly as `row.managerName` (resolved server-side from the resourceById
+   * map the handler already builds) — an EARLIER version of this resolved the
+   * name by looking for the manager's OWN row in the same feed
+   * (`resourceId === managerId`), which almost never exists (a feed lists a
+   * manager's REPORTS, not the manager themselves), so that approach fell
+   * back to a bare id in the common case — visibly broken to the approver.
+   * The `?? id` fallback below is kept only as a last resort for a manager
+   * whose resource record has genuinely vanished; it should be unreachable
+   * in normal operation now.
    */
   managerFilterOptions = computed<{ id: string; name: string }[]>(() => {
     const rows = this.feed().rows;
     const ids = new Set(rows.map(r => r.managerId).filter((id): id is string => !!id));
-    const nameById = new Map(rows.map(r => [r.resourceId, r.resourceName]));
+    const nameByManagerId = new Map(rows.filter(r => r.managerId !== undefined).map(r => [r.managerId as string, r.managerName]));
     return [...ids]
-      .map(id => ({ id, name: nameById.get(id) ?? id }))
+      .map(id => ({ id, name: nameByManagerId.get(id) ?? id }))
       .sort((a, b) => a.name.localeCompare(b.name));
   });
 

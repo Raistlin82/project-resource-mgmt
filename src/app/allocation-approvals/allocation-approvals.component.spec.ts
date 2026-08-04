@@ -157,37 +157,31 @@ describe('AllocationApprovalsComponent', () => {
     ];
 
     /**
-     * Jane Doe (Backend, two levels under Engineering, manager m1) and John
-     * Miller (Consulting directly, manager m2) — John carries the sole pending
-     * item, so the KPI-consistency test below has something to lose when the
-     * capability filter excludes him. `organization` now lives directly on
-     * the row (server-populated, round 2) — no separate resources fixture.
-     * Mona/Nora are the two managers' OWN rows in the same feed (no org, no
-     * items, no manager of their own) — they exist purely so
-     * `managerFilterOptions` can resolve a display name via self-reference,
-     * exactly like the deleted client-side join used to via a second fetch.
+     * Jane Doe (Backend, two levels under Engineering, manager m1/"Mona
+     * Manager") and John Miller (Consulting directly, manager m2/"Nora
+     * Manager") — John carries the sole pending item, so the KPI-consistency
+     * test below has something to lose when the capability filter excludes
+     * him. `organization` AND `managerName` now live directly on the row
+     * (server-populated, rounds 2 and 3) — no separate resources fixture, and
+     * no synthetic "manager's own row" needed: a real feed almost never
+     * contains one (it lists a manager's REPORTS, not the manager), so the
+     * server resolves the name once, from the resource record it already has,
+     * rather than the client hunting for a self-reference that is usually
+     * absent.
      */
     const ORG_FEED: AllocationApprovalFeed = {
       months: ['2026-09'],
       rows: [
         {
-          resourceId: 'r10', resourceName: 'Jane Doe', managerId: 'm1', kind: 'internal', contractHoursPerDay: 8,
+          resourceId: 'r10', resourceName: 'Jane Doe', managerId: 'm1', managerName: 'Mona Manager', kind: 'internal', contractHoursPerDay: 8,
           targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 100 }, items: [],
           organization: 'Backend',
         },
         {
-          resourceId: 'r11', resourceName: 'John Miller', managerId: 'm2', kind: 'internal', contractHoursPerDay: 8,
+          resourceId: 'r11', resourceName: 'John Miller', managerId: 'm2', managerName: 'Nora Manager', kind: 'internal', contractHoursPerDay: 8,
           targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 50 },
           items: [{ assignmentMonthId: 'A11:2026-09', assignmentId: 'A11', month: '2026-09', status: 'Requested', requestId: '11', projectName: 'Consulting Gig', hours: 50, approvalId: 'AR11' }],
           organization: 'Consulting',
-        },
-        {
-          resourceId: 'm1', resourceName: 'Mona Manager', kind: 'internal', contractHoursPerDay: 8,
-          targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 0 }, items: [],
-        },
-        {
-          resourceId: 'm2', resourceName: 'Nora Manager', kind: 'internal', contractHoursPerDay: 8,
-          targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 0 }, items: [],
         },
       ],
     };
@@ -268,6 +262,29 @@ describe('AllocationApprovalsComponent', () => {
       const rows = host.querySelectorAll('[data-test="approval-row"]');
       expect(rows.length).toBe(1);
       expect(rows[0].textContent).toContain('Jane Doe');
+    });
+
+    it('shows the manager NAME in the dropdown option, not the raw resource id (D, Task 8 round 3)', async () => {
+      // Regression: a feed lists a manager's REPORTS, not the manager
+      // themselves, so there is (almost) never a row to resolve a name from
+      // client-side — the server now serves `managerName` directly on each
+      // row. Neither Mona Manager (m1) nor Nora Manager (m2) has a row of
+      // their own anywhere in this fixture; if `managerName` were dropped
+      // (or the component reverted to the old feed-self-reference lookup),
+      // this would show the bare ids 'm1'/'m2' instead.
+      const { fixture } = setup(true, { orgNodes: ORG_NODES, feed: ORG_FEED });
+      await flush(fixture);
+
+      const host = fixture.nativeElement as HTMLElement;
+      const options = [...host.querySelectorAll<HTMLOptionElement>('[data-test="manager-filter"] option')];
+      const forM1 = options.find(o => o.value === 'm1');
+      const forM2 = options.find(o => o.value === 'm2');
+      expect(forM1?.textContent?.trim()).toBe('Mona Manager');
+      expect(forM2?.textContent?.trim()).toBe('Nora Manager');
+      // The failure mode this guards against, spelled out: neither option's
+      // rendered text is the raw id it's keyed by.
+      expect(forM1?.textContent?.trim()).not.toBe('m1');
+      expect(forM2?.textContent?.trim()).not.toBe('m2');
     });
 
     it('composes two dimension filters (capability AND manager) — the intersection, not the union', async () => {

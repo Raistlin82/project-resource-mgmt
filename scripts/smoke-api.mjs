@@ -1583,6 +1583,19 @@ async function checkMonthlyApproval() {
     julieRow !== undefined && julieRow.organization === 'Engineering',
     `row=${JSON.stringify(julieRow)}`);
 
+  // D (Task 8, round 3): `AllocationApprovalRow` now ALSO carries
+  // `managerName`, resolved server-side from the SAME resourceById map the
+  // handler already built for this row — no extra I/O. This is what lets the
+  // People Manager filter's dropdown show a real name instead of a bare id:
+  // a feed lists a manager's REPORTS, not the manager themselves, so a
+  // client-side lookup for "the manager's own row in this same feed" almost
+  // never finds one. Resource '2' (John Miller) is seeded with managerId '1'
+  // (Julie Armstrong) and has an assignment spanning this window.
+  const johnRow = (feed.body?.rows || []).find(r => r.resourceId === '2');
+  check("D feed rows carry the manager's name (Task 8 round 3) — no client-side lookup needed",
+    johnRow !== undefined && johnRow.managerId === '1' && johnRow.managerName === 'Julie Armstrong',
+    `row=${JSON.stringify(johnRow)}`);
+
   const pendingOnly = await req('GET', '/allocation-approvals?from=2026-05&to=2026-09&status=Requested');
   const allPending = (pendingOnly.body?.rows || []).every(r => (r.items || []).every(i => i.status === 'Requested'));
   check('B3 feed status filter narrows to pending months', pendingOnly.status === 200 && allPending, `status=${pendingOnly.status}`);

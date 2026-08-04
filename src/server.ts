@@ -3287,6 +3287,12 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
         // capability/practice/competence dimensions without a second
         // getResources() catalogue fetch — `resource` is already in hand here.
         organization: resource.organization,
+        // D (Task 8, round 3): resolved from the SAME resourceById map built
+        // above for this very handler — no extra I/O — so the People Manager
+        // filter's option list can show a real name instead of a bare id (the
+        // feed lists a manager's REPORTS, so the manager rarely has a row of
+        // their own to resolve a name from client-side).
+        managerName: resource.managerId !== undefined ? resourceById.get(resource.managerId)?.name : undefined,
       };
       rowsByResource.set(resource.id, row);
     }

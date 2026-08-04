@@ -268,6 +268,17 @@ export interface AllocationApprovalRow {
    * build this row. Absent when the resource has no organization.
    */
   organization?: string;
+  /**
+   * D (Task 8, round 3): the display name of `managerId`'s resource, resolved
+   * server-side from the SAME `resourceById` map the handler already builds
+   * for this row — no extra I/O. Lets the People Manager filter's option list
+   * show a real name rather than a bare id: the feed lists a manager's
+   * REPORTS, not the manager themselves, so the manager typically has no row
+   * of their own here to resolve a name from client-side. Absent only when
+   * `managerId` is absent, or points at a resource record that has genuinely
+   * vanished (should not happen in normal operation).
+   */
+  managerName?: string;
 }
 
 /** Envelope returned by `GET /allocation-approvals` (B3): the People Manager's
