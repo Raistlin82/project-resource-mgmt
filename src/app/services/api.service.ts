@@ -260,6 +260,14 @@ export interface AllocationApprovalRow {
   targetHours: Record<string, number>;
   totalHours: Record<string, number>;
   items: AllocationApprovalItem[];
+  /**
+   * D (Task 8): the resource's `organization` (resource-org NAME), carried
+   * straight from `Resource.organization` so the client can derive the
+   * capability/practice/competence dimensions via `dimensionsOf` without a
+   * second catalogue fetch — the handler already loads the resource list to
+   * build this row. Absent when the resource has no organization.
+   */
+  organization?: string;
 }
 
 /** Envelope returned by `GET /allocation-approvals` (B3): the People Manager's

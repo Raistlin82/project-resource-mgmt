@@ -3283,6 +3283,10 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
         targetHours: Object.fromEntries(months.map(mo => [mo, monthlyTargetHours(cap, mo, holidays)])),
         totalHours: { ...(totalsByResource.get(resource.id) ?? Object.fromEntries(months.map(mo => [mo, 0]))) },
         items: [],
+        // D (Task 8): carried straight through so the client can derive the
+        // capability/practice/competence dimensions without a second
+        // getResources() catalogue fetch — `resource` is already in hand here.
+        organization: resource.organization,
       };
       rowsByResource.set(resource.id, row);
     }

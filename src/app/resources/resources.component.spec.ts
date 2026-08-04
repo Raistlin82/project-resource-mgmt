@@ -265,5 +265,49 @@ describe('ResourcesComponent', () => {
       fixture.detectChanges();
       expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['10']);
     });
+
+    it('composes two dimension filters (capability AND manager) — the intersection, not the union', async () => {
+      // Jane Doe (Backend/Engineering, manager m1) and John Miller
+      // (Consulting, manager m2) sit on DISJOINT capability/manager pairs. An
+      // OR-composition bug would keep BOTH once a second filter is added
+      // (either one matches); the correct AND keeps NEITHER.
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+
+      fixture.componentInstance.capabilityFilter.set('Engineering');
+      fixture.detectChanges();
+      expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['10']); // Jane alone
+
+      fixture.componentInstance.managerFilter.set('m2');
+      fixture.detectChanges();
+      // AND, not OR: a future edit that silently OR'd the two predicates
+      // would show both (Jane via capability, John via manager) instead of
+      // the correct empty intersection.
+      expect(fixture.componentInstance.filteredResources()).toEqual([]);
+
+      fixture.componentInstance.capabilityFilter.set('');
+      fixture.detectChanges();
+      expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['11']); // manager=m2 alone is John
+    });
+
+    it('composes a dimension filter with the pre-existing search filter — the intersection, not either alone', async () => {
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+
+      fixture.componentInstance.search.set('Doe');
+      fixture.detectChanges();
+      expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['10']); // Jane Doe alone
+
+      fixture.componentInstance.capabilityFilter.set('Consulting');
+      fixture.detectChanges();
+      // AND, not OR: search='Doe' matches only Jane (organization Backend),
+      // and capability='Consulting' matches only John — their intersection
+      // is empty, not the 2-resource union an OR-composition bug would produce.
+      expect(fixture.componentInstance.filteredResources()).toEqual([]);
+
+      fixture.componentInstance.search.set('');
+      fixture.detectChanges();
+      expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['11']); // capability alone is John
+    });
   });
 });

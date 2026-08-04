@@ -1569,6 +1569,20 @@ async function checkMonthlyApproval() {
   check('B3 feed rows carry per-month items', !!withItems && typeof withItems.items[0].assignmentMonthId === 'string', `rows=${feed.body?.rows?.length}`);
   check('B3 feed exposes the monthly target', !!withItems && typeof withItems.targetHours === 'object', 'targetHours missing');
 
+  // D (Task 8, round 2): `AllocationApprovalRow` now carries `organization`
+  // straight from the server — populated from the SAME resource record the
+  // handler already loads to build the row — so the client's capability/
+  // practice/competence filters can call `dimensionsOf` on it directly with
+  // NO second getResources() catalogue fetch (that second fetch was deleted
+  // specifically because it could race the org-tree load and silently show
+  // "nothing to approve" instead of "not loaded yet"). Resource '1' (Julie
+  // Armstrong) is seeded on 'Engineering' with assignments spanning this
+  // window, so her row must carry it.
+  const julieRow = (feed.body?.rows || []).find(r => r.resourceId === '1');
+  check("D feed rows carry the resource's organization (Task 8) — no client-side join needed",
+    julieRow !== undefined && julieRow.organization === 'Engineering',
+    `row=${JSON.stringify(julieRow)}`);
+
   const pendingOnly = await req('GET', '/allocation-approvals?from=2026-05&to=2026-09&status=Requested');
   const allPending = (pendingOnly.body?.rows || []).every(r => (r.items || []).every(i => i.status === 'Requested'));
   check('B3 feed status filter narrows to pending months', pendingOnly.status === 200 && allPending, `status=${pendingOnly.status}`);

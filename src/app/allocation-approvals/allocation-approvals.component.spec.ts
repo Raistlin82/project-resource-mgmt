@@ -2,7 +2,7 @@ import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
 import { AllocationApprovalsComponent } from './allocation-approvals.component';
-import { AllocationApprovalFeed, ApiService, Resource, ResourceOrganization } from '../services/api.service';
+import { AllocationApprovalFeed, ApiService, ResourceOrganization } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 
 /** Two resources over one month: Ada has a pending month, Bob only approved work. */
@@ -22,15 +22,19 @@ const FEED: AllocationApprovalFeed = {
   ],
 };
 
-function setup(ready: boolean, overrides: { resources?: Resource[]; orgNodes?: ResourceOrganization[]; feed?: AllocationApprovalFeed } = {}) {
-  const getAllocationApprovals = vi.fn(() => of(overrides.feed ?? FEED));
-  // D (Task 8): `AllocationApprovalRow` carries no `organization` — the capability/
-  // practice/competence filters resolve it via a client-side join against the
-  // resources catalog (getResources), same as the org tree comes from
-  // getResourceOrganizations. Both default empty so existing feed-only specs are unaffected.
-  const getResources = vi.fn(() => of(overrides.resources ?? []));
+function setup(ready: boolean, overrides: {
+  orgNodes?: ResourceOrganization[];
+  feed?: AllocationApprovalFeed;
+  /** For status-aware fixtures: supply the whole mock instead of a static feed. */
+  getAllocationApprovals?: ReturnType<typeof vi.fn>;
+} = {}) {
+  // D (Task 8, round 2): `AllocationApprovalRow` now carries `organization`
+  // straight from the server (the handler already has the resource record in
+  // hand when it builds the row) — there is no second getResources() load to
+  // stub here any more. Only the org tree (getResourceOrganizations) remains.
+  const getAllocationApprovals = overrides.getAllocationApprovals ?? vi.fn(() => of(overrides.feed ?? FEED));
   const getResourceOrganizations = vi.fn(() => of(overrides.orgNodes ?? []));
-  const apiStub = { getAllocationApprovals, getResources, getResourceOrganizations } as unknown as ApiService;
+  const apiStub = { getAllocationApprovals, getResourceOrganizations } as unknown as ApiService;
   // `role`/`userId` are read by the embedded ApprovalModalComponent's
   // decidability check; an admin can decide any step, so the modal cases below
   // exercise the modal itself rather than the gate.
@@ -152,29 +156,38 @@ describe('AllocationApprovalsComponent', () => {
       { id: '6', name: 'Backend', description: '', costCenters: [], level: 'competence', parentId: '5' },
     ];
 
-    /** `AllocationApprovalRow` carries no `organization` of its own — the
-     *  component resolves it via a client-side join against `getResources()`. */
-    const ORG_RESOURCES: Resource[] = [
-      { id: 'r10', name: 'Jane Doe', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal', organization: 'Backend', managerId: 'm1' },
-      { id: 'r11', name: 'John Miller', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal', organization: 'Consulting', managerId: 'm2' },
-      { id: 'm1', name: 'Mona Manager', role: 'Delivery Lead', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal' },
-      { id: 'm2', name: 'Nora Manager', role: 'Delivery Lead', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal' },
-    ];
-
-    /** Jane Doe (Backend, two levels under Engineering) and John Miller (Consulting
-     *  directly) — John carries the sole pending item, so the KPI-consistency test
-     *  below has something to lose when the capability filter excludes him. */
+    /**
+     * Jane Doe (Backend, two levels under Engineering, manager m1) and John
+     * Miller (Consulting directly, manager m2) — John carries the sole pending
+     * item, so the KPI-consistency test below has something to lose when the
+     * capability filter excludes him. `organization` now lives directly on
+     * the row (server-populated, round 2) — no separate resources fixture.
+     * Mona/Nora are the two managers' OWN rows in the same feed (no org, no
+     * items, no manager of their own) — they exist purely so
+     * `managerFilterOptions` can resolve a display name via self-reference,
+     * exactly like the deleted client-side join used to via a second fetch.
+     */
     const ORG_FEED: AllocationApprovalFeed = {
       months: ['2026-09'],
       rows: [
         {
           resourceId: 'r10', resourceName: 'Jane Doe', managerId: 'm1', kind: 'internal', contractHoursPerDay: 8,
           targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 100 }, items: [],
+          organization: 'Backend',
         },
         {
           resourceId: 'r11', resourceName: 'John Miller', managerId: 'm2', kind: 'internal', contractHoursPerDay: 8,
           targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 50 },
           items: [{ assignmentMonthId: 'A11:2026-09', assignmentId: 'A11', month: '2026-09', status: 'Requested', requestId: '11', projectName: 'Consulting Gig', hours: 50, approvalId: 'AR11' }],
+          organization: 'Consulting',
+        },
+        {
+          resourceId: 'm1', resourceName: 'Mona Manager', kind: 'internal', contractHoursPerDay: 8,
+          targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 0 }, items: [],
+        },
+        {
+          resourceId: 'm2', resourceName: 'Nora Manager', kind: 'internal', contractHoursPerDay: 8,
+          targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 0 }, items: [],
         },
       ],
     };
@@ -182,7 +195,7 @@ describe('AllocationApprovalsComponent', () => {
     it('filters the list by capability', async () => {
       // Fixture: one resource on 'Backend' (competence under Platform under Engineering),
       // one on 'Consulting' (a capability of its own).
-      const { fixture } = setup(true, { resources: ORG_RESOURCES, orgNodes: ORG_NODES, feed: ORG_FEED });
+      const { fixture } = setup(true, { orgNodes: ORG_NODES, feed: ORG_FEED });
       await flush(fixture);
 
       fixture.componentInstance.capabilityFilter.set('Engineering');
@@ -198,7 +211,7 @@ describe('AllocationApprovalsComponent', () => {
       // rows() draws its grid from, not the raw unfiltered feed — otherwise the
       // KPI strip can show a pending month for a capability the grid has just
       // filtered down to zero resources for.
-      const { fixture } = setup(true, { resources: ORG_RESOURCES, orgNodes: ORG_NODES, feed: ORG_FEED });
+      const { fixture } = setup(true, { orgNodes: ORG_NODES, feed: ORG_FEED });
       await flush(fixture);
       const host = fixture.nativeElement as HTMLElement;
 
@@ -214,7 +227,7 @@ describe('AllocationApprovalsComponent', () => {
     });
 
     it('offers only the dimensions that exist in the tree', async () => {
-      const { fixture } = setup(true, { resources: ORG_RESOURCES, orgNodes: ORG_NODES, feed: ORG_FEED });
+      const { fixture } = setup(true, { orgNodes: ORG_NODES, feed: ORG_FEED });
       await flush(fixture);
       const host = fixture.nativeElement as HTMLElement;
       const opts = [...host.querySelectorAll<HTMLOptionElement>('[data-test="capability-filter"] option')]
@@ -223,7 +236,7 @@ describe('AllocationApprovalsComponent', () => {
     });
 
     it('filters the list by practice and by competence', async () => {
-      const { fixture } = setup(true, { resources: ORG_RESOURCES, orgNodes: ORG_NODES, feed: ORG_FEED });
+      const { fixture } = setup(true, { orgNodes: ORG_NODES, feed: ORG_FEED });
       await flush(fixture);
       const host = fixture.nativeElement as HTMLElement;
 
@@ -242,7 +255,7 @@ describe('AllocationApprovalsComponent', () => {
     });
 
     it('filters the list by People Manager and offers only the managers present', async () => {
-      const { fixture } = setup(true, { resources: ORG_RESOURCES, orgNodes: ORG_NODES, feed: ORG_FEED });
+      const { fixture } = setup(true, { orgNodes: ORG_NODES, feed: ORG_FEED });
       await flush(fixture);
 
       const host = fixture.nativeElement as HTMLElement;
@@ -255,6 +268,88 @@ describe('AllocationApprovalsComponent', () => {
       const rows = host.querySelectorAll('[data-test="approval-row"]');
       expect(rows.length).toBe(1);
       expect(rows[0].textContent).toContain('Jane Doe');
+    });
+
+    it('composes two dimension filters (capability AND manager) — the intersection, not the union', async () => {
+      // Jane Doe (Backend/Engineering, manager m1) and John Miller
+      // (Consulting, manager m2) sit on DISJOINT capability/manager pairs.
+      // An OR-composition bug would keep BOTH once a second filter is added
+      // (either one matches); the correct AND keeps NEITHER.
+      const { fixture } = setup(true, { orgNodes: ORG_NODES, feed: ORG_FEED });
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const rows = () => host.querySelectorAll('[data-test="approval-row"]');
+
+      fixture.componentInstance.capabilityFilter.set('Engineering');
+      fixture.detectChanges();
+      expect(rows().length).toBe(1); // Jane Doe alone
+
+      fixture.componentInstance.managerFilter.set('m2');
+      fixture.detectChanges();
+      // AND, not OR: capability=Engineering matches only Jane; manager=m2
+      // matches only John. Their intersection is empty — a future edit that
+      // silently OR'd the two predicates together would show both (2 rows)
+      // instead of the correct 0.
+      expect(rows().length).toBe(0);
+
+      fixture.componentInstance.capabilityFilter.set('');
+      fixture.detectChanges();
+      expect(rows().length).toBe(1); // manager=m2 alone is John Miller
+      expect(rows()[0].textContent).toContain('John Miller');
+    });
+
+    it('composes a dimension filter with the pre-existing status filter — the intersection, not either alone', async () => {
+      // Status is a FETCH parameter here (server-side), not an in-memory
+      // predicate like the dimension filters — this locks in that the two
+      // still compose correctly: switching status re-fetches a different
+      // feed, and the capability filter must keep narrowing whatever comes
+      // back, rather than one silently overriding the other.
+      const FEED_REQUESTED: AllocationApprovalFeed = {
+        months: ['2026-09'],
+        rows: [
+          {
+            resourceId: 'r20', resourceName: 'Priya Pending', managerId: 'm3', kind: 'internal', contractHoursPerDay: 8,
+            targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 80 }, organization: 'Engineering',
+            items: [{ assignmentMonthId: 'A20:2026-09', assignmentId: 'A20', month: '2026-09', status: 'Requested', requestId: '20', projectName: 'Nebula', hours: 80, approvalId: 'AR20' }],
+          },
+        ],
+      };
+      const FEED_ALL: AllocationApprovalFeed = {
+        months: ['2026-09'],
+        rows: [
+          ...FEED_REQUESTED.rows,
+          {
+            resourceId: 'r21', resourceName: 'Sam Settled', managerId: 'm3', kind: 'internal', contractHoursPerDay: 8,
+            targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 176 }, organization: 'Consulting',
+            items: [{ assignmentMonthId: 'A21:2026-09', assignmentId: 'A21', month: '2026-09', status: 'Allocated', requestId: '21', projectName: 'Orion', hours: 176 }],
+          },
+        ],
+      };
+      const getAllocationApprovals = vi.fn((_from?: string, _to?: string, status?: string) =>
+        of(status === 'Requested' ? FEED_REQUESTED : FEED_ALL));
+      const { fixture } = setup(true, { orgNodes: ORG_NODES, getAllocationApprovals });
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const rows = () => host.querySelectorAll('[data-test="approval-row"]');
+
+      // Default status is 'Requested' (Pending) — only Priya is ever fetched.
+      expect(rows().length).toBe(1);
+      expect(rows()[0].textContent).toContain('Priya Pending');
+
+      // Switch to 'All': the fetch itself now returns BOTH resources.
+      const statusSelect = host.querySelector('[data-test="status-filter"]') as HTMLSelectElement;
+      statusSelect.value = 'all';
+      statusSelect.dispatchEvent(new Event('change'));
+      await flush(fixture);
+      expect(rows().length).toBe(2);
+
+      // Adding the Engineering capability filter on top must narrow it BACK
+      // to just Priya — the AND of "status=All" and "capability=Engineering",
+      // not either alone (2 resources, or the un-narrowed all-statuses feed).
+      fixture.componentInstance.capabilityFilter.set('Engineering');
+      fixture.detectChanges();
+      expect(rows().length).toBe(1);
+      expect(rows()[0].textContent).toContain('Priya Pending');
     });
   });
 });

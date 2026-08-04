@@ -11,7 +11,7 @@ import { DecimalPipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { of } from 'rxjs';
 import { rxResource } from '@angular/core/rxjs-interop';
-import { AllocationApprovalFeed, AllocationApprovalRow, ApiService, Resource, ResourceKind, ResourceOrganization } from '../services/api.service';
+import { AllocationApprovalFeed, AllocationApprovalRow, ApiService, ResourceKind, ResourceOrganization } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { ListStateComponent } from '../shared/list-state.component';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
@@ -361,7 +361,19 @@ export class AllocationApprovalsComponent {
   competenceFilter = signal('');
   managerFilter = signal('');
 
-  // The org tree (D). Gated on authReady like every other principal-gated read here.
+  // The org tree (D). Gated on authReady like every other principal-gated read
+  // here. This is the ONLY extra read this task needs: `AllocationApprovalRow`
+  // now carries `organization` straight from the server (populated from the
+  // SAME resource record the handler already loads to build the row), so
+  // `dimensionsOf` reads `row.organization` directly below — no second
+  // getResources() catalogue fetch, and therefore no client-side join to race
+  // against `orgsRes`. (An earlier version of this fix DID add a second
+  // `resourcesRes` load purely to recover `organization` — that was wrong: its
+  // `organizationByResourceId` map could still be empty while `orgsRes` had
+  // already resolved and `capabilityOptions` was already offering real values,
+  // so picking a capability in that window silently filtered every row out —
+  // "nothing to approve" when the truth was "not loaded yet". Deleting the
+  // second fetch removes the race outright rather than guarding it.)
   private orgsRes = rxResource<ResourceOrganization[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getResourceOrganizations() : of<ResourceOrganization[]>([])),
@@ -369,26 +381,23 @@ export class AllocationApprovalsComponent {
   });
   private orgNodes = this.orgsRes.value;
 
-  // `AllocationApprovalRow` carries no `organization` of its own (only
-  // `managerId`, already on the row) — resolve it via a client-side join
-  // against the resources catalog, gated the same way.
-  private resourcesRes = rxResource<Resource[], boolean>({
-    params: () => this.auth.authReady(),
-    stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
-    defaultValue: [] as Resource[],
-  });
-  private allResources = this.resourcesRes.value;
-  private organizationByResourceId = computed(() => new Map(this.allResources().map(r => [r.id, r.organization])));
-
   /** Option lists filtered by level, in tree order (node names are unique across the whole tree). */
   capabilityOptions = computed<string[]>(() => this.orgNodes().filter(n => n.level === 'capability').map(n => n.name));
   practiceOptions = computed<string[]>(() => this.orgNodes().filter(n => n.level === 'practice').map(n => n.name));
   competenceOptions = computed<string[]>(() => this.orgNodes().filter(n => n.level === 'competence').map(n => n.name));
 
-  /** Distinct People Managers actually present among the (unfiltered) feed rows, name-sorted. */
+  /**
+   * Distinct People Managers actually present among the (unfiltered) feed
+   * rows, name-sorted. A manager's display name is resolved by looking for
+   * their OWN row in the same feed (`resourceId === managerId`) — no separate
+   * fetch — falling back to the raw id on the (typical) case where the
+   * manager themselves has no row here (`reportsClosure`/the feed's own scope
+   * lists reports, not the manager).
+   */
   managerFilterOptions = computed<{ id: string; name: string }[]>(() => {
-    const ids = new Set(this.feed().rows.map(r => r.managerId).filter((id): id is string => !!id));
-    const nameById = new Map(this.allResources().map(r => [r.id, r.name]));
+    const rows = this.feed().rows;
+    const ids = new Set(rows.map(r => r.managerId).filter((id): id is string => !!id));
+    const nameById = new Map(rows.map(r => [r.resourceId, r.resourceName]));
     return [...ids]
       .map(id => ({ id, name: nameById.get(id) ?? id }))
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -458,10 +467,10 @@ export class AllocationApprovalsComponent {
    * The feed's raw rows narrowed by the capability/practice/competence/People
    * Manager filters — shared by `rows` (the grid) and `pendingMonths` (the KPI
    * strip) so both stay consistent with the filter, not just the grid. The org
-   * dimensions are derived through `dimensionsOf` from the row's resolved
-   * `organization` (joined in from `allResources`, since the row itself
-   * carries none) — never a raw equality check, so a capability filter also
-   * matches a resource attached BELOW it (e.g. a competence two levels down).
+   * dimensions are derived through `dimensionsOf` from `row.organization`
+   * (server-populated on `AllocationApprovalRow` directly — no client-side
+   * join) — never a raw equality check, so a capability filter also matches a
+   * resource attached BELOW it (e.g. a competence two levels down).
    */
   private filteredFeedRows = computed<AllocationApprovalRow[]>(() => {
     const cap = this.capabilityFilter();
@@ -469,9 +478,8 @@ export class AllocationApprovalsComponent {
     const com = this.competenceFilter();
     const mgr = this.managerFilter();
     const nodes = this.orgNodes();
-    const orgByResource = this.organizationByResourceId();
     return this.feed().rows.filter(r => {
-      const dims = dimensionsOf({ id: r.resourceId, organization: orgByResource.get(r.resourceId) }, nodes);
+      const dims = dimensionsOf({ id: r.resourceId, organization: r.organization }, nodes);
       if (cap && dims.capability !== cap) return false;
       if (pra && dims.practice !== pra) return false;
       if (com && dims.competence !== com) return false;
