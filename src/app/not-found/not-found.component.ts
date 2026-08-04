@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component } from '@angular/core';
+import { ChangeDetectionStrategy, Component, RESPONSE_INIT, inject } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import { MatIconModule } from '@angular/material/icon';
 
@@ -19,4 +19,10 @@ import { MatIconModule } from '@angular/material/icon';
     </div>
   `,
 })
-export class NotFoundComponent {}
+export class NotFoundComponent {
+  private readonly responseInit = inject(RESPONSE_INIT, { optional: true });
+
+  constructor() {
+    if (this.responseInit) this.responseInit.status = 404;
+  }
+}
