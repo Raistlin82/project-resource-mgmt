@@ -758,11 +758,28 @@ export class ApprovalModalComponent {
     const org = this.orgFilter();
     const q = this.personFilter().trim().toLowerCase();
     const nodes = this.orgNodes();
+    // REGRESSION (review round 1): `resources()` and `orgNodes()` are two
+    // INDEPENDENT rxResources, nothing serializes them, and the Substitute
+    // button is gated only on `line.row.kind === 'dummy'` while `defaultOrgFor`
+    // reads only `resources()` — so the picker can open with a NON-EMPTY
+    // `orgFilter` while the tree is still in flight. `dimensionsOf(r, [])`
+    // returns `{}` for every candidate in that window, which would fail
+    // everyone shut: the worst false negative on this screen ("nobody can
+    // cover this"), and one the pre-fix exact-name code never had, since it
+    // never depended on the tree at all. That window is a TRANSIENT loading
+    // state, not "no nodes configured" — the case spec §4 deliberately fails
+    // closed on is a resource attached to a node that genuinely does not
+    // exist, which is a data question, not a timing one. `isLoading()` is read
+    // directly (rather than inferred from `nodes.length === 0`, which cannot
+    // tell "still loading" apart from "genuinely empty tree") so the org
+    // predicate is simply skipped — same as an empty filter — until the tree
+    // has actually resolved.
+    const treeLoading = this.orgNodesRes.isLoading();
     return this.eligibleTargets().filter(r => {
       // The filter names ONE node, but a candidate anywhere BENEATH it belongs to
       // the same branch: compare against the DERIVED dimensions, not the stored
       // name, so a dummy on a capability still offers the practices under it.
-      if (org) {
+      if (org && !treeLoading) {
         const dims = dimensionsOf(r, nodes);
         if (dims.capability !== org && dims.practice !== org && dims.competence !== org) return false;
       }
