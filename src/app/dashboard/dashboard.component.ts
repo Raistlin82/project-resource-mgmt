@@ -106,18 +106,56 @@ interface ProjectCommandRow {
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-2 pt-1">
-          <a routerLink="/reporting" class="command-button secondary">
-            <mat-icon class="text-[20px] w-[20px] h-[20px]">insights</mat-icon>
-            Reporting
-          </a>
-          <button type="button" (click)="onNewRequest()" class="command-button">
-            <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon>
-            New Request
-          </button>
+          @if (canViewPortfolioDashboard()) {
+            <a routerLink="/reporting" class="command-button secondary">
+              <mat-icon class="text-[20px] w-[20px] h-[20px]">insights</mat-icon>
+              Reporting
+            </a>
+          }
+          @if (canManageStaffing()) {
+            <button type="button" (click)="onNewRequest()" class="command-button">
+              <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon>
+              New Request
+            </button>
+          }
         </div>
       </header>
 
-      @if (hasError()) {
+      @if (!canViewPortfolioDashboard()) {
+        <section class="command-card p-6 sm:p-8" aria-labelledby="workspace-title">
+          <div class="command-eyebrow">Role-aware home</div>
+          <h2 id="workspace-title" class="mt-2 font-display text-2xl font-bold text-ink">My workspace</h2>
+          <p class="mt-2 max-w-2xl text-sm text-ink-muted">
+            Open the areas available to your role. Portfolio financials are shown only to authorized finance readers.
+          </p>
+          <div class="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <a routerLink="/profile" class="command-card-muted p-5 hover:ring-1 hover:ring-accent">
+              <mat-icon class="text-accent-text">person</mat-icon>
+              <div class="mt-3 font-bold text-ink">My Profile</div>
+              <p class="mt-1 text-sm text-ink-muted">Maintain your skills, roles and experience.</p>
+            </a>
+            <a routerLink="/assignments" class="command-card-muted p-5 hover:ring-1 hover:ring-accent">
+              <mat-icon class="text-accent-text">event_note</mat-icon>
+              <div class="mt-3 font-bold text-ink">My Assignments</div>
+              <p class="mt-1 text-sm text-ink-muted">Review your schedule and submit actual time.</p>
+            </a>
+            @if (canManageStaffing()) {
+              <a routerLink="/requests" class="command-card-muted p-5 hover:ring-1 hover:ring-accent">
+                <mat-icon class="text-accent-text">assignment</mat-icon>
+                <div class="mt-3 font-bold text-ink">Resource Requests</div>
+                <p class="mt-1 text-sm text-ink-muted">Manage staffing demand and allocations.</p>
+              </a>
+            }
+            @if (canReadCommercial()) {
+              <a routerLink="/orders" class="command-card-muted p-5 hover:ring-1 hover:ring-accent">
+                <mat-icon class="text-accent-text">receipt_long</mat-icon>
+                <div class="mt-3 font-bold text-ink">Commercial</div>
+                <p class="mt-1 text-sm text-ink-muted">Open contracts, customers and orders.</p>
+              </a>
+            }
+          </div>
+        </section>
+      } @else if (hasError()) {
         <!-- Whole-page fetch failure: never contradict the failure with zero KPIs. -->
         <app-list-state
           [error]="true"
@@ -546,8 +584,8 @@ export class DashboardComponent {
   // are normalised to base currency; empty default => no-op conversion until loaded.
   // Keyed on auth readiness so it (re)runs together with the gated data load.
   private fxRes = rxResource<FxRate[], boolean>({
-    params: () => this.auth.authReady(),
-    stream: ({ params: ready }) => (ready ? this.api.getFxRates() : of<FxRate[]>([])),
+    params: () => this.auth.authReady() && this.auth.canViewPortfolioDashboard(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getFxRates() : of<FxRate[]>([])),
     defaultValue: [],
   });
 
@@ -559,9 +597,9 @@ export class DashboardComponent {
   // and forkJoin's fail-fast then collapsed the entire dashboard to empty. When
   // authReady flips false->true the params change re-runs the stream.
   private dataRes = rxResource<DashboardData, boolean>({
-    params: () => this.auth.authReady(),
-    stream: ({ params: ready }) =>
-      ready
+    params: () => this.auth.authReady() && this.auth.canViewPortfolioDashboard(),
+    stream: ({ params: canLoad }) =>
+      canLoad
         ? forkJoin({
             resources: this.api.getResources(),
             requests: this.api.getRequests(),
@@ -596,6 +634,9 @@ export class DashboardComponent {
 
   private data = this.dataRes.value;
   private fxRates = this.fxRes.value;
+  protected readonly canViewPortfolioDashboard = this.auth.canViewPortfolioDashboard;
+  protected readonly canManageStaffing = this.auth.canManageStaffing;
+  protected readonly canReadCommercial = this.auth.canReadCommercial;
   private financeData = computed<FinanceData>(() => {
     const d = this.data();
     return {
