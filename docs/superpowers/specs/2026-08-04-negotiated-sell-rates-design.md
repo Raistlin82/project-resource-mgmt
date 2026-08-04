@@ -93,12 +93,15 @@ L'alternativa scartata era `validFrom`/`validTo` sulla tariffa, contenuti nel pe
 | Entrambi presenti | 400 |
 | `contractId` che non esiste | 400 |
 | `projectId` che non esiste | 400 |
-| `role` che nessuna risorsa possiede | 400 — un prezzo per un profilo inesistente è un errore di battitura, non una configurazione |
+| `role` che non esiste nel catalogo project-roles | 400 |
+| `currency` vuota (`''`) o non configurata in `/fx-rates` | 400 |
 | Duplicato sulla stessa chiave (`contractId`\|`projectId` + `role` + `currency`) | 400, con l'id del record che esiste già |
 | `billRate` non numerico, negativo o `null` esplicito | 400 |
 | `DELETE` di una tariffa | consentito: i ricavi si ricalcolano dalla precedenza, non ci sono figli |
 
-Sulla nota `null`: `pick()` inoltra un `null` letterale (filtra solo `undefined`), e su una colonna `notNull` questo produce una riga corrotta in-memory e un 500 opaco su Postgres. Il blocco D ha chiuso questa classe per `/resource-organizations` dichiarando i campi obbligatori **una volta** in una lista e rifiutandoli in un solo loop; qui si fa lo stesso dal primo giorno, non dopo tre round di review.
+**Correzione (chiusura del branch):** una prima stesura di questa riga verificava `role` contro le risorse che oggi lo ricoprono (`repos.resources`), respingendo come «errore di battitura» un ruolo che nessuna risorsa possiede ancora. È sbagliato: la tariffa si negozia con il cliente **prima** che qualcuno con quel profilo sia assunto, e il contratto si firma prima dello staffing — quindi l'autorità corretta è il **catalogo `project-roles`** (lo stesso che valida `role`/`requiredRole`/`projectRoles[]` altrove nell'app, via `validateRoleRefs`), non le risorse effettivamente staffate oggi. Resta un 400 solo un ruolo assente da entrambi.
+
+Sulla nota `null`: `pick()` inoltra un `null` letterale (filtra solo `undefined`), e su una colonna `notNull` questo produce una riga corrotta in-memory e un 500 opaco su Postgres. Il blocco D ha chiuso questa classe per `/resource-organizations` dichiarando i campi obbligatori **una volta** in una lista e rifiutandoli in un solo loop; qui si fa lo stesso dal primo giorno, non dopo tre round di review. La stessa lista tratta ora una stringa vuota esplicita (`''`) allo stesso modo di `null` per `role` e `currency`: è la stessa corruzione "svuotato a niente" su una colonna `notNull`, e per `currency` ha una conseguenza concreta — una tariffa con `currency: ''` supera ogni regola sopra e produce una riga che sembra salvata ma che `sellRateFor` (`src/app/services/sell-rate.util.ts`) non legge mai, perché risolve solo tariffe nella valuta base.
 
 **RBAC:** riusare la regola esistente che copre `/customers`, `/contracts`, `/orders`, `/order-lines`, `/billing-plan-items` (`src/server.ts:526` per le mutazioni, `:582` per le letture) — `sales`, `finance`, `delivery-executive`, `admin`. Un delivery manager non negozia prezzi. Aggiungere `/negotiated-rates` a **entrambe** quelle liste, non crearne una nuova.
 

@@ -3780,11 +3780,13 @@ async function checkOrgTreeIntegrity() {
  * bespoke `/negotiated-rates` handlers (src/server.ts, NOT mounted with
  * `crud()`, following the `/resource-organizations` shape exercised above):
  * contractId XOR projectId, FK existence on whichever side is supplied, a role
- * check against roles ACTUALLY held by a resource (not the project-roles
- * catalog — a price for a role nobody holds is a typo, spec §5), same-key
- * uniqueness on (contractId|projectId, role, currency), the numeric guard on
- * billRate, and the pick()-forwards-null class proven again here (spec §5's
- * own callback to the D block's REQUIRED_ORG_FIELDS fix).
+ * check against the project-roles CATALOG (not roles actually held by a
+ * resource — a negotiated rate is agreed BEFORE anyone with that profile is
+ * hired, and a contract is signed before staffing, so the catalog, not
+ * today's staffing, is the right authority; see `validateNegotiatedRate`'s doc
+ * comment), same-key uniqueness on (contractId|projectId, role, currency), the
+ * numeric guard on billRate, and the pick()-forwards-null class proven again
+ * here (spec §5's own callback to the D block's REQUIRED_ORG_FIELDS fix).
  *
  * SEED FIXTURES relied on (src/db/seed.ts) — none of these are mutated by
  * earlier smoke sections:
@@ -3793,15 +3795,16 @@ async function checkOrgTreeIntegrity() {
  *     to create/duplicate/mutate against without colliding with seed rows.
  *   - resource '1' (Julie Armstrong) has role 'Developer'; resource '3' (Alice
  *     Smith) has role 'Designer'; resource '2' (John Miller) has role
- *     'Consultant' — all three are real, held roles used below so the
- *     role-existence check is exercised against genuine data, not a fixture
- *     invented for the test.
- *   - no resource anywhere holds the literal role 'Nobody Has This' (check 6).
+ *     'Consultant' — all three are real project-roles catalog entries, used
+ *     below so the role-existence check is exercised against genuine data,
+ *     not a fixture invented for the test.
+ *   - no resource anywhere holds the literal role 'Nobody Has This', AND it is
+ *     not a project-roles catalog entry either (check 6) — a typo under
+ *     either candidate mechanism.
  *   - 'Project Manager' (check 14) IS a genuine project-roles catalog entry
- *     (seed.ts projectRoles id '2') but NO seeded resource holds it as `role` —
- *     the fixture that actually distinguishes a catalog check from the
- *     resources-based one implemented, unlike check 6's string which fails
- *     under either mechanism.
+ *     (seed.ts projectRoles id '2') but NO seeded resource holds it as `role`
+ *     — the fixture that actually distinguishes the catalog check from a
+ *     resources-based one, unlike check 6's string which fails under either.
  *
  * Every "expect 400" check below deliberately uses a FRESH, otherwise-unique
  * (contractId, role, currency) key of its own (never CT1+Developer+EUR, which
@@ -3821,6 +3824,13 @@ async function checkOrgTreeIntegrity() {
  *     checks (catalog vs. resources-held) actually governs, since its string
  *     fails under both. 14 uses a role that is real in one and absent in the
  *     other.
+ *
+ * ROUND 3 (user decision, this branch's closing work) — check 14 FLIPPED.
+ * The role check now validates against the project-roles CATALOG, not
+ * against roles actually held by a resource (see the doc comment on
+ * `validateNegotiatedRate` in src/server.ts for the full rationale). 'Project
+ * Manager' is a genuine catalog entry held by no seeded resource, so it now
+ * must be ACCEPTED (200), the opposite of its original 400 expectation.
  */
 async function checkNegotiatedRates() {
   const EMPLOYEE_HEADERS = { 'X-User-Id': '9', 'X-User-Role': 'employee' };
@@ -4052,25 +4062,63 @@ async function checkNegotiatedRates() {
     );
   }
 
-  // 14) ROUND 2 (coordinator review, minor) — PIN THE ROLE-CHECK SEMANTICS.
-  // Check 6 ('Nobody Has This') fails under EITHER candidate mechanism (the
-  // project-roles CATALOG, or roles actually HELD by a resource), so it cannot
-  // prove which one governs. 'Project Manager' is a genuine project-roles
-  // catalog entry (src/db/seed.ts projectRoles id '2') that NO seeded resource
-  // holds as its role (resources '1'-'6' hold only Developer/Consultant/
-  // Designer) — accepted under a catalog check, rejected under the one
-  // actually implemented (repos.resources). This is the fixture that pins the
-  // deliberate semantics, not merely 'some invalid string'.
+  // 14) ROUND 3 (user decision, this branch's closing work) — PIN THE
+  // ROLE-CHECK SEMANTICS, FLIPPED. Check 6 ('Nobody Has This') fails under
+  // EITHER candidate mechanism (the project-roles CATALOG, or roles actually
+  // HELD by a resource), so it cannot prove which one governs. 'Project
+  // Manager' is a genuine project-roles catalog entry (src/db/seed.ts
+  // projectRoles id '2') that NO seeded resource holds as its role (resources
+  // '1'-'6' hold only Developer/Consultant/Designer) — a price is negotiated
+  // BEFORE anyone with that profile is hired, and a contract is signed before
+  // staffing, so the catalog (not today's staffing) is the right authority.
+  // This is now ACCEPTED (200), the opposite of this check's original 400
+  // expectation — the fixture that pins the deliberate semantics, not merely
+  // 'some invalid string'.
   {
-    const bad = await req('POST', '/negotiated-rates', {
+    const ok = await req('POST', '/negotiated-rates', {
       headers: RBAC_HEADERS,
       body: { contractId: CONTRACT_ID, role: 'Project Manager', currency: 'EUR', billRate: 700 },
     });
     check(
-      "POST /api/negotiated-rates {role:'Project Manager'} -> 400 (a real project-roles CATALOG entry, but held by NO seeded resource — pins the resources-based check, not a catalog check)",
+      "POST /api/negotiated-rates {role:'Project Manager'} -> 200 (a real project-roles CATALOG entry, held by NO seeded resource — negotiation precedes staffing, so the catalog governs, not repos.resources)",
+      ok.status === 200 && ok.body?.role === 'Project Manager',
+      `status=${ok.status}, body=${JSON.stringify(ok.body)}`,
+    );
+    if (typeof ok.body?.id === 'string') {
+      const cleanup = await req('DELETE', `/negotiated-rates/${ok.body.id}`, { headers: RBAC_HEADERS });
+      check(`check 14 cleanup: DELETE /api/negotiated-rates/${ok.body.id} -> 204`, cleanup.status === 204, `status=${cleanup.status}`);
+    }
+  }
+
+  // 15) NEW (this branch's closing work, change #2) — currency: '' must be
+  // REJECTED, not silently accepted. The null-rejection loop used to reject
+  // only an explicit `null`, never an empty string, so `currency: ''` sailed
+  // through every rule below untouched and produced a row that LOOKED saved
+  // but was silently never read again: `sellRateFor`
+  // (src/app/services/sell-rate.util.ts) only ever resolves a rate whose
+  // currency is the base currency, so an empty-string row never participates
+  // in resolution — a configuration that looks saved and never applies.
+  // Fixed by reusing the SAME `validateCurrency` helper /contracts and
+  // /orders already call (no second currency rule). Uses role 'Consultant' —
+  // a role actually HELD by seeded resource '2' — so the check exercises
+  // ONLY the currency rule: it must pass both the old resources-based role
+  // check and the new catalog-based one, so a failure here can only be about
+  // the currency, never a role collision (unlike a role no resource holds,
+  // which would 400 for the wrong reason on the pre-fix code too).
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: CONTRACT_ID, role: 'Consultant', currency: '', billRate: 800 },
+    });
+    check(
+      "POST /api/negotiated-rates {currency: ''} -> 400 (an empty currency is silently ignored forever by sellRateFor's resolution — validateCurrency, reused from /contracts and /orders)",
       bad.status === 400,
       `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
     );
+    if (bad.status === 200 && typeof bad.body?.id === 'string') {
+      const cleanup = await req('DELETE', `/negotiated-rates/${bad.body.id}`, { headers: RBAC_HEADERS });
+      check(`check 15 cleanup: DELETE /api/negotiated-rates/${bad.body.id} -> 204`, cleanup.status === 204, `status=${cleanup.status}`);
+    }
   }
 }
 

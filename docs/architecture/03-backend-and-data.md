@@ -456,6 +456,8 @@ erDiagram
     projects  ||--o{ billingPlanItems : "charged to"
     milestones ||--o{ billingPlanItems: "triggers (milestoneId)"
     projectPartners ||--o{ orders     : "supplies (Purchase, partnerId)"
+    contracts ||--o{ negotiatedRates  : "negotiates (contractId, XOR with projectId)"
+    projects  ||--o{ negotiatedRates  : "overrides (projectId, XOR with contractId)"
 
     customers { text id PK }
     contracts {
@@ -490,9 +492,59 @@ erDiagram
         text currency
         text status
     }
+    negotiatedRates {
+        text id PK
+        text contractId FK "nullable, XOR with projectId"
+        text projectId FK "nullable, XOR with contractId"
+        text role
+        text currency
+        double billRate
+    }
     fxRates { text currency PK
         double rateToBase }
 ```
+
+#### Negotiated sell rates — the contractId/projectId XOR is a write-time invariant, not a CHECK
+
+Migration `0016_marvelous_omega_red.sql` adds `negotiated_rates`: the sell
+price negotiated **per contract**, with an optional **per-project override**,
+for a given `role` + `currency`. Exactly one of `contractId` / `projectId` is
+set on every row — never both, never neither.
+
+**The XOR is enforced at write time (`validateNegotiatedRate` in
+`src/server.ts`), not as a database `CHECK` constraint.** No portable
+constraint expresses "exactly one of these two nullable columns is set"
+across both adapters this project runs on: Postgres could carry a `CHECK
+((contract_id IS NULL) <> (project_id IS NULL))`, but the in-memory adapter
+has no constraint layer at all, so a Postgres-only `CHECK` would let the two
+adapters silently disagree on a row the in-memory mock would accept and
+Postgres would reject — exactly the class of drift the dev/prod parity
+guarantee (see [above](#the-repository-pattern)) exists to prevent. The
+invariant instead lives once, in the handler, and runs identically over
+either backing store; the same function also carries the FK-existence,
+role-in-the-project-roles-catalog, currency-validity, same-key-uniqueness and
+non-negative-number checks, called identically from `POST` and `PUT` so the
+rule can never drift between the two verbs. The role check validates against
+the `/project-roles` catalog rather than roles actually held by a resource
+today, because a rate is negotiated — and the contract signed — before
+anyone with that profile is ever hired or staffed.
+
+**Validity is not a column on the rate — it comes from the contract's own
+period.** `negotiated_rates` carries no `startDate`/`endDate` of its own: a
+contract already carries `startDate`/`endDate` (see the ER diagram above), so
+a contract-level rate applies only to hours **dated inside that contract's
+period**, and a project override borrows its project's contract period when
+the project has one (an override on a project with no contract at all applies
+with no date limit). A renegotiation is expressed as a **new contract** with
+its own period, never as an edit to an existing rate row — there is no
+versioning or effective-dating on `negotiated_rates` itself. Resolution
+(which rate wins, and whether it is in period) lives entirely in the pure
+`sellRateFor` layer (`src/app/services/sell-rate.util.ts`), which takes the
+hours' date as a **value** and never reads a clock. See
+[roles-and-permissions.md](../roles-and-permissions.md) for who may read/write
+`/negotiated-rates`, and
+[functional/commercial.md](../functional/commercial.md#negotiate-a-sell-rate-for-a-contract-or-a-project)
+for the negotiation workflow.
 
 ### Governance, config & audit
 
@@ -657,16 +709,17 @@ foreign keys; *(soft)* marks columns that carry a reference without a hard FK.
 | `orderLines` | Order line items charged to a project | `id`, `amount`; **FK** `orderId→orders`, `projectId→projects` | Commercial / Billing |
 | `billingPlanItems` | Per-`BillingType` billing plan | `id`, `type`, `amount`, `capAmount`, `currency`, `status`; **FK** `contractId→contracts`, `projectId→projects`, `milestoneId→milestones`, `orderId→orders` | Billing |
 | `fxRates` | FX rate to base (natural key `currency`) | `currency` PK, `rateToBase` | Billing / Finance |
+| `negotiatedRates` | Negotiated SELL rate per contract, with an optional per-project override | `id`, `role`, `currency`, `billRate`; **FK** `contractId→contracts`, `projectId→projects` *(exactly one of the two set — write-time invariant, not a CHECK; validity comes from the referenced contract's own period, not from a column here)* | Commercial |
 | `approvalRequests` | Multi-step approval chains | `id`, `kind`, `amount`, `steps`, `currentStep`, `requestedBy` *(server-pinned SoD)*; **FK** `projectId→projects`; `refId` *(soft, polymorphic)* | Governance |
 | `auditLogs` | Append-only mutation trail | `id`, `at` *(indexed DESC)*, `actorId`, `method`, `path`, `before`, `after` | Governance |
 
 ## The `doublePrecision` money trade-off
 
 Every monetary amount (contract `totalValue`, order/line/billing `amount`,
-`costRate`/`billRate`, FX `rateToBase`, project budgets) is stored as
-**`doublePrecision`** — IEEE-754 floating point. This matches the JS `number`
-runtime the in-memory mock uses, so dev and prod agree exactly, and it is fine
-for the demo's previews, rollups, and exports.
+`costRate`/`billRate`, negotiated-rate `billRate`, FX `rateToBase`, project
+budgets) is stored as **`doublePrecision`** — IEEE-754 floating point. This
+matches the JS `number` runtime the in-memory mock uses, so dev and prod agree
+exactly, and it is fine for the demo's previews, rollups, and exports.
 
 It is **not** appropriate for real money once invoices are actually issued and
 posted: binary floating point cannot represent decimal cents exactly, so sums and

@@ -135,7 +135,7 @@ and **403** otherwise. Path tests use `startsWith`.
 | Collection(s) | Allowed roles |
 | --- | --- |
 | `/audit-logs` | `admin`, `delivery-executive` |
-| `/customers`, `/contracts`, `/orders`, `/order-lines`, `/billing-plan-items` | `sales`, `finance`, `delivery-executive`, `admin` |
+| `/customers`, `/contracts`, `/orders`, `/order-lines`, `/billing-plan-items`, `/negotiated-rates` | `sales`, `finance`, `delivery-executive`, `admin` |
 | `/project-financials`, `/project-cost-centers`, `/cost-centers` | `finance`, `delivery-executive`, `admin` |
 | `/resources` (incl. `/resources/:id`), `/users` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/assignments`, `/requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
@@ -161,7 +161,7 @@ A role not in the matched rule's list gets **403**. Path tests use `startsWith`
 
 | Collection(s) | Allowed roles |
 | --- | --- |
-| `/customers`, `/contracts`, `/orders`, `/order-lines`, `/billing-plan-items` | `sales`, `finance`, `delivery-executive`, `admin` |
+| `/customers`, `/contracts`, `/orders`, `/order-lines`, `/billing-plan-items`, `/negotiated-rates` | `sales`, `finance`, `delivery-executive`, `admin` |
 | `/project-financials`, `/project-cost-centers`, `/cost-centers` | `finance`, `delivery-executive`, `admin` |
 | `/resources` | `resource-manager`, `delivery-executive`, `admin` |
 | `/time-entries` | `employee`, `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
@@ -213,7 +213,7 @@ guards + server RBAC above. Legend: **Full** = create/edit (mutation-allowed),
 | **Schedule** (`/schedule` view — reads `/assignments`, `/requests`, `/resources`)³ | — | Read | Read | — | — | Read | Read |
 | **Time entries** (`/time-entries`) | Full (own) | Full | Full + Approve | Read | Full + Approve | Full + Approve | Full |
 | **Projects** (`/projects` + sub-resources) | Read | Full | Read | Read | Read | Full | Full |
-| **Commercial** (`/customers`, `/contracts`, `/orders`, `/order-lines`) | — | — | — | Full | Full | Full | Full |
+| **Commercial** (`/customers`, `/contracts`, `/orders`, `/order-lines`, `/negotiated-rates`) | — | — | — | Full | Full | Full | Full |
 | **Billing & finance** (`/billing-plan-items`, `/project-financials`, `/cost-centers`) | — | — | — | Read/Full¹ | Full + Approve | Full + Approve | Full |
 | **Configuration** (catalogs, skills, project-roles, orgs, languages, FX) | Read | Read | Read | Read | Read | Full | Full |
 | **Governance** (`/approval-requests`, `/audit-logs`, `/integrations`) | — | Approve² | Approve² | — | Approve² + Read | Full + Read | Full + Read |

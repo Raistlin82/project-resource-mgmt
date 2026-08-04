@@ -4616,12 +4616,13 @@ const REQUIRED_NEGOTIATED_RATE_FIELDS = ['role', 'currency', 'billRate'] as cons
 
 /**
  * Validate a `/negotiated-rates` body against every rule in design spec §5, in
- * the order the spec lists them: the null-rejection loop first, then
- * contractId XOR projectId, then FK existence (whichever side is supplied),
- * then role existence, then same-key uniqueness (self-excluded on PUT), then
- * the numeric check. Returns a 400-suitable message, or null when the body is
- * acceptable. Both POST and PUT call this same function so the rule can never
- * drift between the two verbs.
+ * the order the spec lists them: the null/empty-string-rejection loop first,
+ * then contractId XOR projectId, then FK existence (whichever side is
+ * supplied), then role existence, then currency validity, then same-key
+ * uniqueness (self-excluded on PUT), then the numeric check. Returns a
+ * 400-suitable message, or null when the body is acceptable. Both POST and
+ * PUT call this same function so the rule can never drift between the two
+ * verbs.
  *
  * `ctx.id` is the record's own id on PUT (absent on POST) — mirrors
  * `validateOrgTreeNode`'s signature above. A field omitted from `body` (POST
@@ -4630,15 +4631,32 @@ const REQUIRED_NEGOTIATED_RATE_FIELDS = ['role', 'currency', 'billRate'] as cons
  * exactly what check 9 in the smoke suite (PUT changing only billRate) needs
  * to keep passing its own xor/FK/role/uniqueness checks unchanged.
  *
- * ROLE CHECK — DECIDED HERE, NOT SPELLED OUT VERBATIM IN THE BRIEF: spec §5
- * says a role "che nessuna risorsa possiede" (that NO RESOURCE holds) is
- * rejected as a typo, not a valid-but-unstaffed configuration. That is a
- * DIFFERENT check from `validateRoleRefs` above, which validates `role`
- * against the project-roles CONFIG CATALOG (used for staffing
- * requests/required roles — a role can be a legitimate catalog entry before
- * anyone is ever staffed against it). A negotiated rate prices an actual
- * profile someone is billed AS, so this checks against the roles ACTUALLY
- * held by a resource today (`repos.resources`), not the catalog.
+ * ROLE CHECK (user decision, superseding an earlier reading of spec §5) —
+ * against the project-roles CATALOG, via the SAME `validateRoleRefs` helper
+ * every other role reference in the app already uses (resources,
+ * requests/`requiredRole`), not a second rule. An earlier draft checked
+ * roles actually HELD by a resource today (`repos.resources`), reasoning that
+ * a role no resource holds is a typo. That reasoning has it backwards: a
+ * sell rate is negotiated with a customer BEFORE anyone with that profile is
+ * ever hired, and a contract is signed before staffing begins — so a
+ * catalog role with no resource staffed on it yet is a perfectly legitimate,
+ * forward-looking configuration, not an error. Checking against
+ * `repos.resources` would reject the exact rates this feature exists to let
+ * sales negotiate early. Only a role absent from the catalog too (a genuine
+ * typo) is rejected.
+ *
+ * CURRENCY CHECK (this branch's closing work) — reuses the SAME
+ * `validateCurrency` helper `/contracts`, `/orders` and `/rate-cards` already
+ * call — no second currency rule. Before this check existed, `currency: ''`
+ * was accepted by every rule below untouched (the null-rejection loop only
+ * ever caught an explicit `null`) and produced a row that LOOKED saved but
+ * was silently never read again: `sellRateFor`
+ * (`src/app/services/sell-rate.util.ts`) only ever resolves a rate whose
+ * currency is the base currency, so an empty-string row never participated
+ * in resolution. The null-rejection loop below now treats `''` the same as
+ * `null` for every required column (closing the empty-string gap for `role`
+ * too, not only `currency`), and this step additionally rejects a non-empty
+ * but unconfigured currency code.
  *
  * ROUND 2 (coordinator review, critical) — OMITTED is not the same bug as
  * NULL. Every check below the null loop reads `body.field === undefined ?
@@ -4661,18 +4679,24 @@ async function validateNegotiatedRate(
   body: Partial<NegotiatedRate>,
   ctx?: { id?: string },
 ): Promise<string | null> {
-  // 1. Null-rejection loop — every notNull column, rejected as a class BEFORE
-  // anything below (the `??` merges, the xor, the uniqueness key) ever sees a
-  // masked corruption: pick() forwards an explicit JSON null (it filters only
-  // undefined), and a naive `body.role ?? existing?.role` cannot tell "the
-  // client didn't touch this field" from "the client sent null" — it would
-  // fall back to the EXISTING value for every check below while the object
-  // handed to the repo still carries the literal null, corrupting the row
-  // in-memory (repository.ts's explicit-null-clears rule deletes the key) and
-  // raising an unmapped NOT NULL violation (23502) as an opaque 500 on
-  // Postgres — the two adapters silently disagreeing.
+  // 1. Null/empty-string-rejection loop — every notNull column, rejected as a
+  // class BEFORE anything below (the `??` merges, the xor, the uniqueness
+  // key) ever sees a masked corruption. Two distinct classes closed here:
+  //   - pick() forwards an explicit JSON null (it filters only undefined),
+  //     and a naive `body.role ?? existing?.role` cannot tell "the client
+  //     didn't touch this field" from "the client sent null" — it would fall
+  //     back to the EXISTING value for every check below while the object
+  //     handed to the repo still carries the literal null, corrupting the
+  //     row in-memory (repository.ts's explicit-null-clears rule deletes the
+  //     key) and raising an unmapped NOT NULL violation (23502) as an opaque
+  //     500 on Postgres — the two adapters silently disagreeing.
+  //   - an explicit empty string is not `null`, so it survived that check
+  //     alone, but it is the same "cleared to nothing" corruption for a
+  //     notNull column in practice (see the CURRENCY CHECK doc note above for
+  //     the concrete, previously-silent consequence) — treated identically to
+  //     `null` here so neither `currency` nor `role` can ever be saved empty.
   for (const field of REQUIRED_NEGOTIATED_RATE_FIELDS) {
-    if (body[field] === null) return `${field} is required and cannot be cleared`;
+    if (body[field] === null || body[field] === '') return `${field} is required and cannot be cleared`;
   }
   // 1b. Required-PRESENT on POST only (see the ROUND 2 doc note above): with
   // no existing row to inherit from, an omitted key is not "unchanged", it is
@@ -4704,17 +4728,23 @@ async function validateNegotiatedRate(
     return 'projectId must reference an existing project';
   }
 
-  // 4. Role existence — against resources actually holding it (see doc comment above).
+  // 4. Role existence — against the project-roles CATALOG (see doc comment
+  // above), via the same `validateRoleRefs` helper the rest of the app uses
+  // for role references, rather than a second, negotiated-rates-only rule.
   const role = body.role === undefined ? existing?.role : body.role;
   if (role !== undefined) {
-    const resources = await repos.resources.list();
-    if (!resources.some(r => r.role === role)) {
-      return 'role must match a role held by an existing resource';
-    }
+    const roleErr = await validateRoleRefs({ role });
+    if (roleErr) return roleErr;
   }
 
-  // 5. Same-key uniqueness on (contractId|projectId, role, currency), self-excluded on PUT.
+  // 5. Currency validity — must be a configured fx-rates currency code (see
+  // doc comment above), via the same `validateCurrency` helper /contracts,
+  // /orders and /rate-cards already call.
   const currency = body.currency === undefined ? existing?.currency : body.currency;
+  const curErr = await validateCurrency({ currency });
+  if (curErr) return curErr;
+
+  // 6. Same-key uniqueness on (contractId|projectId, role, currency), self-excluded on PUT.
   if (role !== undefined && currency !== undefined) {
     const dupe = all.find(r =>
       r.id !== ctx?.id
@@ -4725,7 +4755,7 @@ async function validateNegotiatedRate(
     if (dupe) return `a negotiated rate already exists for this key (existing id ${dupe.id})`;
   }
 
-  // 6. Numeric — billRate must be a finite, non-negative number.
+  // 7. Numeric — billRate must be a finite, non-negative number.
   const billRate = body.billRate === undefined ? existing?.billRate : body.billRate;
   if (billRate !== undefined && !isNonNegNumber(billRate)) {
     return 'billRate must be a non-negative number';
