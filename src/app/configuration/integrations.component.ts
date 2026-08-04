@@ -101,14 +101,19 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
             </div>
             <div>
               <label for="einvoiceOrder" class="block text-sm font-medium text-[var(--cc-muted)] mb-1">Invoiced order</label>
+              <!-- [selected] per OPTION, never [value] on the select: a [value]
+                   applied before its @for options exist is dropped and never
+                   re-applied, because the bound expression itself has not
+                   changed. Masked today only because the initial '' matches the
+                   static placeholder; it breaks the moment selectedOrderId is set
+                   programmatically or the order list reloads. -->
               <select
                 id="einvoiceOrder"
-                [value]="selectedOrderId()"
                 (change)="onOrderSelect($event)"
                 class="command-select">
-                <option value="">Select an invoiced order…</option>
+                <option value="" [selected]="selectedOrderId() === ''">Select an invoiced order…</option>
                 @for (order of invoicedOrders(); track order.id) {
-                  <option [value]="order.id">{{ order.invoiceNumber }} · Order {{ order.id }} ({{ order.currency }} {{ order.amount | number:'1.0-0' }})</option>
+                  <option [value]="order.id" [selected]="order.id === selectedOrderId()">{{ order.invoiceNumber }} · Order {{ order.id }} ({{ order.currency }} {{ order.amount | number:'1.0-0' }})</option>
                 }
               </select>
             </div>

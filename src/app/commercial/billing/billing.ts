@@ -842,6 +842,7 @@ export class Billing {
     || this.itemsRes.isLoading()
     || this.contractsRes.isLoading()
     || this.projectsRes.isLoading()
+    || this.milestonesRes.isLoading()
     || this.timeEntriesRes.isLoading()
     || this.resourcesRes.isLoading()
     || this.fxRatesRes.isLoading()
@@ -851,6 +852,10 @@ export class Billing {
     this.itemsRes,
     this.contractsRes,
     this.projectsRes,
+    // milestonesRes was in NO loading, error or reload list: on failure it
+    // latched permanently and the billing table's Trigger column rendered
+    // 'No milestone' for every Milestone condition, forever, with no Retry.
+    this.milestonesRes,
     this.timeEntriesRes,
     this.resourcesRes,
     this.fxRatesRes,
@@ -862,6 +867,7 @@ export class Billing {
     this.itemsRes.reload();
     this.contractsRes.reload();
     this.projectsRes.reload();
+    this.milestonesRes.reload();
     this.timeEntriesRes.reload();
     this.resourcesRes.reload();
     this.fxRatesRes.reload();

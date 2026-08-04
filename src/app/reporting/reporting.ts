@@ -87,6 +87,41 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
         </div>
       }
 
+      <!--
+        MONEY TILES ARE INSIDE THE GATE. These three regions (KPI cards,
+        Portfolio Financials, Realization & Productivity) used to render
+        unconditionally, outside every readiness wrapper, with two consequences:
+        (1) pre-authReady the gated resource resolves SUCCESSFULLY with an empty
+        envelope, so SSR shipped a full page of EUR 0 Revenue / Margin / Backlog /
+        EAC / VAC that then jumped on hydration; (2) on the error path
+        dataRes.value() throws out of the first tile, aborting the render BEFORE
+        the access notice above and all ten Retry panels below — contradicting the
+        notice's own text. dashboard.component.ts:158-185 already models the right
+        shape: error, then loading, then content.
+      -->
+      @if (dataError()) {
+        <app-list-state [error]="true" label="portfolio analytics" (retry)="reloadData()" />
+      } @else if (dataLoading()) {
+        <div class="space-y-6" aria-busy="true" aria-label="Loading portfolio analytics">
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+            @for (tile of [1, 2, 3, 4]; track tile) {
+              <div class="command-skeleton h-36"></div>
+            }
+          </div>
+          <div class="command-section-label">Portfolio Financials</div>
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+            @for (tile of [1, 2, 3, 4, 5, 6, 7, 8]; track tile) {
+              <div class="command-skeleton h-24"></div>
+            }
+          </div>
+          <div class="command-section-label">Realization &amp; Productivity</div>
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+            @for (tile of [1, 2, 3, 4]; track tile) {
+              <div class="command-skeleton h-28"></div>
+            }
+          </div>
+        </div>
+      } @else {
       <!-- KPI Cards -->
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
         @for (kpi of kpis(); track kpi.label) {
@@ -189,6 +224,8 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           <p class="command-note">{{ realization().headcount }} {{ realization().headcount === 1 ? 'person' : 'people' }} &middot; {{ realization().hours | number:'1.0-0' }}h</p>
         </div>
       </div>
+
+      }
 
       <!-- Charts Area -->
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -681,8 +718,12 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
       <!-- Accounts Receivable (A/R aging) -->
       <div class="command-section-label">Accounts Receivable</div>
 
-      <!-- A/R KPI cards -->
+      <!-- A/R KPI cards. Same rule as the strips above: three money figures, so
+           they render only from a resolved envelope — never zeros from a
+           pre-authReady or failed load. -->
       @defer (hydrate on viewport) {
+      <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="block" [rows]="1" label="accounts receivable" (retry)="reloadData()">
+      <ng-template>
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
         <div class="command-kpi">
           <p class="command-kpi-label">Total Outstanding</p>
@@ -700,6 +741,8 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           <p class="command-note">Amount-weighted age of A/R</p>
         </div>
       </div>
+      </ng-template>
+      </app-list-state>
       } @placeholder {
         <div class="command-skeleton h-24"></div>
       }
@@ -916,7 +959,9 @@ export class Reporting {
    * mirrors the same error state the access notice keys on, so a 401 shows the
    * documented under-privileged notice AND a Retry-able panel instead of zero-flash.
    */
-  protected dataLoading = computed(() => this.dataRes.isLoading() || this.fxRes.isLoading());
+  protected dataLoading = computed(() => !this.auth.authReady()
+    || this.dataRes.isLoading()
+    || this.fxRes.isLoading());
   protected dataError = computed(() => this.dataRes.status() === 'error' || this.fxRes.status() === 'error');
 
   /** Reload both gated resources behind the ListState Retry affordance. */

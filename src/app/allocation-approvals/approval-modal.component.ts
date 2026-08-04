@@ -118,9 +118,19 @@ interface Line {
         @if (months().length > 0) {
           <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
             <span class="text-ink-muted">Open months</span>
-            <select [value]="selectedMonth()" (change)="onMonthChange($event)" aria-label="Open months" class="command-select">
+            <!-- No [value] on the SELECT — [selected] per OPTION, the same fix
+                 this file already applies to the organization filter below.
+                 THIS ONE BIT: selectedMonth is a linkedSignal that deliberately
+                 KEEPS the previous month when months() gets a new array reference
+                 after the host's post-decision reload. The options are rebuilt but
+                 the [value] expression is unchanged, so Angular never re-writes
+                 the property and the browser falls back to option 0 — while the
+                 signal still holds the old month. The modal then decides a
+                 DIFFERENT month than the one on screen. [selected] is evaluated
+                 per option and has no such race. -->
+            <select (change)="onMonthChange($event)" aria-label="Open months" class="command-select">
               @for (m of months(); track m) {
-                <option [value]="m">{{ monthLabel(m) }}</option>
+                <option [value]="m" [selected]="m === selectedMonth()">{{ monthLabel(m) }}</option>
               }
             </select>
           </label>
