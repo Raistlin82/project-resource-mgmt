@@ -94,6 +94,13 @@ flowchart TD
    - **How:** navigate to `/resources` (`ResourcesComponent`). On `authReady` the
      page loads `getResources()`. The "Active only" toggle (on by default) hides
      terminated rows; the search box filters by name/role/organization/location.
+     Four further selects narrow the list: **Kind** (internal / dummy / subco),
+     and **Capability / Practice / Competence** plus **People Manager**. The three
+     dimension filters are matched through the org tree
+     (`dimensionsOf`, see [Manage Resource Organizations](configuration.md#manage-resource-organizations)),
+     **not** by raw equality on `organization` — so filtering by a capability
+     also returns everyone attached *below* it (e.g. two levels down, on a
+     competence). All filters combine (AND).
    - **Output:** the resource table with an Active / Terminated status badge.
 2. **Onboard a new employee (creazione).**
    - **Who:** `resource-manager`. **When:** a new hire joins.

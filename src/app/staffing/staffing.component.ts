@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, inject, signal, computed } from '@angular/core';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
-import { ApiService, ResourceRequest, Resource, Assignment } from '../services/api.service';
+import { ApiService, ResourceRequest, Resource, Assignment, ResourceOrganization } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { DecimalPipe } from '@angular/common';
@@ -14,6 +14,7 @@ import {
   type CandidateScore,
   type MatchDimension,
 } from '../services/match.util';
+import { dimensionsOf } from '../services/org-scope.util';
 import { ListStateComponent } from '../shared/list-state.component';
 import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
 
@@ -110,6 +111,44 @@ interface DimensionMeter {
               >
             </div>
 
+            <!-- Capability / Practice / Competence / People Manager filters (D, Task 8).
+                 Derived through dimensionsOf, so a capability filter also matches a
+                 resource attached BELOW it (e.g. a competence two levels down) — never
+                 a raw equality check against r.organization. These <select>s load their
+                 <option>s from an async rxResource, so per the established trap they
+                 use (change) + per-option [selected] rather than [value]/[ngModel] on
+                 the <select> itself. -->
+            <div class="mt-4 flex flex-col sm:flex-row flex-wrap gap-3">
+              <select (change)="onCapabilityChange($event)" aria-label="Filter by capability"
+                      data-test="capability-filter" class="command-select sm:w-44">
+                <option value="" [selected]="capabilityFilter() === ''">All capabilities</option>
+                @for (name of capabilityOptions(); track name) {
+                  <option [value]="name" [selected]="name === capabilityFilter()">{{ name }}</option>
+                }
+              </select>
+              <select (change)="onPracticeChange($event)" aria-label="Filter by practice"
+                      data-test="practice-filter" class="command-select sm:w-44">
+                <option value="" [selected]="practiceFilter() === ''">All practices</option>
+                @for (name of practiceOptions(); track name) {
+                  <option [value]="name" [selected]="name === practiceFilter()">{{ name }}</option>
+                }
+              </select>
+              <select (change)="onCompetenceChange($event)" aria-label="Filter by competence"
+                      data-test="competence-filter" class="command-select sm:w-44">
+                <option value="" [selected]="competenceFilter() === ''">All competences</option>
+                @for (name of competenceOptions(); track name) {
+                  <option [value]="name" [selected]="name === competenceFilter()">{{ name }}</option>
+                }
+              </select>
+              <select (change)="onManagerFilterChange($event)" aria-label="Filter by People Manager"
+                      data-test="manager-filter" class="command-select sm:w-44">
+                <option value="" [selected]="managerFilter() === ''">All people managers</option>
+                @for (m of managerFilterOptions(); track m.id) {
+                  <option [value]="m.id" [selected]="m.id === managerFilter()">{{ m.name }}</option>
+                }
+              </select>
+            </div>
+
             @if (missingSkillGap().length > 0) {
               <div class="mt-6 flex items-start gap-3 rounded-md bg-caution-tint ring-1 ring-caution p-4">
                 <mat-icon class="text-caution-text text-[20px] w-[20px] h-[20px] shrink-0 mt-0.5">warning_amber</mat-icon>
@@ -141,7 +180,7 @@ interface DimensionMeter {
                       </div>
                       <div class="min-w-0">
                         <h3 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors flex items-center gap-2">
-                          {{ cand.resource.name }}
+                          <span data-test="resource-name">{{ cand.resource.name }}</span>
                           <app-resource-kind-badge [kind]="cand.resource.kind" />
                         </h3>
                         <p class="text-sm font-medium text-[var(--cc-muted)] mt-0.5">{{ cand.resource.role }} <span class="mx-1.5 text-ink-muted">•</span> <span class="font-mono tabular-nums" [class.text-critical-text]="cand.resource.utilization > 100" [class.text-positive-text]="cand.resource.utilization <= 100">{{ cand.resource.utilization | number:'1.0-0' }}% Utilized</span></p>
@@ -234,7 +273,7 @@ interface DimensionMeter {
                     </div>
                     <div>
                       <h3 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors flex items-center gap-2">
-                        {{ res.name }}
+                        <span data-test="resource-name">{{ res.name }}</span>
                         <app-resource-kind-badge [kind]="res.kind" />
                       </h3>
                       <p class="text-sm font-medium text-[var(--cc-muted)] mt-0.5">{{ res.role }} <span class="mx-1.5 text-ink-muted">•</span> <span class="font-mono tabular-nums" [class.text-critical-text]="res.utilization > 100" [class.text-positive-text]="res.utilization <= 100">{{ res.utilization | number:'1.0-0' }}% Utilized</span></p>
@@ -285,6 +324,51 @@ export class StaffingComponent {
   selectedRequest = signal<ResourceRequest | null>(null);
   searchQuery = signal('');
 
+  // D (Task 8): the org tree the capability/practice/competence filters derive
+  // from. Gated on authReady like the resources+requests load above.
+  private orgsRes = rxResource<ResourceOrganization[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResourceOrganizations() : of<ResourceOrganization[]>([])),
+    defaultValue: [] as ResourceOrganization[],
+  });
+  orgOptions = this.orgsRes.value;
+
+  // D (Task 8): Capability / Practice / Competence / People Manager filters. '' =
+  // all. Matched via `dimensionsOf`, not a raw equality against r.organization —
+  // that is what makes a capability filter also match a resource attached BELOW
+  // it (e.g. a competence two levels down).
+  capabilityFilter = signal('');
+  practiceFilter = signal('');
+  competenceFilter = signal('');
+  managerFilter = signal('');
+
+  /** Option lists filtered by level, in tree order (node names are unique across the whole tree). */
+  capabilityOptions = computed<string[]>(() => this.orgOptions().filter(n => n.level === 'capability').map(n => n.name));
+  practiceOptions = computed<string[]>(() => this.orgOptions().filter(n => n.level === 'practice').map(n => n.name));
+  competenceOptions = computed<string[]>(() => this.orgOptions().filter(n => n.level === 'competence').map(n => n.name));
+
+  /** Distinct People Managers actually present among the (unfiltered) resource pool, name-sorted. */
+  managerFilterOptions = computed<{ id: string; name: string }[]>(() => {
+    const all = this.allResources();
+    const ids = new Set(all.map(r => r.managerId).filter((id): id is string => !!id));
+    return [...ids]
+      .map(id => ({ id, name: all.find(r => r.id === id)?.name ?? id }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  });
+
+  onCapabilityChange(event: Event): void {
+    this.capabilityFilter.set((event.target as HTMLSelectElement).value);
+  }
+  onPracticeChange(event: Event): void {
+    this.practiceFilter.set((event.target as HTMLSelectElement).value);
+  }
+  onCompetenceChange(event: Event): void {
+    this.competenceFilter.set((event.target as HTMLSelectElement).value);
+  }
+  onManagerFilterChange(event: Event): void {
+    this.managerFilter.set((event.target as HTMLSelectElement).value);
+  }
+
   assigningResourceId = signal<string | null>(null);
   assignHours = signal<number>(0);
 
@@ -296,16 +380,34 @@ export class StaffingComponent {
   /** True while a createAssignment request is in flight, to block duplicate submits (double-staffing). */
   assigning = signal(false);
 
-  /** Resources after applying the free-text search box (name / role / skills). */
+  /**
+   * Resources after applying the free-text search box (name / role / skills)
+   * AND the D (Task 8) capability/practice/competence/People Manager filters —
+   * the single filtering computed both `rankedCandidates` and
+   * `displayedResources` derive from, so a filter narrows the pool the same
+   * way whether or not a request is selected.
+   */
   private searchedResources = computed(() => {
     const resources = this.allResources();
     const query = this.searchQuery().trim().toLowerCase();
-    if (!query) return resources;
-    return resources.filter(r =>
-      r.name.toLowerCase().includes(query) ||
-      r.role.toLowerCase().includes(query) ||
-      r.skills.some(s => s.name.toLowerCase().includes(query))
-    );
+    const cap = this.capabilityFilter();
+    const pra = this.practiceFilter();
+    const com = this.competenceFilter();
+    const mgr = this.managerFilter();
+    const nodes = this.orgOptions();
+    return resources.filter(r => {
+      const dims = dimensionsOf(r, nodes);
+      if (cap && dims.capability !== cap) return false;
+      if (pra && dims.practice !== pra) return false;
+      if (com && dims.competence !== com) return false;
+      if (mgr && r.managerId !== mgr) return false;
+      if (!query) return true;
+      return (
+        r.name.toLowerCase().includes(query) ||
+        r.role.toLowerCase().includes(query) ||
+        r.skills.some(s => s.name.toLowerCase().includes(query))
+      );
+    });
   });
 
   /**

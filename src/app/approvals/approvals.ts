@@ -8,8 +8,10 @@ import {
   ApiService,
   ApprovalKind,
   ApprovalRequest,
+  Assignment,
   Project,
   Resource,
+  ResourceOrganization,
   User,
   UserRole,
 } from '../services/api.service';
@@ -17,12 +19,24 @@ import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ListStateComponent } from '../shared/list-state.component';
 import { parseMonthRowId } from '../services/allocation-month.util';
+import { accountableApproversOf } from '../services/org-scope.util';
+
+/** Today as ISO 'YYYY-MM-DD'. The org-scope layer is pure and takes this as a
+ *  value, so the clock read lives here — same helper as the other screens. */
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
 interface ApprovalsData {
   approvals: ApprovalRequest[];
   projects: Project[];
   resources: Resource[];
   users: User[];
+  /** D: an Allocation approval's `refId` addresses a month ROW, so the target
+   *  resource is only reachable through its assignment — see `scopeAllows`. */
+  assignments: Assignment[];
+  /** D: the second scope axis (the capability > practice > competence tree). */
+  orgNodes: ResourceOrganization[];
 }
 
 /** A row enriched with derived, display-ready labels and SoD/authorization flags. */
@@ -44,9 +58,22 @@ interface ApprovalRow {
   approvable: boolean;
   /** The requester can never decide their own item (segregation of duties). */
   selfRequested: boolean;
+  /** D: the actor DOES hold the step's role but the resource is outside their org
+   *  scope. Kept apart from `!approvable` so the tooltip does not tell a resource
+   *  manager they are "awaiting Resource Manager approval" — the same reason the
+   *  server words its two 403s differently. */
+  outOfScope: boolean;
   /** Final guard for the Approve/Reject buttons (pending + role match + not self). */
   canDecide: boolean;
 }
+
+/** The single empty value for both the pre-`authReady` stream and the default,
+ *  so the two can never drift as fields are added to `ApprovalsData`. */
+const EMPTY_DATA: ApprovalsData = { approvals: [], projects: [], resources: [], users: [], assignments: [], orgNodes: [] };
+
+/** D: the out-of-scope tooltip. Deliberately does NOT name the resource's
+ *  managers or its org node — the same leak the server's scope 403 avoids. */
+const OUT_OF_SCOPE_TITLE = 'You do not manage this resource, so you cannot decide its allocation';
 
 /**
  * APPROVALS INBOX — surfaces every approval request whose current workflow step
@@ -231,6 +258,15 @@ export class Approvals {
   // immediately 401s and the rxResource latches on the error (inbox shows empty
   // forever). Key the load on auth readiness so it fires only AFTER the OAuth
   // bootstrap has settled and the bearer token is attached.
+  //
+  // D: `assignments` and `orgNodes` joined the SAME forkJoin rather than
+  // becoming their own rxResource on purpose — `scopeAllows` below needs all
+  // three lists to answer at all, and one combined load means the rows can
+  // never be computed from a half-loaded scope (an independent resource could
+  // resolve later and flip a button from enabled to disabled under the
+  // operator's cursor). Both reads are already permitted to every role this
+  // route admits: `/assignments` to pm/resource-manager/delivery-executive/
+  // finance/admin, `/resource-organizations` to any verified actor.
   protected res = rxResource<ApprovalsData, boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) =>
@@ -240,9 +276,11 @@ export class Approvals {
             projects: this.api.getProjects(),
             resources: this.api.getResources(),
             users: this.api.getUsers(),
+            assignments: this.api.getAssignments(),
+            orgNodes: this.api.getResourceOrganizations(),
           })
-        : of<ApprovalsData>({ approvals: [], projects: [], resources: [], users: [] }),
-    defaultValue: { approvals: [], projects: [], resources: [], users: [] },
+        : of<ApprovalsData>(EMPTY_DATA),
+    defaultValue: EMPTY_DATA,
   });
 
   /** 'mine' = items awaiting my role (the inbox); 'all' = every pending item. */
@@ -261,6 +299,84 @@ export class Approvals {
   private projectsById = computed(() => new Map(this.res.value().projects.map(p => [p.id, p.name])));
   private resourcesById = computed(() => new Map(this.res.value().resources.map(r => [r.id, r.name])));
   private usersById = computed(() => new Map(this.res.value().users.map(u => [u.id, u.name])));
+  /** Full records (not just names) — `scopeAllows` needs `managerId`/`organization`. */
+  private resourceRecordsById = computed(() => new Map(this.res.value().resources.map(r => [r.id, r])));
+  private assignmentsById = computed(() => new Map(this.res.value().assignments.map(a => [a.id, a])));
+
+  /**
+   * D (design spec §3.4) — mirror of the ORG-SCOPE half of the server's
+   * `decideOneApproval` step enforcement (src/server.ts). Answers: given that
+   * the actor already holds the step's role, may they decide THIS item?
+   *
+   * BEFORE D holding the step's role was the whole answer, and this page still
+   * said so: an `Allocation` step is routed to `resource-manager`, so EVERY
+   * resource-manager was offered an enabled Approve button for every pending
+   * allocation in the inbox — and since D the server 403s the ones outside their
+   * scope ("Actor does not manage this resource and cannot decide its
+   * allocation"). A dead button, not a cosmetic mismatch.
+   *
+   * The server's branches, in the same order and with the same outcomes:
+   *   - `admin`/`delivery-executive` are GLOBAL roles: never narrowed by scope;
+   *   - scope binds `Allocation` steps ONLY — every other kind routes by role
+   *     and has no target resource (`allocationTargetResourceId` returns
+   *     undefined there), so the rule falls through to the pre-D behaviour;
+   *   - an UNRESOLVABLE target (deleted assignment or resource) also falls
+   *     through permissively, exactly as the server does: refusing there would
+   *     strand a live approval nobody could decide;
+   *   - otherwise the target must be in the actor's scope — the transitive
+   *     `managerId` chain union the managers of the org nodes above it, minus
+   *     anyone already terminated — or have no accountable manager anywhere
+   *     (`roleFallback`).
+   *
+   * TWO paths are an OR with this and are checked by the CALLER: the
+   * named-approver path (`step.approverId`) and `isAccountableFor` (the server's
+   * rule 2 — being an accountable manager admits an actor whatever their global
+   * role, so it must NOT be gated on the role match this function assumes).
+   * Both inherit the same demo-identity caveat: `auth.userId()` is a resource-id
+   * in this app's demo identity but the JWT `sub` in production, so in prod the
+   * comparison may simply not match — the server remains the authority either way.
+   *
+   * NO LOADING RACE to guard: approvals, assignments and the org tree arrive in
+   * ONE forkJoin, so `approvals` is non-empty only when the other two have also
+   * resolved. There is no window in which a row exists and its scope inputs do not.
+   *
+   * UX only, like the route guards. It cannot predict segregation of duties on
+   * an item this actor did not request (the caller handles the self case).
+   */
+  private scopeAllows(request: ApprovalRequest, role: UserRole, userId: string): boolean {
+    if (role === 'admin' || role === 'delivery-executive') return true;
+    const accountable = this.accountableApprovers(request);
+    if (accountable === undefined) return true;
+    return accountable.roleFallback || accountable.managerIds.has(userId);
+  }
+
+  /**
+   * The server's RULE 2, mirrored: is this actor an ACCOUNTABLE MANAGER of the
+   * allocation's target resource? True regardless of the actor's global role —
+   * that is the whole point (D adds no new RBAC role because authority over a
+   * set of resources is relative, while every role here is global), and it is
+   * why this is separate from `scopeAllows` above rather than folded into it.
+   */
+  private isAccountableFor(request: ApprovalRequest, userId: string): boolean {
+    return this.accountableApprovers(request)?.managerIds.has(userId) ?? false;
+  }
+
+  /** The accountable-approver answer for an allocation request, or `undefined`
+   *  when the request is not scoped at all (not an Allocation, or its target
+   *  cannot be resolved — both fall through permissively, as the server does). */
+  private accountableApprovers(
+    request: ApprovalRequest,
+  ): { managerIds: Set<string>; roleFallback: boolean } | undefined {
+    if (request.kind !== 'Allocation') return undefined;
+    // B3's composite `<assignmentId>:<YYYY-MM>`, or a bare (legacy) assignment id.
+    const assignmentId = parseMonthRowId(request.refId)?.assignmentId ?? request.refId;
+    const targetId = this.assignmentsById().get(assignmentId)?.resourceId;
+    if (targetId === undefined) return undefined;
+    const target = this.resourceRecordsById().get(targetId);
+    if (target === undefined) return undefined;
+    return accountableApproversOf(
+      target, this.res.value().resources, this.res.value().orgNodes, todayIso());
+  }
 
   /** Every Pending request, enriched with display labels and authorization flags. */
   private allRows = computed<ApprovalRow[]>(() => {
@@ -286,7 +402,16 @@ export class Approvals {
         // (In prod userId() is the JWT sub, not a resource-id, so this may not match;
         // accepted gap — the role-based path still surfaces the action, server allows.)
         const managerMatches = !!step?.approverId && step.approverId === userId;
-        const authorized = roleMatches || managerMatches;
+        // D: holding the step's role is necessary but no longer sufficient for an
+        // Allocation — see `scopeAllows`. The named-approver path is unaffected,
+        // and `isAccountableFor` is a THIRD, role-independent path (the server's
+        // rule 2): being the resource's accountable manager admits the actor even
+        // when no allocation step is routed to their global role, which is how a
+        // Capability Leader who is a `delivery-executive` reaches their own rows.
+        const inScope = roleMatches && this.scopeAllows(request, role, userId);
+        const accountable = this.isAccountableFor(request, userId);
+        const authorized = inScope || managerMatches || accountable;
+        const outOfScope = roleMatches && !authorized;
         const approvable = !selfRequested && authorized;
         const overdue = !!request.slaDueAt && new Date(request.slaDueAt).getTime() < now;
         const projectLabel = request.projectId ? (projects.get(request.projectId) ?? request.projectId) : 'No project';
@@ -306,6 +431,7 @@ export class Approvals {
           overdue,
           approvable,
           selfRequested,
+          outOfScope,
           canDecide: authorized && !selfRequested,
         } satisfies ApprovalRow;
       });
@@ -341,12 +467,14 @@ export class Approvals {
 
   approveTitle(row: ApprovalRow): string {
     if (row.selfRequested) return 'Segregation of duties: you cannot approve a request you submitted';
+    if (row.outOfScope) return OUT_OF_SCOPE_TITLE;
     if (!row.approvable) return `Awaiting ${this.roleLabel(row.currentRole)} approval`;
     return 'Approve this request';
   }
 
   rejectTitle(row: ApprovalRow): string {
     if (row.selfRequested) return 'Segregation of duties: you cannot decide a request you submitted';
+    if (row.outOfScope) return OUT_OF_SCOPE_TITLE;
     if (!row.approvable) return `Awaiting ${this.roleLabel(row.currentRole)} decision`;
     return 'Reject this request';
   }

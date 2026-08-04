@@ -42,6 +42,7 @@ import type {
   AssignmentMonth,
   ResourceKind,
 } from '../app/services/api.service';
+import type { OrgLevel } from '../app/services/org-scope.util';
 
 // ---------------------------------------------------------------------------
 // Local helper types for jsonb payloads (mirrors of the nested shapes used by
@@ -368,11 +369,22 @@ export const resourceOrganizations = pgTable(
     serviceOrganizationId: text('service_organization_id').references(
       () => serviceOrganizations.id,
     ),
+    // D — the delivery tree (Capability > Practice > Competence). `parentId` is
+    // a plain text column, NOT a self-FK — same deliberate choice as C2's
+    // `replacedFromAssignmentMonthId`: a self-FK would order the seed and the
+    // deletes for no benefit the write-time validation (Task 3) does not
+    // already give. `level` defaults to 'capability' so the migration is
+    // additive with no backfill: existing rows become valid roots.
+    parentId: text('parent_id'),
+    level: text('level').$type<OrgLevel>().notNull().default('capability'),
+    managerId: text('manager_id'),
   },
   (t) => [
     index('resource_organizations_service_organization_id_idx').on(
       t.serviceOrganizationId,
     ),
+    // The tree is walked upward on every read that derives dimensions.
+    index('resource_organizations_parent_id_idx').on(t.parentId),
   ],
 );
 

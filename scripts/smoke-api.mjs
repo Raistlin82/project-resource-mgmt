@@ -1282,26 +1282,43 @@ async function checkMonthlyApproval() {
   check('B3 submit on a non-open month is refused', closed.status === 403 || closed.status === 404, `status=${closed.status}`);
 
   // Self-managed submit-clear path: exercise it directly instead of routing
-  // around it. Assignment 1's resource is '1' (Julie Armstrong), whose
-  // managerId is ALSO '1' — the default RBAC_HEADERS admin actor — so
-  // submitting as the DEFAULT actor hits the self-managed auto-approval
-  // shortcut (straight to 'Allocated', approvalId cleared, no approval
-  // opened). 2026-09 is an OPEN period neither of assignment 1's assignments
-  // books (assignment 1 ends 2026-06-30; assignment 2, also resource 1, ends
-  // 2026-08-31), so a PUT there is guaranteed conflict-free and creates a
-  // fresh Draft row to submit. This is the regression coverage for the
-  // self-managed branch's `approvalId: null` clear: it must leave the field
-  // ABSENT in the response (both adapters), never a literal `null`.
-  const selfManagedPut = await req('PUT', '/assignments/1/allocation', { body: { month: '2026-09', dailyHours: { '2026-09-07': 1 } } });
-  check('B3 self-managed setup: PUT into an unbooked open month creates a Draft row', selfManagedPut.status === 200, `status=${selfManagedPut.status}`);
+  // around it. The shortcut fires when the PROPOSER IS THE RESOURCE'S MANAGER
+  // (`autoApprovesAllocation`): resource '2' (John Miller) has managerId '1',
+  // which is the default RBAC_HEADERS actor's resource-id, so submitting as the
+  // DEFAULT actor lands the month straight on 'Allocated' with `approvalId`
+  // cleared and no approval opened. This is the regression coverage for that
+  // branch's `approvalId: null` clear: it must leave the field ABSENT in the
+  // response (both adapters), never a literal `null`.
+  //
+  // D — THIS FIXTURE WAS RE-ACTORED, and the assertions below are untouched. It
+  // used to run on assignment 1 (resource '1', Julie Armstrong) as the default
+  // actor, which only worked because the seed had Julie as HER OWN manager
+  // (`managerId: '1'`) — a self-cycle that Task 4 now refuses on write and that
+  // Task 5 removed from the seed. The rule under test is "the proposer is the
+  // resource's manager", so the fixture now uses a REAL manager/report pair
+  // instead of a degenerate self-loop. Same idiom as the totals fixture further
+  // down this function, which already relies on '1' being resource 2's manager.
+  //
+  // A throwaway assignment keeps this clear of every seeded booking, and
+  // 2026-09-23 (a Wednesday, Open period) is past the end of resource '2's only
+  // seeded booking (assignment 3, whose days stop at 2026-09-15) and is used by
+  // nothing else in this suite, so the daily-capacity gate never fires.
+  const selfManagedCreate = await req('POST', '/assignments', { body: { requestId: '4', resourceId: '2', assignedHours: 0 } });
+  const selfManagedCreateOk = check('B3 self-managed setup: throwaway assignment created for a resource whose manager IS the acting principal',
+    selfManagedCreate.status === 200 && typeof selfManagedCreate.body?.id === 'string', `status=${selfManagedCreate.status}`);
+  if (selfManagedCreateOk) {
+    const selfManagedAssignmentId = selfManagedCreate.body.id;
+    const selfManagedPut = await req('PUT', `/assignments/${selfManagedAssignmentId}/allocation`, { body: { month: '2026-09', dailyHours: { '2026-09-23': 1 } } });
+    check('B3 self-managed setup: PUT into an unbooked open month creates a Draft row', selfManagedPut.status === 200, `status=${selfManagedPut.status}`);
 
-  const selfManagedSubmit = await req('POST', '/assignments/1/months/2026-09/submit', { body: {} });
-  check('B3 self-managed submit auto-approves to Allocated', selfManagedSubmit.status === 200 && selfManagedSubmit.body?.status === 'Allocated',
-    `status=${selfManagedSubmit.status} row=${selfManagedSubmit.body?.status}`);
-  check('B3 self-managed submit clears approvalId to absent, not null',
-    selfManagedSubmit.body !== null && typeof selfManagedSubmit.body === 'object' &&
-    !Object.prototype.hasOwnProperty.call(selfManagedSubmit.body, 'approvalId') && selfManagedSubmit.body.approvalId === undefined,
-    `approvalId=${JSON.stringify(selfManagedSubmit.body?.approvalId)} hasOwn=${Object.prototype.hasOwnProperty.call(selfManagedSubmit.body ?? {}, 'approvalId')}`);
+    const selfManagedSubmit = await req('POST', `/assignments/${selfManagedAssignmentId}/months/2026-09/submit`, { body: {} });
+    check('B3 self-managed submit auto-approves to Allocated', selfManagedSubmit.status === 200 && selfManagedSubmit.body?.status === 'Allocated',
+      `status=${selfManagedSubmit.status} row=${selfManagedSubmit.body?.status}`);
+    check('B3 self-managed submit clears approvalId to absent, not null',
+      selfManagedSubmit.body !== null && typeof selfManagedSubmit.body === 'object' &&
+      !Object.prototype.hasOwnProperty.call(selfManagedSubmit.body, 'approvalId') && selfManagedSubmit.body.approvalId === undefined,
+      `approvalId=${JSON.stringify(selfManagedSubmit.body?.approvalId)} hasOwn=${Object.prototype.hasOwnProperty.call(selfManagedSubmit.body ?? {}, 'approvalId')}`);
+  }
 
   // --- BATCH DECIDE (Task 5) -------------------------------------------------
   // "Approva Mese" / "Approva e Prosegui": decide N month rows in ONE call,
@@ -1400,16 +1417,26 @@ async function checkMonthlyApproval() {
   // STEP ENFORCEMENT through the batch — the filter the coarse
   // '/allocation-approvals' role gate relies on. pm '2' (John Miller, resource
   // '2') passes that gate and is NOT the requester ('3'), so SoD lets him
-  // through; he is refused by the per-step check instead, because the step is
-  // routed to resource 1's manager, approverId '1'. Without this the coarse
-  // gate would let any pm decide any manager's allocation.
+  // through; he is refused by the per-step check instead. Without this the
+  // coarse gate would let any pm decide any manager's allocation.
+  //
+  // D — THE EXPECTED MESSAGE CHANGED WITH THE SEED, not with the rule. This row
+  // belongs to assignment 1, i.e. resource '1' (Julie Armstrong), who is the top
+  // of the org chart and now correctly has NO `managerId` (Task 5 removed the
+  // seed's self-cycle). `allocationApproverStep(undefined)` therefore routes the
+  // step by ROLE alone, so the refusal names the role rather than a named
+  // approver id. Still the role/step refusal — a 'pm' holds neither
+  // 'resource-manager' nor the named-approver position — and still asserted
+  // verbatim. The named-approver form of this message (`...assigned to 2`) is
+  // pinned in checkScopedAllocationDecision, on Alice's step, which really does
+  // carry an approverId.
   const wrongApprover = await req('POST', '/allocation-approvals/decide', {
     body: { items: [{ assignmentMonthId: BATCH_ROW_ID, decision: 'Approved' }] },
     headers: { 'X-User-Id': '2', 'X-User-Role': 'pm' },
   });
   const wrongApproverResult = (wrongApprover.body?.results || [])[0];
   check('B3 batch enforces per-step approver routing (non-requester, non-manager is refused)',
-    wrongApprover.status === 200 && wrongApproverResult?.status === 'Error' && /cannot decide a step assigned to 1/.test(String(wrongApproverResult?.error)),
+    wrongApprover.status === 200 && wrongApproverResult?.status === 'Error' && /cannot decide a step assigned to resource-manager/.test(String(wrongApproverResult?.error)),
     `result=${JSON.stringify(wrongApproverResult)}`);
 
   // The SAME id twice in one batch: decided once, the duplicate reported as
@@ -1542,6 +1569,33 @@ async function checkMonthlyApproval() {
   check('B3 feed rows carry per-month items', !!withItems && typeof withItems.items[0].assignmentMonthId === 'string', `rows=${feed.body?.rows?.length}`);
   check('B3 feed exposes the monthly target', !!withItems && typeof withItems.targetHours === 'object', 'targetHours missing');
 
+  // D (Task 8, round 2): `AllocationApprovalRow` now carries `organization`
+  // straight from the server — populated from the SAME resource record the
+  // handler already loads to build the row — so the client's capability/
+  // practice/competence filters can call `dimensionsOf` on it directly with
+  // NO second getResources() catalogue fetch (that second fetch was deleted
+  // specifically because it could race the org-tree load and silently show
+  // "nothing to approve" instead of "not loaded yet"). Resource '1' (Julie
+  // Armstrong) is seeded on 'Engineering' with assignments spanning this
+  // window, so her row must carry it.
+  const julieRow = (feed.body?.rows || []).find(r => r.resourceId === '1');
+  check("D feed rows carry the resource's organization (Task 8) — no client-side join needed",
+    julieRow !== undefined && julieRow.organization === 'Engineering',
+    `row=${JSON.stringify(julieRow)}`);
+
+  // D (Task 8, round 3): `AllocationApprovalRow` now ALSO carries
+  // `managerName`, resolved server-side from the SAME resourceById map the
+  // handler already built for this row — no extra I/O. This is what lets the
+  // People Manager filter's dropdown show a real name instead of a bare id:
+  // a feed lists a manager's REPORTS, not the manager themselves, so a
+  // client-side lookup for "the manager's own row in this same feed" almost
+  // never finds one. Resource '2' (John Miller) is seeded with managerId '1'
+  // (Julie Armstrong) and has an assignment spanning this window.
+  const johnRow = (feed.body?.rows || []).find(r => r.resourceId === '2');
+  check("D feed rows carry the manager's name (Task 8 round 3) — no client-side lookup needed",
+    johnRow !== undefined && johnRow.managerId === '1' && johnRow.managerName === 'Julie Armstrong',
+    `row=${JSON.stringify(johnRow)}`);
+
   const pendingOnly = await req('GET', '/allocation-approvals?from=2026-05&to=2026-09&status=Requested');
   const allPending = (pendingOnly.body?.rows || []).every(r => (r.items || []).every(i => i.status === 'Requested'));
   check('B3 feed status filter narrows to pending months', pendingOnly.status === 200 && allPending, `status=${pendingOnly.status}`);
@@ -1636,8 +1690,14 @@ async function checkMonthlyApproval() {
  *  - The stranded shape is "a NON-Draft month row carrying NO approvalId". The
  *    self-managed submit shortcut produces exactly that live: submitting a month
  *    as the resource's OWN manager lands it 'Allocated' with `approvalId`
- *    cleared. Resource '1' (Julie Armstrong) has managerId '1', which is the
+ *    cleared. Resource '2' (John Miller) has managerId '1', which is the
  *    default admin actor this suite runs as.
+ *
+ *    D — RE-ACTORED FROM RESOURCE '1' TO '2', assertions untouched. This fixture
+ *    used to use resource '1' (Julie Armstrong), which only produced the
+ *    stranded shape because the seed had her as her OWN manager — the self-cycle
+ *    Task 4 refuses on write and Task 5 removed from the seed. Resource '2' is a
+ *    genuine report of '1', so the shortcut fires for the real reason.
  *  - A bare-`refId` approval can only be created through `POST
  *    /approval-requests` (the B3 endpoints always open month-scoped ones). That
  *    route is gated to the approver-grade roles (pm / resource-manager /
@@ -1666,17 +1726,21 @@ async function checkMonthlyApproval() {
  * itself proof the live month survived.
  *
  * Both months are Open planning periods, and both days are free of every other
- * booking in this suite for resource '1' (8h/day cap, so the capacity gate never
- * fires): 2026-11-04 is a Wednesday (checkMonthlyApproval uses 2026-11-03) and
- * 2026-12-02 is a Wednesday (it uses 2026-12-01; the 2026-12-25 holiday is
+ * booking in this suite for resource '2' (8h/day cap, so the capacity gate never
+ * fires — resource '2's only seeded booking, assignment 3, stops at 2026-09-15):
+ * 2026-11-04 is a Wednesday (checkMonthlyApproval uses 2026-11-03 and
+ * checkScopedAllocationDecision 2026-11-03, both on other resources) and
+ * 2026-12-02 is a Wednesday (they use 2026-12-01; the 2026-12-25 holiday is
  * avoided).
  */
 async function checkLegacyAllocationApproval() {
   const REQUESTER_HEADERS = { 'X-User-Id': '3', 'X-User-Role': 'pm' };
-  // pm '2' (John Miller, resource '2') is NOT resource 1's manager ('1'), so his
-  // submit opens a genuine Pending approval instead of self-approving.
+  // pm '2' maps to resource '2' — the resource ITSELF, which is not its own
+  // manager ('1' is), so this submit opens a genuine Pending approval instead of
+  // self-approving. That the shortcut needs the MANAGER specifically, not merely
+  // a related party, is part of what this fixture demonstrates.
   const NON_MANAGER_HEADERS = { 'X-User-Id': '2', 'X-User-Role': 'pm' };
-  const RESOURCE_ID = '1'; // Julie Armstrong — managerId '1' == the default admin actor
+  const RESOURCE_ID = '2'; // John Miller — managerId '1' == the default admin actor
   const REQUEST_ID = '2';
   const MONTH = '2026-11';
   const DAY = `${MONTH}-04`;
@@ -2949,6 +3013,1741 @@ async function checkDummySubstitution() {
   }
 }
 
+/**
+ * D (Task 3) — org-tree integrity on the bespoke `/resource-organizations`
+ * handlers (src/server.ts, NOT mounted with `crud()`): levels, parent/child
+ * pairing, whole-tree name uniqueness (self excluded on PUT), the
+ * capability-is-a-root rule on write, and the two protected-delete guards
+ * (children / resources still referencing the node by name) — each isolated
+ * on its OWN fixture so neither can mask the other. Plus, alongside the nine
+ * checks from the task-3 brief, the same clear-to-absent seam proven for
+ * `parentId` is proven again for `managerId` (review round 1 — see below).
+ *
+ * SEED FIXTURES relied on (src/db/seed.ts resourceOrganizations) — none of
+ * these are mutated by earlier smoke sections:
+ *   id '2' — 'Engineering' (capability), no parent. Seeded resources carry
+ *     organization: 'Engineering' (resources bind to a node BY NAME, spec §2.4).
+ *   id '5' — 'Platform' (practice), parentId '2'.
+ *   id '6' — 'Backend' (competence), parentId '5' — Engineering's grandchild,
+ *     used by check 7 (has-children delete guard) and check 6 (capability
+ *     root rule — see the note at check 6 for why this is NOT a cycle-guard
+ *     exercise, despite '6' being '2's own descendant).
+ *
+ * Check 7 DELETEs seeded node '5'. Check 8 (review round 1 — rewritten, see
+ * below) no longer touches seeded nodes at all: it builds its OWN fresh,
+ * childless leaf and a throwaway resource, specifically so the CHILDREN guard
+ * cannot fire first and mask the RESOURCES guard, which check 8 exists to
+ * prove. Against the pre-Task-3 build (delete was an unguarded one-liner)
+ * check 7's DELETE actually SUCCEEDED (204) and removed '5' from the
+ * in-memory store for the rest of THAT throwaway process's lifetime —
+ * expected and harmless: the task's own instructions have the server
+ * restarted between runs, and post-implementation the 409 guard means the
+ * delete never goes through, so seed data survives a green run intact.
+ *
+ * REVIEW ROUND 1 (coordinator feedback on the first pass):
+ *   1. Check 8 originally deleted seeded node '2' (Engineering), which 409s
+ *      via the CHILDREN guard (it still has '5' beneath it) — the RESOURCES
+ *      guard was never actually exercised. Rewritten as described above;
+ *      confirmed by mutation (temporarily commenting out the resources-guard
+ *      branch in the DELETE handler made this check fail — see the task-3
+ *      report for the captured output) that this version really does depend
+ *      on that guard.
+ *   2. managerId gained the same clear-to-absent check parentId already had
+ *      (see 9b below) — not academic: Task 7's manager `<select>` has no way
+ *      to author a literal `null`, so its empty option relies on this exact
+ *      translation to ever detach a Capability Leader from a node.
+ *   3. Check 6 reworded (see the comment there) to state what it actually
+ *      verifies — a capability cannot be given a parent — rather than
+ *      implying cycle-guard coverage it never had. Per the coordinator's
+ *      ruling, no smoke check was added for the cycle guard itself: with the
+ *      level rules enforced, a cycle is structurally unreachable through this
+ *      API (closing one would require a capability to sit beneath something,
+ *      which the level guard refuses first), so there is no honest API-level
+ *      fixture for it. `wouldCycleInOrgTree` is unit-tested directly in
+ *      `org-scope.util.spec.ts`; the cycle guard's own defence-in-depth
+ *      rationale is now documented at the guard itself (`src/server.ts`,
+ *      `validateOrgTreeNode`).
+ */
+async function checkOrgTreeIntegrity() {
+  const ENGINEERING_ID = '2';
+  const PLATFORM_ID = '5';
+  const BACKEND_ID = '6';
+
+  // 1) POST carries level + parentId through (today: silently dropped by the
+  // pick() allow-list — the row still gets created, just as a bare capability).
+  const created = await req('POST', '/resource-organizations', {
+    headers: RBAC_HEADERS,
+    body: { name: 'D Smoke Practice', description: 'x', level: 'practice', parentId: ENGINEERING_ID },
+  });
+  check(
+    "POST /api/resource-organizations {level:'practice', parentId:'2'} -> 200, response carries both through",
+    created.status === 200 && created.body?.level === 'practice' && created.body?.parentId === ENGINEERING_ID,
+    `status=${created.status}, body=${JSON.stringify(created.body)}`,
+  );
+  // Keep the id even if the assertion above failed (pre-implementation the
+  // POST still succeeds, just with the wrong shape) so check 9 below can
+  // still run its own — independently meaningful — assertion.
+  const smokeNodeId = typeof created.body?.id === 'string' ? created.body.id : undefined;
+
+  // 2) A practice with no parent -> 400.
+  {
+    const bad = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Bad', description: 'x', level: 'practice' },
+    });
+    check(
+      'POST a practice with no parentId -> 400',
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+  }
+
+  // 3) A competence whose parent is a capability (wrong level) -> 400.
+  {
+    const bad2 = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Bad2', description: 'x', level: 'competence', parentId: ENGINEERING_ID },
+    });
+    check(
+      "POST a competence whose parent ('2', a capability) is the wrong level -> 400",
+      bad2.status === 400,
+      `status=${bad2.status}, body=${JSON.stringify(bad2.body)}`,
+    );
+  }
+
+  // 4) A name already in the tree -> 400.
+  {
+    const dup = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'Engineering', description: 'x', level: 'capability' },
+    });
+    check(
+      "POST with a name already in the tree ('Engineering') -> 400",
+      dup.status === 400,
+      `status=${dup.status}, body=${JSON.stringify(dup.body)}`,
+    );
+  }
+
+  // 5) PUT its OWN unchanged name -> 200 (must not collide with itself). This
+  // is a regression guard on the new uniqueness check's ctx.id exclusion —
+  // note it can ALREADY pass today (no uniqueness check exists yet to break
+  // it), which is fine: its job is to prove the eventual validator doesn't
+  // regress a working rename-to-self, not to prove a currently-broken 400.
+  {
+    const self = await req('PUT', `/resource-organizations/${ENGINEERING_ID}`, {
+      headers: RBAC_HEADERS,
+      body: { name: 'Engineering' },
+    });
+    check(
+      "PUT /api/resource-organizations/2 {name:'Engineering'} (unchanged) -> 200, not a self-collision",
+      self.status === 200,
+      `status=${self.status}, body=${JSON.stringify(self.body)}`,
+    );
+  }
+
+  // 6) A capability cannot be given a parent -> 400. NOT a cycle-guard
+  // exercise, despite '6' (Backend) being '2's (Engineering's) own descendant:
+  // node '2' is still a capability in this PUT (no `level` sent), so
+  // validateOrgTreeNode's capability-is-a-root guard rejects it before the
+  // cycle check ever runs — see the comment at that cycle guard (src/server.ts)
+  // for why a cycle is structurally unreachable through this API at all. This
+  // check only proves the root rule fires on an UPDATE, not merely on create.
+  {
+    const cyc = await req('PUT', `/resource-organizations/${ENGINEERING_ID}`, {
+      headers: RBAC_HEADERS,
+      body: { parentId: BACKEND_ID },
+    });
+    check(
+      "PUT /api/resource-organizations/2 {parentId:'6'} -> 400 (a capability cannot be given a parent)",
+      cyc.status === 400,
+      `status=${cyc.status}, body=${JSON.stringify(cyc.body)}`,
+    );
+  }
+
+  // 7) DELETE a node that still has a child -> 409.
+  {
+    const del1 = await req('DELETE', `/resource-organizations/${PLATFORM_ID}`, { headers: RBAC_HEADERS });
+    check(
+      "DELETE /api/resource-organizations/5 (Platform) while '6' (Backend) still names it as parent -> 409",
+      del1.status === 409,
+      `status=${del1.status}, body=${JSON.stringify(del1.body)}`,
+    );
+  }
+
+  // 8) DELETE a CHILDLESS node that a resource still references by name -> 409
+  // — the RESOURCES guard specifically. Deleting '2' (Engineering) would also
+  // 409, but only via the CHILDREN guard (it still has '5'/Platform beneath
+  // it) — that would leave the resources-guard branch completely untested.
+  // Built on a FRESH leaf with zero children instead, so the children guard
+  // structurally cannot fire first, and the resources guard is the only one
+  // that can produce the 409 below.
+  {
+    const leaf = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Leaf (resource-guard)', description: 'x', level: 'capability' },
+    });
+    const leafOk = check(
+      'check 8 setup: a fresh, childless leaf node is created',
+      leaf.status === 200 && typeof leaf.body?.id === 'string',
+      `status=${leaf.status}, body=${JSON.stringify(leaf.body)}`,
+    );
+    if (leafOk) {
+      const leafId = leaf.body.id;
+      const leafName = leaf.body.name;
+
+      // No DELETE /resources endpoint exists (checked: src/server.ts has no
+      // `apiRouter.delete('/resources...')`), so this throwaway resource is
+      // never removed — same convention already used by the C2 dummy-
+      // substitution fixtures above, which also never delete the resources
+      // they create.
+      const resource = await req('POST', '/resources', {
+        headers: RBAC_HEADERS,
+        body: { name: 'D Smoke Resource (resource-guard)', role: 'Developer', kind: 'internal', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8 },
+      });
+      const resourceOk = check(
+        'check 8 setup: a throwaway resource is created',
+        resource.status === 201 && typeof resource.body?.id === 'string',
+        `status=${resource.status}, body=${JSON.stringify(resource.body)}`,
+      );
+      if (resourceOk) {
+        const resourceId = resource.body.id;
+        const attach = await req('PUT', `/resources/${resourceId}`, {
+          headers: RBAC_HEADERS,
+          body: { organization: leafName },
+        });
+        const attachOk = check(
+          `check 8 setup: PUT /api/resources/${resourceId} {organization:'${leafName}'} -> 200 (resources bind by NAME, spec §2.4)`,
+          attach.status === 200 && attach.body?.organization === leafName,
+          `status=${attach.status}, body=${JSON.stringify(attach.body)}`,
+        );
+        if (attachOk) {
+          const del2 = await req('DELETE', `/resource-organizations/${leafId}`, { headers: RBAC_HEADERS });
+          check(
+            `DELETE /api/resource-organizations/${leafId} (childless leaf) while a resource carries organization:'${leafName}' -> 409, the RESOURCES guard specifically`,
+            del2.status === 409 && del2.body?.error === 'Cannot delete an organization that resources still reference',
+            `status=${del2.status}, body=${JSON.stringify(del2.body)}`,
+          );
+        }
+
+        // Cleanup: detach the resource (organization: '') so the leaf becomes
+        // deletable again, then remove the leaf itself — leaving only the
+        // permanent, un-deletable throwaway resource behind (see the note above).
+        const detach = await req('PUT', `/resources/${resourceId}`, {
+          headers: RBAC_HEADERS,
+          body: { organization: '' },
+        });
+        check(`check 8 cleanup: PUT /api/resources/${resourceId} {organization:''} -> 200, detaches`, detach.status === 200, `status=${detach.status}`);
+        const cleanup = await req('DELETE', `/resource-organizations/${leafId}`, { headers: RBAC_HEADERS });
+        check(`check 8 cleanup: DELETE /api/resource-organizations/${leafId} (now unreferenced, childless) -> 204`, cleanup.status === 204, `status=${cleanup.status}`);
+      }
+    }
+  }
+
+  // 9) THE DUAL-ADAPTER CLEAR-TO-ABSENT SEAM — PUT {level:'capability',
+  // parentId:''} on the node from check 1 must land as a root (parentId
+  // ABSENT from the response, not a stored literal ''), identically on both
+  // adapters. The assertion below folds in the precondition that the node
+  // really did carry parentId '2' beforehand (from check 1) — so pre-
+  // implementation this fails for the REAL reason (parentId was never
+  // attached by POST in the first place), not by accident.
+  if (smokeNodeId !== undefined) {
+    const cleared = await req('PUT', `/resource-organizations/${smokeNodeId}`, {
+      headers: RBAC_HEADERS,
+      body: { level: 'capability', parentId: '' },
+    });
+    check(
+      `PUT /api/resource-organizations/${smokeNodeId} {level:'capability', parentId:''} -> 200, clears a REAL parentId to absent (root)`,
+      created.body?.parentId === ENGINEERING_ID && cleared.status === 200 &&
+      cleared.body !== undefined && !('parentId' in cleared.body),
+      `preParentId=${created.body?.parentId}, status=${cleared.status}, body=${JSON.stringify(cleared.body)}`,
+    );
+    // Re-confirm via a FRESH GET (not just the PUT's own echoed response) —
+    // the point of this seam is that it persists identically on both adapters.
+    {
+      const { status, body } = await req('GET', '/resource-organizations');
+      const node = Array.isArray(body) ? body.find((n) => n.id === smokeNodeId) : undefined;
+      check(
+        'GET /api/resource-organizations reflects the cleared node as a root (parentId absent) on re-read',
+        status === 200 && Boolean(node) && !('parentId' in node),
+        node ? `node=${JSON.stringify(node)}` : `status=${status}, missing`,
+      );
+    }
+
+    // 9b) THE SAME SEAM FOR managerId — a client clears the manager by
+    // sending '', not null (identical reasoning to parentId above: an
+    // untranslated '' would persist as a literal empty string on both
+    // adapters, never becoming absent). This is not just symmetry for its own
+    // sake: Task 7 builds a manager <select> whose empty option is the ONLY
+    // way to detach a Capability Leader from a node — without this
+    // translation, clearing the manager in that UI would silently do nothing.
+    const managerSet = await req('PUT', `/resource-organizations/${smokeNodeId}`, {
+      headers: RBAC_HEADERS,
+      body: { managerId: '1' },
+    });
+    check(
+      `PUT /api/resource-organizations/${smokeNodeId} {managerId:'1'} -> 200, sets a real manager`,
+      managerSet.status === 200 && managerSet.body?.managerId === '1',
+      `status=${managerSet.status}, body=${JSON.stringify(managerSet.body)}`,
+    );
+    // The assertion folds in the precondition that a REAL managerId was set
+    // beforehand (same discipline as the parentId seam above), so this fails
+    // for the right reason if the translation is missing, not by accident.
+    const managerCleared = await req('PUT', `/resource-organizations/${smokeNodeId}`, {
+      headers: RBAC_HEADERS,
+      body: { managerId: '' },
+    });
+    check(
+      `PUT /api/resource-organizations/${smokeNodeId} {managerId:''} -> 200, clears a REAL manager to absent`,
+      managerSet.body?.managerId === '1' && managerCleared.status === 200 &&
+      managerCleared.body !== undefined && !('managerId' in managerCleared.body),
+      `preManagerId=${managerSet.body?.managerId}, status=${managerCleared.status}, body=${JSON.stringify(managerCleared.body)}`,
+    );
+    {
+      const { status, body } = await req('GET', '/resource-organizations');
+      const node = Array.isArray(body) ? body.find((n) => n.id === smokeNodeId) : undefined;
+      check(
+        'GET /api/resource-organizations reflects the cleared node with managerId absent on re-read',
+        status === 200 && Boolean(node) && !('managerId' in node),
+        node ? `node=${JSON.stringify(node)}` : `status=${status}, missing`,
+      );
+    }
+
+    // Cleanup: the smoke node is now a childless root with no resources
+    // referencing it — deletable, so a future run against a persistent
+    // (Postgres) backend never accumulates cruft.
+    const cleanup = await req('DELETE', `/resource-organizations/${smokeNodeId}`, { headers: RBAC_HEADERS });
+    check(`DELETE /api/resource-organizations/${smokeNodeId} (smoke cleanup) -> 204`, cleanup.status === 204, `status=${cleanup.status}`);
+  }
+
+  // 10) REVIEW ROUND 2 (critical #1) — PUT {name: null} must be REJECTED
+  // (400), never masked. `body.level ?? existing?.level` / `body.name ??
+  // existing?.name` cannot tell "absent" from "explicitly null" — both are
+  // nullish to `??` — and pick() copies an explicit `null` straight through
+  // (it only filters `undefined`). Left unchecked this corrupts the row: the
+  // in-memory adapter's update() DELETES the `name` key outright (it is
+  // `notNull()` in the schema); Postgres raises an unmapped NOT NULL
+  // violation (SQLSTATE 23502) as an opaque 500. Uses a FRESH throwaway node,
+  // never a seeded one — against the pre-fix build this call actually
+  // corrupts whatever row it targets, and seeded nodes are load-bearing for
+  // every other check in this function.
+  {
+    const throwaway = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Null-Name Guard', description: 'x', level: 'capability' },
+    });
+    const throwawayOk = check(
+      'null-name guard setup: a fresh throwaway node is created',
+      throwaway.status === 200 && typeof throwaway.body?.id === 'string',
+      `status=${throwaway.status}, body=${JSON.stringify(throwaway.body)}`,
+    );
+    if (throwawayOk) {
+      const throwawayId = throwaway.body.id;
+      const masked = await req('PUT', `/resource-organizations/${throwawayId}`, {
+        headers: RBAC_HEADERS,
+        body: { name: null },
+      });
+      check(
+        `PUT /api/resource-organizations/${throwawayId} {name: null} -> 400 (rejected, not masked by the ?? fallback)`,
+        masked.status === 400,
+        `status=${masked.status}, body=${JSON.stringify(masked.body)}`,
+      );
+      // The point of this check is that the row was never corrupted, even
+      // transiently — not just that the response was a 400.
+      {
+        const { status, body } = await req('GET', '/resource-organizations');
+        const node = Array.isArray(body) ? body.find((n) => n.id === throwawayId) : undefined;
+        check(
+          "GET /api/resource-organizations shows the throwaway node's name UNCHANGED after the rejected PUT",
+          status === 200 && node?.name === 'D Smoke Null-Name Guard',
+          node ? `name=${JSON.stringify(node.name)}` : `status=${status}, missing`,
+        );
+      }
+      const cleanup10 = await req('DELETE', `/resource-organizations/${throwawayId}`, { headers: RBAC_HEADERS });
+      check(`null-name guard cleanup: DELETE /api/resource-organizations/${throwawayId} -> 204`, cleanup10.status === 204, `status=${cleanup10.status}`);
+    }
+  }
+
+  // 11) REVIEW ROUND 2 (critical #1, the full exploit chain) — a masked
+  // {name: null} PUT was the one thing that could get a resource-still-
+  // referenced node PAST the delete guard: rename to `undefined` (silently),
+  // then the guard's `resources.some(r => r.organization === node.name)`
+  // compares against `undefined` and matches nobody. Proves the WHOLE chain
+  // is closed, not just the isolated PUT from check 10 — a fresh, childless
+  // leaf with an attached resource, attempt the masking PUT (must now 400),
+  // then attempt the delete (must STILL 409 — the guard never stopped
+  // working, because the name never actually changed).
+  {
+    const leaf2 = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Leaf (null-name chain)', description: 'x', level: 'capability' },
+    });
+    const leaf2Ok = check(
+      'check 11 setup: a fresh, childless leaf node is created',
+      leaf2.status === 200 && typeof leaf2.body?.id === 'string',
+      `status=${leaf2.status}, body=${JSON.stringify(leaf2.body)}`,
+    );
+    if (leaf2Ok) {
+      const leaf2Id = leaf2.body.id;
+      const leaf2Name = leaf2.body.name;
+      const resource2 = await req('POST', '/resources', {
+        headers: RBAC_HEADERS,
+        body: { name: 'D Smoke Resource (null-name chain)', role: 'Developer', kind: 'internal', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8 },
+      });
+      const resource2Ok = check(
+        'check 11 setup: a throwaway resource is created',
+        resource2.status === 201 && typeof resource2.body?.id === 'string',
+        `status=${resource2.status}, body=${JSON.stringify(resource2.body)}`,
+      );
+      if (resource2Ok) {
+        const resource2Id = resource2.body.id;
+        const attach2 = await req('PUT', `/resources/${resource2Id}`, {
+          headers: RBAC_HEADERS,
+          body: { organization: leaf2Name },
+        });
+        const attach2Ok = check(
+          `check 11 setup: PUT /api/resources/${resource2Id} {organization:'${leaf2Name}'} -> 200`,
+          attach2.status === 200 && attach2.body?.organization === leaf2Name,
+          `status=${attach2.status}, body=${JSON.stringify(attach2.body)}`,
+        );
+        if (attach2Ok) {
+          const maskAttempt = await req('PUT', `/resource-organizations/${leaf2Id}`, {
+            headers: RBAC_HEADERS,
+            body: { name: null },
+          });
+          check(
+            `check 11: PUT /api/resource-organizations/${leaf2Id} {name: null} -> 400 (the masking attempt is rejected)`,
+            maskAttempt.status === 400,
+            `status=${maskAttempt.status}, body=${JSON.stringify(maskAttempt.body)}`,
+          );
+          const delAttempt = await req('DELETE', `/resource-organizations/${leaf2Id}`, { headers: RBAC_HEADERS });
+          check(
+            `check 11: DELETE /api/resource-organizations/${leaf2Id} -> 409, the resources guard STILL fires (the name was never actually changed, so the bypass is closed)`,
+            delAttempt.status === 409,
+            `status=${delAttempt.status}, body=${JSON.stringify(delAttempt.body)}`,
+          );
+        }
+        // Cleanup: detach, then remove the leaf.
+        const detach2 = await req('PUT', `/resources/${resource2Id}`, {
+          headers: RBAC_HEADERS,
+          body: { organization: '' },
+        });
+        check(`check 11 cleanup: PUT /api/resources/${resource2Id} {organization:''} -> 200, detaches`, detach2.status === 200, `status=${detach2.status}`);
+        const cleanup11 = await req('DELETE', `/resource-organizations/${leaf2Id}`, { headers: RBAC_HEADERS });
+        check(`check 11 cleanup: DELETE /api/resource-organizations/${leaf2Id} (now unreferenced, childless) -> 204`, cleanup11.status === 204, `status=${cleanup11.status}`);
+      }
+    }
+  }
+
+  // 12) REVIEW ROUND 2 (important) — a rename must not silently orphan every
+  // resource still bound to the OLD name. Exercises the EXACT scenario the
+  // coordinator reported: renaming seeded 'Engineering' (id '2'), which
+  // several seeded resources reference by organization name (spec §2.4:
+  // resources bind by NAME, and tree-wide name uniqueness exists PRECISELY
+  // because of that binding). Mirrors the delete guard as a 409 refusal, NOT
+  // a cascade onto the resources — see the comment at this guard in
+  // src/server.ts for why cascading was considered and deliberately deferred.
+  {
+    const renamed = await req('PUT', `/resource-organizations/${ENGINEERING_ID}`, {
+      headers: RBAC_HEADERS,
+      body: { name: 'Engineering EMEA' },
+    });
+    check(
+      "PUT /api/resource-organizations/2 {name:'Engineering EMEA'} -> 409 (resources still reference 'Engineering' by name)",
+      renamed.status === 409,
+      `status=${renamed.status}, body=${JSON.stringify(renamed.body)}`,
+    );
+    // Not just the status — confirm the name genuinely never changed.
+    const { status, body } = await req('GET', '/resource-organizations');
+    const node = Array.isArray(body) ? body.find((n) => n.id === ENGINEERING_ID) : undefined;
+    check(
+      "GET /api/resource-organizations shows 'Engineering' (id '2') name UNCHANGED after the refused rename",
+      status === 200 && node?.name === 'Engineering',
+      node ? `name=${JSON.stringify(node.name)}` : `status=${status}, missing`,
+    );
+  }
+
+  // 13) REVIEW ROUND 2 (minor, the brief's "highest-risk area") — three
+  // single-field PUTs the validator's cross-field logic already handles
+  // correctly (per the coordinator's own read of the code), pinned so a
+  // future edit to validateOrgTreeNode can't quietly break them. Read-only:
+  // each is rejected with 400 before validateOrgTreeNode ever reaches
+  // `update()`, so none of these mutate seed data.
+  {
+    // {level: 'capability'} ALONE on '5' (Platform), which still has parentId
+    // '2' — the capability-is-a-root rule must fire off the EXISTING
+    // parentId, not just a parentId supplied in the same body.
+    const r13a = await req('PUT', `/resource-organizations/${PLATFORM_ID}`, {
+      headers: RBAC_HEADERS,
+      body: { level: 'capability' },
+    });
+    check(
+      "PUT /api/resource-organizations/5 {level:'capability'} ALONE (still has parentId '2') -> 400",
+      r13a.status === 400,
+      `status=${r13a.status}, body=${JSON.stringify(r13a.body)}`,
+    );
+
+    // {parentId: X} ALONE on '6' (Backend, competence), where X ('2',
+    // Engineering) is a capability, not the practice a competence requires —
+    // the wrong-level check must fire off the EXISTING level, not just a
+    // level supplied in the same body. '2' is not '6's descendant, so this is
+    // purely the wrong-level branch, not a cycle.
+    const r13b = await req('PUT', `/resource-organizations/${BACKEND_ID}`, {
+      headers: RBAC_HEADERS,
+      body: { parentId: ENGINEERING_ID },
+    });
+    check(
+      "PUT /api/resource-organizations/6 {parentId:'2'} ALONE (a capability, wrong level for a competence's parent) -> 400",
+      r13b.status === 400,
+      `status=${r13b.status}, body=${JSON.stringify(r13b.body)}`,
+    );
+
+    // {parentId: ''} ALONE on '5' (Platform, practice) — clearing the parent
+    // must be caught off the EXISTING level ('practice' must have a parent),
+    // not just a level supplied in the same body.
+    const r13c = await req('PUT', `/resource-organizations/${PLATFORM_ID}`, {
+      headers: RBAC_HEADERS,
+      body: { parentId: '' },
+    });
+    check(
+      "PUT /api/resource-organizations/5 {parentId:''} ALONE (a practice, which must have a parent) -> 400",
+      r13c.status === 400,
+      `status=${r13c.status}, body=${JSON.stringify(r13c.body)}`,
+    );
+  }
+
+  // 14) REVIEW ROUND 3 — the required-field null-rejection covers the WHOLE
+  // class of notNull columns (name, description, costCenters, level), not
+  // just the two round 2 found. {description: null} on PUT -> 400, same
+  // primitive as the round-2 name bug: description has no "absent" state to
+  // clear to, so an explicit null is invalid input, not a clear-to-absent.
+  {
+    const throwaway14 = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Null-Description Guard', description: 'x', level: 'capability' },
+    });
+    const ok14 = check(
+      'null-description guard setup: a fresh throwaway node is created',
+      throwaway14.status === 200 && typeof throwaway14.body?.id === 'string',
+      `status=${throwaway14.status}, body=${JSON.stringify(throwaway14.body)}`,
+    );
+    if (ok14) {
+      const id14 = throwaway14.body.id;
+      const masked14 = await req('PUT', `/resource-organizations/${id14}`, {
+        headers: RBAC_HEADERS,
+        body: { description: null },
+      });
+      check(
+        `PUT /api/resource-organizations/${id14} {description: null} -> 400 (rejected, notNull column)`,
+        masked14.status === 400,
+        `status=${masked14.status}, body=${JSON.stringify(masked14.body)}`,
+      );
+      const { status: s14, body: b14 } = await req('GET', '/resource-organizations');
+      const node14 = Array.isArray(b14) ? b14.find((n) => n.id === id14) : undefined;
+      check(
+        "GET /api/resource-organizations shows the throwaway node's description UNCHANGED after the rejected PUT",
+        s14 === 200 && node14?.description === 'x',
+        node14 ? `description=${JSON.stringify(node14.description)}` : `status=${s14}, missing`,
+      );
+      const cleanup14 = await req('DELETE', `/resource-organizations/${id14}`, { headers: RBAC_HEADERS });
+      check(`null-description guard cleanup: DELETE /api/resource-organizations/${id14} -> 204`, cleanup14.status === 204, `status=${cleanup14.status}`);
+    }
+  }
+
+  // 15) {costCenters: null} on PUT -> 400. Additionally notable because
+  // validateResourceOrgRefs's OWN `!== null` clause explicitly treats null as
+  // acceptable for ITS check (see the comment there) — it is the required-
+  // field loop in validateOrgTreeNode, called right after in the same
+  // request, that actually stops a null costCenters from reaching the repo.
+  {
+    const throwaway15 = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Null-CostCenters Guard', description: 'x', level: 'capability', costCenters: ['CC-9001'] },
+    });
+    const ok15 = check(
+      'null-costCenters guard setup: a fresh throwaway node is created (with a real costCenters entry)',
+      throwaway15.status === 200 && typeof throwaway15.body?.id === 'string' && Array.isArray(throwaway15.body?.costCenters) && throwaway15.body.costCenters.includes('CC-9001'),
+      `status=${throwaway15.status}, body=${JSON.stringify(throwaway15.body)}`,
+    );
+    if (ok15) {
+      const id15 = throwaway15.body.id;
+      const masked15 = await req('PUT', `/resource-organizations/${id15}`, {
+        headers: RBAC_HEADERS,
+        body: { costCenters: null },
+      });
+      check(
+        `PUT /api/resource-organizations/${id15} {costCenters: null} -> 400 (rejected, notNull column)`,
+        masked15.status === 400,
+        `status=${masked15.status}, body=${JSON.stringify(masked15.body)}`,
+      );
+      const { status: s15, body: b15 } = await req('GET', '/resource-organizations');
+      const node15 = Array.isArray(b15) ? b15.find((n) => n.id === id15) : undefined;
+      check(
+        "GET /api/resource-organizations shows the throwaway node's costCenters UNCHANGED after the rejected PUT",
+        s15 === 200 && Array.isArray(node15?.costCenters) && node15.costCenters.includes('CC-9001'),
+        node15 ? `costCenters=${JSON.stringify(node15.costCenters)}` : `status=${s15}, missing`,
+      );
+      const cleanup15 = await req('DELETE', `/resource-organizations/${id15}`, { headers: RBAC_HEADERS });
+      check(`null-costCenters guard cleanup: DELETE /api/resource-organizations/${id15} -> 204`, cleanup15.status === 204, `status=${cleanup15.status}`);
+    }
+  }
+
+  // 16) THE POST-SPECIFIC HALF — {costCenters: null} on POST -> 400, not a
+  // persisted null. Before this round, the POST handler's
+  // `{ costCenters: [], ...body }` spread meant an explicit
+  // `costCenters: null` OVERRODE the `[]` default (the trailing spread always
+  // wins), landing a literal null straight in the created row — no row
+  // should be created at all now.
+  {
+    const rejectedPost = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Null-CostCenters POST Guard', description: 'x', level: 'capability', costCenters: null },
+    });
+    check(
+      'POST /api/resource-organizations {costCenters: null} -> 400 (rejected, not persisted via the spread)',
+      rejectedPost.status === 400,
+      `status=${rejectedPost.status}, body=${JSON.stringify(rejectedPost.body)}`,
+    );
+    // Confirm no row leaked under that name (not just the status code) — and
+    // clean it up if it did (only reachable pre-fix, on a red run).
+    const { status: s16, body: b16 } = await req('GET', '/resource-organizations');
+    const leaked = Array.isArray(b16) ? b16.find((n) => n.name === 'D Smoke Null-CostCenters POST Guard') : undefined;
+    check(
+      'GET /api/resource-organizations confirms no row was created for the rejected POST',
+      s16 === 200 && leaked === undefined,
+      leaked ? `leaked row=${JSON.stringify(leaked)}` : 'none found (correct)',
+    );
+    if (leaked !== undefined) {
+      await req('DELETE', `/resource-organizations/${leaked.id}`, { headers: RBAC_HEADERS });
+    }
+  }
+
+  // 17) REVIEW ROUND 1 (Task 7 coordinator feedback, critical #2) — changing a
+  // node's OWN level while it has an EXISTING CHILD must be refused: every
+  // check above only ever validates the record being edited against ITS OWN
+  // parent, never against a child pointing back at it. Isolated on a fresh,
+  // throwaway capability -> practice -> competence chain (never the seeded
+  // Platform/Backend used elsewhere in this function) so a pre-fix run that
+  // lets this through does not corrupt a fixture other checks rely on.
+  {
+    const rootC = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Level-Guard Root', description: 'x', level: 'capability' },
+    });
+    const rootOk = check(
+      'check 17 setup: a fresh capability root is created',
+      rootC.status === 200 && typeof rootC.body?.id === 'string',
+      `status=${rootC.status}, body=${JSON.stringify(rootC.body)}`,
+    );
+    if (rootOk) {
+      const rootId = rootC.body.id;
+      const midC = await req('POST', '/resource-organizations', {
+        headers: RBAC_HEADERS,
+        body: { name: 'D Smoke Level-Guard Mid', description: 'x', level: 'practice', parentId: rootId },
+      });
+      const midOk = check(
+        'check 17 setup: a fresh practice, child of the root, is created',
+        midC.status === 200 && typeof midC.body?.id === 'string',
+        `status=${midC.status}, body=${JSON.stringify(midC.body)}`,
+      );
+      if (midOk) {
+        const midId = midC.body.id;
+        const leafC = await req('POST', '/resource-organizations', {
+          headers: RBAC_HEADERS,
+          body: { name: 'D Smoke Level-Guard Leaf', description: 'x', level: 'competence', parentId: midId },
+        });
+        const leafOk = check(
+          'check 17 setup: a fresh competence, child of the practice, is created',
+          leafC.status === 200 && typeof leafC.body?.id === 'string',
+          `status=${leafC.status}, body=${JSON.stringify(leafC.body)}`,
+        );
+        if (leafOk) {
+          const leafId = leafC.body.id;
+          // The guard itself: mid has a child (the leaf, a competence
+          // requiring a practice parent) — changing mid's own level to
+          // 'capability' would leave that child's parent no longer a practice.
+          const changed = await req('PUT', `/resource-organizations/${midId}`, {
+            headers: RBAC_HEADERS,
+            body: { level: 'capability', parentId: '' },
+          });
+          check(
+            `PUT /api/resource-organizations/${midId} {level:'capability'} while it still has a competence child -> 400 (would orphan the child's level requirement)`,
+            changed.status === 400,
+            `status=${changed.status}, body=${JSON.stringify(changed.body)}`,
+          );
+          // Confirm the row was never actually changed, not just the status.
+          const { status: sMid, body: bMid } = await req('GET', '/resource-organizations');
+          const midNode = Array.isArray(bMid) ? bMid.find((n) => n.id === midId) : undefined;
+          check(
+            "GET /api/resource-organizations shows the mid node's level UNCHANGED ('practice') after the rejected PUT",
+            sMid === 200 && midNode?.level === 'practice' && midNode?.parentId === rootId,
+            midNode ? `node=${JSON.stringify(midNode)}` : `status=${sMid}, missing`,
+          );
+          // The guard is scoped to "has children", not "level changes are
+          // never allowed again" — delete the only child, then the exact same
+          // PUT must now succeed.
+          const delLeaf = await req('DELETE', `/resource-organizations/${leafId}`, { headers: RBAC_HEADERS });
+          check(`check 17: DELETE /api/resource-organizations/${leafId} (the now-only child) -> 204`, delLeaf.status === 204, `status=${delLeaf.status}`);
+          const changedOk = await req('PUT', `/resource-organizations/${midId}`, {
+            headers: RBAC_HEADERS,
+            body: { level: 'capability', parentId: '' },
+          });
+          check(
+            `PUT /api/resource-organizations/${midId} {level:'capability'} now that it has NO children -> 200 (the guard is scoped to children, not a blanket freeze)`,
+            changedOk.status === 200 && changedOk.body?.level === 'capability',
+            `status=${changedOk.status}, body=${JSON.stringify(changedOk.body)}`,
+          );
+        }
+        // Cleanup: mid is now childless either way (the leaf was deleted
+        // above on the success path; leaf creation never happened at all on
+        // the setup-failure path), so a single DELETE here covers both.
+        const cleanupMid = await req('DELETE', `/resource-organizations/${midId}`, { headers: RBAC_HEADERS });
+        check(`check 17 cleanup: DELETE /api/resource-organizations/${midId} -> 204`, cleanupMid.status === 204, `status=${cleanupMid.status}`);
+      }
+      const cleanupRoot = await req('DELETE', `/resource-organizations/${rootId}`, { headers: RBAC_HEADERS });
+      check(`check 17 cleanup: DELETE /api/resource-organizations/${rootId} -> 204`, cleanupRoot.status === 204, `status=${cleanupRoot.status}`);
+    }
+  }
+
+  // 18) REVIEW ROUND 4 (important #3) — THE '' SENTINEL ON **CREATE**. The PUT
+  // handler translates '' -> null ("clear this field"); POST used to spread the
+  // body straight into `create()`, which strips nothing, while
+  // `validateOrgTreeNode` skips the reference check for '' — so a POST carrying
+  // `managerId: ''` persisted a LITERAL empty string. That value then entered
+  // `scopedApproversOf`'s manager set (which guarded only `!== undefined`),
+  // naming an approver nobody can be while still suppressing the role fallback:
+  // the same lockout critical #1 describes, through a second door. `parentId: ''`
+  // likewise persisted and made the node fall out of the customizing tree's main
+  // walk. The client was working around this by omitting the keys on create —
+  // the UI as sole guardian, which the Global Constraints forbid.
+  //
+  // Mirrors checks 5/6 of `checkResourceManagerCycle` (the same bug, the same
+  // fix, on `POST /resources`' own managerId) — including the literal-`null`
+  // half, which `pick()` forwards unchanged.
+  {
+    const emptySentinels = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Empty Sentinels', description: 'x', level: 'capability', parentId: '', managerId: '' },
+    });
+    check(
+      "POST /api/resource-organizations {parentId:'', managerId:''} -> 200, both normalized to ABSENT, not persisted as literal ''",
+      emptySentinels.status === 200
+      && emptySentinels.body?.parentId === undefined && emptySentinels.body?.managerId === undefined,
+      `status=${emptySentinels.status}, body=${JSON.stringify(emptySentinels.body)}`,
+    );
+    // Re-READ it, not just the create response: the in-memory adapter returns
+    // what it was handed, so only a fresh GET proves what was actually stored.
+    if (typeof emptySentinels.body?.id === 'string') {
+      const id = emptySentinels.body.id;
+      const reread = await req('GET', '/resource-organizations');
+      const stored = (Array.isArray(reread.body) ? reread.body : []).find((n) => n.id === id);
+      check(
+        'check 18: the stored row reads back with parentId/managerId genuinely absent (adapter parity)',
+        stored !== undefined && stored.parentId === undefined && stored.managerId === undefined,
+        `stored=${JSON.stringify(stored)}`,
+      );
+      const cleanup = await req('DELETE', `/resource-organizations/${id}`, { headers: RBAC_HEADERS });
+      check(`check 18 cleanup: DELETE /api/resource-organizations/${id} -> 204`, cleanup.status === 204, `status=${cleanup.status}`);
+    }
+  }
+
+  // 19) The literal-`null` half of check 18 — `pick()` forwards an explicit
+  // JSON null unchanged (it only filters `undefined`), and `create()` has no
+  // null-stripping step on either adapter, so an unnormalized null would live
+  // on in an in-memory row while Postgres stored a proper NULL: a silent
+  // adapter disagreement. Neither field is in REQUIRED_ORG_FIELDS, so a null is
+  // NOT a 400 here (unlike `name`/`level`/`description`/`costCenters`) — it is
+  // a legitimate "no parent / no manager", normalized to absent.
+  {
+    const nullSentinels = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Null Sentinels', description: 'x', level: 'capability', parentId: null, managerId: null },
+    });
+    check(
+      'POST /api/resource-organizations {parentId: null, managerId: null} -> 200, both normalized to ABSENT, not persisted as literal null',
+      nullSentinels.status === 200
+      && nullSentinels.body?.parentId === undefined && nullSentinels.body?.managerId === undefined,
+      `status=${nullSentinels.status}, body=${JSON.stringify(nullSentinels.body)}`,
+    );
+    if (typeof nullSentinels.body?.id === 'string') {
+      const cleanup = await req('DELETE', `/resource-organizations/${nullSentinels.body.id}`, { headers: RBAC_HEADERS });
+      check(`check 19 cleanup: DELETE /api/resource-organizations/${nullSentinels.body.id} -> 204`, cleanup.status === 204, `status=${cleanup.status}`);
+    }
+  }
+}
+
+/**
+ * D task 5 — THE SCOPED ALLOCATION DECISION (design spec §3.3, §3.4, §3.5).
+ *
+ * Until D, `decideOneApproval` admitted ANY actor holding the step's role, so
+ * every `resource-manager` could decide every allocation (the gap-A §4.3
+ * fallback). D replaces that with a real scope — the target's transitive
+ * `managerId` chain UNION the managers of every org node above the target —
+ * and keeps the role fallback ONLY for a resource with no manager anywhere.
+ * §3.5 declares the breaking change: "chi oggi approva risorse che non
+ * gestisce smetterà di poterlo fare".
+ *
+ * IDENTITIES — AND A FIXTURE THAT USED TO CERTIFY A FICTION (review round 4).
+ * Header trust (AUTH_TRUST_HEADERS=true) resolves ROLE and IDENTITY through two
+ * independent paths: `trustedRole` reads X-User-Role while `actorResourceId`
+ * maps X-User-Id through the users directory. This section used to exploit that
+ * by sending `X-User-Id: '1'` with a FORGED `X-User-Role: resource-manager` —
+ * but seed user '1' (Julie) is a **delivery-executive**, and the only seeded
+ * resource-manager is user '2' (John). So the green "the node manager decides"
+ * check below proved a principal that DOES NOT EXIST in the directory, and it
+ * masked the real defect: the node-manager grant was subordinated to the role
+ * match, which made it inert for every actor whose global role was not
+ * 'resource-manager' — i.e. for Julie, the actual Capability Leader of node
+ * 'Engineering'. The fixture now uses her REAL role, which is exactly what the
+ * fix makes work: being an accountable manager is an allow of its own
+ * (design spec §3.4 rule 2), because the node's manager IS that profile and D
+ * deliberately adds no new RBAC role.
+ *
+ * SEED FACTS this section leans on (asserted as preconditions below, so a
+ * failure points at the rule and not at drifted seed data):
+ *   - resource '3' (Alice) has managerId '2' (John), who has managerId '1'
+ *     (Julie) -> Alice's scoped approvers are {'2','1'};
+ *   - org node '2' 'Engineering' has managerId '1' -> anyone attached to
+ *     Engineering (or to 'Platform'/'Backend' beneath it) is decidable by '1'
+ *     even with NO org-chart link at all;
+ *   - resource '4' (a dummy) is attached to 'Engineering' and has NO
+ *     managerId -> its ONLY scoped approver is node manager '1';
+ *   - resource '5' (a dummy) is attached to 'Consulting', which has no
+ *     manager and no parent -> `roleFallback` is true and ANY
+ *     resource-manager may still decide (this is what keeps C2's
+ *     substitutions decidable).
+ *
+ * The PROPOSER is never one of the deciders, so a scope refusal can never be
+ * masked by (or mistaken for) the segregation-of-duties 403 that sits above
+ * the scope check in `decideOneApproval`.
+ */
+async function checkScopedAllocationDecision() {
+  const PROPOSER = { 'X-User-Id': '3', 'X-User-Role': 'pm' };                // -> resource '3'
+  // Resource '1' (Julie) with her REAL directory role: a delivery-executive who
+  // is the manager of node '2' 'Engineering' and the top of the 3 -> 2 -> 1
+  // chain. NO role forging — see the IDENTITIES note above.
+  const MANAGER_1 = { 'X-User-Id': '1', 'X-User-Role': 'delivery-executive' };
+  const MANAGER_2 = { 'X-User-Id': '2', 'X-User-Role': 'resource-manager' };  // -> resource '2' (John)
+  // Maps to no user row, so `actorResourceId` falls back to the raw id: a
+  // resource-manager who manages nobody and no node — the "stranger" of §3.5.
+  const STRANGER = { 'X-User-Id': '99', 'X-User-Role': 'resource-manager' };
+  // A role NO allocation step is ever routed to: refused for a different reason
+  // than scope, and must keep saying so.
+  const OTHER_ROLE = { 'X-User-Id': '98', 'X-User-Role': 'pm' };
+  const ADMIN = { 'X-User-Id': '9', 'X-User-Role': 'admin' };
+
+  const ALICE = '3';
+  const DUMMY_ENGINEERING = '4';
+  const DUMMY_CONSULTING = '5';
+
+  // One month per approval: a month row can only be decided once, and reusing
+  // ONE assignment across several months is what keeps this section's request
+  // count down (each approval otherwise needs its own assignment).
+  // All three months are Open in the seed (2026-04..2026-12) and every day
+  // below is a Tuesday that is not a seeded holiday.
+  const MONTHS = { a: '2026-10', b: '2026-11', c: '2026-12' };
+  const DAYS = { '2026-10': '2026-10-06', '2026-11': '2026-11-03', '2026-12': '2026-12-01' };
+
+  // --- Preconditions --------------------------------------------------------
+  {
+    const alice = await req('GET', `/resources/${ALICE}`);
+    const john = await req('GET', '/resources/2');
+    check(
+      "D5 setup: the seeded chain 3 -> 2 -> 1 is intact (Alice's managerId is '2', John's is '1') — her scoped approvers are {'2','1'}",
+      alice.status === 200 && alice.body?.managerId === '2' && john.status === 200 && john.body?.managerId === '1',
+      `alice=${JSON.stringify(alice.body?.managerId)}, john=${JSON.stringify(john.body?.managerId)}`,
+    );
+    // The top of the chain, asserted as data: Julie has NO manager of her own
+    // (Task 5 removed the seed's self-cycle), which is what makes the transitive
+    // walk above terminate at her rather than at the traversal's `visited` set.
+    const julie = await req('GET', '/resources/1');
+    check(
+      "D5 setup: resource '1' (Julie) is the top of the chain — no managerId at all, not a self-loop",
+      julie.status === 200 && julie.body?.managerId === undefined,
+      `status=${julie.status}, managerId=${JSON.stringify(julie.body?.managerId)}`,
+    );
+    const dummyEng = await req('GET', `/resources/${DUMMY_ENGINEERING}`);
+    check(
+      "D5 setup: resource '4' (dummy) is attached to 'Engineering' and has NO managerId",
+      dummyEng.status === 200 && dummyEng.body?.organization === 'Engineering' && dummyEng.body?.managerId === undefined,
+      `status=${dummyEng.status}, organization=${JSON.stringify(dummyEng.body?.organization)}, managerId=${JSON.stringify(dummyEng.body?.managerId)}`,
+    );
+    const dummyCon = await req('GET', `/resources/${DUMMY_CONSULTING}`);
+    check(
+      "D5 setup: resource '5' (dummy) is attached to 'Consulting' and has NO managerId",
+      dummyCon.status === 200 && dummyCon.body?.organization === 'Consulting' && dummyCon.body?.managerId === undefined,
+      `status=${dummyCon.status}, organization=${JSON.stringify(dummyCon.body?.organization)}, managerId=${JSON.stringify(dummyCon.body?.managerId)}`,
+    );
+    const { status, body } = await req('GET', '/resource-organizations');
+    const nodes = Array.isArray(body) ? body : [];
+    const engineering = nodes.find((n) => n.name === 'Engineering');
+    const consulting = nodes.find((n) => n.name === 'Consulting');
+    check(
+      "D5 setup: org node 'Engineering' has managerId '1' and 'Consulting' has no manager and no parent",
+      status === 200 && engineering?.managerId === '1' &&
+      consulting !== undefined && consulting.managerId === undefined && consulting.parentId === undefined,
+      `engineering=${JSON.stringify(engineering)}, consulting=${JSON.stringify(consulting)}`,
+    );
+  }
+
+  // Shared parent request for every assignment below — one row, not one per case.
+  const request = await req('POST', '/requests', {
+    headers: PROPOSER,
+    body: { name: 'D5 scoped-decision request', requiredRole: 'Developer', requiredEffort: 1, skills: [] },
+  });
+  const requestOk = check(
+    'D5 setup: the shared parent request is created',
+    request.status === 200 && typeof request.body?.id === 'string',
+    `status=${request.status}, body=${JSON.stringify(request.body)}`,
+  );
+  if (!requestOk) return;
+
+  /** One assignment per target resource, booked lazily per month below. */
+  async function assignmentFor(resourceId) {
+    const created = await req('POST', '/assignments', {
+      headers: PROPOSER,
+      body: { requestId: request.body.id, resourceId, assignedHours: 0 },
+    });
+    const ok = check(
+      `D5 setup: assignment created for resource '${resourceId}'`,
+      created.status === 200 && typeof created.body?.id === 'string',
+      `status=${created.status}, body=${JSON.stringify(created.body)}`,
+    );
+    return ok ? created.body.id : undefined;
+  }
+
+  /**
+   * Book one hour in `month` and submit it, returning the Pending approval id.
+   * The PROPOSER is a `pm` who is nobody's manager here, so
+   * `autoApprovesAllocation` is false and a REAL approval always opens.
+   */
+  async function openApproval(assignmentId, month) {
+    const booked = await req('PUT', `/assignments/${assignmentId}/allocation`, {
+      headers: PROPOSER,
+      body: { month, dailyHours: { [DAYS[month]]: 1 } },
+    });
+    if (!check(
+      `D5 setup: 1h booked on ${DAYS[month]} for assignment ${assignmentId}`,
+      booked.status === 200,
+      `status=${booked.status}, body=${JSON.stringify(booked.body)}`,
+    )) return undefined;
+    const submitted = await req('POST', `/assignments/${assignmentId}/months/${month}/submit`, {
+      headers: PROPOSER, body: {},
+    });
+    const ok = check(
+      `D5 setup: ${assignmentId}:${month} submitted -> 'Requested' with a real approvalId`,
+      submitted.status === 200 && submitted.body?.status === 'Requested' && typeof submitted.body?.approvalId === 'string',
+      `status=${submitted.status}, monthStatus=${submitted.body?.status}, approvalId=${submitted.body?.approvalId}`,
+    );
+    return ok ? submitted.body.approvalId : undefined;
+  }
+
+  /**
+   * Decide `approvalId` as `headers` and assert the HTTP status — and, when
+   * `errorRe` is given, the refusal MESSAGE too. The two 403s this rule can
+   * produce are worded differently on purpose (out-of-scope vs a role the step
+   * was never routed to), so asserting only the status would let the server
+   * report the wrong reason and still pass.
+   */
+  async function decideAs(name, approvalId, headers, expected, errorRe) {
+    if (approvalId === undefined) { check(name, false, 'no approval id (setup failed above)'); return; }
+    const decided = await req('PUT', `/approval-requests/${approvalId}/decision`, {
+      headers, body: { decision: 'Approved', note: 'D5 smoke' },
+    });
+    const messageOk = errorRe === undefined || errorRe.test(String(decided.body?.error));
+    check(name, decided.status === expected && messageOk, `status=${decided.status}, body=${JSON.stringify(decided.body)}`);
+  }
+
+  // --- Alice ('3'): a real org-chart chain, 3 -> 2 -> 1 ---------------------
+  const aliceAssignment = await assignmentFor(ALICE);
+  if (aliceAssignment !== undefined) {
+    // §3.4 rule 1 + rule 2: John IS the step's named approver AND is in scope.
+    await decideAs(
+      "D5 the resource's own manager decides in scope (Alice/'3' decided by '2') -> 200",
+      await openApproval(aliceAssignment, MONTHS.a), MANAGER_2, 200,
+    );
+    // §3.4 rule 2 ALONE: Julie is NOT the step's `approverId` (that is '2') and
+    // her role ('delivery-executive') matches no allocation step, so this can
+    // only pass by her being ACCOUNTABLE via the TRANSITIVE chain 3 -> 2 -> 1.
+    await decideAs(
+      "D5 a transitive manager decides on the strength of the chain alone (Alice/'3' decided by '1', not the named approver, role not routed here) -> 200",
+      await openApproval(aliceAssignment, MONTHS.b), MANAGER_1, 200,
+    );
+    // ONE approval, TWO refusals — a refused decision leaves the request
+    // Pending, so the same month proves both messages against the same step.
+    const strangerApprovalId = await openApproval(aliceAssignment, MONTHS.c);
+    // (a) The UNCHANGED role/step refusal, on a step that really does carry an
+    // `approverId`: a 'pm' holds neither 'resource-manager' nor the named
+    // position, so the message names the approver — nothing to do with scope.
+    await decideAs(
+      "D5 a role the step was never routed to is refused with the role/step message (Alice/'3' decided by a pm) -> 403",
+      strangerApprovalId, OTHER_ROLE, 403, /cannot decide a step assigned to 2/,
+    );
+    // (b) THE BREAKING CHANGE (§3.5): passes today via the role fallback, must
+    // not — and must say WHY. The actor DOES hold 'resource-manager', so the
+    // message above would misdescribe this refusal; it must not name the
+    // resource or its managers either.
+    await decideAs(
+      "D5 a stranger resource-manager is refused with the SCOPE message (Alice/'3' decided by '99') -> 403",
+      strangerApprovalId, STRANGER, 403, /does not manage this resource/,
+    );
+  }
+
+  // --- Dummy in Engineering ('4'): no org-chart link, node manager only -----
+  const dummyEngAssignment = await assignmentFor(DUMMY_ENGINEERING);
+  if (dummyEngAssignment !== undefined) {
+    // §3.4 rule 2 via the ORG TREE, AND THE REAL PRINCIPAL: '1' manages node
+    // 'Engineering' and the dummy has no `managerId` at all, so the org chart
+    // offers nothing here — the grant can ONLY come from the node. Her role is
+    // her directory role ('delivery-executive'), which no allocation step is
+    // routed to, so this check is the one that fails before the fix: the whole
+    // point of rule 2 is that the Capability Leader does not need a global role.
+    await decideAs(
+      "D5 the node manager decides with no org-chart link and no routed role (dummy '4' in Engineering decided by Capability Leader '1') -> 200",
+      await openApproval(dummyEngAssignment, MONTHS.a), MANAGER_1, 200,
+    );
+    // A REAL seeded resource-manager who manages neither the dummy nor any
+    // node above it. Passes today via the role fallback, must not.
+    await decideAs(
+      "D5 a resource-manager outside the node's scope is refused with the SCOPE message (dummy '4' decided by '2') -> 403",
+      await openApproval(dummyEngAssignment, MONTHS.b), MANAGER_2, 403, /does not manage this resource/,
+    );
+    // §3.3: `admin` is a global role and is never scoped.
+    await decideAs(
+      "D5 admin is unaffected by scope (dummy '4' decided by admin '9') -> 200",
+      await openApproval(dummyEngAssignment, MONTHS.c), ADMIN, 200,
+    );
+  }
+
+  // --- Dummy in Consulting ('5'): no manager ANYWHERE -> the last resort ----
+  const dummyConAssignment = await assignmentFor(DUMMY_CONSULTING);
+  if (dummyConAssignment !== undefined) {
+    // §3.4 rule 3. This is the check that keeps C2's substitutions decidable:
+    // it must stay GREEN across this change.
+    await decideAs(
+      "D5 the role fallback survives for a resource with no manager anywhere (dummy '5' decided by '99') -> 200",
+      await openApproval(dummyConAssignment, MONTHS.b), STRANGER, 200,
+    );
+  }
+
+  // --- Scope binds ALLOCATION only -----------------------------------------
+  // Another kind routes by ROLE and has no target resource, so
+  // `allocationTargetResourceId` returns undefined and the rule falls through
+  // to the pre-D behaviour. A stranger resource-manager must still decide it.
+  {
+    const other = await req('POST', '/approval-requests', {
+      headers: PROPOSER,
+      body: { kind: 'TimeEntry', refId: 'D5-not-an-allocation' },
+    });
+    const otherOk = check(
+      "D5 setup: a non-allocation ('TimeEntry') approval is created, routed to 'resource-manager'",
+      other.status === 200 && typeof other.body?.id === 'string' && other.body?.steps?.[0]?.role === 'resource-manager',
+      `status=${other.status}, body=${JSON.stringify(other.body)}`,
+    );
+    if (otherOk) {
+      await decideAs(
+        'D5 scope binds allocation only: a non-allocation approval still routes by role -> 200',
+        other.body.id, STRANGER, 200,
+      );
+    }
+  }
+}
+
+/**
+ * D task 6 — THE SCOPED APPROVAL FEED (design spec §3.3).
+ *
+ * `GET /allocation-approvals` used to return every row to anyone holding one
+ * of the feed's roles (src/server.ts:542), regardless of what
+ * `decideOneApproval` (Task 5) would actually let them decide — offering a
+ * manager rows whose buttons the server then refused, which reads as a
+ * broken UI rather than as a permission boundary. This proves the feed now
+ * mirrors the decision gate: a resource is visible when it is in the actor's
+ * `scopeOf(...)`, OR when `scopedApproversOf(resource).roleFallback` is true
+ * (nobody is accountable for it anywhere) — the second disjunct is what keeps
+ * a no-manager-anywhere placeholder both VISIBLE and DECIDABLE, never one
+ * without the other.
+ *
+ * REUSES the fixtures `checkScopedAllocationDecision` (Task 5, immediately
+ * above) already created, rather than booking fresh ones: that section left
+ * genuine assignment-month rows for MONTH '2026-11' on resource '3' (Alice —
+ * decided, Allocated), resource '4' (the Engineering dummy — refused, still
+ * Requested) and resource '5' (the Consulting dummy — decided, Allocated).
+ * `status=all` on the feed query returns a row regardless of decided/pending
+ * state, so all three show up under one `from=to='2026-11'` query with no new
+ * bookings needed. This is WHY this section must run immediately after
+ * `checkScopedAllocationDecision` and — like it — BEFORE
+ * `checkResourceManagerCycle`, which permanently rewrites resource '3's
+ * managerId and would break the chain both sections read.
+ *
+ * SEED FACTS this leans on (already asserted as preconditions in
+ * `checkScopedAllocationDecision`, immediately above):
+ *   - resource '3' (Alice) is reachable from resource-manager '2' (John) via
+ *     the managerId chain 3 -> 2 — `scopeOf('2', ...)` is exactly {'3'}, since
+ *     John manages no org-tree node.
+ *   - resource '4' (a dummy attached to 'Engineering') is decidable ONLY by
+ *     node-manager '1' (Julie), NOT by '2' — `scopedApproversOf('4').roleFallback`
+ *     is FALSE (a real manager exists), so it is the genuine "outside scope,
+ *     must be hidden" row for actor '2' and for a stranger alike.
+ *   - resource '5' (a dummy attached to 'Consulting', which has no manager and
+ *     no parent) has NO manager anywhere — `roleFallback` is TRUE — so it stays
+ *     visible to EVERY resource-manager, including one who manages nobody.
+ */
+async function checkScopedApprovalFeed() {
+  const MANAGER_2 = { 'X-User-Id': '2', 'X-User-Role': 'resource-manager' };            // -> resource '2' (John); scope = {'3'}
+  const ADMIN = { 'X-User-Id': '9', 'X-User-Role': 'admin' };                            // global role — resourceId irrelevant
+  const DELIVERY_EXECUTIVE = { 'X-User-Id': '1', 'X-User-Role': 'delivery-executive' };  // global role — resourceId irrelevant
+  // Maps to no user row, so `actorResourceId` falls back to the raw id: a
+  // resource-manager who manages NOBODY and no org node — scope = ∅.
+  const STRANGER = { 'X-User-Id': '99', 'X-User-Role': 'resource-manager' };
+
+  const FEED_PATH = '/allocation-approvals?from=2026-11&to=2026-11&status=all';
+  const ALICE = '3';
+  const DUMMY_ENGINEERING = '4';
+  const DUMMY_CONSULTING = '5';
+
+  /** The set of `resourceId`s carried by the feed's `rows`, or empty on a bad body. */
+  const rowIds = (body) => new Set((Array.isArray(body?.rows) ? body.rows : []).map((r) => r.resourceId));
+  const rowCount = (body) => (Array.isArray(body?.rows) ? body.rows.length : -1);
+
+  // --- Check 1: a resource-manager sees their own scope, not more ----------
+  const scoped = await req('GET', FEED_PATH, { headers: MANAGER_2 });
+  const scopedIds = rowIds(scoped.body);
+  check(
+    "D6 the feed scopes to the actor: manager '2' sees resource '3' (in scope, 3 -> 2)",
+    scoped.status === 200 && scopedIds.has(ALICE),
+    `status=${scoped.status}, resourceIds=[${[...scopedIds].join(',')}]`,
+  );
+  check(
+    "D6 the feed scopes to the actor: manager '2' does NOT see resource '4' (outside scope — a real manager exists elsewhere)",
+    scoped.status === 200 && !scopedIds.has(DUMMY_ENGINEERING),
+    `status=${scoped.status}, resourceIds=[${[...scopedIds].join(',')}]`,
+  );
+
+  // --- Check 2: admin's feed is unrestricted --------------------------------
+  const asAdmin = await req('GET', FEED_PATH, { headers: ADMIN });
+  const adminIds = rowIds(asAdmin.body);
+  check(
+    "D6 admin's feed is unrestricted: at least as many rows as the scoped call",
+    asAdmin.status === 200 && rowCount(asAdmin.body) >= rowCount(scoped.body),
+    `status=${asAdmin.status}, adminRows=${rowCount(asAdmin.body)}, scopedRows=${rowCount(scoped.body)}`,
+  );
+  check(
+    "D6 admin's feed is unrestricted: includes resource '4', which the scoped manager could not see",
+    asAdmin.status === 200 && adminIds.has(DUMMY_ENGINEERING),
+    `status=${asAdmin.status}, resourceIds=[${[...adminIds].join(',')}]`,
+  );
+
+  // --- Check 3: delivery-executive's feed is unrestricted — a global oversight
+  // role sees every row. It does NOT follow that they can decide every row: the
+  // role is routed to no allocation step, so on the DECISION they get in only
+  // where they are actually accountable for the resource (§3.4 rule 2 — see D5's
+  // Capability-Leader check) or are the step's named approver. The feed being
+  // wider than the decision is deliberate for the two global roles; do not "fix"
+  // it into consistency.
+  const asDE = await req('GET', FEED_PATH, { headers: DELIVERY_EXECUTIVE });
+  const deIds = rowIds(asDE.body);
+  check(
+    "D6 delivery-executive's feed is unrestricted: at least as many rows as the scoped call",
+    asDE.status === 200 && rowCount(asDE.body) >= rowCount(scoped.body),
+    `status=${asDE.status}, deRows=${rowCount(asDE.body)}, scopedRows=${rowCount(scoped.body)}`,
+  );
+  check(
+    "D6 delivery-executive's feed is unrestricted: includes resource '4' too",
+    asDE.status === 200 && deIds.has(DUMMY_ENGINEERING),
+    `status=${asDE.status}, resourceIds=[${[...deIds].join(',')}]`,
+  );
+
+  // --- Check 4: the decision fallback is mirrored in the feed ---------------
+  // A resource-manager who manages NOBODY (not even resource '3') must still
+  // see resource '5' — the fallback exists precisely so a no-manager-anywhere
+  // row is never both invisible AND undecidable.
+  const asStranger = await req('GET', FEED_PATH, { headers: STRANGER });
+  const strangerIds = rowIds(asStranger.body);
+  check(
+    "D6 the decision fallback is mirrored in the feed: a resource-manager who manages nobody still sees resource '5' (no manager anywhere)",
+    asStranger.status === 200 && strangerIds.has(DUMMY_CONSULTING),
+    `status=${asStranger.status}, resourceIds=[${[...strangerIds].join(',')}]`,
+  );
+  check(
+    "D6 the fallback stays narrow: the same stranger does NOT see resource '3' or '4' (both have a real accountable manager elsewhere)",
+    asStranger.status === 200 && !strangerIds.has(ALICE) && !strangerIds.has(DUMMY_ENGINEERING),
+    `status=${asStranger.status}, resourceIds=[${[...strangerIds].join(',')}]`,
+  );
+}
+
+/**
+ * D REVIEW ROUND 4 — THE ACCOUNTABLE-MANAGER RULES, the two cases the suite
+ * could not see before.
+ *
+ * (A) CRITICAL #2 — the ORG-TREE half of the AUTO-APPROVAL shortcut.
+ * `autoApprovesAllocation` exists so a manager's own submission never deadlocks:
+ * segregation of duties forbids the requester from deciding their own approval,
+ * so when the only competent approver IS the proposer, opening a real approval
+ * strands the month. D widened the APPROVER set to node managers but not that
+ * shortcut, so the mainline Practice Manager workflow — plan your practice's
+ * placeholders, then confirm them — deadlocked: John's own decision 403s on SoD,
+ * every other resource-manager 403s on scope, a delivery-executive 403s on role,
+ * and only an admin can clear it. Worse, BOTH client mirrors showed John an
+ * ENABLED Approve button, because they check the scope and cannot predict SoD.
+ * The suite deliberately never made the proposer a decider, which is exactly
+ * why this was outside its coverage.
+ *
+ * (C) THE RULE (A) CANNOT DISTINGUISH — the shortcut must fire only where a
+ * deadlock is actually possible, i.e. where the node manager is the resource's
+ * ONLY accountable approver. (A)'s target has no personal manager and no seeded
+ * resource has both a personal manager and a managed node above it, so (A) is
+ * equally consistent with "auto-approve whenever you manage a node above" — a
+ * rule that would delete a working human review step wherever a direct people
+ * manager exists, and would let a `pm` who manages a node self-approve across
+ * their whole subtree. (C) is the fixture that pins which rule is intended.
+ *
+ * (B) CRITICAL #1, SECOND TRIGGER — a manager who has LEFT must not suppress
+ * the role fallback. Nothing revisits a stored `managerId` when a
+ * `terminationDate` is set and there is no `DELETE /resources`, so the stale id
+ * stays in the structural approver set, keeps `roleFallback` false, and turns
+ * the whole subtree beneath the departed manager admin-only — silently. The
+ * CONTRAST case (an ACTIVE manager still refusing a stranger) is D5's
+ * "a stranger resource-manager is refused with the SCOPE message" check, which
+ * must stay green: this must widen who can decide only when nobody is left.
+ *
+ * ORDERING. Runs AFTER `checkScopedApprovalFeed` — case (A) temporarily makes
+ * resource-manager '2' the manager of node '3' ('Consulting'), which would
+ * otherwise destroy that section's `roleFallback` fixture on resource '5' — and
+ * BEFORE `checkResourceManagerCycle`, which permanently rewrites resource '3'.
+ * The node's manager is restored at the end of (A) either way.
+ */
+async function checkAccountableApproverRules() {
+  const JOHN = { 'X-User-Id': '2', 'X-User-Role': 'resource-manager' };   // -> resource '2'
+  const PROPOSER = { 'X-User-Id': '3', 'X-User-Role': 'pm' };             // -> resource '3'
+  // Same principal as PROPOSER, named for the role it plays in (C): the DIRECT
+  // people manager, who gets in as the step's named approver rather than by role.
+  const ALICE = { 'X-User-Id': '3', 'X-User-Role': 'pm' };                // -> resource '3'
+  // Maps to no user row, so `actorResourceId` falls back to the raw id: a
+  // resource-manager who manages nobody and no node — the §3.5 "stranger".
+  const STRANGER = { 'X-User-Id': '99', 'X-User-Role': 'resource-manager' };
+
+  const CONSULTING_ID = '3';       // org node 'Consulting': no parent, no manager in the seed
+  const DUMMY_CONSULTING = '5';    // attached to 'Consulting', NO personal managerId
+  const MONTH = '2026-09';         // Open, and left Open by every earlier section
+  const DAY_A = '2026-09-08';      // Tuesday, not a seeded holiday
+  const DAY_B = '2026-09-15';      // Tuesday, not a seeded holiday
+  const DAY_C = '2026-09-22';      // Tuesday, not a seeded holiday
+
+  /** Book 1h in MONTH on `day` and submit it as `headers`; returns the month row. */
+  async function bookAndSubmit(label, assignmentId, day, headers) {
+    const booked = await req('PUT', `/assignments/${assignmentId}/allocation`, {
+      headers, body: { month: MONTH, dailyHours: { [day]: 1 } },
+    });
+    if (!check(`${label}: 1h booked on ${day}`, booked.status === 200, `status=${booked.status}, body=${JSON.stringify(booked.body)}`)) {
+      return undefined;
+    }
+    const submitted = await req('POST', `/assignments/${assignmentId}/months/${MONTH}/submit`, { headers, body: {} });
+    return submitted;
+  }
+
+  // --- (A) the node manager's OWN submission auto-approves -------------------
+  {
+    const grant = await req('PUT', `/resource-organizations/${CONSULTING_ID}`, {
+      headers: RBAC_HEADERS, body: { managerId: '2' },
+    });
+    const grantOk = check(
+      "D-R4(A) setup: resource-manager '2' (John) is made the manager of node '3' ('Consulting') -> 200",
+      grant.status === 200 && grant.body?.managerId === '2',
+      `status=${grant.status}, body=${JSON.stringify(grant.body)}`,
+    );
+    const dummy = await req('GET', `/resources/${DUMMY_CONSULTING}`);
+    const dummyOk = check(
+      "D-R4(A) setup: resource '5' sits on 'Consulting' with NO personal managerId, so John is its ONLY accountable manager",
+      dummy.status === 200 && dummy.body?.organization === 'Consulting' && dummy.body?.managerId === undefined,
+      `status=${dummy.status}, organization=${JSON.stringify(dummy.body?.organization)}, managerId=${JSON.stringify(dummy.body?.managerId)}`,
+    );
+    if (grantOk && dummyOk) {
+      const request = await req('POST', '/requests', {
+        headers: JOHN,
+        body: { name: 'D-R4 node-manager self-submission', requiredRole: 'Developer', requiredEffort: 1, skills: [] },
+      });
+      const assig = request.status === 200 && typeof request.body?.id === 'string'
+        ? await req('POST', '/assignments', { headers: JOHN, body: { requestId: request.body.id, resourceId: DUMMY_CONSULTING, assignedHours: 0 } })
+        : { status: 0, body: undefined };
+      const setupOk = check(
+        "D-R4(A) setup: John creates a request + an assignment on the placeholder he is accountable for",
+        assig.status === 200 && typeof assig.body?.id === 'string',
+        `request=${request.status}/${JSON.stringify(request.body?.id)}, assignment=${assig.status}/${JSON.stringify(assig.body)}`,
+      );
+      if (setupOk) {
+        const submitted = await bookAndSubmit('D-R4(A) setup', assig.body.id, DAY_A, JOHN);
+        check(
+          "D-R4(A) a NODE manager's own submission auto-approves, exactly as a direct manager's does (month -> 'Allocated', no approval opened) -> 200",
+          submitted !== undefined && submitted.status === 200 && submitted.body?.status === 'Allocated'
+          && submitted.body?.approvalId === undefined,
+          `status=${submitted?.status}, monthStatus=${submitted?.body?.status}, approvalId=${JSON.stringify(submitted?.body?.approvalId)}`,
+        );
+        // The DEADLOCK, asserted as data rather than inferred: if an approval
+        // had opened, it would be Pending on this very month row, requested by
+        // John, and nobody but an admin could ever decide it.
+        const rowId = `${assig.body.id}:${MONTH}`;
+        const approvals = await req('GET', '/approval-requests', { headers: RBAC_HEADERS });
+        const stranded = (Array.isArray(approvals.body) ? approvals.body : [])
+          .filter((a) => a.refId === rowId && a.status === 'Pending');
+        check(
+          'D-R4(A) no Pending approval is left on that month row — the SoD deadlock cannot form',
+          approvals.status === 200 && stranded.length === 0,
+          `status=${approvals.status}, stranded=${JSON.stringify(stranded)}`,
+        );
+      }
+    }
+    // --- (C) THE DISTINGUISHING CASE, run while John still manages the node ---
+    // (A) above only proves the rule where the node manager is the resource's
+    // ONLY accountable approver ('5' has no personal managerId — the fixture
+    // says so explicitly), and NO seeded resource has both a personal manager
+    // and a managed node above it. So (A) alone cannot tell "auto-approve when
+    // you are the sole approver" from "auto-approve whenever you manage a node
+    // above" — and the broad rule would have shipped on the narrow rule's
+    // evidence. This is that missing fixture.
+    //
+    // A resource under 'Consulting' (so John, its node manager, is accountable)
+    // that ALSO has a direct people manager, Alice ('3'). John submits. Before
+    // this narrowing the month auto-approved and ALICE NEVER SAW IT: a working
+    // human review step silently deleted, in a case that was never admin-only —
+    // `allocationApproverStep` pins `approverId` to the direct manager, and she
+    // faces neither an SoD conflict nor a scope refusal. Worst shape: a `pm` who
+    // manages a node granting themselves unreviewed approval across their whole
+    // subtree, having been unable to decide an allocation at all before D.
+    if (grantOk) {
+      const stamp = Date.now();
+      const managed = await req('POST', '/resources', {
+        headers: RBAC_HEADERS,
+        body: {
+          name: `D-R4 Has Both Managers ${stamp}`, role: 'Developer', kind: 'internal',
+          skills: [], projectRoles: [], externalExperience: [],
+          capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8,
+          organization: 'Consulting', managerId: '3',
+        },
+      });
+      const managedOk = check(
+        "D-R4(C) setup: a resource under 'Consulting' (node manager John '2') that ALSO has a direct people manager, Alice '3'",
+        managed.status === 201 && managed.body?.managerId === '3' && managed.body?.organization === 'Consulting',
+        `status=${managed.status}, body=${JSON.stringify(managed.body)}`,
+      );
+      if (managedOk) {
+        const request = await req('POST', '/requests', {
+          headers: JOHN,
+          body: { name: 'D-R4 node manager is not the only approver', requiredRole: 'Developer', requiredEffort: 1, skills: [] },
+        });
+        const assig = request.status === 200 && typeof request.body?.id === 'string'
+          ? await req('POST', '/assignments', { headers: JOHN, body: { requestId: request.body.id, resourceId: managed.body.id, assignedHours: 0 } })
+          : { status: 0, body: undefined };
+        const setupOk = check(
+          'D-R4(C) setup: John creates a request + an assignment on that resource',
+          assig.status === 200 && typeof assig.body?.id === 'string',
+          `request=${request.status}/${JSON.stringify(request.body?.id)}, assignment=${assig.status}/${JSON.stringify(assig.body)}`,
+        );
+        if (setupOk) {
+          const submitted = await bookAndSubmit('D-R4(C) setup', assig.body.id, DAY_C, JOHN);
+          const submitOk = check(
+            "D-R4(C) a node manager who is NOT the only accountable approver does NOT auto-approve — a real approval opens, pinned to the direct manager '3'",
+            submitted !== undefined && submitted.status === 200 && submitted.body?.status === 'Requested'
+            && typeof submitted.body?.approvalId === 'string',
+            `status=${submitted?.status}, monthStatus=${submitted?.body?.status}, approvalId=${JSON.stringify(submitted?.body?.approvalId)}`,
+          );
+          if (submitOk) {
+            // There is no `GET /approval-requests/:id` — the collection is
+            // list-only on the read side — so find it in the list.
+            const list = await req('GET', '/approval-requests', { headers: RBAC_HEADERS });
+            const ar = (Array.isArray(list.body) ? list.body : []).find((a) => a.id === submitted.body.approvalId);
+            check(
+              "D-R4(C) the approval really is routed to the direct people manager (step.approverId === '3'), which is why nothing was stranded",
+              list.status === 200 && ar?.steps?.[0]?.approverId === '3' && ar?.requestedBy === '2',
+              `status=${list.status}, approval=${JSON.stringify(ar)}`,
+            );
+            // ...and the review step actually WORKS: Alice decides it. Her role
+            // is 'pm', which no allocation step is routed to — she gets in as the
+            // step's NAMED approver, and SoD passes because John requested it.
+            const decided = await req('PUT', `/approval-requests/${submitted.body.approvalId}/decision`, {
+              headers: ALICE, body: { decision: 'Approved', note: 'D-R4(C) smoke' },
+            });
+            check(
+              'D-R4(C) and the direct manager can still decide it -> 200 (the human review step the broad rule would have deleted)',
+              decided.status === 200 && decided.body?.status === 'Approved',
+              `status=${decided.status}, body=${JSON.stringify(decided.body)}`,
+            );
+          }
+        }
+      }
+    }
+
+    // RESTORE the seeded shape whatever happened above: resource '5' must go
+    // back to having no accountable manager anywhere.
+    const restore = await req('PUT', `/resource-organizations/${CONSULTING_ID}`, {
+      headers: RBAC_HEADERS, body: { managerId: '' },
+    });
+    check(
+      "D-R4(A) cleanup: node '3' ('Consulting') is detached from its manager again -> 200, managerId absent",
+      restore.status === 200 && restore.body?.managerId === undefined,
+      `status=${restore.status}, body=${JSON.stringify(restore.body)}`,
+    );
+  }
+
+  // --- (B) a TERMINATED manager does not suppress the role fallback ---------
+  {
+    const stamp = Date.now();
+    const departed = await req('POST', '/resources', {
+      headers: RBAC_HEADERS,
+      body: {
+        name: `D-R4 Departed Manager ${stamp}`, role: 'Developer', kind: 'internal',
+        skills: [], projectRoles: [], externalExperience: [],
+        capacity: 40, hireDate: '2020-01-01', terminationDate: '2026-01-31', contractHoursPerDay: 8,
+      },
+    });
+    const departedOk = check(
+      'D-R4(B) setup: a manager whose contract ALREADY ended is created (terminationDate in the past)',
+      departed.status === 201 && typeof departed.body?.id === 'string' && departed.body?.terminationDate === '2026-01-31',
+      `status=${departed.status}, body=${JSON.stringify(departed.body)}`,
+    );
+    if (departedOk) {
+      // NO `organization`: the org-tree axis must contribute nothing, so the
+      // departed manager is the resource's ONLY structural approver.
+      const orphan = await req('POST', '/resources', {
+        headers: RBAC_HEADERS,
+        body: {
+          name: `D-R4 Orphaned Report ${stamp}`, role: 'Developer', kind: 'internal',
+          skills: [], projectRoles: [], externalExperience: [],
+          capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8, managerId: departed.body.id,
+        },
+      });
+      const orphanOk = check(
+        'D-R4(B) setup: a report whose ONLY manager is that departed person is created (no organization, so the org tree adds nobody)',
+        orphan.status === 201 && orphan.body?.managerId === departed.body.id && orphan.body?.organization === undefined,
+        `status=${orphan.status}, body=${JSON.stringify(orphan.body)}`,
+      );
+      if (orphanOk) {
+        const request = await req('POST', '/requests', {
+          headers: PROPOSER,
+          body: { name: 'D-R4 terminated-manager fallback', requiredRole: 'Developer', requiredEffort: 1, skills: [] },
+        });
+        const assig = request.status === 200 && typeof request.body?.id === 'string'
+          ? await req('POST', '/assignments', { headers: PROPOSER, body: { requestId: request.body.id, resourceId: orphan.body.id, assignedHours: 0 } })
+          : { status: 0, body: undefined };
+        const setupOk = check(
+          'D-R4(B) setup: a request + assignment on that report, proposed by a pm who is nobody\'s manager',
+          assig.status === 200 && typeof assig.body?.id === 'string',
+          `request=${request.status}/${JSON.stringify(request.body?.id)}, assignment=${assig.status}/${JSON.stringify(assig.body)}`,
+        );
+        if (setupOk) {
+          const submitted = await bookAndSubmit('D-R4(B) setup', assig.body.id, DAY_B, PROPOSER);
+          const submitOk = check(
+            "D-R4(B) setup: submit opens a REAL approval (the proposer is not accountable, so no auto-approval) -> 'Requested' + approvalId",
+            submitted !== undefined && submitted.status === 200 && submitted.body?.status === 'Requested'
+            && typeof submitted.body?.approvalId === 'string',
+            `status=${submitted?.status}, monthStatus=${submitted?.body?.status}, approvalId=${JSON.stringify(submitted?.body?.approvalId)}`,
+          );
+          if (submitOk) {
+            const decided = await req('PUT', `/approval-requests/${submitted.body.approvalId}/decision`, {
+              headers: STRANGER, body: { decision: 'Approved', note: 'D-R4 smoke' },
+            });
+            check(
+              'D-R4(B) a departed manager does not suppress the fallback: with nobody accountable left, any competent approver may decide -> 200',
+              decided.status === 200,
+              `status=${decided.status}, body=${JSON.stringify(decided.body)}`,
+            );
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * D task 4 — refuse a `Resource.managerId` assignment that would close a
+ * cycle in the ORG CHART (distinct from the ORG TREE cycle guard exercised
+ * above — see org-scope.util's module doc for the two axes). Uses
+ * `wouldCycleInOrgChart` (src/app/services/org-scope.util.ts), which is
+ * already unit-tested directly; this is the live-API wiring.
+ *
+ * Leans on the SEEDED chain 3 -> 2 -> 1: Alice Smith ('3') has managerId '2'
+ * (John Miller), who has managerId '1' (Julie Armstrong). Resource '1' is the
+ * TOP and has no managerId at all.
+ *
+ * HISTORY (Task 5): resource '1' used to seed with `managerId: '1'` — herself,
+ * a self-loop shipped as demo data, i.e. exactly the write check 1 below
+ * refuses. It was removed from the seed rather than tolerated: "the read side
+ * survives a cycle in the data" is proven by unit tests over synthetic input
+ * (org-scope.util.spec), and a fixture that can only be produced by illegal
+ * data is a fixture that stops meaning anything the day the data is fixed.
+ * Checks 2 and 3 below were re-actored accordingly, with their assertions
+ * intact.
+ *
+ * MUST RUN LAST in main(): check 3 below permanently clears resource '3's
+ * managerId for the rest of THIS server process, which breaks the 3 -> 2 -> 1
+ * chain every earlier section reads. Nothing in this file may run after this
+ * function within the same process; per the suite's own restart discipline
+ * (see the file header) that is expected, not a bug.
+ */
+async function checkResourceManagerCycle() {
+  const RESOURCE_1 = '1'; // Julie Armstrong — the TOP of the chain, no managerId.
+  const RESOURCE_2 = '2'; // John Miller — seeded managerId '1'.
+  const RESOURCE_3 = '3'; // Alice Smith — seeded managerId '2'.
+
+  // Setup/precondition: confirm the chain this whole function leans on is
+  // still what the seed data promises, so a failure below points at the
+  // guard, not at drifted seed data.
+  {
+    const { status, body } = await req('GET', `/resources/${RESOURCE_3}`);
+    check(
+      "setup: seeded resource '3' (Alice Smith) has managerId '2' (John Miller), as this section assumes",
+      status === 200 && body?.managerId === RESOURCE_2,
+      `status=${status}, managerId=${JSON.stringify(body?.managerId)}`,
+    );
+    const top = await req('GET', `/resources/${RESOURCE_1}`);
+    check(
+      "setup: seeded resource '1' (Julie Armstrong) is the TOP of the chain and has NO managerId",
+      top.status === 200 && top.body?.managerId === undefined,
+      `status=${top.status}, managerId=${JSON.stringify(top.body?.managerId)}`,
+    );
+  }
+
+  // 1) Self-management -> 400 mentioning a cycle. Pre-implementation this was
+  // ACCEPTED (200) — nothing stopped a resource naming itself its own manager,
+  // which is how the seed came to carry exactly this shape on resource '1'
+  // until Task 5 removed it (see the note above).
+  {
+    const self = await req('PUT', `/resources/${RESOURCE_1}`, {
+      headers: RBAC_HEADERS,
+      body: { managerId: RESOURCE_1 },
+    });
+    check(
+      "PUT /api/resources/1 {managerId:'1'} (itself) -> 400, mentions a cycle",
+      self.status === 400 && typeof self.body?.error === 'string' && /cycle/i.test(self.body.error),
+      `status=${self.status}, body=${JSON.stringify(self.body)}`,
+    );
+  }
+
+  // 2) A longer cycle: seeded 3 -> 2 -> 1, closed by making '1' report to
+  // '3' (1 -> 3 -> 2 -> 1). Pre-implementation this is ALSO accepted (200) —
+  // nothing today walks the manager chain before writing it. (Review round 1,
+  // minor: now asserts /cycle/i on the message too, matching check 1's
+  // discipline — a bare 400 could previously have passed on a coincidental,
+  // unrelated rejection.)
+  {
+    const closeLoop = await req('PUT', `/resources/${RESOURCE_1}`, {
+      headers: RBAC_HEADERS,
+      body: { managerId: RESOURCE_3 },
+    });
+    check(
+      "PUT /api/resources/1 {managerId:'3'} -> 400 (would close 1 -> 3 -> 2 -> 1), mentions a cycle",
+      closeLoop.status === 400 && typeof closeLoop.body?.error === 'string' && /cycle/i.test(closeLoop.body.error),
+      `status=${closeLoop.status}, body=${JSON.stringify(closeLoop.body)}`,
+    );
+    // Not just the status — confirm the refused PUT wrote NOTHING. Resource '1'
+    // is the top of the chain, so "nothing" means still no managerId at all.
+    const { status, body } = await req('GET', `/resources/${RESOURCE_1}`);
+    check(
+      'GET /api/resources/1 still has NO managerId after the refused PUT (the refusal wrote nothing)',
+      status === 200 && body?.managerId === undefined,
+      `status=${status}, managerId=${JSON.stringify(body?.managerId)}`,
+    );
+  }
+
+  // 2b) THE SAME "a refusal writes nothing" PROOF, on a resource that carries a
+  // REAL managerId — so the witness is a value that survived, not an absence
+  // that would look identical whether the guard wrote or not. This is what
+  // check 2's re-read used to give while resource '1' still carried the seed's
+  // self-loop; with that gone, the observable-unchanged case needs a resource
+  // that genuinely has a manager. Alice ('3') self-targeting is refused by the
+  // same guard, and her seeded managerId '2' must be exactly as it was.
+  {
+    const selfAlice = await req('PUT', `/resources/${RESOURCE_3}`, {
+      headers: RBAC_HEADERS,
+      body: { managerId: RESOURCE_3 },
+    });
+    check(
+      "PUT /api/resources/3 {managerId:'3'} (itself) -> 400, mentions a cycle",
+      selfAlice.status === 400 && typeof selfAlice.body?.error === 'string' && /cycle/i.test(selfAlice.body.error),
+      `status=${selfAlice.status}, body=${JSON.stringify(selfAlice.body)}`,
+    );
+    const { status, body } = await req('GET', `/resources/${RESOURCE_3}`);
+    check(
+      "GET /api/resources/3 shows managerId UNCHANGED ('2') after the refused PUT",
+      status === 200 && body?.managerId === RESOURCE_2,
+      `status=${status}, managerId=${JSON.stringify(body?.managerId)}`,
+    );
+  }
+
+  // 3) THE CLEAR-TO-ABSENT SEAM for the Resource entity's OWN managerId
+  // (distinct from the org-tree NODE's managerId proven in check 9b above) —
+  // '' must clear a REAL managerId to absent, identically on both adapters,
+  // and must NEVER be refused as a cycle (a cleared manager has no manager
+  // to close a loop with). This is expected to ALREADY PASS pre-implementation
+  // (no cycle-guard code path can reject it), unlike checks 1-2 — its job is to
+  // prove the new guard doesn't regress the clear-to-absent write once it
+  // exists, not to prove new rejection behavior.
+  //
+  // Runs on Alice ('3'), whose seeded managerId '2' is a REAL value: the
+  // assertion folds in that precondition, so "cleared" cannot pass on a field
+  // that was empty to begin with. It used to run on resource '1', which only had
+  // a value to clear because of the seed's self-loop — clearing an already-absent
+  // field would still have returned 200 and asserted nothing. Sequenced AFTER
+  // every cycle check above, since it breaks the 3 -> 2 -> 1 chain those use.
+  {
+    const before = await req('GET', `/resources/${RESOURCE_3}`);
+    const cleared = await req('PUT', `/resources/${RESOURCE_3}`, {
+      headers: RBAC_HEADERS,
+      body: { managerId: '' },
+    });
+    check(
+      "PUT /api/resources/3 {managerId:''} -> 200, clears a REAL managerId to absent",
+      before.body?.managerId === RESOURCE_2 && cleared.status === 200 && cleared.body !== undefined && !('managerId' in cleared.body),
+      `preManagerId=${JSON.stringify(before.body?.managerId)}, status=${cleared.status}, body=${JSON.stringify(cleared.body)}`,
+    );
+    // Re-confirm via a FRESH GET, not just the PUT's own echoed response —
+    // the point of this seam is that it persists identically on both adapters.
+    const reread = await req('GET', `/resources/${RESOURCE_3}`);
+    check(
+      'GET /api/resources/3 reflects managerId absent on re-read',
+      reread.status === 200 && !('managerId' in (reread.body || {})),
+      `status=${reread.status}, body=${JSON.stringify(reread.body)}`,
+    );
+  }
+
+  // 4) REGRESSION GUARD, not part of the task-4 brief's three required
+  // checks: proves the guard does not misfire on an ordinary create. A
+  // brand-new resource has no reports yet (POST's `all` never includes the
+  // not-yet-created row — see the guard's own comment in src/server.ts), so
+  // a real, pre-existing managerId can never close a cycle here; this must
+  // stay 201 both before and after implementation.
+  {
+    const ok = await req('POST', '/resources', {
+      headers: RBAC_HEADERS,
+      body: {
+        name: 'D Smoke Manager-Cycle Regression', role: 'Developer', kind: 'internal',
+        skills: [], projectRoles: [], externalExperience: [], utilization: 0,
+        capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8,
+        managerId: RESOURCE_2,
+      },
+    });
+    check(
+      "POST /api/resources {managerId:'2'} (an ordinary, real manager on a brand-new resource) -> 201, not blocked by the cycle guard",
+      ok.status === 201 && ok.body?.managerId === RESOURCE_2,
+      `status=${ok.status}, body=${JSON.stringify(ok.body)}`,
+    );
+  }
+
+  // 5) REVIEW ROUND 1 ("Important") — POST managerId:'' must normalize to
+  // absent, not persist as a literal empty string. NOT an edge case: the
+  // resources form's `save()` (src/app/resources/resources.component.ts
+  // ~line 709) sends `managerId: raw.managerId ?? ''` on EVERY create, so
+  // every ordinary "onboard someone with no People Manager" hits this path.
+  // Same reasoning, and the identical fix, as vendorId's own POST-side
+  // normalization a few lines above it in src/server.ts: nothing breaks
+  // TODAY only because no real id is ever '', but `reportsClosure`/
+  // `scopedApproversOf` (org-scope.util) both gate on `=== undefined`, so an
+  // unnormalized '' would slip past them and seed a phantom key.
+  {
+    const emptyManagerCreate = await req('POST', '/resources', {
+      headers: RBAC_HEADERS,
+      body: {
+        name: 'D Smoke Empty ManagerId Is Absent', role: 'Developer', kind: 'internal',
+        skills: [], projectRoles: [], externalExperience: [], utilization: 0,
+        capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8,
+        managerId: '',
+      },
+    });
+    check(
+      "POST /api/resources {managerId:''} -> 201, normalized to absent, not persisted as a literal ''",
+      emptyManagerCreate.status === 201 && !('managerId' in (emptyManagerCreate.body || {})),
+      `status=${emptyManagerCreate.status}, body=${JSON.stringify(emptyManagerCreate.body)}`,
+    );
+  }
+
+  // 6) The same for a literal `null` — `pick()` forwards an explicit JSON
+  // null unchanged (it only filters `undefined`), so this is reachable the
+  // same way vendorId's own null case is.
+  {
+    const nullManagerCreate = await req('POST', '/resources', {
+      headers: RBAC_HEADERS,
+      body: {
+        name: 'D Smoke Null ManagerId Is Absent', role: 'Developer', kind: 'internal',
+        skills: [], projectRoles: [], externalExperience: [], utilization: 0,
+        capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8,
+        managerId: null,
+      },
+    });
+    check(
+      'POST /api/resources {managerId: null} -> 201, normalized to absent, not persisted as a literal null',
+      nullManagerCreate.status === 201 && !('managerId' in (nullManagerCreate.body || {})),
+      `status=${nullManagerCreate.status}, body=${JSON.stringify(nullManagerCreate.body)}`,
+    );
+  }
+
+  // 7) REVIEW ROUND 1 ("Important") — THE PREDICTABLE-ID SELF-CYCLE, ACTUALLY
+  // EXECUTED, not just verified by inspection. `POST /resources` hoists
+  // `newId()` (src/server.ts) before validation specifically so a client-
+  // guessed `managerId` equal to THIS resource's own about-to-be-assigned id
+  // is caught — ids are a plain sequential counter (`${++idSeq}`), not
+  // client-supplied, but predictable. This smoke suite is a SINGLE sequential
+  // client against a freshly booted server (no other concurrent traffic), so
+  // `newId()` is fully deterministic here, with NO timing/sleep involved —
+  // BUT the step between two consecutive resource ids is NOT reliably +1:
+  // the append-only audit middleware (src/server.ts, `res.on('finish', ...)`)
+  // also draws an id (`AL${newId()}`) for its own log entry on every
+  // successful POST, synchronously, before this suite's next request can
+  // possibly arrive — confirmed empirically while building this check (two
+  // consecutive plain creates landed 2 apart, not 1). Rather than hard-code
+  // that constant (a second future side-effecting `newId()` call anywhere in
+  // the request lifecycle would silently break a hard-coded assumption),
+  // MEASURE the actual step from two clean, back-to-back, manager-less
+  // probes, then extrapolate it forward exactly once more for the real
+  // attempt — self-adjusting to whatever the true per-request id
+  // consumption is, still with no timing/sleep involved.
+  {
+    const probe1 = await req('POST', '/resources', {
+      headers: RBAC_HEADERS,
+      body: {
+        name: 'D Smoke Predictable-Id Probe 1', role: 'Developer', kind: 'internal',
+        skills: [], projectRoles: [], externalExperience: [], utilization: 0,
+        capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8,
+      },
+    });
+    const probe1Ok = check(
+      'predictable-id setup: probe #1 (manager-less) is created so its id can be read back',
+      probe1.status === 201 && typeof probe1.body?.id === 'string' && /^\d+$/.test(probe1.body.id),
+      `status=${probe1.status}, body=${JSON.stringify(probe1.body)}`,
+    );
+    if (probe1Ok) {
+      const probe2 = await req('POST', '/resources', {
+        headers: RBAC_HEADERS,
+        body: {
+          name: 'D Smoke Predictable-Id Probe 2', role: 'Developer', kind: 'internal',
+          skills: [], projectRoles: [], externalExperience: [], utilization: 0,
+          capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8,
+        },
+      });
+      const probe2Ok = check(
+        'predictable-id setup: probe #2 (manager-less, identical shape) is created to measure the per-request id step',
+        probe2.status === 201 && typeof probe2.body?.id === 'string' && /^\d+$/.test(probe2.body.id),
+        `status=${probe2.status}, body=${JSON.stringify(probe2.body)}`,
+      );
+      if (probe2Ok) {
+        const step = Number(probe2.body.id) - Number(probe1.body.id);
+        const predictedNextId = String(Number(probe2.body.id) + step);
+        const attempt = await req('POST', '/resources', {
+          headers: RBAC_HEADERS,
+          body: {
+            name: 'D Smoke Predictable-Id Self-Cycle', role: 'Developer', kind: 'internal',
+            skills: [], projectRoles: [], externalExperience: [], utilization: 0,
+            capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8,
+            managerId: predictedNextId,
+          },
+        });
+        check(
+          `POST /api/resources {managerId:'${predictedNextId}'} (predicted from the measured step=${step} between the two probes) -> 400, mentions a cycle`,
+          attempt.status === 400 && typeof attempt.body?.error === 'string' && /cycle/i.test(attempt.body.error),
+          `status=${attempt.status}, step=${step}, body=${JSON.stringify(attempt.body)}`,
+        );
+      }
+    }
+  }
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -3046,6 +4845,63 @@ async function main() {
     await checkDummySubstitution();
   } catch (err) {
     console.log(`FAIL  dummy-substitution flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the D org-tree-integrity
+  // flow never masks or blocks any of the prior section results.
+  try {
+    await checkOrgTreeIntegrity();
+  } catch (err) {
+    console.log(`FAIL  org-tree integrity flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the D scoped-decision
+  // flow never masks or blocks any of the prior section results. Runs BEFORE
+  // checkResourceManagerCycle, which permanently clears resource '3's
+  // managerId — this section reads the seeded 3 -> 2 -> 1 chain.
+  try {
+    await checkScopedAllocationDecision();
+  } catch (err) {
+    console.log(`FAIL  scoped allocation-decision flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the D scoped-approval-feed
+  // flow never masks or blocks any of the prior section results. MUST run
+  // immediately after checkScopedAllocationDecision (reuses its '2026-11'
+  // fixtures for resources '3'/'4'/'5') and — like it — BEFORE
+  // checkResourceManagerCycle, which permanently clears resource '3's
+  // managerId.
+  try {
+    await checkScopedApprovalFeed();
+  } catch (err) {
+    console.log(`FAIL  scoped approval-feed flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the D review-round-4
+  // accountable-manager flow never masks or blocks any of the prior section
+  // results. MUST run AFTER checkScopedApprovalFeed (it temporarily gives node
+  // '3' a manager, which would destroy that section's roleFallback fixture) and
+  // BEFORE checkResourceManagerCycle.
+  try {
+    await checkAccountableApproverRules();
+  } catch (err) {
+    console.log(`FAIL  accountable-manager rules — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the D resource-manager-
+  // cycle flow never masks or blocks any of the prior section results. MUST
+  // run LAST (see the function's doc comment) — it permanently clears
+  // resource '3's managerId for the rest of this server process, breaking the
+  // seeded 3 -> 2 -> 1 chain that earlier sections read.
+  try {
+    await checkResourceManagerCycle();
+  } catch (err) {
+    console.log(`FAIL  resource-manager-cycle flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

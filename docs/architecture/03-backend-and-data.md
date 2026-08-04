@@ -499,7 +499,8 @@ erDiagram
 ```mermaid
 erDiagram
     projects ||--o{ approvalRequests : "subject of"
-    serviceOrganizations ||--o{ resourceOrganizations : "parents"
+    serviceOrganizations ||--o{ resourceOrganizations : "parents (financial)"
+    resourceOrganizations ||--o{ resourceOrganizations : "parentId (delivery, soft)"
     proficiencySets ||--o{ skills : "leveled by"
     assignments ||--o{ timeEntries : "logged against"
     requests    ||--o{ timeEntries : "logged against"
@@ -533,9 +534,80 @@ erDiagram
         jsonb before
         jsonb after
     }
+    resourceOrganizations {
+        text id PK
+        text name "UNIQUE tree-wide"
+        text level "capability|practice|competence, notNull"
+        text parentId "soft self-ref, indexed (D)"
+        text managerId "soft to resources (D)"
+        text serviceOrganizationId FK
+        jsonb costCenters
+    }
     languages { text code PK
         bool isDefault }
 ```
+
+#### D — the org tree: three columns and two orthogonal upward references
+
+`resourceOrganizations` is a **Capability > Practice > Competence tree** (migration
+`0015_tiny_meltdown.sql`, purely additive — the only table it touches). Three
+columns carry it:
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `level` | `text`, **notNull**, default `'capability'` | Which rung of the tree this node is. The legal parent of a node is the level immediately above it (`ORG_LEVELS[i-1]`): a `capability` has **no** parent, a `practice`'s parent is a `capability`, a `competence`'s parent is a `practice`. Enforced on POST *and* PUT, including a guard that refuses a level change which would leave an existing **child** under an illegal parent. |
+| `parentId` | `text`, nullable, **indexed** | The node above, in the **delivery** hierarchy. |
+| `managerId` | `text`, nullable | The resource who manages this node — the manual's **Capability Leader / Practice Manager / Competence Manager**. No new RBAC role: the manager is data, and their authority is derived (see [roles-and-permissions](../roles-and-permissions.md#d--allocation-decisions-are-scoped-to-the-competent-manager)). |
+
+**Two upward references, orthogonal on purpose.** A node points up twice and the
+two answers are unrelated:
+
+- **`parentId` → `resourceOrganizations`** is the **delivery** hierarchy: who a
+  resource belongs to, and whose manager is accountable for it.
+- **`serviceOrganizationId` → `serviceOrganizations`** is the **financial**
+  attachment (cost centers, the S/4HANA-replicated org). Unchanged by D.
+
+Reading one for the other is the mistake this note exists to prevent: two nodes
+under the same service organization can sit in completely different capabilities,
+and a whole capability branch can share one service organization.
+
+**`parentId` is a plain `text` column, not a `.references(() => resourceOrganizations.id)` self-FK. That is a decision, not an omission** — the
+same reasoning as [C2's back-link](#c2--the-substitution-back-link-is-deliberately-not-a-foreign-key),
+plus one specific to this table: the delete guard is the *application's*
+(`DELETE /resource-organizations/:id` returns **409** naming the blocking
+children, and another **409** when resources still reference the node by name),
+so a database-level FK would only add a second, opaque failure mode — a bare
+`23503`→409 with no count and no message — for a rule that already refuses the
+write with an explanation. `managerId` is likewise soft, exactly like
+`Resource.managerId`.
+
+**Dimensions are DERIVED, never stored.** A resource carries a *single*
+attachment — `Resource.organization`, matched to a node **by name** (which is why
+node names are unique tree-wide, why a rename that would orphan resources is
+refused with **409**, and why `pickRateCard` still resolves). Its
+capability/practice/competence triple is computed by walking **up** from that
+node (`dimensionsOf` in `src/app/services/org-scope.util.ts`) on every read.
+Nothing denormalizes the triple onto the resource, so a resource's practice can
+never disagree with its competence, and re-parenting a node re-derives every
+resource beneath it with no backfill. A resource may attach at **any** level, so
+a dimension key is simply absent when that level does not exist above the
+attachment point.
+
+Both traversals tolerate a cycle in the data (every walk carries a `visited`
+set), and writes that would *create* one are refused with **400** — in the tree
+(`wouldCycleInOrgTree`) and in the org chart (`wouldCycleInOrgChart`).
+
+**Both axes serialize their writes, on two distinct global keys.** Every
+`Resource.managerId` mutation runs under `withLock('org-chart')` so concurrent
+reassignments cannot compose a loop through the guard; every
+`/resource-organizations` mutation (POST, PUT, DELETE) runs under
+`withLock('org-tree')` because `validateOrgTreeNode` reasons about a node against
+both its parent *and* its existing children — two writers on their own pre-write
+snapshots could each pass and leave, say, a practice parented to a practice, at
+which point `dimensionsOf` reports the wrong practice for every resource beneath.
+The two keys never nest in either direction (nothing inside an `org-chart` section
+touches the tree catalog; nothing inside an `org-tree` section takes any lock), so
+they cannot deadlock against each other.
 
 ## Entity catalogue (reference)
 
@@ -557,7 +629,7 @@ foreign keys; *(soft)* marks columns that carry a reference without a hard FK.
 | `skills` | Skill master data | `id`, `conceptUri`, `restricted`; **FK** `proficiencySetId→proficiencySets` | Config |
 | `projectRoles` | Project role master data | `id`, `code`, `restricted` | Config |
 | `serviceOrganizations` | Delivery org units | `id`, `code`, `costCenters` (jsonb) | Config |
-| `resourceOrganizations` | Resource org units | `id`, `costCenters` (jsonb); **FK** `serviceOrganizationId→serviceOrganizations` | Config |
+| `resourceOrganizations` | Resource org units — a **Capability > Practice > Competence tree** (D) | `id`, `name` *(unique tree-wide; `Resource.organization` binds to it **by name**)*, `costCenters` (jsonb); D: `level` *(notNull)*, `parentId` *(soft **self**-ref, indexed, deliberately not an FK)*, `managerId` *(soft → resources)*; **FK** `serviceOrganizationId→serviceOrganizations` *(financial, orthogonal to `parentId`)* — [why](#d--the-org-tree-three-columns-and-two-orthogonal-upward-references) | Config |
 | `countries` | Country master data (natural key `code`) | `code` PK, `name` | Config |
 | `cities` | City master data | `id`, `name`; **FK** `countryCode→countries` | Config |
 | `industries` | Industry master data | `id`, `name` | Config |

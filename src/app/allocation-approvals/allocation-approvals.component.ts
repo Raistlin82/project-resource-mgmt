@@ -11,13 +11,14 @@ import { DecimalPipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { of } from 'rxjs';
 import { rxResource } from '@angular/core/rxjs-interop';
-import { AllocationApprovalFeed, AllocationApprovalRow, ApiService, ResourceKind } from '../services/api.service';
+import { AllocationApprovalFeed, AllocationApprovalRow, ApiService, ResourceKind, ResourceOrganization } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { ListStateComponent } from '../shared/list-state.component';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 import { ApprovalModalComponent } from './approval-modal.component';
 import { AllocationCalendarComponent } from '../allocation-calendar/allocation-calendar.component';
 import { monthsInRange, semaphoreBand, type SemaphoreBand } from '../services/capacity.util';
+import { dimensionsOf } from '../services/org-scope.util';
 
 /** Empty envelope used until auth settles (and as the resource default). */
 const EMPTY: AllocationApprovalFeed = { months: [], rows: [] };
@@ -120,7 +121,7 @@ function shiftMonth(month: string, delta: number): string {
           <h1 class="command-title">Allocation Approvals</h1>
           <p class="command-subtitle">Per-month allocation requests awaiting a People Manager decision, by resource. Booked-hours totals always reflect the full month regardless of the status filter below.</p>
         </div>
-        <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
+        <div class="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-3 w-full sm:w-auto">
           <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
             <span class="text-ink-muted">Status</span>
             <select [value]="statusFilter()" (change)="onStatusChange($event)" aria-label="Status filter" data-test="status-filter" class="command-select">
@@ -129,6 +130,44 @@ function shiftMonth(month: string, delta: number): string {
               <option value="all">All</option>
             </select>
           </label>
+          <!-- Capability / Practice / Competence / People Manager filters (D, Task 8).
+               Derived through dimensionsOf, so a capability filter also matches a
+               resource attached BELOW it (e.g. a competence two levels down) — never
+               a raw equality check against the resource's organization. These
+               <select>s load their <option>s from an async rxResource, so per the
+               established trap they use (change) + per-option [selected] rather
+               than [value]/[ngModel] on the <select> itself. Explicit min-widths
+               (this row now packs 7 controls + a button) so the label text never
+               shrink-wraps down to an unreadable sliver — the sm:flex-wrap above
+               lets the row spill onto a second line rather than fight them for space. -->
+          <select (change)="onCapabilityChange($event)" aria-label="Filter by capability"
+                  data-test="capability-filter" class="command-select sm:min-w-[9rem]">
+            <option value="" [selected]="capabilityFilter() === ''">All capabilities</option>
+            @for (name of capabilityOptions(); track name) {
+              <option [value]="name" [selected]="name === capabilityFilter()">{{ name }}</option>
+            }
+          </select>
+          <select (change)="onPracticeChange($event)" aria-label="Filter by practice"
+                  data-test="practice-filter" class="command-select sm:min-w-[9rem]">
+            <option value="" [selected]="practiceFilter() === ''">All practices</option>
+            @for (name of practiceOptions(); track name) {
+              <option [value]="name" [selected]="name === practiceFilter()">{{ name }}</option>
+            }
+          </select>
+          <select (change)="onCompetenceChange($event)" aria-label="Filter by competence"
+                  data-test="competence-filter" class="command-select sm:min-w-[9rem]">
+            <option value="" [selected]="competenceFilter() === ''">All competences</option>
+            @for (name of competenceOptions(); track name) {
+              <option [value]="name" [selected]="name === competenceFilter()">{{ name }}</option>
+            }
+          </select>
+          <select (change)="onManagerFilterChange($event)" aria-label="Filter by People Manager"
+                  data-test="manager-filter" class="command-select sm:min-w-[10rem]">
+            <option value="" [selected]="managerFilter() === ''">All people managers</option>
+            @for (m of managerFilterOptions(); track m.id) {
+              <option [value]="m.id" [selected]="m.id === managerFilter()">{{ m.name }}</option>
+            }
+          </select>
           @if (monthOptions().length > 0) {
             <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
               <span class="text-ink-muted">From</span>
@@ -213,7 +252,7 @@ function shiftMonth(month: string, delta: number): string {
                                class="command-checkbox">
                       </td>
                       <td class="px-4 sm:px-6 py-4 font-bold text-ink whitespace-nowrap sticky left-10 bg-surface z-10">
-                        {{ row.resourceName }}
+                        <span data-test="resource-name">{{ row.resourceName }}</span>
                         @if (row.hasPending) {
                           <span class="command-status amber uppercase ml-2 text-[10px]">Pending</span>
                         }
@@ -313,6 +352,75 @@ export class AllocationApprovalsComponent {
   protected from = signal<string | null>(null);
   protected to = signal<string | null>(null);
 
+  // D (Task 8): Capability / Practice / Competence / People Manager filters. '' = all.
+  // The dimension filters are matched via `dimensionsOf`, not a raw equality against
+  // a resource's organization — that is what makes a capability filter also match a
+  // resource attached BELOW it (e.g. a competence two levels down).
+  capabilityFilter = signal('');
+  practiceFilter = signal('');
+  competenceFilter = signal('');
+  managerFilter = signal('');
+
+  // The org tree (D). Gated on authReady like every other principal-gated read
+  // here. This is the ONLY extra read this task needs: `AllocationApprovalRow`
+  // now carries `organization` straight from the server (populated from the
+  // SAME resource record the handler already loads to build the row), so
+  // `dimensionsOf` reads `row.organization` directly below — no second
+  // getResources() catalogue fetch, and therefore no client-side join to race
+  // against `orgsRes`. (An earlier version of this fix DID add a second
+  // `resourcesRes` load purely to recover `organization` — that was wrong: its
+  // `organizationByResourceId` map could still be empty while `orgsRes` had
+  // already resolved and `capabilityOptions` was already offering real values,
+  // so picking a capability in that window silently filtered every row out —
+  // "nothing to approve" when the truth was "not loaded yet". Deleting the
+  // second fetch removes the race outright rather than guarding it.)
+  private orgsRes = rxResource<ResourceOrganization[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getResourceOrganizations() : of<ResourceOrganization[]>([])),
+    defaultValue: [] as ResourceOrganization[],
+  });
+  private orgNodes = this.orgsRes.value;
+
+  /** Option lists filtered by level, in tree order (node names are unique across the whole tree). */
+  capabilityOptions = computed<string[]>(() => this.orgNodes().filter(n => n.level === 'capability').map(n => n.name));
+  practiceOptions = computed<string[]>(() => this.orgNodes().filter(n => n.level === 'practice').map(n => n.name));
+  competenceOptions = computed<string[]>(() => this.orgNodes().filter(n => n.level === 'competence').map(n => n.name));
+
+  /**
+   * Distinct People Managers actually present among the (unfiltered) feed
+   * rows, name-sorted. D (Task 8, round 3): the display name is now served
+   * directly as `row.managerName` (resolved server-side from the resourceById
+   * map the handler already builds) — an EARLIER version of this resolved the
+   * name by looking for the manager's OWN row in the same feed
+   * (`resourceId === managerId`), which almost never exists (a feed lists a
+   * manager's REPORTS, not the manager themselves), so that approach fell
+   * back to a bare id in the common case — visibly broken to the approver.
+   * The `?? id` fallback below is kept only as a last resort for a manager
+   * whose resource record has genuinely vanished; it should be unreachable
+   * in normal operation now.
+   */
+  managerFilterOptions = computed<{ id: string; name: string }[]>(() => {
+    const rows = this.feed().rows;
+    const ids = new Set(rows.map(r => r.managerId).filter((id): id is string => !!id));
+    const nameByManagerId = new Map(rows.filter(r => r.managerId !== undefined).map(r => [r.managerId as string, r.managerName]));
+    return [...ids]
+      .map(id => ({ id, name: nameByManagerId.get(id) ?? id }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  });
+
+  protected onCapabilityChange(event: Event): void {
+    this.capabilityFilter.set((event.target as HTMLSelectElement).value);
+  }
+  protected onPracticeChange(event: Event): void {
+    this.practiceFilter.set((event.target as HTMLSelectElement).value);
+  }
+  protected onCompetenceChange(event: Event): void {
+    this.competenceFilter.set((event.target as HTMLSelectElement).value);
+  }
+  protected onManagerFilterChange(event: Event): void {
+    this.managerFilter.set((event.target as HTMLSelectElement).value);
+  }
+
   // Gated read: keyed on authReady + the selected range + the status filter so
   // it fires only after the OIDC bootstrap settles (bearer attached) and re-runs
   // when either changes. Until authReady it resolves to the empty default.
@@ -360,11 +468,35 @@ export class AllocationApprovalsComponent {
     this.feedRes.reload();
   }
 
+  /**
+   * The feed's raw rows narrowed by the capability/practice/competence/People
+   * Manager filters — shared by `rows` (the grid) and `pendingMonths` (the KPI
+   * strip) so both stay consistent with the filter, not just the grid. The org
+   * dimensions are derived through `dimensionsOf` from `row.organization`
+   * (server-populated on `AllocationApprovalRow` directly — no client-side
+   * join) — never a raw equality check, so a capability filter also matches a
+   * resource attached BELOW it (e.g. a competence two levels down).
+   */
+  private filteredFeedRows = computed<AllocationApprovalRow[]>(() => {
+    const cap = this.capabilityFilter();
+    const pra = this.practiceFilter();
+    const com = this.competenceFilter();
+    const mgr = this.managerFilter();
+    const nodes = this.orgNodes();
+    return this.feed().rows.filter(r => {
+      const dims = dimensionsOf({ id: r.resourceId, organization: r.organization }, nodes);
+      if (cap && dims.capability !== cap) return false;
+      if (pra && dims.practice !== pra) return false;
+      if (com && dims.competence !== com) return false;
+      if (mgr && r.managerId !== mgr) return false;
+      return true;
+    });
+  });
+
   /** Grid rows (view models) — one per resource, cells across every month in range. */
   protected rows = computed<RowVm[]>(() => {
-    const value = this.feed();
-    const months = value.months;
-    return value.rows.map(r => ({
+    const months = this.feed().months;
+    return this.filteredFeedRows().map(r => ({
       resourceId: r.resourceId,
       resourceName: r.resourceName,
       kind: r.kind,
@@ -451,9 +583,16 @@ export class AllocationApprovalsComponent {
   // --- KPI strip -------------------------------------------------------
   /** Resources with at least one 'Requested' item in the CURRENT (filtered) listing. */
   protected pendingResourceCount = computed(() => this.rows().filter(r => r.hasPending).length);
-  /** Total 'Requested' (assignment, month) items across every resource currently listed. */
+  /**
+   * Total 'Requested' (assignment, month) items across every resource
+   * currently listed. D (Task 8): reduces over `filteredFeedRows`, the SAME
+   * capability/practice/competence/People-Manager-narrowed set `rows` builds
+   * its grid from — not the raw `feed().rows` — so this KPI never disagrees
+   * with "Resources Pending" above it (e.g. showing a pending month for a
+   * capability the grid has just filtered down to zero resources for).
+   */
   protected pendingMonths = computed(() =>
-    this.feed().rows.reduce((n, r) => n + r.items.filter(i => i.status === 'Requested').length, 0));
+    this.filteredFeedRows().reduce((n, r) => n + r.items.filter(i => i.status === 'Requested').length, 0));
 
   /** Range-selector options: the loaded window padded by ±OPTION_PAD_MONTHS so the user can narrow OR extend. */
   protected monthOptions = computed<string[]>(() => {

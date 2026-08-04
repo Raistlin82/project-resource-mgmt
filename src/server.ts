@@ -18,6 +18,7 @@ import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { isResourceKind, RESOURCE_KINDS, kindOf, dailyCapFor } from './app/services/resource-kind.util';
+import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, scopeOf, accountableApproversOf, nodeManagersAbove, isTerminatedAsOf, type OrgLevel } from './app/services/org-scope.util';
 import { maxIdSeq } from './server/id-seq.util';
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
@@ -72,6 +73,15 @@ function isNonNegNumber(v: unknown): v is number {
 /** Resource Schedule: a value is an ISO-parseable date string (Date.parse). */
 function isIsoDateString(v: unknown): v is string {
   return typeof v === 'string' && Number.isFinite(Date.parse(v));
+}
+
+/**
+ * Today as ISO 'YYYY-MM-DD'. THE server-side clock read for the org-scope layer
+ * (`isTerminatedAsOf`/`accountableApproversOf` are pure and take the value as a
+ * parameter, so the clock stays here). Mirrors the components' own `todayIso()`.
+ */
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
 }
 
 /**
@@ -1015,6 +1025,15 @@ async function validateResourceCatalogRefs(body: { location?: unknown; organizat
  * service-organizations catalog (by id). Both optional; only supplied values checked.
  */
 async function validateResourceOrgRefs(body: { costCenters?: unknown; serviceOrganizationId?: unknown }): Promise<string | null> {
+  // REVIEW ROUND 3 NOTE: the `!== null` below only skips THIS function's
+  // array-shape/reference check when `costCenters` is null — it does NOT mean
+  // `null` is an accepted value for `costCenters`. `costCenters` is a
+  // `notNull()` column and `validateOrgTreeNode`'s REQUIRED_ORG_FIELDS loop
+  // unconditionally rejects an explicit `null` for it (both POST and PUT call
+  // that validator in the same request), so `null` never actually reaches
+  // `update()`/`create()`. This clause is left as-is functionally — changing
+  // it is unnecessary now that rejection happens elsewhere — but do not read
+  // it as evidence `costCenters: null` is a supported value.
   if (body.costCenters !== undefined && body.costCenters !== null) {
     if (!Array.isArray(body.costCenters)) return 'costCenters must be an array of cost-center ids';
     if (body.costCenters.length > 0) {
@@ -1030,6 +1049,138 @@ async function validateResourceOrgRefs(body: { costCenters?: unknown; serviceOrg
     if (!(await existsRepo(repos.serviceOrganizations, body.serviceOrganizationId))) {
       return 'serviceOrganizationId must reference an existing service organization';
     }
+  }
+  return null;
+}
+
+/**
+ * REVIEW ROUND 3 — every `notNull()` column on `resource_organizations`
+ * (`src/db/schema.ts`), declared ONCE so the required-field null-rejection in
+ * `validateOrgTreeNode` below covers the class, not a hand-picked subset.
+ * Round 2 fixed exactly `level` and `name`, having missed that `description`
+ * and `costCenters` are equally `notNull` and sit in the SAME `pick()`
+ * allow-lists, open to the identical primitive — the next `notNull` column
+ * added to this catalog is covered the day it is added here, not the next
+ * time someone finds a fifth case of the same bug.
+ */
+const REQUIRED_ORG_FIELDS = ['name', 'description', 'costCenters', 'level'] as const;
+
+/**
+ * D — org-tree integrity for a `/resource-organizations` body (design spec §2.1,
+ * §2.4). Returns a 400-suitable message, or null when the body is acceptable.
+ *
+ * `ctx.id` is the record's own id on PUT (absent on POST): the name-uniqueness
+ * check must exclude the record being edited, or renaming nothing would 400.
+ *
+ * Cycles are refused here, in WRITE. The read side is separately cycle-safe
+ * (org-scope.util carries a visited set on every traversal) — both are needed:
+ * this stops new cycles, that survives ones already in the data.
+ */
+async function validateOrgTreeNode(
+  body: Partial<ResourceOrganization>,
+  ctx?: { id?: string },
+): Promise<string | null> {
+  const all = await repos.resourceOrganizations.list();
+  const nodes = all.map(n => ({ id: n.id, name: n.name, level: n.level, parentId: n.parentId, managerId: n.managerId }));
+  const existing = ctx?.id === undefined ? undefined : all.find(n => n.id === ctx.id);
+
+  // REVIEW ROUND 2/3 (critical) — every REQUIRED_ORG_FIELDS column is
+  // `notNull()`, and `pick()` copies an explicit JSON `null` straight through
+  // (it only filters `undefined`). A naive `body.level ?? existing?.level`
+  // (and the equivalent for `name`) cannot tell "the client didn't touch this
+  // field" from "the client sent null": `??` treats both as nullish and falls
+  // back to the EXISTING value for every check below, so validation sees a
+  // perfectly consistent row and passes — while the body's own field STILL
+  // carries a literal `null` into the object handed to the repo. In-memory
+  // `update()` then DELETES the key outright (repository.ts's
+  // explicit-null-clears rule); Postgres issues `SET <col> = NULL` and raises
+  // an unmapped NOT NULL violation (SQLSTATE 23502) as an opaque 500 — the two
+  // adapters silently disagree (200 vs 500), and either way the row is
+  // corrupted. Worse on POST: a `null` for a field with no `existing` fallback
+  // resolves to `undefined` (skipping any check keyed on it, e.g. `name`'s
+  // uniqueness check below), and the trailing `...body` spread in the POST
+  // handler means an explicit `{costCenters: null}` OVERRIDES that handler's
+  // own `costCenters: []` default — `create()` does no null-stripping at all,
+  // so a literal `null` lands straight in the persisted row. And the `name`
+  // corruption specifically can be CHAINED to defeat the delete guard: mask a
+  // childless-but-referenced node's name to `undefined`, then `DELETE` — the
+  // guard's `resources.some(r => r.organization === node.name)` no longer
+  // matches the resource that used to reference it by its real name.
+  //
+  // This is a DIFFERENT rule from the nullable `parentId`/`managerId`, where
+  // `''`/`null` legitimately mean "clear to absent" — every REQUIRED_ORG_FIELDS
+  // column has no "absent" state to clear TO, so an explicit `null` for any of
+  // them is simply invalid input, rejected in one loop before anything below
+  // (the `??` fallbacks, `validateResourceOrgRefs`'s costCenters shape check,
+  // the POST handler's spread) ever sees it.
+  for (const field of REQUIRED_ORG_FIELDS) {
+    if (body[field] === null) return `${field} is required and cannot be cleared`;
+  }
+
+  const level = (body.level ?? existing?.level) as OrgLevel | undefined;
+  if (level !== undefined && !ORG_LEVELS.includes(level)) {
+    return `level must be one of ${ORG_LEVELS.join(', ')}`;
+  }
+  // An empty string clears the parent (the clear-to-absent seam), so treat it as absent.
+  const rawParent = body.parentId === undefined ? existing?.parentId : body.parentId;
+  const parentId = rawParent === '' || rawParent === null ? undefined : rawParent;
+
+  if (level === 'capability' && parentId !== undefined) return 'a capability is a root and cannot have a parent';
+  if (level !== undefined && level !== 'capability') {
+    if (parentId === undefined) return `a ${level} must have a parent`;
+    const parent = all.find(n => n.id === parentId);
+    if (parent === undefined) return 'parentId must reference an existing resource organization';
+    const wanted = ORG_LEVELS[ORG_LEVELS.indexOf(level) - 1];
+    if (parent.level !== wanted) return `the parent of a ${level} must be a ${wanted}`;
+  }
+  // REVIEW ROUND 1 (Task 7 coordinator feedback, critical) — every check above
+  // only ever looks at THIS record against ITS OWN parent; nothing looked the
+  // other way, at EXISTING CHILDREN that point at this record as THEIRS. Left
+  // unguarded: Platform (a practice, child Backend a competence) could have
+  // its own level changed to 'capability' — Platform's own parent is cleared
+  // correctly above, but Backend is left a competence whose parent is now a
+  // capability, a state the level guard never re-validates because it only
+  // ever runs against the record being edited, never against Backend. Every
+  // resource at/under Backend then silently loses its practice dimension in
+  // dimensionsOf() (reporting, rate-card resolution), with no error anywhere.
+  // Only fires on an ACTUAL level change — comparing the RESOLVED `level`
+  // against the record's own EXISTING level, not merely `body.level` being
+  // present, because the UI's save() resends the unchanged level on every
+  // edit (Task 7's orgForm always carries a `level` control).
+  if (ctx?.id !== undefined && level !== undefined && existing !== undefined && level !== existing.level) {
+    const children = all.filter(n => n.parentId === ctx.id);
+    for (const child of children) {
+      const wantedForChild = ORG_LEVELS[ORG_LEVELS.indexOf(child.level) - 1];
+      if (wantedForChild !== level) {
+        return `cannot change level to ${level}: existing ${child.level} child "${child.name}" requires a ${wantedForChild} parent`;
+      }
+    }
+  }
+  // DEFENCE IN DEPTH, not dead code: with the level rules above enforced (a
+  // capability has no parent, a practice's parent must be a capability, a
+  // competence's parent must be a practice), a cycle is structurally
+  // UNREACHABLE through this API — closing one would require a capability to
+  // sit beneath something, which the `level === 'capability'` guard above
+  // already refuses first. There is deliberately no smoke check driving this
+  // branch through the live API for that reason (see the note at check 6 in
+  // scripts/smoke-api.mjs); `wouldCycleInOrgTree` itself is unit-tested
+  // directly in org-scope.util.spec.ts. This guard earns its place anyway:
+  // rows predating D (this feature) have no meaningful level — an admin can
+  // hold, or later import, data whose levels are already inconsistent with
+  // the parent chain, a state the level guard above was never designed to
+  // catch (it only reasons about the level being written NOW). For such a
+  // row, the level guard would not fire first, and this is the only thing
+  // standing between an inconsistent write and a real cycle.
+  if (ctx?.id !== undefined && wouldCycleInOrgTree(ctx.id, parentId, nodes)) {
+    return 'parentId would close a cycle in the organizational tree';
+  }
+  const name = body.name ?? existing?.name;
+  if (name !== undefined && all.some(n => n.name === name && n.id !== ctx?.id)) {
+    return 'name must be unique across the whole organizational tree';
+  }
+  if (body.managerId !== undefined && body.managerId !== '') {
+    const manager = await repos.resources.get(body.managerId);
+    if (manager === undefined) return 'managerId must reference an existing resource';
   }
   return null;
 }
@@ -1194,15 +1345,95 @@ async function withdrawAllocationApproval(approvalId: string | undefined, reason
 }
 
 /**
- * True iff the actor proposing an allocation IS the resource's own manager — the
- * self-managed AUTO-APPROVAL shortcut. Compared in resource-id space
- * (`resource.managerId` vs the actor's `actorResourceId`), mirroring the decision
- * endpoint's per-manager enforcement. Shared by the POST and PUT handlers.
+ * True iff the actor proposing an allocation is one of the resource's
+ * ACCOUNTABLE MANAGERS — the self-managed AUTO-APPROVAL shortcut. Compared in
+ * resource-id space (the actor's `actorResourceId`), mirroring the decision
+ * endpoint's own enforcement. Shared by the POST/PUT/submit/substitute handlers.
+ *
+ * WHY IT EXISTS: segregation of duties (in `decideOneApproval`) forbids the
+ * requester from deciding their own approval. So when the person who may decide
+ * an allocation is also the person proposing it, opening a real approval creates
+ * a DEADLOCK: they cannot decide it (SoD), and nobody else is competent (scope).
+ * This shortcut is what keeps "plan your own team, then confirm it" workable —
+ * the approval is implicit, recorded by the month landing 'Allocated' with no
+ * approvalId.
+ *
+ * D (review round 4, critical #2) — the shortcut used to compare ONLY against
+ * `resource.managerId`, i.e. the ORG-CHART axis. D widened the APPROVER set to
+ * the org-tree axis (a node's `managerId` — the manual's Capability Leader /
+ * Practice Manager / Competence Manager) but not this shortcut, so the mainline
+ * Practice Manager workflow deadlocked exactly as described above: plan your
+ * practice's placeholders, submit, and then nobody but an admin can clear the
+ * month. The org-tree axis now grants the SAME shortcut the org chart already
+ * did.
+ *
+ * SCOPE OF THE WIDENING. The DEFECT being fixed is the DEADLOCK, so the widening
+ * reaches exactly as far as a deadlock can, and no further. Two consequences,
+ * both of them narrowings I had to be talked down to — recorded so the next
+ * reader can see which rule is intended rather than inferring it from a test
+ * that cannot tell the two apart:
+ *
+ *  - the ORG-CHART case is preserved BIT-FOR-BIT and answered FIRST (a direct
+ *    `managerId` match short-circuits before any extra I/O, and is unaffected by
+ *    both the termination filter and the sole-approver test below, exactly as
+ *    today);
+ *
+ *  - the TRANSITIVE chart chain is NOT included, even though `decideOneApproval`
+ *    admits it. A grand-manager's own proposal has never auto-approved and must
+ *    not start: it cannot deadlock, because the DIRECT manager can still decide
+ *    it. Including it would silently stop editing an 'Allocated' month from
+ *    forcing re-approval whenever a senior manager made the edit — a live smoke
+ *    check (`checkTimePhasedAllocation`, assignment 4 edited by resource '1',
+ *    Alice's grand-manager) pins exactly that, and it caught this when the first
+ *    cut of this fix over-reached;
+ *
+ *  - THE SAME REASONING ONE STEP FURTHER (review round 4, follow-up), and the
+ *    sentence above is the argument: a node manager only faces a deadlock when
+ *    they are the ONLY accountable approver. Where the resource ALSO has a direct
+ *    people manager `M`, submitting used to open an approval that
+ *    `allocationApproverStep` pinned to `M`, and `M` decided it — no SoD
+ *    conflict, no scope refusal, nothing admin-only. Auto-approving there does
+ *    not resolve a deadlock; it DELETES A WORKING HUMAN REVIEW STEP, and `M`
+ *    never sees the month. Worst shape: a `pm` who manages a node would grant
+ *    themselves unreviewed approval across their whole subtree, having been
+ *    unable to decide an allocation at all before this wave. So the tree branch
+ *    additionally requires the accountable set MINUS the proposer to be empty.
+ *
+ * The rule this leaves: auto-approve iff the proposer is the resource's DIRECT
+ * people manager, or is an accountable manager with nobody else accountable
+ * alongside them. Exactly the cases where a real approval would strand.
  */
 async function autoApprovesAllocation(req: Request, resourceId: string): Promise<boolean> {
   const resource = await repos.resources.get(resourceId);
+  if (resource === undefined) return false;
   const proposerResourceId = await actorResourceId(req);
-  return resource?.managerId !== undefined && resource.managerId === proposerResourceId;
+  if (proposerResourceId === undefined) return false;
+  // ORG CHART — unchanged behaviour, unchanged cost.
+  if (resource.managerId !== undefined && resource.managerId === proposerResourceId) return true;
+  // ORG TREE — the axis D added.
+  const nodes = await repos.resourceOrganizations.list();
+  const nodeManagers = nodeManagersAbove(resource, nodes);
+  // Nobody is their own approver, so being the manager of your OWN node cannot
+  // be an implicit self-approval either (`scopedApproversOf` removes the target
+  // from its own set for the same reason).
+  nodeManagers.delete(resource.id);
+  if (!nodeManagers.has(proposerResourceId)) return false;
+  const today = todayIso();
+  // ALIGNMENT WITH THE DECISION: `accountableApproversOf` drops a terminated
+  // manager, so one cannot decide explicitly — they must not receive an IMPLICIT
+  // approval here either. An id that resolves to no resource fails open, the
+  // same way it does in the approver set. MUST stay ABOVE the sole-approver test
+  // below: a terminated sole node manager is absent from the accountable set, so
+  // that test would find it empty and wave them through.
+  const proposer = await repos.resources.get(proposerResourceId);
+  if (proposer !== undefined && isTerminatedAsOf(proposer, today)) return false;
+  // ...AND ONLY IF THERE IS NOBODY ELSE. See the SOLE-APPROVER note above: this
+  // is the whole difference between resolving the deadlock and quietly deleting
+  // a working human review step.
+  const resources = await repos.resources.list();
+  const { managerIds } = accountableApproversOf(resource, resources, nodes, today);
+  managerIds.delete(proposerResourceId);
+  return managerIds.size === 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1325,6 +1556,13 @@ apiRouter.get('/resources/:id', async (req, res) => {
 // utilization starts at 0 (derived server-side from assignments), id is server-set.
 apiRouter.post('/resources', async (req, res) => {
   const body = pick<Resource>(req.body, RESOURCE_FIELDS);
+  // D — hoisted so the cycle guard below can check a client-supplied
+  // managerId against THIS resource's own about-to-be-assigned id, before it
+  // exists anywhere else. Harmless to generate ahead of validation: newId()
+  // only advances a counter (no persistence side effect), so a rejected POST
+  // just leaves a gap in the sequence like any other validation failure
+  // already does.
+  const id = newId();
   // Phase E: map costRateOverride/billRateOverride onto the cost_rate/bill_rate
   // columns ('' / absent = inherit the role's rate card on read).
   const rateErr = applyRateOverrides(body, req.body);
@@ -1358,32 +1596,79 @@ apiRouter.post('/resources', async (req, res) => {
   // resource-organizations. Optional; only supplied values are checked.
   const catalogErr = await validateResourceCatalogRefs(body);
   if (catalogErr) { res.status(400).json({ error: catalogErr }); return; }
-  // C1: kind must be one of the known values, and only a subco may carry a
-  // vendorId (and must carry one). Pin the default so downstream reads never
-  // see kind absent.
-  const kindErr = await validateResourceKind(body.kind, body.vendorId);
-  if (kindErr) { res.status(400).json({ error: kindErr }); return; }
-  if (body.kind === undefined) body.kind = 'internal';
-  // A non-subco '' or null vendorId already passed validation
-  // (validateResourceKind treats both like absent) but must never be PERSISTED
-  // verbatim — normalize to undefined so the field is genuinely absent. Use
-  // undefined (not null) here: the in-memory adapter's create() has no
-  // null-stripping step (that only exists on update()), so a literal null
-  // would leak into every later read of this row, unlike Postgres where the
-  // column is NULL and nullsToUndefined() hands it back absent — undefined is
-  // the one value both adapters agree means "don't set this column" on create.
-  // `pick()` copies an explicit null straight through, so it has to be caught
-  // here alongside '': this normalization IS the adapter parity.
-  if (body.vendorId === '' || body.vendorId === null) body.vendorId = undefined;
-  const item = {
-    skills: [], projectRoles: [], externalExperience: [],
-    ...body,
-    id: newId(),
-    utilization: 0,
-  } as Resource;
-  const created = await repos.resources.create(item);
+  // D — the tail of this handler (kind/vendorId validation + defaulting, item
+  // construction, and the actual `create()`) is IDENTICAL whether or not
+  // `managerId` is being set. Factored into a closure so it can run either
+  // directly (no manager is being set — the common case, no extra locking
+  // cost) or nested inside the 'org-chart' lock below (one IS being set) —
+  // same pattern as the PUT handler's `finishPut`.
+  const finishPost = async (): Promise<{ status?: number; error?: string; created?: Resource }> => {
+    // C1: kind must be one of the known values, and only a subco may carry a
+    // vendorId (and must carry one). Pin the default so downstream reads never
+    // see kind absent.
+    const kindErr = await validateResourceKind(body.kind, body.vendorId);
+    if (kindErr) return { status: 400, error: kindErr };
+    if (body.kind === undefined) body.kind = 'internal';
+    // A non-subco '' or null vendorId already passed validation
+    // (validateResourceKind treats both like absent) but must never be PERSISTED
+    // verbatim — normalize to undefined so the field is genuinely absent. Use
+    // undefined (not null) here: the in-memory adapter's create() has no
+    // null-stripping step (that only exists on update()), so a literal null
+    // would leak into every later read of this row, unlike Postgres where the
+    // column is NULL and nullsToUndefined() hands it back absent — undefined is
+    // the one value both adapters agree means "don't set this column" on create.
+    // `pick()` copies an explicit null straight through, so it has to be caught
+    // here alongside '': this normalization IS the adapter parity.
+    if (body.vendorId === '' || body.vendorId === null) body.vendorId = undefined;
+    // D (review round 1) — the SAME normalization for managerId, and NOT an
+    // edge case: the resources form's `save()`
+    // (src/app/resources/resources.component.ts ~line 709) sends
+    // `managerId: raw.managerId ?? ''` on EVERY create, so an ordinary
+    // "onboard someone with no People Manager" is the common path, not a rare
+    // one. Left unnormalized, '' would persist as a literal empty string
+    // (same in-memory create()-has-no-null-stripping reasoning as vendorId
+    // above) — and `reportsClosure`/`scopedApproversOf`
+    // (src/app/services/org-scope.util.ts) both gate on `managerId ===
+    // undefined`, so a stored '' silently slips past them, seeding a phantom
+    // key in the closure map instead of being ignored. `undefined`, not
+    // `null`, for the identical adapter-parity reason as vendorId.
+    if (body.managerId === '' || body.managerId === null) body.managerId = undefined;
+    const item = {
+      skills: [], projectRoles: [], externalExperience: [],
+      ...body,
+      id, // D — hoisted above (see comment there); NOT a fresh newId() call.
+      utilization: 0,
+    } as Resource;
+    return { created: await repos.resources.create(item) };
+  };
+  // D (review round 1, CRITICAL) — see the matching comment at the PUT
+  // handler's `org-chart` lock for the full rationale (two concurrent writers
+  // racing the SAME read-check-write can each pass a check that reasons from
+  // a stale snapshot). The scenario here is narrower than PUT-vs-PUT — a
+  // brand-new resource still cannot be named by any OTHER concurrent writer
+  // (its id doesn't exist until `create()` runs, inside this very lock), so
+  // the only thing a race could still slip past is two POSTs mutually
+  // guessing each other's about-to-be-assigned id — but the lock is taken
+  // unconditionally here anyway, for the same reason the ruling gave for
+  // PUT: it is a single global key, reassignments (including onboarding with
+  // a manager) are rare/human-scale, and reasoning about ONE consistent rule
+  // ("any mutation of the manager chain is serialized under 'org-chart'") is
+  // worth more than reasoning about which handler's race is "narrow enough"
+  // to skip it. Only paid when a manager is actually being set — a POST
+  // with no managerId never touches this lock at all.
+  const result = body.managerId !== undefined
+    ? await withLock('org-chart', async (): Promise<{ status?: number; error?: string; created?: Resource }> => {
+        const effectiveManagerId = (body.managerId === '' || body.managerId === null) ? undefined : body.managerId;
+        const all = await repos.resources.list();
+        if (wouldCycleInOrgChart(id, effectiveManagerId, all)) {
+          return { status: 400, error: 'managerId would close a cycle in the org chart' };
+        }
+        return finishPost();
+      })
+    : await finishPost();
+  if (result.error !== undefined) { res.status(result.status ?? 400).json({ error: result.error }); return; }
   // Resolve effective rates so the create response matches the GET shape (Phase E).
-  const [resolved] = await resolveResourceRates([created]);
+  const [resolved] = await resolveResourceRates([result.created as Resource]);
   res.status(201).json(resolved);
 });
 apiRouter.put('/resources/:id', async (req, res) => {
@@ -1431,36 +1716,73 @@ apiRouter.put('/resources/:id', async (req, res) => {
   // REFERENCE-DATA INTEGRITY (Phase F2): validate any supplied location/organization.
   const catalogErr = await validateResourceCatalogRefs(body);
   if (catalogErr) { res.status(400).json({ error: catalogErr }); return; }
-  // C1: validate the MERGED kind/vendorId state, not the body in isolation —
-  // a partial PUT that changes only one of the two fields must still produce
-  // a coherent pair (e.g. a kind-only PUT to 'subco' is rejected when the
-  // stored row has no vendor, and a vendorId-only PUT is rejected when the
-  // stored kind isn't 'subco'). When the effective kind is no longer 'subco'
-  // and the caller did not touch vendorId, the stale stored vendor is cleared
-  // with an explicit null (which means "clear to absent" on both adapters)
-  // rather than rejected or silently carried forward — a PUT that moves a
-  // resource away from being a subco must not leave an orphaned vendor behind.
-  // An empty-string vendorId is a clear request, exactly like an explicit
-  // null (same '' === clear convention as applyRateOverrides above) — never
-  // persist a literal ''. Normalize before computing the merge so it's
-  // treated as "supplied" (a real clear), not silently dropped back to the
-  // stale stored value the way `'' ?? current.vendorId` would.
+  // D — a cycle in the org chart would make every scope computation for these
+  // people meaningless (org-scope.util's scopeOf/reportsClosure), and
+  // `managerId` is a free field of the resource form — one careless edit away
+  // from closing one. The read side is separately cycle-safe (every
+  // traversal there carries its own visited set), so this guard exists only
+  // to stop NEW cycles from being written, not to protect reads from ones
+  // that already exist (seeded resource '1' already self-manages — see
+  // src/db/seed.ts — and reads of it are unaffected either way).
   //
-  // Then: narrowing a kind (dummy/subco -> internal) shrinks the daily ceiling
-  // by MULTI_FTE_MAX. Refuse if that would strand existing bookings above the
-  // new cap rather than silently leaving invalid allocations behind. baseCap is
-  // resolved exactly like the allocation handler's gate (resolveBaseCap: stored
-  // contractHoursPerDay, guarded against 0/NaN/negative, else getHoursPerDay()).
+  // THREE managerId INPUTS, three different meanings — pick() forwards an
+  // explicit JSON null unchanged (it only filters `undefined`), so all three
+  // must be told apart, same lesson as the D task 3 name/level guard:
+  //   - absent -> leave the manager untouched, no cycle check runs.
+  //   - ''     -> the established clear-to-absent sentinel (the UI has no way
+  //               to author a literal null). Normalized to a real `null`
+  //               below so it clears identically on both adapters
+  //               (src/db/repository.ts: an explicit null in an update patch
+  //               clears a nullable column, undefined leaves it untouched) —
+  //               the same translation already done for vendorId a few lines
+  //               below and the org-tree node's own managerId (PUT
+  //               /resource-organizations/:id, further down this file).
+  //   - null   -> managerId is a NULLABLE column (no notNull guard, unlike
+  //               task 3's name/level), so — unlike those fields — a literal
+  //               null here is already a legitimate "clear to absent" with no
+  //               help needed. Treated exactly like '' for this check: neither
+  //               can ever close a cycle (a cleared manager has no manager to
+  //               loop back through).
   //
-  // TOCTOU: ALL of it — the read of the stored row, the merge, both caps, the
-  // assignment-day re-check and the write — happens inside ONE res: lock, the
-  // same discipline the allocation handler's own res: critical section (below)
-  // uses. Two concurrent PUTs that each read the pre-state would otherwise
-  // reason from the same snapshot and could persist exactly the incoherent
-  // kind/vendor pair (or the over-cap narrowing) this block exists to prevent;
-  // a concurrent PUT .../allocation could equally book hours in between. The
-  // section acquires no other lock, so it cannot deadlock.
-  const locked = await withLock(`res:${req.params.id}`, async (): Promise<{ status?: number; error?: string; updated?: Resource }> => {
+  // D (review round 1, CRITICAL) — see the `org-chart` lock acquisition below
+  // for why the read-check-write cannot be split from the write anymore: two
+  // concurrent PUTs (A -> B and B -> A) each reading the pre-race chain would
+  // both pass this check and commit under DIFFERENT `res:<id>` keys (`res:A`,
+  // `res:B`, which never contend), writing the exact cycle this guard exists
+  // to refuse. The tail of this handler (kind/vendorId validation, the daily-
+  // cap TOCTOU, and the actual write) is IDENTICAL whether or not `managerId`
+  // is being touched — factored into `finishPut` so it can run either
+  // directly (no manager change — the common case, no extra locking cost) or
+  // nested inside `org-chart` below (one IS being attempted).
+  const finishPut = (): Promise<{ status?: number; error?: string; updated?: Resource }> => withLock(`res:${req.params.id}`, async () => {
+    // C1: validate the MERGED kind/vendorId state, not the body in isolation —
+    // a partial PUT that changes only one of the two fields must still produce
+    // a coherent pair (e.g. a kind-only PUT to 'subco' is rejected when the
+    // stored row has no vendor, and a vendorId-only PUT is rejected when the
+    // stored kind isn't 'subco'). When the effective kind is no longer 'subco'
+    // and the caller did not touch vendorId, the stale stored vendor is cleared
+    // with an explicit null (which means "clear to absent" on both adapters)
+    // rather than rejected or silently carried forward — a PUT that moves a
+    // resource away from being a subco must not leave an orphaned vendor behind.
+    // An empty-string vendorId is a clear request, exactly like an explicit
+    // null (same '' === clear convention as applyRateOverrides above) — never
+    // persist a literal ''. Normalize before computing the merge so it's
+    // treated as "supplied" (a real clear), not silently dropped back to the
+    // stale stored value the way `'' ?? current.vendorId` would.
+    //
+    // Then: narrowing a kind (dummy/subco -> internal) shrinks the daily ceiling
+    // by MULTI_FTE_MAX. Refuse if that would strand existing bookings above the
+    // new cap rather than silently leaving invalid allocations behind. baseCap is
+    // resolved exactly like the allocation handler's gate (resolveBaseCap: stored
+    // contractHoursPerDay, guarded against 0/NaN/negative, else getHoursPerDay()).
+    //
+    // TOCTOU: ALL of it — the read of the stored row, the merge, both caps, the
+    // assignment-day re-check and the write — happens inside ONE res: lock, the
+    // same discipline the allocation handler's own res: critical section (below)
+    // uses. Two concurrent PUTs that each read the pre-state would otherwise
+    // reason from the same snapshot and could persist exactly the incoherent
+    // kind/vendor pair (or the over-cap narrowing) this block exists to prevent;
+    // a concurrent PUT .../allocation could equally book hours in between.
     const current = await repos.resources.get(req.params.id);
     if (current === undefined) return { status: 404, error: 'Not found' };
     if (body.vendorId === '') body.vendorId = null as unknown as undefined;
@@ -1487,6 +1809,58 @@ apiRouter.put('/resources/:id', async (req, res) => {
     }
     return { updated: await repos.resources.update(req.params.id, body) };
   });
+  // D (review round 1, CRITICAL) — a SINGLE global lock key, not a per-pair
+  // `withLock` (the pattern used elsewhere in this file for exactly-two-known-
+  // resources operations, e.g. the retarget handler below): three or more
+  // concurrent PUTs can compose an arbitrarily long cycle (A -> B, B -> C,
+  // C -> A), and no pair of per-target locks serializes that — only a single
+  // key that EVERY manager-chain mutation contends on does. Cheap in
+  // practice: manager reassignments are rare, human-scale operations (a
+  // reorg, an onboarding), so serializing all of them costs nothing real.
+  //
+  // LOCK ORDER, stated explicitly because `withLock` is not re-entrant and
+  // this handler already takes `res:<id>` inside `finishPut`: `org-chart` is
+  // acquired OUTERMOST here, `res:<id>` nested inside it (via `finishPut()`
+  // called from within this callback) — never the reverse. No `res:` lock is
+  // held at the point `org-chart` is acquired (this call site is the entire
+  // body of the handler from the top; nothing above it takes a lock). As long
+  // as no code path anywhere in this file acquires `org-chart` from INSIDE a
+  // `res:` section, this ordering is globally deadlock-free — confirmed by
+  // inspection: `org-chart` is acquired at exactly two call sites in this
+  // file (here and the POST handler above), both at the top level of their
+  // handler, neither nested inside any other `withLock` callback.
+  //
+  // The ORG TREE has its own, DISTINCT key (`ORG_TREE_LOCK`, see the
+  // `/resource-organizations` handlers) for the same reason and with the same
+  // discipline. The two never nest in either direction: nothing inside an
+  // `org-chart` section touches `/resource-organizations` (the only read of
+  // that catalog on this path, `validateResourceCatalogRefs`, runs BEFORE the
+  // lock is taken), and nothing inside an `org-tree` section takes any lock at
+  // all. No path can hold one while acquiring the other, so they cannot
+  // deadlock regardless of which is notionally "first".
+  //
+  // Freshly re-reads the resource list INSIDE this lock (not the stale one a
+  // caller might have read earlier) — that fresh read is what makes the fix
+  // correct: whichever request's critical section runs first commits its
+  // write before the next one's `list()` call executes, so the second
+  // request's check always reasons about the FIRST request's already-applied
+  // change, closing the race the finding described. See the task report for
+  // why this is asserted correct by construction rather than by a timing-
+  // based test (the smoke suite is a single sequential client and cannot
+  // express real concurrency; `withLock` itself is a private, non-exported
+  // closure in this file with no existing unit coverage at any other call
+  // site either).
+  const locked = body.managerId !== undefined
+    ? await withLock('org-chart', async (): Promise<{ status?: number; error?: string; updated?: Resource }> => {
+        if (body.managerId === '') body.managerId = null as unknown as undefined;
+        const effectiveManagerId = body.managerId === null ? undefined : body.managerId;
+        const all = await repos.resources.list();
+        if (wouldCycleInOrgChart(req.params.id, effectiveManagerId, all)) {
+          return { status: 400, error: 'managerId would close a cycle in the org chart' };
+        }
+        return finishPut();
+      })
+    : await finishPut();
   if (locked.error !== undefined) { res.status(locked.status ?? 400).json({ error: locked.error }); return; }
   const [resolved] = await resolveResourceRates([locked.updated as Resource]);
   res.json(resolved);
@@ -1645,8 +2019,11 @@ apiRouter.put('/assignments/:id', async (req, res) => {
   // it's given, so a stale resourceId would route the fresh approval to the
   // OLD resource's manager, reproducing the exact bug this closes. The
   // self-managed check is hoisted out of the loop: the answer (is the
-  // proposer the NEW resource's manager?) cannot change between month rows of
-  // the same retarget. This is approval-repo I/O + month-row writes only,
+  // proposer an accountable manager of the NEW resource — its direct people
+  // manager, or the manager of a node above it?) depends only on that resource
+  // and the org tree, neither of which this loop touches, so it cannot change
+  // between month rows of the same retarget. This is approval-repo I/O +
+  // month-row writes only,
   // done OUTSIDE any res:/req: lock and never nested inside an aggregate
   // critical section (mirrors every other approval side-effect in this
   // file); the aggregate recomputes below stay LAST so they read the
@@ -2740,7 +3117,10 @@ apiRouter.post('/assignments/:id/months/:month/submit', async (req, res) => {
   const plannerNote = typeof body.plannerNote === 'string' ? body.plannerNote : undefined;
 
   // Self-managed: approver and requester would be the same principal (SoD would
-  // block the decision anyway), so the month is approved on the spot.
+  // block the decision anyway), so the month is approved on the spot. Covers the
+  // direct people manager AND a manager of a node above the resource — the
+  // Practice Manager planning their own practice's placeholders is the mainline
+  // workflow, not an edge case (see `autoApprovesAllocation`).
   await withdrawAllocationApproval(row.approvalId, 'superseded');
   if (await autoApprovesAllocation(req, assig.resourceId)) {
     await repos.assignmentMonths.update(row.id, {
@@ -2892,11 +3272,62 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
   if (monthToIdx(to) - monthToIdx(from) + 1 > 24) { res.status(400).json({ error: 'range must span at most 24 months' }); return; }
   const months = monthsInRange(from, to);
 
-  const [resources, assignments, monthRows, days, requests, projects, holidayRows] = await Promise.all([
+  const [resources, assignments, monthRows, days, requests, projects, holidayRows, orgNodes] = await Promise.all([
     repos.resources.list(), repos.assignments.list(), repos.assignmentMonths.list(),
     repos.assignmentDays.list(), repos.requests.list(), repos.projects.list(), repos.holidays.list(),
+    repos.resourceOrganizations.list(),
   ]);
   const holidays = new Set(holidayRows.map(h => h.id));
+
+  // D (design spec §3.3) — a manager sees their own scope. This rule MUST mirror
+  // `decideOneApproval`: a row the actor cannot decide would render as a dead
+  // button, and a row they CAN decide must never be hidden — hence the
+  // no-manager-anywhere rows stay visible to every resource-manager.
+  const feedRole = trustedRole(req);
+  const feedActorResourceId = await actorResourceId(req);
+  const feedGlobalRole = feedRole === 'admin' || feedRole === 'delivery-executive';
+  const visibleResourceIds = feedGlobalRole
+    ? undefined
+    : feedActorResourceId === undefined
+      // DEFENSIVE, CURRENTLY UNREACHABLE: `actorResourceId` resolves via
+      // `actorId(req)` (`id = req.verifiedUserId || String(req.header('X-User-Id')
+      // || 'system')`), which can never be falsy — `verifyBearer` yields
+      // 'unknown' rather than '', and the unauthenticated fallback is the
+      // literal 'system' — so `actorResourceId`'s own `?? (id || undefined)`
+      // always yields the (truthy) id, never `undefined`. This branch is
+      // therefore dead today. It is kept, rather than deleted, and made
+      // RESTRICTIVE (an empty scope — the roleFallback-only rows below, not an
+      // unrestricted feed) so that if `actorId`/`actorResourceId` ever change to
+      // make it reachable, the feed cannot silently diverge from
+      // `decideOneApproval`'s OWN treatment of an unresolved `deciderResourceId`:
+      // there, `scopeMatch` reduces to `roleFallback` alone, never to "anything
+      // goes". An empty `Set` (not `undefined`) is what makes the loop below
+      // apply exactly that: only no-manager-anywhere rows survive.
+      ? new Set<string>()
+      : scopeOf(feedActorResourceId, resources, orgNodes);
+  // PERFORMANCE: `accountableApproversOf` is O(resources.length) per call (it
+  // rebuilds a resources-by-id Map internally) and is evaluated once per
+  // VISIBLE-CHECK below, not once per resource — a resource with N month-rows
+  // in the window would otherwise re-derive the identical answer N times, an
+  // O(rows × resources) cost where O(rows + resources) is available. Memoized
+  // per resource id so each resource pays for the computation at most once
+  // per request, regardless of how many month-rows it has in range.
+  //
+  // `accountableApproversOf`, not `scopedApproversOf`, for the SAME reason the
+  // decision uses it (review round 4, critical #1): a manager who has left
+  // suppresses the fallback structurally but cannot act. The feed and the
+  // decision must agree on that or a row that any competent approver may now
+  // decide would be hidden from all of them.
+  const feedToday = todayIso();
+  const roleFallbackCache = new Map<string, boolean>();
+  const isRoleFallback = (resource: Resource): boolean => {
+    let cached = roleFallbackCache.get(resource.id);
+    if (cached === undefined) {
+      cached = accountableApproversOf(resource, resources, orgNodes, feedToday).roleFallback;
+      roleFallbackCache.set(resource.id, cached);
+    }
+    return cached;
+  };
   const hoursPerDay = await getHoursPerDay();
   const assignmentById = new Map(assignments.map(a => [a.id, a]));
   const resourceById = new Map(resources.map(r => [r.id, r]));
@@ -2943,6 +3374,11 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
     if (assig === undefined) continue;
     const resource = resourceById.get(assig.resourceId);
     if (resource === undefined) continue;
+    if (
+      visibleResourceIds !== undefined
+      && !visibleResourceIds.has(resource.id)
+      && !isRoleFallback(resource)
+    ) continue;
 
     let row = rowsByResource.get(resource.id);
     if (row === undefined) {
@@ -2958,6 +3394,16 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
         targetHours: Object.fromEntries(months.map(mo => [mo, monthlyTargetHours(cap, mo, holidays)])),
         totalHours: { ...(totalsByResource.get(resource.id) ?? Object.fromEntries(months.map(mo => [mo, 0]))) },
         items: [],
+        // D (Task 8): carried straight through so the client can derive the
+        // capability/practice/competence dimensions without a second
+        // getResources() catalogue fetch — `resource` is already in hand here.
+        organization: resource.organization,
+        // D (Task 8, round 3): resolved from the SAME resourceById map built
+        // above for this very handler — no extra I/O — so the People Manager
+        // filter's option list can show a real name instead of a bare id (the
+        // feed lists a manager's REPORTS, so the manager rarely has a row of
+        // their own to resolve a name from client-side).
+        managerName: resource.managerId !== undefined ? resourceById.get(resource.managerId)?.name : undefined,
       };
       rowsByResource.set(resource.id, row);
     }
@@ -3115,25 +3561,181 @@ apiRouter.put('/project-roles/:id', async (req, res) => {
 apiRouter.get('/service-organizations', async (_req, res) => { res.json(await repos.serviceOrganizations.list()); });
 
 apiRouter.get('/resource-organizations', async (_req, res) => { res.json(await repos.resourceOrganizations.list()); });
+
+/**
+ * D (review round 4, important #4) — THE ORG-TREE LOCK KEY.
+ *
+ * Every `/resource-organizations` MUTATION (POST, PUT, DELETE) is a
+ * read-validate-write over the WHOLE tree: `validateOrgTreeNode` lists all
+ * nodes, reasons about this record against its parent AND against its existing
+ * children, then writes. Unserialized, two concurrent writers each reason from
+ * their own pre-write snapshot and both pass. The exhibit: interleave
+ * `PUT X {parentId: A}` (X a practice, A a capability — legal) with
+ * `PUT A {level:'practice', parentId: Z}`; if A's child-invalidation guard reads
+ * the node list before X's write commits, it sees A childless and allows the
+ * demotion, leaving a practice whose parent is a practice. `dimensionsOf` then
+ * overwrites `out['practice']` with the outer node, so every resource under X
+ * reports the WRONG practice in all three D filter screens and in reporting —
+ * silently, with no error anywhere. Node edits are rare, human-scale admin
+ * operations, so a single global key costs nothing measurable and is far easier
+ * to reason about than a per-node scheme (the invariant spans several nodes, so
+ * a per-node lock would have to be taken over an unbounded set anyway).
+ *
+ * LOCK ORDER, stated explicitly because `withLock` is NOT re-entrant:
+ * `'org-tree'` is a LEAF and a ROOT — it is acquired at exactly the three call
+ * sites below, each of them the outermost (and only) lock of its handler, and
+ * NOTHING inside those sections acquires another lock (they do repo reads and
+ * one write; `validateOrgTreeNode`/`validateResourceOrgRefs` are lock-free).
+ * It therefore cannot participate in a cycle with any other key, `'org-chart'`
+ * included: that one is likewise taken only at the two `/resources` write
+ * handlers, and no path from inside it reaches these handlers (Express routes
+ * never call one another). A DEADLOCK would require some path to hold one while
+ * acquiring the other; no such path exists in either direction.
+ */
+const ORG_TREE_LOCK = 'org-tree';
 apiRouter.post('/resource-organizations', async (req, res) => {
-  const body = pick<ResourceOrganization>(req.body, ['name', 'description', 'costCenters', 'serviceOrganizationId']);
-  // REFERENCE-DATA INTEGRITY (Phase F2): costCenters[] -> cost-centers catalog (id),
-  // serviceOrganizationId -> service-organizations (id). Optional; supplied values checked.
-  const refErr = await validateResourceOrgRefs(body as Record<string, unknown>);
-  if (refErr) { res.status(400).json({ error: refErr }); return; }
-  const item = { id: newId(), costCenters: [], ...body } as ResourceOrganization;
-  res.json(await repos.resourceOrganizations.create(item));
+  const body = pick<ResourceOrganization>(req.body, [
+    'name', 'description', 'costCenters', 'serviceOrganizationId',
+    // D — the delivery tree. A field missing here is dropped SILENTLY.
+    'parentId', 'level', 'managerId',
+  ]);
+  // D (review round 4, important #3) — THE '' SENTINEL, ON CREATE TOO. The PUT
+  // handler below translates '' -> null ("clear this field"); this handler used
+  // to spread `body` straight into `create()`, which strips nothing, while
+  // `validateOrgTreeNode` skips the reference check for '' — so a POST carrying
+  // `managerId: ''` persisted a LITERAL empty string, which then entered
+  // `scopedApproversOf`'s manager set (it guarded only `!== undefined`) and
+  // reproduced the critical-#1 lockout through a second door; `parentId: ''`
+  // likewise persisted and made the node fall out of the customizing tree's
+  // main walk. The client was working around this by omitting the keys
+  // entirely on create — the UI as sole guardian, which the Global Constraints
+  // forbid.
+  //
+  // `undefined`, NOT `null`, on this path — the opposite of PUT, deliberately:
+  // there is nothing to CLEAR on a create, and `create()` has no
+  // null-stripping step on either adapter (that only exists on `update()`), so
+  // a literal `null` would leak into every later read of an in-memory row while
+  // Postgres stored a proper NULL — the two adapters would silently disagree.
+  // `undefined` is the one value both read back as genuinely absent. Same rule,
+  // same reasoning, as `vendorId`/`managerId` on `POST /resources`. Runs BEFORE
+  // validation so every check below sees the normalized shape (both were
+  // already treated as absent there, so no check changes meaning).
+  if (body.parentId === '' || body.parentId === null) body.parentId = undefined;
+  if (body.managerId === '' || body.managerId === null) body.managerId = undefined;
+  const result = await withLock(ORG_TREE_LOCK, async (): Promise<{ status?: number; error?: string; created?: ResourceOrganization }> => {
+    // REFERENCE-DATA INTEGRITY (Phase F2): costCenters[] -> cost-centers catalog (id),
+    // serviceOrganizationId -> service-organizations (id). Optional; supplied values checked.
+    const refErr = await validateResourceOrgRefs(body as Record<string, unknown>);
+    if (refErr) return { status: 400, error: refErr };
+    // D — org-tree integrity (levels, parent/child, cycles, unique name). Run
+    // AFTER the F2 reference check, on the same allow-listed body; no ctx.id on
+    // create.
+    const treeErr = await validateOrgTreeNode(body);
+    if (treeErr) return { status: 400, error: treeErr };
+    // D — `level` IS now in the pick() allow-list above, so an explicit value
+    // overrides this default; an omitted one still lands as 'capability',
+    // mirroring the schema default, so the two adapters agree. In-memory stores
+    // exactly what it is handed (no column default to fall back on), so leaving
+    // this out would make an in-memory-created row silently disagree with a
+    // Postgres one. `level` MUST stay before `...body` — reversing the order
+    // would make every explicit `level` silently ignored.
+    const item = { id: newId(), costCenters: [], level: 'capability', ...body } as ResourceOrganization;
+    return { created: await repos.resourceOrganizations.create(item) };
+  });
+  if (result.error !== undefined) { res.status(result.status ?? 400).json({ error: result.error }); return; }
+  res.json(result.created);
 });
 apiRouter.put('/resource-organizations/:id', async (req, res) => {
-  const existing = await repos.resourceOrganizations.get(req.params.id);
-  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
-  const body = pick<ResourceOrganization>(req.body, ['name', 'description', 'costCenters', 'serviceOrganizationId']);
-  const refErr = await validateResourceOrgRefs(body as Record<string, unknown>);
-  if (refErr) { res.status(400).json({ error: refErr }); return; }
-  const updated = await repos.resourceOrganizations.update(req.params.id, body);
-  res.json(updated);
+  const body = pick<ResourceOrganization>(req.body, [
+    'name', 'description', 'costCenters', 'serviceOrganizationId',
+    // D — the delivery tree. A field missing here is dropped SILENTLY.
+    'parentId', 'level', 'managerId',
+  ]);
+  // The 404 read is INSIDE the lock together with the validation and the write:
+  // that is the whole point of the section (see ORG_TREE_LOCK above) — a
+  // snapshot taken before the lock is exactly the stale snapshot the guard used
+  // to reason from.
+  const result = await withLock(ORG_TREE_LOCK, async (): Promise<{ status?: number; error?: string; updated?: ResourceOrganization }> => {
+    const existing = await repos.resourceOrganizations.get(req.params.id);
+    if (existing === undefined) return { status: 404, error: 'Not found' };
+    const refErr = await validateResourceOrgRefs(body as Record<string, unknown>);
+    if (refErr) return { status: 400, error: refErr };
+    // D — org-tree integrity, excluding this record's own id from the
+    // name-uniqueness check and enabling the cycle check (PUT only).
+    const treeErr = await validateOrgTreeNode(body, { id: req.params.id });
+    if (treeErr) return { status: 400, error: treeErr };
+    // REVIEW ROUND 2 (important) — a rename must not silently ORPHAN every
+    // resource still bound to the OLD name. Resources attach to a node by NAME
+    // (spec §2.4) — that is precisely WHY tree-wide name uniqueness exists in
+    // validateOrgTreeNode above — so renaming the node they point at walks
+    // straight past that binding: `dimensionsOf`/`pickRateCard` would stop
+    // resolving for every one of them, silently, the moment this PUT commits.
+    // 409, not a 400: this is a conflict with other live data, exactly like the
+    // DELETE guard below, which this mirrors — a rename is refused under the
+    // exact same condition a delete would be. A no-op rename (body.name equals
+    // the existing name — see check 5) is deliberately excluded: nothing is
+    // actually changing, so nothing can be orphaned.
+    //
+    // NOT cascaded onto the resources: rewriting `Resource.organization` on
+    // every affected row is a side effect into ANOTHER collection with its own
+    // audit implications (the append-only audit middleware would need to
+    // attribute those writes to something), and that is a decision for its own
+    // task, not a silent side-effect bundled into this one. Recorded here, not
+    // left implicit, so the next reader knows cascade-on-rename was considered
+    // and deliberately deferred, not overlooked.
+    if (body.name !== undefined && body.name !== existing.name) {
+      const resources = await repos.resources.list();
+      const affected = resources.filter(r => r.organization === existing.name);
+      if (affected.length > 0) {
+        return {
+          status: 409,
+          error: `Cannot rename: ${affected.length} resource(s) still reference the name "${existing.name}"`,
+        };
+      }
+    }
+    // D — CLEAR-TO-ABSENT SEAM (src/db/repository.ts): both adapters treat an
+    // explicit `null` in an update patch as "clear this field" and `undefined`
+    // as "leave untouched" — but a client clears an optional reference by
+    // sending '', not null (the UI has no way to author a literal `null`). Left
+    // as-is, '' would persist as a literal empty string on BOTH adapters (never
+    // becoming absent), instead of reading back as a root/manager-less node.
+    // Translate the '' sentinel to `null` here so parentId AND managerId each
+    // clear identically on both adapters. managerId matters beyond symmetry:
+    // Task 7's manager <select> has no way to author a literal `null`, so its
+    // empty option — the only way to detach a Capability Leader from a node —
+    // relies on exactly this translation to do anything at all. The CREATE path
+    // does the same job with `undefined` — see the note on POST above for why
+    // the two sentinels differ.
+    if (body.parentId === '') (body as Record<string, unknown>)['parentId'] = null;
+    if (body.managerId === '') (body as Record<string, unknown>)['managerId'] = null;
+    return { updated: await repos.resourceOrganizations.update(req.params.id, body) };
+  });
+  if (result.error !== undefined) { res.status(result.status ?? 400).json({ error: result.error }); return; }
+  res.json(result.updated);
 });
-apiRouter.delete('/resource-organizations/:id', async (req, res) => { await repos.resourceOrganizations.remove(req.params.id); res.status(204).send(); });
+apiRouter.delete('/resource-organizations/:id', async (req, res) => {
+  // Serialized on the same key as POST/PUT (see ORG_TREE_LOCK): the child and
+  // the still-referenced guards below are a read-check-write over the whole
+  // tree, so a concurrent PUT reparenting a node UNDER this one could otherwise
+  // commit between the check and the removal.
+  const result = await withLock(ORG_TREE_LOCK, async (): Promise<{ status?: number; error?: string }> => {
+    const node = await repos.resourceOrganizations.get(req.params.id);
+    if (node === undefined) return { status: 404, error: 'Not found' };
+    const all = await repos.resourceOrganizations.list();
+    if (all.some(n => n.parentId === req.params.id)) {
+      return { status: 409, error: 'Cannot delete an organization that has children' };
+    }
+    // Resources bind to a node by NAME (design spec §2.4), so this is a name check.
+    const resources = await repos.resources.list();
+    if (resources.some(r => r.organization === node.name)) {
+      return { status: 409, error: 'Cannot delete an organization that resources still reference' };
+    }
+    await repos.resourceOrganizations.remove(req.params.id);
+    return {};
+  });
+  if (result.error !== undefined) { res.status(result.status ?? 400).json({ error: result.error }); return; }
+  res.status(204).send();
+});
 
 // --- Customizing catalogs (Phase F1 — additive reference data) --------------
 // Reads stay open (like the other config catalogs); mutations are gated to
@@ -4223,6 +4825,34 @@ interface DeciderContext { by: string; decidingRole: string; deciderResourceId: 
 interface DecisionOutcome { status: number; body: unknown; allocation?: { refId: string; decided: 'Approved' | 'Rejected' } }
 
 /**
+ * D — the resource an ALLOCATION approval is about, or undefined for any other
+ * kind. Undefined means "not scoped": the caller falls through to the role rule.
+ *
+ * `kind` is the CAPITALIZED `'Allocation'` (see `ApprovalKind` /
+ * `createAllocationApproval`) — a lowercase compare would silently never match
+ * and would quietly restore the pre-D "any resource-manager" rule while
+ * looking like it enforced a scope.
+ *
+ * `refId` is resolved with `parseMonthRowId`, the SAME splitter
+ * `applyAllocationDecision` uses: a B3 approval's refId is the composite month
+ * row `<assignmentId>:<YYYY-MM>`, a gap-A one is a bare assignment id, and the
+ * assignment is what carries `resourceId` in both cases. Not a naive
+ * `split(':')` — that helper anchors on the LAST colon and validates the month,
+ * so an id that merely contains a colon can never be mistaken for a month row.
+ *
+ * Reads only, so it takes NO lock: it runs inside the caller's
+ * `approval:<id>` section, and acquiring the `org-chart` lock (or any other)
+ * from in there would invent a lock order no other call site uses — see the
+ * ordering note on the `/resources` PUT handler.
+ */
+async function allocationTargetResourceId(ar: ApprovalRequestEntry): Promise<string | undefined> {
+  if (ar.kind !== 'Allocation') return undefined;
+  const assignmentId = parseMonthRowId(ar.refId)?.assignmentId ?? ar.refId;
+  const assignment = await repos.assignments.get(assignmentId);
+  return assignment?.resourceId;
+}
+
+/**
  * Decide ONE approval request. Extracted from the /decision handler so the B3
  * batch endpoint and the single-request endpoint share ONE implementation of
  * SoD + per-manager step enforcement — duplicating those rules is exactly how a
@@ -4252,34 +4882,120 @@ async function decideOneApproval(
     }
     const step = ar.steps[ar.currentStep];
     if (!step) return { status: 400, body: { error: 'No pending step to decide' } };
-    // STEP ENFORCEMENT — the actor may decide when EITHER holds:
-    //   roleMatch:    they hold the ROLE the routing assigned to the CURRENT
-    //                 step; 'admin' matches any step.
-    //   managerMatch: the step carries an explicit `approverId` (a manager, by
-    //                 RESOURCE id — that is how `allocationApproverStep` routes
-    //                 allocation requests) and the deciding actor IS that
-    //                 resource.
+    // STEP ENFORCEMENT — D (design spec §3.4). Supersedes the gap-A role
+    // fallback: an actor holding the step's role no longer decides for ANYONE.
+    // An actor may decide when ANY of these holds:
+    //   1. they are the step's named approver (`step.approverId`, a RESOURCE id
+    //      — that is how `allocationApproverStep` routes an allocation);
+    //   2. they are an ACCOUNTABLE MANAGER of the target resource — in its
+    //      transitive org chart, or the manager of a node above it
+    //      (`accountableApproversOf(...).managerIds`). This stands ON ITS OWN,
+    //      independent of the actor's global role;
+    //   3. they hold the step's role AND the target resource is in their scope;
+    //   4. they hold the step's role AND the target has no accountable manager
+    //      ANYWHERE (`accountableApproversOf(...).roleFallback`) — the last resort;
+    //   5. their role is 'admin'.
     //
-    // READ THIS BEFORE "FIXING" IT. The two are a genuine OR, so for an
-    // ALLOCATION step — which `allocationApproverStep` always builds with
-    // `role: 'resource-manager'` — `roleMatch` alone admits ANY resource-manager,
-    // not only the one named by `approverId`. That is DELIBERATE, per the gap-A
-    // design spec §4.3: "un altro resource-manager, diverso dal proponente, può
-    // approvare" — a manager must not be a single point of failure for their own
-    // team's bookings. An earlier version of this comment claimed the block exists
-    // to stop "any resource-manager deciding ANY manager's allocation", which is
-    // the opposite of what the code does and of what was specified; do not
-    // tighten the code to match that wording without reopening the spec decision.
+    // WHY RULE 2 IS ITS OWN ALLOW (review round 4, critical #1). D deliberately
+    // adds NO new RBAC role, because authority over a set of resources is
+    // RELATIVE while every role here is GLOBAL: the design's whole claim is that
+    // "the node's manager IS the Capability Leader / Practice Manager /
+    // Competence Manager". Subordinating that grant to `roleMatch` made it
+    // INERT — a node manager could only decide if their global role happened to
+    // be 'resource-manager' — while its mere presence in the set still set
+    // `roleFallback` false. The shipped seed was the exhibit: node '2'
+    // (Engineering) is managed by resource '1' (Julie, a delivery-executive),
+    // and the Engineering dummy '4' has no personal manager, so John (the only
+    // seeded resource-manager) got the SCOPE 403, Julie — the actual Capability
+    // Leader — got the ROLE 403, and only an admin could clear the month.
+    // Authority now comes from the structure, as the design says.
     //
-    // What the block DOES buy: a role the routing did NOT assign gets in only by
-    // being the named approver. Concretely, a `delivery-executive` (who passes the
-    // coarse `/approval-requests` gate and sees the whole approval feed) can
-    // decide an allocation only for a resource they personally manage.
-    // Segregation of duties is enforced separately, above, and binds every role.
-    // `canDecideFor` in the approvals modal mirrors exactly this rule.
+    // This is SAFE because it is not the only gate: `roleGate` has already
+    // admitted this request (`/approval-requests` mutations are limited to
+    // pm/resource-manager/delivery-executive/finance/admin), so anyone reaching
+    // here holds an approver-grade role — rule 2 decides WHICH resources, not
+    // WHETHER. And segregation of duties sits ABOVE, untouched: an accountable
+    // manager still cannot decide an approval they requested themselves (which
+    // is exactly why `autoApprovesAllocation` exists).
+    //
+    // HISTORY, so nobody re-tightens or re-loosens this by accident: gap-A §4.3
+    // deliberately let ANY resource-manager decide ("un altro resource-manager,
+    // diverso dal proponente, può approvare"), so that a manager was not a
+    // single point of failure for their own team's bookings — and the comment
+    // that stood here said so, ending with "do not tighten the code without
+    // reopening the spec decision". THAT DECISION WAS REOPENED AND CHANGED WITH
+    // THE USER: D replaces the flat fallback with a real scope — the transitive
+    // org chart UNION the org subtrees the actor manages — and keeps a fallback
+    // ONLY for a resource with no manager anywhere, which is the case of a
+    // placeholder (dummy) today and is what keeps C2's substitutions decidable.
+    // The previous wording is therefore obsolete, not a constraint: D's design
+    // spec §3.4 is the rule, and §3.5 declares the breaking change (whoever
+    // approves resources they do not manage stops being able to).
+    //
+    // Scope binds ALLOCATION steps only: every other kind routes by role and has
+    // no target resource, so `allocationTargetResourceId` returns undefined and
+    // the rule falls through to the pre-D behaviour. It also falls through when
+    // the target cannot be resolved (a deleted assignment/resource) — refusing
+    // there would strand a live approval nobody could decide.
+    //
+    // `admin` and `delivery-executive` are GLOBAL roles (§3.3) and are never
+    // narrowed by scope. Note what that does NOT mean for an allocation: a
+    // delivery-executive still fails `roleMatch` on a step routed to
+    // 'resource-manager', so their ROLE grants them nothing here. `globalRole`
+    // exempts them from scope, it does not grant them a step their role was
+    // never routed to — they reach an allocation through the named-approver
+    // path or through rule 2, i.e. by actually being accountable for the
+    // resource, never by being a delivery-executive.
+    //
+    // Segregation of duties is enforced separately, ABOVE, and binds every role.
+    // `canDecideFor` in the approvals modal and `scopeAllows` in the Approvals
+    // Inbox mirror this rule.
+    //
+    // LOCKING: the two list reads below take NO lock. They are reads, and this
+    // runs inside `withLock('approval:<id>')` — acquiring `org-chart` or
+    // `org-tree` here would create an `approval:` -> `org-*` order that no other
+    // call site uses (see the lock-order notes on `PUT /resources/:id` and
+    // `ORG_TREE_LOCK`) and is exactly how a deadlock gets introduced. It also
+    // means those two writers are never held off by a decision, which is the
+    // right trade for a read that only informs an authorization answer.
     const roleMatch = decidingRole === step.role || decidingRole === 'admin';
     const managerMatch = step.approverId !== undefined && deciderResourceId === step.approverId;
-    if (!roleMatch && !managerMatch) {
+    const globalRole = decidingRole === 'admin' || decidingRole === 'delivery-executive';
+    let scopeMatch = roleMatch;
+    // Rule 2 — accountable-manager, role-independent (see above).
+    let accountableMatch = false;
+    const targetResourceId = await allocationTargetResourceId(ar);
+    // The scope lookup is skipped for an actor `roleMatch && globalRole` already
+    // admits unconditionally (an `admin`, or a global role on a step routed to
+    // it): nothing below could change the outcome, so it would be pure I/O.
+    if (targetResourceId !== undefined && !(roleMatch && globalRole)) {
+      const target = await repos.resources.get(targetResourceId);
+      if (target !== undefined) {
+        const [resources, nodes] = await Promise.all([repos.resources.list(), repos.resourceOrganizations.list()]);
+        const { managerIds, roleFallback } = accountableApproversOf(target, resources, nodes, todayIso());
+        accountableMatch = deciderResourceId !== undefined && managerIds.has(deciderResourceId);
+        if (roleMatch) scopeMatch = roleFallback || accountableMatch;
+      }
+    }
+    if (!scopeMatch && !managerMatch && !accountableMatch) {
+      // TWO DISTINCT REFUSALS, worded apart on purpose. Reaching here with
+      // `roleMatch` true can only be the SCOPE branch above (`scopeMatch` starts
+      // as `roleMatch` and only that branch lowers it), and for that actor the
+      // role/step wording would be a lie: they DO hold the step's role, and were
+      // refused because the resource is not theirs to decide. A 403 that
+      // misdescribes its own reason costs the next person an afternoon. The
+      // other message therefore covers everyone whose ROLE was never routed
+      // here and who is not accountable for the resource either — which is the
+      // same population it covered before rule 2 existed.
+      //
+      // Neither message names the target resource, its managers or its org node.
+      // The actor has just failed an authorization check on this very resource,
+      // so telling them who WOULD have been competent would leak org structure
+      // to exactly the wrong person. The competent approver is discoverable
+      // through the feed, which is scoped in its own right.
+      if (roleMatch) {
+        return { status: 403, body: { error: 'Actor does not manage this resource and cannot decide its allocation' } };
+      }
       return { status: 403, body: { error: `Actor cannot decide a step assigned to ${step.approverId ?? step.role}` } };
     }
     const decidedAt = new Date().toISOString();

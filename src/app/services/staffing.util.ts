@@ -74,7 +74,19 @@ export type AllocationStatus = Assignment['status'];
 // documentation of a retired design. Their replacements all live in
 // allocation-month.util: `deriveAssignmentStatus` and `monthlyAggregateHours`.
 
-/** Build the single approval step for an allocation: the resource's manager (resource-id), fallback role only. */
+/**
+ * Build the single approval step for an allocation: the resource's manager
+ * (resource-id), fallback role only.
+ *
+ * `approverId` is pinned from the ORG-CHART axis alone (`Resource.managerId`) and
+ * that is DELIBERATE — do not "complete" it by also pinning a node manager. A
+ * step carries ONE `approverId`, while the org tree can put several managers above
+ * a resource (competence, practice, capability), so any pin would have to pick a
+ * winner and would silently exclude the others. The org-tree axis is honoured
+ * where it belongs: in `decideOneApproval`, which admits any ACCOUNTABLE manager
+ * of the target on its own merits (design spec §3.4 rule 2). The pin is therefore
+ * a routing hint for the common case, not the boundary.
+ */
 export function allocationApproverStep(managerId: string | undefined): ApprovalStep {
   return managerId
     ? { role: 'resource-manager', status: 'Pending', approverId: managerId }

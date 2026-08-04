@@ -4,6 +4,7 @@ import { Observable } from 'rxjs';
 import { API_BASE_URL } from './api-config';
 import type { CapacityCell, CapacityRow, CapacityTotals } from './capacity.util';
 import type { ResourceKind } from './resource-kind.util';
+import type { OrgLevel } from './org-scope.util';
 
 export type { CapacityCell, CapacityRow, CapacityTotals, ResourceKind };
 
@@ -259,6 +260,25 @@ export interface AllocationApprovalRow {
   targetHours: Record<string, number>;
   totalHours: Record<string, number>;
   items: AllocationApprovalItem[];
+  /**
+   * D (Task 8): the resource's `organization` (resource-org NAME), carried
+   * straight from `Resource.organization` so the client can derive the
+   * capability/practice/competence dimensions via `dimensionsOf` without a
+   * second catalogue fetch — the handler already loads the resource list to
+   * build this row. Absent when the resource has no organization.
+   */
+  organization?: string;
+  /**
+   * D (Task 8, round 3): the display name of `managerId`'s resource, resolved
+   * server-side from the SAME `resourceById` map the handler already builds
+   * for this row — no extra I/O. Lets the People Manager filter's option list
+   * show a real name rather than a bare id: the feed lists a manager's
+   * REPORTS, not the manager themselves, so the manager typically has no row
+   * of their own here to resolve a name from client-side. Absent only when
+   * `managerId` is absent, or points at a resource record that has genuinely
+   * vanished (should not happen in normal operation).
+   */
+  managerName?: string;
 }
 
 /** Envelope returned by `GET /allocation-approvals` (B3): the People Manager's
@@ -385,12 +405,31 @@ export interface ServiceOrganization {
   costCenters: string[];
 }
 
+/**
+ * A node of the organizational tree (D). Capability > Practice > Competence.
+ *
+ * TWO REFERENCES UPWARD, deliberately orthogonal (design spec §2.3):
+ *   - `parentId`              -> the DELIVERY hierarchy. Drives manager scope,
+ *                                derived dimensions and filters.
+ *   - `serviceOrganizationId` -> FINANCIAL belonging. Drives cost centres and
+ *                                rate-card selection. NOT part of the tree; it
+ *                                is never walked for scope.
+ *
+ * `managerId` IS the manual's Capability Leader / Practice Manager / Competence
+ * Manager — the node's level says which. No new RBAC role exists for them.
+ */
 export interface ResourceOrganization {
   id: string;
   name: string;
   description: string;
   costCenters: string[];
   serviceOrganizationId?: string;
+  /** The node above this one in the DELIVERY tree. Absent on a capability (root). */
+  parentId?: string;
+  /** Declared level. A capability has no parent; a practice's parent is a capability; a competence's parent is a practice. */
+  level: OrgLevel;
+  /** The resource who manages this node — soft reference, like `Resource.managerId`. */
+  managerId?: string;
 }
 
 // --- Customizing catalogs (Phase F1 — additive reference data) ---
