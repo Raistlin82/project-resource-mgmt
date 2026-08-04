@@ -604,6 +604,7 @@ and the tools to rebalance bookings (add, copy/paste, edit, delete assignments).
 | Step | Responsible | Accountable | Consulted | Informed |
 |------|-------------|-------------|-----------|----------|
 | Review utilization | resource-manager | resource-manager | pm | delivery-executive |
+| Read the Team Average | resource-manager | resource-manager | pm | delivery-executive |
 | Rebalance bookings | resource-manager | resource-manager | pm | employee |
 | Approve/reject inline time | resource-manager | resource-manager | — | finance |
 
@@ -631,17 +632,24 @@ flowchart TD
      even when the second view would be empty:
      - **Direct reports** (default, pre-existing behaviour) — everyone whose
        `managerId` is the viewer.
-     - **All my org** — the same organizational scope the Allocation Approvals
-       feed uses (`scopeOf`): the transitive org chart below the viewer
-       **union** the resources sitting in the org-tree subtrees (Capability /
-       Practice / Competence) they manage. A person reachable only through a
-       subtree two levels down, with no org-chart link at all, still appears
-       here. `admin` and `delivery-executive` see their **own** scope in this
-       view — never the whole company — so the number means the same thing for
-       every viewer regardless of role.
-     - The empty state names the reason: "nobody reports to you" (Direct
-       reports) is a different message from "you manage no organization, and
-       nobody reports to you" (All my org).
+     - **All my org** — the same **function** the Allocation Approvals feed
+       uses to scope requests (`scopeOf`): the transitive org chart below the
+       viewer **union** the resources sitting in the org-tree subtrees
+       (Capability / Practice / Competence) they manage. A person reachable
+       only through a subtree two levels down, with no org-chart link at all,
+       still appears here. That equivalence is about the **function**, not
+       the **set** the feed shows, though: the feed also admits any resource
+       with **no manager anywhere** (`roleFallback`) to every
+       `resource-manager`, so a manager may see and decide on placeholder
+       rows in the feed that All my org does not list. `admin` and
+       `delivery-executive` see their **own** scope in this view — never the
+       whole company — so the number means the same thing for every viewer
+       regardless of role.
+     - The empty state names the reason: **"Nobody is set up to report
+       directly to you."** (Direct reports) is a different message from
+       **"You do not manage any organization, and nobody reports to you."**
+       (All my org) — the "…and nobody reports to you" ending belongs to the
+       All my org message, not to Direct reports.
    - **Output:** a per-resource utilization picture, scoped to the active view.
 2. **Read the Team Average.**
    - **Who:** `resource-manager` and any viewer of the panel. **How:** the

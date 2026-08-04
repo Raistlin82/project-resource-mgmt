@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { UtilizationComponent } from './utilization.component';
 import { ApiService, type Resource, type ResourceOrganization, type UserRole } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
@@ -27,13 +27,13 @@ const RESOURCES: Resource[] = [
   { ...base, id: 'x1', name: 'Outside Otto', role: 'Developer', utilization: 90, kind: 'internal', organization: 'Consulting' },
 ] as Resource[];
 
-function setup({ resources = RESOURCES, orgs = ORGS, userId = 'm1', role = 'resource-manager' as UserRole } = {}) {
+function setup({ resources = RESOURCES, orgs = ORGS, userId = 'm1', role = 'resource-manager' as UserRole, orgsFail = false } = {}) {
   const apiStub = {
     getResources: vi.fn(() => of(resources)),
     getAssignments: vi.fn(() => of([])),
     getRequests: vi.fn(() => of([])),
     getTimeEntries: vi.fn(() => of([])),
-    getResourceOrganizations: vi.fn(() => of(orgs)),
+    getResourceOrganizations: vi.fn(() => orgsFail ? throwError(() => new Error('tree endpoint down')) : of(orgs)),
   } as unknown as ApiService;
   const authStub = {
     authReady: signal(true), isAuthenticated: signal(true),
@@ -75,6 +75,12 @@ describe('UtilizationComponent — team scope', () => {
     await flush(fixture);
     expect(names(host).join(' ')).toContain('Direct Dana');
     expect(names(host).join(' ')).not.toContain('Subtree Sven');
+    // Dana is the ONLY row on the default view and she is internal, so the
+    // list and the average's denominator agree exactly here. Every other
+    // assertion on this hook in this file only checks it is PRESENT — this is
+    // the one place that pins it ABSENT, which is the branch's actual promise:
+    // nobody's number, and nobody's screen, changes on the pre-existing view.
+    expect(host.querySelector('[data-test="kpi-internal-note"]')).toBeNull();
   });
 
   it('switching to All my org adds people reachable only through the org subtree', async () => {
@@ -141,6 +147,28 @@ describe('UtilizationComponent — team scope', () => {
     expect(host.querySelector('[data-test="team-empty"]')!.textContent).toContain('organization');
   });
 
+  it('degrades to the org-chart axis instead of collapsing when the org tree endpoint fails alone', async () => {
+    // forkJoin is fail-fast: without a catchError scoped to the orgs leg, an
+    // isolated failure of GET /resource-organizations would throw the whole
+    // dataResource and take the Direct-reports list down with it, even though
+    // neither Direct reports nor the assignments/time-approval panes read the
+    // tree at all. The fix confines the catch to that one leg.
+    const { fixture, host } = setup({ orgsFail: true });
+    await flush(fixture);
+    // Direct reports (the unchanged, pre-existing view) must survive untouched.
+    expect(names(host).join(' ')).toContain('Direct Dana');
+    // The 'org' view degrades to the org-chart axis alone (scopeOf with an
+    // empty node list has no managed roots, so it falls back to
+    // reportsClosure) rather than erroring — Dana still shows via the chart
+    // axis, but Sven (reachable ONLY through the now-missing org subtree)
+    // does not.
+    host.querySelector<HTMLButtonElement>('[data-test="team-scope-org"]')!.click();
+    fixture.detectChanges();
+    const shown = names(host).join(' ');
+    expect(shown).toContain('Direct Dana');
+    expect(shown).not.toContain('Subtree Sven');
+  });
+
   it('keeps the view switch visible even when the org view would be empty', async () => {
     const { fixture, host } = setup({ userId: 'nobody' });
     await flush(fixture);
@@ -166,4 +194,31 @@ describe('UtilizationComponent — team scope', () => {
       expect(shown).not.toContain('Outside Otto');
     },
   );
+
+  it('renders a neutral dash, not a red 0%, when every row in view is non-internal', async () => {
+    // Both rows are dummy/subco, so `countedForAverage()` is EMPTY and
+    // `averageUtilization`'s `if (!counted.length) return 0` branch is what
+    // actually runs — the design's §4 table calls this exact case out
+    // ("La lista li mostra, la media è 0 su denominatore vuoto") and nothing
+    // else in this file reaches it: every other fixture mixes in at least one
+    // internal resource.
+    const resources = [
+      { ...base, id: 'p3', name: 'Idle Placeholder', role: 'Developer', utilization: 0, kind: 'dummy', managerId: 'm1' },
+      { ...base, id: 'p4', name: 'Idle Subco', role: 'Developer', utilization: 0, kind: 'subco', managerId: 'm1', vendorId: 'v9' },
+    ] as Resource[];
+    const { fixture, host } = setup({ resources });
+    await flush(fixture);
+    const shown = names(host).join(' ');
+    expect(shown).toContain('Idle Placeholder');
+    expect(shown).toContain('Idle Subco');
+    const avgEl = host.querySelector('[data-test="team-average"]')!;
+    // The VALUE 0 is correct here (spec-adjudicated, matches /reporting) —
+    // what must not happen is colour-banding it through the critical/red
+    // band, which would read as "my team is completely idle" for a subtree
+    // that is simply unmeasured (no internal capacity to measure at all).
+    expect(avgEl.textContent).toContain('—');
+    expect(avgEl.textContent).not.toContain('0%');
+    expect(avgEl.className).not.toContain('text-critical-text');
+    expect(host.querySelector('[data-test="kpi-internal-note"]')).not.toBeNull();
+  });
 });

@@ -7,6 +7,7 @@ import { NotificationService } from '../services/notification.service';
 import { DecimalPipe } from '@angular/common';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { forkJoin, of } from 'rxjs';
+import { catchError } from 'rxjs/operators';
 import { scopeOf } from '../services/org-scope.util';
 import { kindOf, countsTowardInternalCapacity } from '../services/resource-kind.util';
 
@@ -28,8 +29,22 @@ interface UtilizationData {
         <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Manage Resource Utilization</h1>
         <div class="command-card flex items-center gap-3 px-5 py-3">
           <span class="command-kpi-label">Team Average:</span>
-          <span data-test="team-average" class="text-xl font-black tracking-tight font-mono tabular-nums" [class]="getUtilizationColorText(averageUtilization())">
-            {{ averageUtilization() | number:'1.0-0' }}%
+          <!-- countedForAverage() empty is NOT "0% utilization" — averageUtilization()
+               returns 0 on an empty denominator (spec §4 last row: the value 0 is
+               correct and matches /reporting), but colour-banding that 0 through
+               getUtilizationColorText falls through to the critical/red band, which
+               reads as "my team is completely idle" for what is really "nothing here
+               is measurable" (e.g. a subtree of only pre-staffed dummy/subco rows).
+               /utilization is the only surface that colour-bands this KPI at all
+               (/reporting's equivalent tile uses a fixed colorClass) — show a neutral
+               dash instead of a red 0% when there is nothing to divide by. -->
+          <span data-test="team-average" class="text-xl font-black tracking-tight font-mono tabular-nums"
+                [class]="countedForAverage().length ? getUtilizationColorText(averageUtilization()) : 'text-ink-muted'">
+            @if (countedForAverage().length) {
+              {{ averageUtilization() | number:'1.0-0' }}%
+            } @else {
+              —
+            }
           </span>
           @if (hasUncountedRows()) {
             <!-- command-kpi-note (src/styles.css) carries margin-top: 0.55rem for its
@@ -289,7 +304,18 @@ export class UtilizationComponent {
             assignments: this.api.getAssignments(),
             requests: this.api.getRequests(),
             timeEntries: this.api.getTimeEntries(),
-            orgs: this.api.getResourceOrganizations()
+            // forkJoin is fail-fast: an error on ANY leg throws the whole
+            // resource, and dataResource.value() re-throws that, so an
+            // isolated failure here would otherwise collapse the Direct
+            // reports list, the assignments pane and the time-approval pane —
+            // none of which read the org tree at all. Only the 'org' scope
+            // view consumes it, and degrades correctly on an empty array:
+            // scopeOf(..., []) has no managed org roots, so it falls back to
+            // the org-chart axis alone (the same behaviour as "tree not yet
+            // loaded" in the design's error table). Confine the catch to this
+            // leg — the other four are genuinely required and must still
+            // fail fast.
+            orgs: this.api.getResourceOrganizations().pipe(catchError(() => of<ResourceOrganization[]>([])))
           })
         : of<UtilizationData>({ resources: [], assignments: [], requests: [], timeEntries: [], orgs: [] }),
     defaultValue: { resources: [], assignments: [], requests: [], timeEntries: [], orgs: [] }
@@ -338,7 +364,7 @@ export class UtilizationComponent {
    * /reporting, where the seed alone halved the average. Applies to BOTH views:
    * a placeholder given a manager would otherwise land in the direct one too.
    */
-  private countedForAverage = computed(() =>
+  protected countedForAverage = computed(() =>
     this.managedResources().filter(r => countsTowardInternalCapacity(kindOf(r))));
 
   averageUtilization = computed(() => {
