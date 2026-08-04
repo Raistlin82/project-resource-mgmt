@@ -677,6 +677,19 @@ export interface OrderLine {
   amount: number;
 }
 
+export interface CreateOrderWithLineRequest {
+  /** Stable for retries of one form submission; a new form uses a new key. */
+  idempotencyKey: string;
+  order: Partial<Order>;
+  line: Omit<Partial<OrderLine>, 'orderId'>;
+}
+
+export interface OrderWithLineResult {
+  order: Order;
+  line: OrderLine;
+  replayed: boolean;
+}
+
 export type BillingType =
   | 'Milestone'          // SAL — fixed-price, triggered by a project Milestone
   | 'Recurring'          // retainer billed on a fixed cadence
@@ -710,6 +723,17 @@ export interface BillingPlanItem {
   paidDate?: string;
   orderId?: string;                                      // generated invoice/order
   notes?: string;
+}
+
+export interface BillingInvoiceResult {
+  billingItem: BillingPlanItem;
+  order: Order;
+  replayed: boolean;
+}
+
+export interface BillingInvoiceBatchResult {
+  results: BillingInvoiceResult[];
+  failures: { id: string; status: number; error: string }[];
 }
 
 export interface TimeEntry {
@@ -903,6 +927,33 @@ export class ApiService {
    */
   updateResource(id: string, data: Partial<Resource>): Observable<Resource> {
     return this.http.put<Resource>(`${this.baseUrl}/resources/${id}`, data);
+  }
+
+  // --- Authenticated self-service (server derives the resource from OIDC) ---
+
+  getMyProfile(): Observable<Resource> {
+    return this.http.get<Resource>(`${this.baseUrl}/self/profile`);
+  }
+
+  updateMyProfile(data: Partial<Resource>): Observable<Resource> {
+    return this.http.put<Resource>(`${this.baseUrl}/self/profile`, data);
+  }
+
+  getMyAssignments(): Observable<Assignment[]> {
+    return this.http.get<Assignment[]>(`${this.baseUrl}/self/assignments`);
+  }
+
+  getMyRequests(): Observable<ResourceRequest[]> {
+    return this.http.get<ResourceRequest[]>(`${this.baseUrl}/self/requests`);
+  }
+
+  getMyTimeEntries(): Observable<TimeEntry[]> {
+    return this.http.get<TimeEntry[]>(`${this.baseUrl}/self/time-entries`);
+  }
+
+  /** Create and submit an own time entry; ownership is derived server-side. */
+  createMyTimeEntry(entry: Partial<TimeEntry>): Observable<TimeEntry> {
+    return this.http.post<TimeEntry>(`${this.baseUrl}/self/time-entries`, entry);
   }
 
   getRequests(): Observable<ResourceRequest[]> {
@@ -1230,6 +1281,9 @@ export class ApiService {
 
   getOrders(): Observable<Order[]> { return this.http.get<Order[]>(`${this.baseUrl}/orders`); }
   createOrder(o: Partial<Order>): Observable<Order> { return this.http.post<Order>(`${this.baseUrl}/orders`, o); }
+  createOrderWithLine(request: CreateOrderWithLineRequest): Observable<OrderWithLineResult> {
+    return this.http.post<OrderWithLineResult>(`${this.baseUrl}/orders/with-line`, request);
+  }
   updateOrder(id: string, o: Partial<Order>): Observable<Order> { return this.http.put<Order>(`${this.baseUrl}/orders/${id}`, o); }
   deleteOrder(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/orders/${id}`); }
 
@@ -1240,6 +1294,12 @@ export class ApiService {
 
   getBillingPlanItems(): Observable<BillingPlanItem[]> { return this.http.get<BillingPlanItem[]>(`${this.baseUrl}/billing-plan-items`); }
   createBillingPlanItem(i: Partial<BillingPlanItem>): Observable<BillingPlanItem> { return this.http.post<BillingPlanItem>(`${this.baseUrl}/billing-plan-items`, i); }
+  generateBillingInvoice(id: string, issuedDate: string): Observable<BillingInvoiceResult> {
+    return this.http.post<BillingInvoiceResult>(`${this.baseUrl}/billing-plan-items/${id}/generate-invoice`, { issuedDate });
+  }
+  generateBillingInvoices(ids: string[], issuedDate: string): Observable<BillingInvoiceBatchResult> {
+    return this.http.post<BillingInvoiceBatchResult>(`${this.baseUrl}/billing-plan-items/generate-invoices`, { ids, issuedDate });
+  }
   updateBillingPlanItem(id: string, i: Partial<BillingPlanItem>): Observable<BillingPlanItem> { return this.http.put<BillingPlanItem>(`${this.baseUrl}/billing-plan-items/${id}`, i); }
   deleteBillingPlanItem(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/billing-plan-items/${id}`); }
 
