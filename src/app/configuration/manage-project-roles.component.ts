@@ -1,9 +1,9 @@
 import { Component, inject, signal, computed } from '@angular/core';
-import { rxResource } from '@angular/core/rxjs-interop';
 import { ReactiveFormsModule, FormBuilder, FormGroup, Validators } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, ProjectRole } from '../services/api.service';
 import { NotificationService } from '../services/notification.service';
+import { authGatedResource } from '../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-manage-project-roles',
@@ -83,7 +83,7 @@ export class ManageProjectRolesComponent {
   private fb = inject(FormBuilder);
   private notificationService = inject(NotificationService);
 
-  private rolesRes = rxResource({ stream: () => this.api.getProjectRoles(), defaultValue: [] as ProjectRole[] });
+  private rolesRes = authGatedResource(() => this.api.getProjectRoles(), [] as ProjectRole[]);
   roles = computed(() => this.rolesRes.value());
   showForm = signal(false);
   private pendingRestrictId = signal<string | null>(null);

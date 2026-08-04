@@ -10,6 +10,7 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 import { ORG_LEVELS, ancestorChain, descendantOrgIds, type OrgLevel } from '../services/org-scope.util';
 import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
 import { todayLocalIso } from '../services/local-date.util';
+import { authGatedResource } from '../services/auth-gated-resource.util';
 
 /** One rendered tree row: the node plus its indentation depth (root = 0). */
 interface OrgTreeRow {
@@ -229,7 +230,7 @@ export class ManageResourceOrganizationsComponent {
   private notifications = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
-  private orgsRes = rxResource({ stream: () => this.api.getResourceOrganizations(), defaultValue: [] as ResourceOrganization[] });
+  private orgsRes = authGatedResource(() => this.api.getResourceOrganizations(), [] as ResourceOrganization[]);
   resourceOrganizations = computed(() => this.orgsRes.value());
   showForm = signal(false);
   editingId = signal<string | null>(null);
@@ -242,7 +243,7 @@ export class ManageResourceOrganizationsComponent {
     stream: ({ params: canLoad }) => (canLoad ? this.api.getCostCenters() : of<CostCenter[]>([])),
     defaultValue: [] as CostCenter[],
   });
-  private serviceOrgsRes = rxResource({ stream: () => this.api.getServiceOrganizations(), defaultValue: [] as ServiceOrganization[] });
+  private serviceOrgsRes = authGatedResource(() => this.api.getServiceOrganizations(), [] as ServiceOrganization[]);
   costCenterOptions = this.costCentersRes.value;
   serviceOrgOptions = this.serviceOrgsRes.value;
 

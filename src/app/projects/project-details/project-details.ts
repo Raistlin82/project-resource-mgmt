@@ -16,6 +16,7 @@ import { ProjectTasks } from '../project-tasks/project-tasks';
 import { ProjectIssues } from '../project-issues/project-issues';
 import { ChangeRequests } from '../change-requests/change-requests';
 import { ProjectRates } from '../project-rates/project-rates';
+import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-project-details',
@@ -256,8 +257,7 @@ export class ProjectDetailsComponent {
   // Route param ':id' bound via withComponentInputBinding()
   id = input.required<string>();
 
-  // getProjects is an OPEN read (no principal gate) — leave ungated.
-  private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
+  private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   project = computed(() => this.projectsRes.value().find(p => p.id === this.id()) ?? null);
 
   // Data for the 360° financial rollup. Sensitive collections are loaded only
@@ -298,10 +298,8 @@ export class ProjectDetailsComponent {
     stream: ({ params: ready }) => (ready ? this.api.getTimeEntries() : of<TimeEntry[]>([])),
     defaultValue: [] as TimeEntry[],
   });
-  // getProjectIssues is an OPEN read (no principal gate) — leave ungated.
-  private issuesRes = rxResource({ stream: () => this.api.getProjectIssues(), defaultValue: [] as Issue[] });
-  // getChangeRequests is an OPEN read (no principal gate) — leave ungated.
-  private changesRes = rxResource({ stream: () => this.api.getChangeRequests(), defaultValue: [] as ChangeRequest[] });
+  private issuesRes = authGatedResource(() => this.api.getProjectIssues(), [] as Issue[]);
+  private changesRes = authGatedResource(() => this.api.getChangeRequests(), [] as ChangeRequest[]);
 
   private financeData = computed<FinanceData>(() => ({
     requests: this.requestsRes.value(),

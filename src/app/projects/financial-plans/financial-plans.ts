@@ -10,6 +10,7 @@ import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { ListStateComponent } from '../../shared/list-state.component';
+import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-financial-plans',
@@ -172,10 +173,7 @@ export class FinancialPlans {
   private notificationService = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
-  private projectsRes = rxResource({
-    stream: () => this.api.getProjects(),
-    defaultValue: [] as Project[]
-  });
+  private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   projects = computed(() => this.projectsRes.value());
   selectedProjectId = signal<string>('');
 
@@ -190,8 +188,8 @@ export class FinancialPlans {
     actual: new FormControl<number | null>(null, [Validators.required, Validators.min(0)])
   });
 
-  // Category is a config FK to the cost-categories catalog (Phase F2). Open read.
-  private categoriesRes = rxResource({ stream: () => this.api.getCostCategories(), defaultValue: [] as CostCategory[] });
+  // Category is a config FK to the cost-categories catalog (Phase F2).
+  private categoriesRes = authGatedResource(() => this.api.getCostCategories(), [] as CostCategory[]);
   categoryOptions = this.categoriesRes.value;
 
   // ORPHAN VALUE: a stored category not in the catalog stays selectable as a disabled option.

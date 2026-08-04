@@ -8,6 +8,7 @@ import { RouterLink } from '@angular/router';
 import { ApiService, Project, Contract, Resource, Country, City } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 /** Allowed location sentinel for fully-remote projects (mirrors the server + seed). */
 const REMOTE_LOCATION = 'Remote';
@@ -287,7 +288,7 @@ export class ProjectsComponent {
   private auth = inject(AuthService);
   private destroyRef = inject(DestroyRef);
 
-  private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
+  private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   // /contracts is principal-gated in READ_RULES; wait for the restored bearer
   // token before loading it so SSR/deep reloads don't latch ResourceValueError.
   private contractsRes = rxResource<Contract[], boolean>({
@@ -314,7 +315,7 @@ export class ProjectsComponent {
   });
   resourceOptions = this.resourcesRes.value;
 
-  // Location = Country + City (Phase F2). Both catalogs are open reads.
+  // Location = Country + City (Phase F2).
   private countriesRes = rxResource<Country[], boolean>({
     params: () => this.auth.authReady() && this.auth.canManageProjects(),
     stream: ({ params: canLoad }) => (canLoad ? this.api.getCountries() : of<Country[]>([])),

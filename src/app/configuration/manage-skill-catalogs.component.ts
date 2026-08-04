@@ -1,9 +1,9 @@
 import { Component, inject, signal, computed } from '@angular/core';
-import { rxResource } from '@angular/core/rxjs-interop';
 import { ReactiveFormsModule, FormBuilder, FormGroup, Validators } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, SkillCatalog } from '../services/api.service';
 import { NotificationService } from '../services/notification.service';
+import { authGatedResource } from '../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-manage-skill-catalogs',
@@ -72,10 +72,7 @@ export class ManageSkillCatalogsComponent {
   private fb = inject(FormBuilder);
   private notificationService = inject(NotificationService);
 
-  private catalogsRes = rxResource({
-    stream: () => this.api.getSkillCatalogs(),
-    defaultValue: [] as SkillCatalog[]
-  });
+  private catalogsRes = authGatedResource(() => this.api.getSkillCatalogs(), [] as SkillCatalog[]);
   skillCatalogs = computed(() => this.catalogsRes.value());
 
   showForm = signal(false);

@@ -1,11 +1,11 @@
 import { Component, inject, signal, computed, PLATFORM_ID } from '@angular/core';
-import { rxResource } from '@angular/core/rxjs-interop';
 import { isPlatformBrowser } from '@angular/common';
 import { ReactiveFormsModule, FormBuilder, FormGroup, Validators } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { forkJoin } from 'rxjs';
 import { ApiService, Skill, SkillCatalog, ProficiencySet } from '../services/api.service';
 import { NotificationService } from '../services/notification.service';
+import { authGatedResource } from '../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-manage-skills',
@@ -132,14 +132,14 @@ export class ManageSkillsComponent {
   private notificationService = inject(NotificationService);
   private platformId = inject(PLATFORM_ID);
 
-  private dataRes = rxResource({
-    stream: () => forkJoin({
+  private dataRes = authGatedResource(
+    () => forkJoin({
       skills: this.api.getSkills(),
       catalogs: this.api.getSkillCatalogs(),
       proficiencySets: this.api.getProficiencySets(),
     }),
-    defaultValue: { skills: [] as Skill[], catalogs: [] as SkillCatalog[], proficiencySets: [] as ProficiencySet[] },
-  });
+    { skills: [] as Skill[], catalogs: [] as SkillCatalog[], proficiencySets: [] as ProficiencySet[] },
+  );
 
   skills = computed(() => this.dataRes.value().skills);
   catalogs = computed(() => this.dataRes.value().catalogs);

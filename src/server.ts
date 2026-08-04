@@ -657,12 +657,12 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
     { test: p => ['/skill-catalogs', '/proficiency-sets', '/skills', '/project-roles', '/resource-organizations', '/languages'].some(prefix => p.startsWith(prefix)), roles: ['admin', 'delivery-executive'] },
     // Customizing catalogs (Phase F1): location/industry/cost-category/partner-role/
     // vendor master data — mutations restricted to admin/delivery-executive (reads
-    // stay open like the other config catalogs). Holidays (B1) joins this group.
+    // need only a principal: no READ_RULE narrows them). Holidays (B1) joins this group.
     { test: p => ['/countries', '/cities', '/industries', '/cost-categories', '/partner-roles', '/vendors', '/holidays'].some(prefix => p.startsWith(prefix)), roles: ['admin', 'delivery-executive'] },
     // Planning periods (B1) open/close a calendar month for time-phased booking —
-    // admin-only mutation (stricter than the config-catalog rule above). Reads
-    // stay open like the other config catalogs (no READ_RULE below), so the
-    // Task-8 calendar (pm/resource-manager) can render open/closed months.
+    // admin-only mutation (stricter than the config-catalog rule above). Reads need
+    // only a principal (no READ_RULE below), so the Task-8 calendar
+    // (pm/resource-manager) can render open/closed months.
     { test: p => p.startsWith('/planning-periods'), roles: ['admin'] },
     { test: p => p.startsWith('/approval-requests'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
     // B3 batch month decisions run the SAME engine as /approval-requests, so the
@@ -4153,7 +4153,7 @@ apiRouter.delete('/resource-organizations/:id', async (req, res) => {
 });
 
 // --- Customizing catalogs (Phase F1 — additive reference data) --------------
-// Reads stay open (like the other config catalogs); mutations are gated to
+// Reads need only a principal (no READ_RULE narrows them); mutations are gated to
 // admin/delivery-executive by the RBAC rule above. No existing consumer is
 // rewired here — F2 binds these.
 
@@ -4263,7 +4263,7 @@ apiRouter.put('/settings/hours-per-day', async (req, res) => {
 // working-day gate (assignment day-replace, above) reads this. Not a `crud()`
 // collection because crud() hard-assigns `id: newId()`, which would clobber the
 // natural key. Upsert via get -> update-or-create, mirroring /settings above.
-// Reads stay open (like the other config catalogs); writes are gated to
+// Reads need only a principal (no READ_RULE narrows them); writes are gated to
 // admin/delivery-executive by the RBAC rule below.
 apiRouter.get('/holidays', async (_req, res) => { res.json(await repos.holidays.list()); });
 apiRouter.put('/holidays/:id', async (req, res) => {
@@ -4285,7 +4285,7 @@ apiRouter.delete('/holidays/:id', async (req, res) => {
 
 // PLANNING PERIODS — natural-key catalog (id IS the 'YYYY-MM' month); a Closed
 // period rejects new/edited daily bookings (working-day gate above). No DELETE
-// — a month is opened/closed, never deleted. Reads stay open (the Task-8
+// — a month is opened/closed, never deleted. Reads need only a principal (the Task-8
 // calendar, used by pm/resource-manager, must read this to render open/closed
 // months); writes are admin-only (a NEW mutation rule below, distinct from the
 // broader config-catalog rule).

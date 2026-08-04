@@ -1,11 +1,12 @@
 import { ChangeDetectionStrategy, Component, input, signal, computed, inject, DestroyRef } from '@angular/core';
-import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { ApiService, Project, Partner, Vendor, PartnerRole } from '../../services/api.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-project-partners',
@@ -167,7 +168,7 @@ export class ProjectPartners {
   private notificationService = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
-  private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
+  private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   projects = computed(() => this.projectsRes.value());
   selectedProjectId = signal<string>('');
   showForm = signal(false);
@@ -179,9 +180,9 @@ export class ProjectPartners {
   });
 
   // Company -> vendors, Role -> partner-roles (Phase F2). `contact` stays FREE (it is
-  // an external person name, not an internal FK). Both catalogs are open reads.
-  private vendorsRes = rxResource({ stream: () => this.api.getVendors(), defaultValue: [] as Vendor[] });
-  private rolesRes = rxResource({ stream: () => this.api.getPartnerRoles(), defaultValue: [] as PartnerRole[] });
+  // an external person name, not an internal FK). Both catalogs need a principal.
+  private vendorsRes = authGatedResource(() => this.api.getVendors(), [] as Vendor[]);
+  private rolesRes = authGatedResource(() => this.api.getPartnerRoles(), [] as PartnerRole[]);
   vendorOptions = this.vendorsRes.value;
   roleOptions = this.rolesRes.value;
 
@@ -199,7 +200,7 @@ export class ProjectPartners {
     return this.roleOptions().some(r => r.name === current) ? null : current;
   });
   
-  private partnersRes = rxResource({ stream: () => this.api.getProjectPartners(), defaultValue: [] as Partner[] });
+  private partnersRes = authGatedResource(() => this.api.getProjectPartners(), [] as Partner[]);
   partners = this.partnersRes.value;
 
   filteredPartners = computed(() => {

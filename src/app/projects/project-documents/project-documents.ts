@@ -1,11 +1,12 @@
 import { ChangeDetectionStrategy, Component, input, signal, computed, inject, DestroyRef } from '@angular/core';
-import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { ApiService, Project, ProjectDocument } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 /**
  * Derive 1-2 uppercase initials from a display name (e.g. "Julie Armstrong" -> "JA",
@@ -136,10 +137,7 @@ export class ProjectDocuments {
   private notificationService = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
-  private projectsRes = rxResource({
-    stream: () => this.api.getProjects(),
-    defaultValue: [] as Project[]
-  });
+  private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   projects = computed(() => this.projectsRes.value());
   selectedProjectId = signal<string>('');
   showForm = signal(false);
@@ -149,10 +147,7 @@ export class ProjectDocuments {
     type: new FormControl('pdf', Validators.required)
   });
   
-  private documentsRes = rxResource({
-    stream: () => this.api.getProjectDocuments(),
-    defaultValue: [] as ProjectDocument[]
-  });
+  private documentsRes = authGatedResource(() => this.api.getProjectDocuments(), [] as ProjectDocument[]);
   documents = this.documentsRes.value;
 
   filteredDocuments = computed(() => {

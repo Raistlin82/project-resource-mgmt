@@ -8,6 +8,7 @@ import { ApiService, Project, WorkPackage, Milestone, Resource } from '../../ser
 import { NotificationService } from '../../services/notification.service';
 import { AuthService } from '../../services/auth.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-project-plans',
@@ -381,7 +382,7 @@ export class ProjectPlans {
   /** Exposed to the template for the explicit "Unassigned" empty option. */
   protected readonly unassigned = 'Unassigned';
 
-  projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
+  projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   projects = computed(() => this.projectsRes.value());
   selectedProjectId = signal<string>('');
 
@@ -432,10 +433,10 @@ export class ProjectPlans {
     return this.resourceOptions().some(r => r.name === value) ? null : value;
   }
 
-  private wpRes = rxResource({ stream: () => this.api.getWorkPackages(), defaultValue: [] as WorkPackage[] });
+  private wpRes = authGatedResource(() => this.api.getWorkPackages(), [] as WorkPackage[]);
   workPackages = this.wpRes.value;
 
-  private milestoneRes = rxResource({ stream: () => this.api.getMilestones(), defaultValue: [] as Milestone[] });
+  private milestoneRes = authGatedResource(() => this.api.getMilestones(), [] as Milestone[]);
   milestones = this.milestoneRes.value;
 
   filteredWorkPackages = computed(() => {

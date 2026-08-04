@@ -1,6 +1,6 @@
 import { Component, inject, computed } from '@angular/core';
-import { rxResource } from '@angular/core/rxjs-interop';
 import { ApiService, Language } from '../services/api.service';
+import { authGatedResource } from '../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-set-default-language',
@@ -58,7 +58,7 @@ import { ApiService, Language } from '../services/api.service';
 })
 export class SetDefaultLanguageComponent {
   private api = inject(ApiService);
-  private languagesRes = rxResource({ stream: () => this.api.getLanguages(), defaultValue: [] as Language[] });
+  private languagesRes = authGatedResource(() => this.api.getLanguages(), [] as Language[]);
   // Sort so default is at the top
   languages = computed(() =>
     [...this.languagesRes.value()].sort((a, b) => (a.isDefault === b.isDefault) ? 0 : a.isDefault ? -1 : 1)

@@ -8,6 +8,7 @@ import { ApiService, ChangeRequest, Project, Resource } from '../../services/api
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-change-requests',
@@ -237,8 +238,8 @@ export class ChangeRequests {
   private auth = inject(AuthService);
   private notifications = inject(NotificationService);
 
-  private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
-  private changesRes = rxResource({ stream: () => this.api.getChangeRequests(), defaultValue: [] as ChangeRequest[] });
+  private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
+  private changesRes = authGatedResource(() => this.api.getChangeRequests(), [] as ChangeRequest[]);
   projects = this.projectsRes.value;
   changes = this.changesRes.value;
 

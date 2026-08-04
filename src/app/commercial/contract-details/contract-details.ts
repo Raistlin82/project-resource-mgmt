@@ -38,6 +38,7 @@ import { NotificationService } from '../../services/notification.service';
 import { todayLocalIso } from '../../services/local-date.util';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { DEFAULT_HOURS_PER_DAY } from '../../services/sell-rate.util';
+import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 interface BillingActualEvent {
   period: string;
@@ -830,7 +831,10 @@ export class ContractDetails {
   // so firing immediately 401s and the rxResource latches its error/empty state
   // forever. Keying each on auth.authReady() defers the request until the token
   // is attached; when authReady flips false->true the params change re-runs the
-  // stream. Open reads (projects, milestones) are left ungated.
+  // stream. EVERY read on this screen is principal-gated: since the server made
+  // GETs deny-by-default, an ungated field-init read 401s with no bearer and, with
+  // no params, never re-fires. The ones that need only readiness go through
+  // authGatedResource().
   private contractsRes = rxResource<Contract[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getContracts() : of<Contract[]>([])),
@@ -841,7 +845,7 @@ export class ContractDetails {
     stream: ({ params: ready }) => (ready ? this.api.getCustomers() : of<Customer[]>([])),
     defaultValue: [] as Customer[],
   });
-  private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
+  private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   private ordersRes = rxResource<Order[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getOrders() : of<Order[]>([])),
@@ -885,24 +889,23 @@ export class ContractDetails {
   // Negotiated sell rates (design spec §4/§6) feed the as-incurred T&M branch of
   // recognitionSchedule via sellRateFor (see `data` below). /negotiated-rates is
   // principal-gated server-side the same way contracts/customers/orders are, so
-  // this follows THAT gated idiom (keyed on auth.authReady()) rather than the
-  // ungated one used for the open reads (projects, milestones).
+  // this follows THAT gated idiom (keyed on auth.authReady()).
   private negotiatedRatesRes = rxResource<NegotiatedRate[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getNegotiatedRates() : of<NegotiatedRate[]>([])),
     defaultValue: [] as NegotiatedRate[],
   });
   // The org's working hours/day — the EUR/DAY -> EUR/HOUR divisor sellRateFor
-  // needs to price a negotiated rate (see FinanceData.hoursPerDay). An OPEN read
-  // (like projects/milestones below), so it is not keyed on authReady; it IS
-  // included in recognitionDataReady() below, because a money figure must never
+  // needs to price a negotiated rate (see FinanceData.hoursPerDay). Principal-gated
+  // like every other read here, AND included in recognitionDataReady() below in
+  // both its loading and its error form, because a money figure must never
   // render from a partial envelope — pricing 8 hours with the wrong divisor is a
   // believable wrong number, which is worse than a loading state.
-  private hoursPerDayRes = rxResource({ stream: () => this.api.getHoursPerDay(), defaultValue: { value: DEFAULT_HOURS_PER_DAY } });
+  private hoursPerDayRes = authGatedResource(() => this.api.getHoursPerDay(), { value: DEFAULT_HOURS_PER_DAY });
   // Role options for the rate form come from the project-roles CATALOG — the same
-  // authority the server validates against (see roleOptions below). Open read.
-  private rolesRes = rxResource({ stream: () => this.api.getProjectRoles(), defaultValue: [] as ProjectRole[] });
-  private milestonesRes = rxResource({ stream: () => this.api.getMilestones(), defaultValue: [] as Milestone[] });
+  // authority the server validates against (see roleOptions below).
+  private rolesRes = authGatedResource(() => this.api.getProjectRoles(), [] as ProjectRole[]);
+  private milestonesRes = authGatedResource(() => this.api.getMilestones(), [] as Milestone[]);
   // REFERENCE-DATA INTEGRITY (Phase B): `currency` is a config-value FK to the
   // configured currency set (fx-rates). Gated on authReady() with the other
   // principal-gated reads.

@@ -8,6 +8,7 @@ import { ApiService, BASE_CURRENCY, Order, Contract, Partner, Project, OrderLine
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-orders',
@@ -220,8 +221,8 @@ export class Orders {
     stream: ({ params: ready }) => (ready ? this.api.getContracts() : of<Contract[]>([])),
     defaultValue: [] as Contract[],
   });
-  private partnersRes = rxResource({ stream: () => this.api.getProjectPartners(), defaultValue: [] as Partner[] });
-  private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
+  private partnersRes = authGatedResource(() => this.api.getProjectPartners(), [] as Partner[]);
+  private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   // REFERENCE-DATA INTEGRITY (Phase B): `currency` is a config-value FK to the
   // configured currency set (fx-rates). Gated on authReady() with the other
   // principal-gated reads so it re-runs when the bearer token attaches.

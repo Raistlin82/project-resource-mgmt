@@ -8,6 +8,7 @@ import { ApiService, RateCard, ProjectRole, ResourceOrganization, FxRate } from 
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
+import { authGatedResource } from '../services/auth-gated-resource.util';
 
 /** Base/reporting currency — the default denomination for a rate card. */
 const BASE_CURRENCY = 'EUR';
@@ -191,11 +192,11 @@ export class ManageRateCardsComponent {
   items = this.itemsRes.value;
 
   // Reference-data sources for the bound selects (role / organization / currency).
-  private rolesRes = rxResource({ stream: () => this.api.getProjectRoles(), defaultValue: [] as ProjectRole[] });
+  private rolesRes = authGatedResource(() => this.api.getProjectRoles(), [] as ProjectRole[]);
   roleOptions = this.rolesRes.value;
-  private orgsRes = rxResource({ stream: () => this.api.getResourceOrganizations(), defaultValue: [] as ResourceOrganization[] });
+  private orgsRes = authGatedResource(() => this.api.getResourceOrganizations(), [] as ResourceOrganization[]);
   orgOptions = this.orgsRes.value;
-  private fxRes = rxResource({ stream: () => this.api.getFxRates(), defaultValue: [] as FxRate[] });
+  private fxRes = authGatedResource(() => this.api.getFxRates(), [] as FxRate[]);
   // Currency list = base currency + every configured fx-rate currency (deduped).
   currencyOptions = computed<string[]>(() => {
     const set = new Set<string>([BASE_CURRENCY, ...this.fxRes.value().map(f => f.currency)]);
@@ -205,7 +206,7 @@ export class ManageRateCardsComponent {
   // Hybrid day model: working hours per day (converts €/day → €/hour for margins).
   hoursPerDay = signal<number | null>(null);
   validHoursPerDay = computed(() => { const v = this.hoursPerDay(); return v != null && v > 0 && v <= 24; });
-  private hpdRes = rxResource({ stream: () => this.api.getHoursPerDay(), defaultValue: { value: 8 } });
+  private hpdRes = authGatedResource(() => this.api.getHoursPerDay(), { value: 8 });
   constructor() {
     // Seed the editable field from the persisted setting once it loads.
     effect(() => { const v = this.hpdRes.value()?.value; if (v != null && this.hoursPerDay() == null) this.hoursPerDay.set(v); });

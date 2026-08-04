@@ -7,6 +7,7 @@ import { ApiService, Order, OrderLine, Partner, Project, Resource, Task } from '
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 /** Sentinel value for an explicitly unassigned task assignee (an empty person ref). */
 const UNASSIGNED = 'Unassigned';
@@ -204,7 +205,7 @@ export class ProjectTasks {
   /** Exposed to the template for the explicit "Unassigned" empty option. */
   protected readonly unassigned = UNASSIGNED;
 
-  private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
+  private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   projects = computed(() => this.projectsRes.value());
   selectedProjectId = signal<string>('');
   showForm = signal(false);
@@ -238,9 +239,9 @@ export class ProjectTasks {
     status: new FormControl('To Do')
   });
   
-  private tasksRes = rxResource({ stream: () => this.api.getProjectTasks(), defaultValue: [] as Task[] });
+  private tasksRes = authGatedResource(() => this.api.getProjectTasks(), [] as Task[]);
   tasks = this.tasksRes.value;
-  private partnersRes = rxResource({ stream: () => this.api.getProjectPartners(), defaultValue: [] as Partner[] });
+  private partnersRes = authGatedResource(() => this.api.getProjectPartners(), [] as Partner[]);
   private ordersRes = rxResource<Order[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getOrders() : of<Order[]>([])),

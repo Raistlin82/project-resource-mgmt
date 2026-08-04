@@ -347,7 +347,7 @@ export class MyProfileComponent {
   });
 
   // Project-role option source: the canonical /project-roles catalog. projectRoles[]
-  // entries are catalog NAMES (Phase A). Open read, but keyed on authReady to mirror
+  // entries are catalog NAMES (Phase A). Keyed on authReady to mirror
   // the principal-gated profile read above.
   private rolesRes = rxResource<ProjectRole[], boolean>({
     params: () => this.auth.authReady(),

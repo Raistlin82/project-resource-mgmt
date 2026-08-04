@@ -624,7 +624,7 @@ export class DashboardComponent {
             contracts: this.api.getContracts(),
             negotiatedRates: this.api.getNegotiatedRates(),
             // The €/day -> €/hour divisor for those rates (see FinanceData's
-            // `hoursPerDay`): an open read, but in THIS forkJoin so the revenue
+            // `hoursPerDay`): in THIS forkJoin so the revenue
             // chart never paints from a partial envelope.
             hoursPerDay: this.api.getHoursPerDay().pipe(map(r => r.value)),
           })

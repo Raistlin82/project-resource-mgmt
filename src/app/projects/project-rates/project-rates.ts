@@ -7,6 +7,7 @@ import { ApiService, BASE_CURRENCY, NegotiatedRate, Project, ProjectRole } from 
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 /**
  * Negotiated sell rates for a project (design spec §7). The project's own
@@ -170,9 +171,8 @@ export class ProjectRates {
 
   projectId = input<string>();
 
-  // getProjects is an OPEN read (no principal gate) — leave ungated; needed
-  // here only to look up this project's OWN contractId.
-  private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
+  // Needed here only to look up this project's OWN contractId.
+  private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   private project = computed<Project | undefined>(() => this.projectsRes.value().find(p => p.id === this.projectId()));
 
   // /negotiated-rates is principal-gated to the commercial role set
@@ -196,7 +196,7 @@ export class ProjectRates {
   // it. It also read a collection this screen's own audience cannot always see:
   // /resources is gated to the staffing roles, which EXCLUDES `sales` — one of
   // the roles allowed to manage negotiated rates — so for a sales user the old
-  // picker was empty AND fired a 403. /project-roles is an open read.
+  // picker was empty AND fired a 403. /project-roles is readable by any role.
   private rolesRes = rxResource<ProjectRole[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getProjectRoles() : of<ProjectRole[]>([])),

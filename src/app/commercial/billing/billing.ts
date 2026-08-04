@@ -27,6 +27,7 @@ import { CsvColumn, downloadCsv, toCsv } from '../../services/export.util';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { ListStateComponent } from '../../shared/list-state.component';
 import { billingPlanValidationError } from '../../services/billing-validation.util';
+import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 type BillingStatus = BillingPlanItem['status'];
 type Recurrence = NonNullable<BillingPlanItem['recurrence']>;
@@ -763,9 +764,10 @@ export class Billing {
   // and the rxResource latches its empty state forever. Keying each on
   // auth.authReady() defers the request until the token is attached; when
   // authReady flips false->true the params change re-runs the stream (reload()
-  // still works for the mutation flows below). Open reads (projects, milestones,
-  // fx-rates) would not 401, but fx-rates is gated too so the KPI rollups it
-  // normalises re-run together with the gated data.
+  // still works for the mutation flows below). EVERY read here is gated, including
+  // projects/milestones/fx-rates: the server made GETs deny-by-default, so an
+  // ungated field-init read 401s with no bearer and never re-fires. The ones that
+  // need only readiness go through authGatedResource().
   private readonly itemsRes = rxResource<BillingPlanItem[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getBillingPlanItems() : of<BillingPlanItem[]>([])),
@@ -781,8 +783,8 @@ export class Billing {
     stream: ({ params: ready }) => (ready ? this.api.getCustomers() : of<Customer[]>([])),
     defaultValue: [] as Customer[],
   });
-  private readonly projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
-  private readonly milestonesRes = rxResource({ stream: () => this.api.getMilestones(), defaultValue: [] as Milestone[] });
+  private readonly projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
+  private readonly milestonesRes = authGatedResource(() => this.api.getMilestones(), [] as Milestone[]);
   private readonly ordersRes = rxResource<Order[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getOrders() : of<Order[]>([])),
@@ -809,7 +811,7 @@ export class Billing {
     stream: ({ params: ready }) => (ready ? this.api.getNegotiatedRates() : of<NegotiatedRate[]>([])),
     defaultValue: [] as NegotiatedRate[],
   });
-  private readonly hoursPerDayRes = rxResource({ stream: () => this.api.getHoursPerDay(), defaultValue: { value: DEFAULT_HOURS_PER_DAY } });
+  private readonly hoursPerDayRes = authGatedResource(() => this.api.getHoursPerDay(), { value: DEFAULT_HOURS_PER_DAY });
   /** FX rate table (base-currency value of 1 unit of each currency); normalises mixed-currency KPI rollups. Keyed on auth readiness so it re-runs with the gated data load. */
   private readonly fxRatesRes = rxResource<FxRate[], boolean>({
     params: () => this.auth.authReady(),

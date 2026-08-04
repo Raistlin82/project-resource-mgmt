@@ -1,10 +1,11 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
-import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { ApiService, City, Country } from '../services/api.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
+import { authGatedResource } from '../services/auth-gated-resource.util';
 
 /** Discriminates which delete confirmation is open. */
 type PendingDelete = { kind: 'country'; code: string } | { kind: 'city'; id: string } | null;
@@ -205,10 +206,10 @@ export class ManageLocationsComponent {
   private destroyRef = inject(DestroyRef);
   private notifications = inject(NotificationService);
 
-  private countriesRes = rxResource({ stream: () => this.api.getCountries(), defaultValue: [] as Country[] });
+  private countriesRes = authGatedResource(() => this.api.getCountries(), [] as Country[]);
   countries = this.countriesRes.value;
 
-  private citiesRes = rxResource({ stream: () => this.api.getCities(), defaultValue: [] as City[] });
+  private citiesRes = authGatedResource(() => this.api.getCities(), [] as City[]);
   cities = this.citiesRes.value;
 
   selectedCountry = signal<string | null>(null);

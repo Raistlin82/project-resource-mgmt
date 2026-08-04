@@ -8,6 +8,7 @@ import { ApiService, Project, ProjectCostCenter, Resource, CostCenter } from '..
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-project-cost-centers',
@@ -176,7 +177,7 @@ export class ProjectCostCenters {
   private notificationService = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
-  private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
+  private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   projects = computed(() => this.projectsRes.value());
   selectedProjectId = signal<string>('');
   showForm = signal(false);

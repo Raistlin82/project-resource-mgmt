@@ -1,10 +1,11 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
-import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { ApiService, Industry } from '../services/api.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
+import { authGatedResource } from '../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-manage-industries',
@@ -114,7 +115,7 @@ export class ManageIndustriesComponent {
   private destroyRef = inject(DestroyRef);
   private notifications = inject(NotificationService);
 
-  private itemsRes = rxResource({ stream: () => this.api.getIndustries(), defaultValue: [] as Industry[] });
+  private itemsRes = authGatedResource(() => this.api.getIndustries(), [] as Industry[]);
   items = this.itemsRes.value;
 
   search = signal('');

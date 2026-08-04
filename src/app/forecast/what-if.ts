@@ -29,6 +29,7 @@ import {
   BarSeries,
   TrendSeries,
 } from '../shared/charts';
+import { authGatedResource } from '../services/auth-gated-resource.util';
 
 /** Rolling horizon (weeks) for the sandbox forecast. Fixed: this is a comparison, not a tuning, surface. */
 const HORIZON_WEEKS = 12;
@@ -414,10 +415,7 @@ export class WhatIf {
     defaultValue: { resources: [], requests: [], assignments: [] },
   });
 
-  private readonly projectsRes = rxResource<Project[], unknown>({
-    stream: () => this.api.getProjects(),
-    defaultValue: [],
-  });
+  private readonly projectsRes = authGatedResource<Project[]>(() => this.api.getProjects(), []);
 
   readonly loading = computed<boolean>(() => this.dataRes.isLoading() || this.projectsRes.isLoading());
 

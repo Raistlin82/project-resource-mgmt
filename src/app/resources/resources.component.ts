@@ -426,7 +426,7 @@ export class ResourcesComponent {
   resources = this.resourcesRes.value;
 
   // Role option source: the canonical /project-roles catalog. Stored value = name
-  // (see reference-data-integrity plan, Phase A). Open read but keyed on authReady
+  // (see reference-data-integrity plan, Phase A). Keyed on authReady
   // to mirror the other gated config reads on this screen.
   protected readonly rolesRes = rxResource<ProjectRole[], boolean>({
     params: () => this.auth.authReady(),
@@ -447,7 +447,7 @@ export class ResourcesComponent {
   private editingRole = signal<string>('');
 
   // Location = Country + City and Organization are config FKs (Phase F2). All three
-  // option sources are open reads but keyed on authReady to mirror the gated reads.
+  // option sources are keyed on authReady like every other read here.
   protected readonly countriesRes = rxResource<Country[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getCountries() : of<Country[]>([])),
@@ -477,7 +477,7 @@ export class ResourcesComponent {
   });
   rateCards = this.rateCardsRes.value;
 
-  // VENDOR (C1): the catalog a 'subco' resource's vendorId references. Open read,
+  // VENDOR (C1): the catalog a 'subco' resource's vendorId references.
   // gated on authReady like the other config catalogs above.
   protected readonly vendorsRes = rxResource<Vendor[], boolean>({
     params: () => this.auth.authReady(),

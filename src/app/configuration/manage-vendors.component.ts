@@ -1,10 +1,11 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
-import { rxResource, toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { ApiService, Vendor, Country } from '../services/api.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
+import { authGatedResource } from '../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-manage-vendors',
@@ -135,7 +136,7 @@ export class ManageVendorsComponent {
   private destroyRef = inject(DestroyRef);
   private notifications = inject(NotificationService);
 
-  private itemsRes = rxResource({ stream: () => this.api.getVendors(), defaultValue: [] as Vendor[] });
+  private itemsRes = authGatedResource(() => this.api.getVendors(), [] as Vendor[]);
   items = this.itemsRes.value;
 
   search = signal('');
@@ -159,7 +160,7 @@ export class ManageVendorsComponent {
   });
 
   // PHASE F2 — `country` is a config FK to the countries catalog (store = ISO-2 code).
-  private countriesRes = rxResource({ stream: () => this.api.getCountries(), defaultValue: [] as Country[] });
+  private countriesRes = authGatedResource(() => this.api.getCountries(), [] as Country[]);
   countryOptions = this.countriesRes.value;
 
   // ORPHAN VALUE: a stored country code not in the catalog stays selectable as a disabled option.

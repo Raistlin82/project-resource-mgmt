@@ -1,8 +1,8 @@
 import { Component, inject, computed, PLATFORM_ID } from '@angular/core';
 import { isPlatformBrowser } from '@angular/common';
-import { rxResource } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, ServiceOrganization } from '../services/api.service';
+import { authGatedResource } from '../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-service-organization-details',
@@ -61,7 +61,7 @@ import { ApiService, ServiceOrganization } from '../services/api.service';
 export class ServiceOrganizationDetailsComponent {
   private api = inject(ApiService);
   private platformId = inject(PLATFORM_ID);
-  private orgsRes = rxResource({ stream: () => this.api.getServiceOrganizations(), defaultValue: [] as ServiceOrganization[] });
+  private orgsRes = authGatedResource(() => this.api.getServiceOrganizations(), [] as ServiceOrganization[]);
   organizations = computed(() => this.orgsRes.value());
 
   private escapeCsv(value: string): string {

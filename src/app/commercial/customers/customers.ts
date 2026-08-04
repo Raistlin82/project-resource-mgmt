@@ -162,7 +162,7 @@ export class Customers {
   customers = this.customersRes.value;
   contracts = this.contractsRes.value;
 
-  // Industry + Country are config FKs (Phase F2). Open reads, gated on authReady.
+  // Industry + Country are config FKs (Phase F2). Gated on authReady.
   private industriesRes = rxResource<Industry[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getIndustries() : of<Industry[]>([])),

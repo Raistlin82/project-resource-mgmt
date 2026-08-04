@@ -1,9 +1,9 @@
 import { Component, inject, signal, computed } from '@angular/core';
-import { rxResource } from '@angular/core/rxjs-interop';
 import { ReactiveFormsModule, FormBuilder, FormGroup, Validators, FormArray } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService } from '../services/api.service';
 import { NotificationService } from '../services/notification.service';
+import { authGatedResource } from '../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-manage-proficiency-sets',
@@ -120,7 +120,7 @@ export class ManageProficiencySetsComponent {
   private fb = inject(FormBuilder);
   private notifications = inject(NotificationService);
 
-  private setsRes = rxResource({ stream: () => this.api.getProficiencySets(), defaultValue: [] });
+  private setsRes = authGatedResource(() => this.api.getProficiencySets(), []);
   proficiencySets = computed(() => this.setsRes.value());
   showForm = signal(false);
   pendingDeleteId = signal<string | null>(null);

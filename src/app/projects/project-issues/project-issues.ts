@@ -8,6 +8,7 @@ import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { todayLocalIso } from '../../services/local-date.util';
+import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 @Component({
   selector: 'app-project-issues',
@@ -223,7 +224,7 @@ export class ProjectIssues {
   private notificationService = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
-  private projectsRes = rxResource({ stream: () => this.api.getProjects(), defaultValue: [] as Project[] });
+  private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   projects = computed(() => this.projectsRes.value());
   selectedProjectId = signal<string>('');
   showForm = signal(false);
@@ -261,7 +262,7 @@ export class ProjectIssues {
     return this.resourceOptions().some(r => r.name === value) ? null : value;
   }
 
-  private issuesRes = rxResource({ stream: () => this.api.getProjectIssues(), defaultValue: [] as Issue[] });
+  private issuesRes = authGatedResource(() => this.api.getProjectIssues(), [] as Issue[]);
   issues = this.issuesRes.value;
 
   filteredIssues = computed(() => {
