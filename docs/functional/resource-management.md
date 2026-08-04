@@ -604,6 +604,7 @@ and the tools to rebalance bookings (add, copy/paste, edit, delete assignments).
 | Step | Responsible | Accountable | Consulted | Informed |
 |------|-------------|-------------|-----------|----------|
 | Review utilization | resource-manager | resource-manager | pm | delivery-executive |
+| Read the Team Average | resource-manager | resource-manager | pm | delivery-executive |
 | Rebalance bookings | resource-manager | resource-manager | pm | employee |
 | Approve/reject inline time | resource-manager | resource-manager | — | finance |
 
@@ -625,10 +626,48 @@ flowchart TD
 1. **Review utilization.**
    - **Who:** `resource-manager`. **When:** ongoing capacity management.
    - **How:** `/utilization` loads resources, assignments, requests, time
-     entries. Bars are banded: **Overbooked** (> 110%), **Optimal** (80–110%),
-     **Free Capacity** (< 80%).
-   - **Output:** a per-resource utilization picture.
-2. **Rebalance.**
+     entries, and the org tree in one shot. Bars are banded: **Overbooked**
+     (> 110%), **Optimal** (80–110%), **Free Capacity** (< 80%). The **My
+     Team** panel has a **team scope** switch with two views, always visible
+     even when the second view would be empty:
+     - **Direct reports** (default, pre-existing behaviour) — everyone whose
+       `managerId` is the viewer.
+     - **All my org** — the same **function** the Allocation Approvals feed
+       uses to scope requests (`scopeOf`): the transitive org chart below the
+       viewer **union** the resources sitting in the org-tree subtrees
+       (Capability / Practice / Competence) they manage. A person reachable
+       only through a subtree two levels down, with no org-chart link at all,
+       still appears here. That equivalence is about the **function**, not
+       the **set** the feed shows, though: the feed also admits any resource
+       with **no manager anywhere** (`roleFallback`) to every
+       `resource-manager`, so a manager may see and decide on placeholder
+       rows in the feed that All my org does not list. `admin` and
+       `delivery-executive` see their **own** scope in this view — never the
+       whole company — so the number means the same thing for every viewer
+       regardless of role.
+     - The empty state names the reason: **"Nobody is set up to report
+       directly to you."** (Direct reports) is a different message from
+       **"You do not manage any organization, and nobody reports to you."**
+       (All my org) — the "…and nobody reports to you" ending belongs to the
+       All my org message, not to Direct reports.
+   - **Output:** a per-resource utilization picture, scoped to the active view.
+2. **Read the Team Average.**
+   - **Who:** `resource-manager` and any viewer of the panel. **How:** the
+     average is computed over whichever list the active team-scope view
+     shows, but it counts **internal resources only**
+     (`countsTowardInternalCapacity(kindOf(resource))`) — a placeholder
+     (dummy) or a subcontractor (subco) is not internal capacity, so its
+     `utilization` (0% for a dummy, or not a saturation signal for a subco)
+     never dilutes the mean. This applies in **both** views: a dummy that has
+     been given a manager would otherwise pull the average toward zero in
+     Direct reports too, the same class of defect the portfolio KPIs on
+     `/reporting` had before it was fixed there.
+   - **Output:** when the list holds rows the average does not count, an
+     **"internal only"** note appears next to the percentage so the
+     denominator is never a silent mismatch with the row count — an auditor
+     comparing "how many people are listed" against "what the average divides
+     by" gets the discrepancy explained on the same screen, not only in code.
+3. **Rebalance.**
    - **Who:** `resource-manager`. **How:**
      - new booking → `createAssignment(data)` → `POST /assignments`;
      - copy/paste a booking to another resource → `createAssignment({ …copied,
@@ -638,7 +677,7 @@ flowchart TD
    - **Output:** rebalanced bookings; the server **recomputes utilization from the
      full assignment set** for every affected resource (under `withLock('res:…')`),
      so over-removals or moves never corrupt the stored figure.
-3. **Approve/reject time inline** — see [Approve a Time Entry](#approve-a-time-entry-segregation-of-duties).
+4. **Approve/reject time inline** — see [Approve a Time Entry](#approve-a-time-entry-segregation-of-duties).
 
 **Exceptions & edge cases.**
 
@@ -648,12 +687,15 @@ flowchart TD
 | Booking exceeds capacity | Allowed; utilization shows > 100% (Overbooked band). |
 | FK retarget on edit to a missing resource/request | `400`. |
 | Concurrent edits to one resource | Serialized; utilization recomputed deterministically. |
+| Viewer manages no organization and has no direct reports | The **All my org** view is empty; the switch itself stays visible so the viewer can tell "no data" from "no feature". |
+| A dummy or subco sits in the viewer's org subtree | It appears in the **All my org** list (it belongs to the organization) but is excluded from **Team Average**; the **internal only** note marks the gap. |
+| `admin` / `delivery-executive` open **All my org** | Scoped to their own `scopeOf`, same as any other viewer — not the whole company, even though these roles see every request in the Allocation Approvals feed. |
 
 **Metrics.**
 
 | Metric | Definition |
 |--------|------------|
-| Average utilization | Mean utilization across active resources. |
+| Average utilization | Mean utilization across **internal** resources in the active team-scope view (Direct reports or All my org); dummy/subco rows are listed but never counted. |
 | Overbooked count | Resources > 110%. |
 | Bench count | Resources < 80% (see forecast `benchList`). |
 

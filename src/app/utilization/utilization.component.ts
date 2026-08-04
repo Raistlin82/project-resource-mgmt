@@ -1,18 +1,22 @@
 import { ChangeDetectionStrategy, Component, inject, signal, computed } from '@angular/core';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
-import { ApiService, Resource, Assignment, ResourceRequest, TimeEntry } from '../services/api.service';
+import { ApiService, Resource, Assignment, ResourceRequest, TimeEntry, ResourceOrganization } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { DecimalPipe } from '@angular/common';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { forkJoin, of } from 'rxjs';
+import { catchError } from 'rxjs/operators';
+import { scopeOf } from '../services/org-scope.util';
+import { kindOf, countsTowardInternalCapacity } from '../services/resource-kind.util';
 
 interface UtilizationData {
   resources: Resource[];
   assignments: Assignment[];
   requests: ResourceRequest[];
   timeEntries: TimeEntry[];
+  orgs: ResourceOrganization[];
 }
 
 @Component({
@@ -25,9 +29,32 @@ interface UtilizationData {
         <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Manage Resource Utilization</h1>
         <div class="command-card flex items-center gap-3 px-5 py-3">
           <span class="command-kpi-label">Team Average:</span>
-          <span class="text-xl font-black tracking-tight font-mono tabular-nums" [class]="getUtilizationColorText(averageUtilization())">
-            {{ averageUtilization() | number:'1.0-0' }}%
+          <!-- countedForAverage() empty is NOT "0% utilization" — averageUtilization()
+               returns 0 on an empty denominator (spec §4 last row: the value 0 is
+               correct and matches /reporting), but colour-banding that 0 through
+               getUtilizationColorText falls through to the critical/red band, which
+               reads as "my team is completely idle" for what is really "nothing here
+               is measurable" (e.g. a subtree of only pre-staffed dummy/subco rows).
+               /utilization is the only surface that colour-bands this KPI at all
+               (/reporting's equivalent tile uses a fixed colorClass) — show a neutral
+               dash instead of a red 0% when there is nothing to divide by. -->
+          <span data-test="team-average" class="text-xl font-black tracking-tight font-mono tabular-nums"
+                [class]="countedForAverage().length ? getUtilizationColorText(averageUtilization()) : 'text-ink-muted'">
+            @if (countedForAverage().length) {
+              {{ averageUtilization() | number:'1.0-0' }}%
+            } @else {
+              —
+            }
           </span>
+          @if (hasUncountedRows()) {
+            <!-- command-kpi-note (src/styles.css) carries margin-top: 0.55rem for its
+                 usual home stacked under a KPI value in a .command-kpi card. Here it
+                 is a flex sibling of the percentage instead, so that top margin would
+                 offset it out of vertical alignment; the mt-0! Tailwind v4 important
+                 modifier (same pattern as border-critical! on list-state.component.ts)
+                 zeroes it for this one usage without a new command-* rule. -->
+            <span data-test="kpi-internal-note" class="command-kpi-note mt-0!">internal only</span>
+          }
         </div>
       </div>
 
@@ -35,9 +62,28 @@ interface UtilizationData {
         <!-- Left Pane: Managed Resources -->
         <div class="lg:col-span-1 command-card overflow-hidden flex flex-col h-[min(800px,80vh)]">
           <div class="command-card-header">
-            <div>
-              <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">My Team</h2>
-              <p class="mt-1 text-sm text-[var(--cc-muted)]">Resources you manage</p>
+            <div class="flex flex-col gap-3">
+              <div>
+                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">My Team</h2>
+                <p class="mt-1 text-sm text-[var(--cc-muted)]">Resources you manage</p>
+              </div>
+              <div class="inline-flex rounded-md border border-[var(--cc-line-strong)] bg-[var(--cc-surface)] p-1"
+                   role="group" aria-label="Team scope">
+                <button type="button" data-test="team-scope-direct"
+                        (click)="teamScope.set('direct')"
+                        [attr.aria-pressed]="teamScope() === 'direct'"
+                        class="rounded px-3 py-1.5 text-xs font-semibold transition-colors"
+                        [class]="teamScope() === 'direct' ? 'bg-accent text-white shadow-sm' : 'text-ink-secondary hover:text-accent-text'">
+                  Direct reports
+                </button>
+                <button type="button" data-test="team-scope-org"
+                        (click)="teamScope.set('org')"
+                        [attr.aria-pressed]="teamScope() === 'org'"
+                        class="rounded px-3 py-1.5 text-xs font-semibold transition-colors"
+                        [class]="teamScope() === 'org' ? 'bg-accent text-white shadow-sm' : 'text-ink-secondary hover:text-accent-text'">
+                  All my org
+                </button>
+              </div>
             </div>
           </div>
           <div class="overflow-y-auto flex-1 divide-y divide-[var(--cc-line)]">
@@ -60,7 +106,7 @@ interface UtilizationData {
                       {{ res.name.charAt(0) }}
                     </div>
                     <div>
-                      <h3 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ res.name }}</h3>
+                      <h3 data-test="team-member" class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ res.name }}</h3>
                       <p class="text-xs font-semibold tracking-wide text-[var(--cc-muted)] uppercase mt-0.5">{{ res.role }}</p>
                     </div>
                   </div>
@@ -79,7 +125,13 @@ interface UtilizationData {
               </div>
             }
             @if (managedResources().length === 0) {
-              <div class="p-12 text-center text-sm text-[var(--cc-muted)]">You do not manage any resources.</div>
+              <div data-test="team-empty" class="p-12 text-center text-sm text-[var(--cc-muted)]">
+                @if (teamScope() === 'direct') {
+                  Nobody is set up to report directly to you.
+                } @else {
+                  You do not manage any organization, and nobody reports to you.
+                }
+              </div>
             }
           </div>
         </div>
@@ -251,16 +303,29 @@ export class UtilizationComponent {
             resources: this.api.getResources(),
             assignments: this.api.getAssignments(),
             requests: this.api.getRequests(),
-            timeEntries: this.api.getTimeEntries()
+            timeEntries: this.api.getTimeEntries(),
+            // forkJoin is fail-fast: an error on ANY leg throws the whole
+            // resource, and dataResource.value() re-throws that, so an
+            // isolated failure here would otherwise collapse the Direct
+            // reports list, the assignments pane and the time-approval pane —
+            // none of which read the org tree at all. Only the 'org' scope
+            // view consumes it, and degrades correctly on an empty array:
+            // scopeOf(..., []) has no managed org roots, so it falls back to
+            // the org-chart axis alone (the same behaviour as "tree not yet
+            // loaded" in the design's error table). Confine the catch to this
+            // leg — the other four are genuinely required and must still
+            // fail fast.
+            orgs: this.api.getResourceOrganizations().pipe(catchError(() => of<ResourceOrganization[]>([])))
           })
-        : of<UtilizationData>({ resources: [], assignments: [], requests: [], timeEntries: [] }),
-    defaultValue: { resources: [], assignments: [], requests: [], timeEntries: [] }
+        : of<UtilizationData>({ resources: [], assignments: [], requests: [], timeEntries: [], orgs: [] }),
+    defaultValue: { resources: [], assignments: [], requests: [], timeEntries: [], orgs: [] }
   });
 
   resources = computed(() => this.dataResource.value().resources);
   assignments = computed(() => this.dataResource.value().assignments);
   allRequests = computed(() => this.dataResource.value().requests);
   timeEntries = computed(() => this.dataResource.value().timeEntries);
+  orgNodes = computed(() => this.dataResource.value().orgs);
 
   private selectedResourceId = signal<string | null>(null);
   // Derived from the loaded resources so it always reflects the latest data after a reload.
@@ -274,15 +339,43 @@ export class UtilizationComponent {
   editingAssignmentId = signal<string | null>(null);
   copiedAssignment = signal<Partial<Assignment> | null>(null);
 
-  // Authorization: Only show resources managed by the current user
-  managedResources = computed(() => this.resources().filter(r => r.managerId === this.currentManagerId));
+  /** Which set 'My Team' means. 'direct' is the pre-D behaviour and stays the default. */
+  protected teamScope = signal<'direct' | 'org'>('direct');
+
+  /**
+   * 'direct' — people who report to the actor directly (unchanged).
+   * 'org'    — the actor's ORGANIZATIONAL SCOPE: the transitive org chart below
+   *            them UNION the resources in the org subtrees they manage. Same
+   *            `scopeOf` the approval feed uses, so the two cannot drift.
+   */
+  managedResources = computed(() => {
+    const me = this.currentManagerId;
+    const all = this.resources();
+    if (this.teamScope() === 'direct') return all.filter(r => r.managerId === me);
+    const inScope = scopeOf(me, all, this.orgNodes());
+    return all.filter(r => inScope.has(r.id));
+  });
+
+  /**
+   * Only INTERNAL resources carry a meaningful `utilization`: a placeholder is
+   * nobody's capacity, and a subco is not internal saturation. `scopeOf` reaches
+   * into org subtrees where placeholders live, so without this filter the mean
+   * would sink toward zero as the tree grows — the exact defect C1 fixed on
+   * /reporting, where the seed alone halved the average. Applies to BOTH views:
+   * a placeholder given a manager would otherwise land in the direct one too.
+   */
+  protected countedForAverage = computed(() =>
+    this.managedResources().filter(r => countsTowardInternalCapacity(kindOf(r))));
 
   averageUtilization = computed(() => {
-    const team = this.managedResources();
-    if (!team.length) return 0;
-    const total = team.reduce((sum, r) => sum + r.utilization, 0);
-    return total / team.length;
+    const counted = this.countedForAverage();
+    if (!counted.length) return 0;
+    return counted.reduce((sum, r) => sum + r.utilization, 0) / counted.length;
   });
+
+  /** True when the list shows rows the average deliberately does not count. */
+  protected hasUncountedRows = computed(() =>
+    this.countedForAverage().length !== this.managedResources().length);
 
   resourceAssignments = computed(() => {
     const resId = this.selectedResource()?.id;
