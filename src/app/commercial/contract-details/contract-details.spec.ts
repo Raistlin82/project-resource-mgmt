@@ -365,3 +365,111 @@ describe('ContractDetails — Negotiated Rates table (Task 5)', () => {
     expect(errorEl?.textContent).toContain('a negotiated rate already exists for this key (existing id NR1)');
   });
 });
+
+describe('ContractDetails — money regions never show a fabricated figure (P1-10, round 2)', () => {
+  const contract: Contract = {
+    id: 'CT9', customerId: 'C1', name: 'Fixed Price', type: 'Fixed Price', totalValue: 100_000,
+    currency: 'EUR', status: 'Active', startDate: '2020-01-01', endDate: '2030-12-31',
+  };
+  const customer: Customer = { id: 'C1', name: 'Acme Co' };
+  const project: Project = {
+    id: 'P9', name: 'Alpha', location: 'Remote', startDate: '2020-01-01',
+    endDate: '2030-12-31', status: 'Active', contractId: 'CT9',
+  };
+  // 100h of approved time at a 100 €/h cost rate = 10,000 actual cost, so the
+  // resolved margin is 50,000 - 10,000 = 40,000. If /resources 401s, that cost
+  // silently becomes 0 and the margin renders as 50,000 at 100.0%.
+  const resource: Resource = {
+    id: 'R9', name: 'Dev', role: 'Developer', skills: [], projectRoles: [],
+    externalExperience: [], utilization: 50, capacity: 40, costRate: 100, billRate: 200,
+  };
+  const entry: TimeEntry = {
+    id: 'TE9', assignmentId: 'a9', requestId: 'r9', resourceId: 'R9',
+    projectId: 'P9', date: '2026-05-01', hours: 100, status: 'Approved',
+  };
+
+  function stub(overrides: Partial<Record<string, () => unknown>> = {}) {
+    return {
+      getContracts: () => of([contract]),
+      getCustomers: () => of([customer]),
+      getProjects: () => of([project]),
+      getOrders: () => of([{ id: 'O9', contractId: 'CT9', type: 'Customer', amount: 50_000, currency: 'EUR', status: 'Invoiced', orderDate: '2026-01-01' }]),
+      getOrderLines: () => of([{ id: 'OL9', orderId: 'O9', projectId: 'P9', description: 'work', amount: 50_000 }]),
+      getRequests: () => of([]),
+      getAssignments: () => of([]),
+      getResources: () => of([resource]),
+      getProjectFinancials: () => of([]),
+      getTimeEntries: () => of([entry]),
+      getBillingPlanItems: () => of([]),
+      getMilestones: () => of([]),
+      getFxRates: () => of([]),
+      getProjectRoles: () => of([]),
+      getNegotiatedRates: () => of([]),
+      getHoursPerDay: () => of({ value: 8 }),
+      ...overrides,
+    } as unknown as ApiService;
+  }
+
+  async function render(api: ApiService) {
+    const authStub = { authReady: signal(true), canApproveFinancials: signal(true) } as unknown as AuthService;
+    TestBed.configureTestingModule({
+      imports: [ContractDetails],
+      providers: [
+        provideRouter([]),
+        { provide: ApiService, useValue: api },
+        { provide: AuthService, useValue: authStub },
+        { provide: NotificationService, useValue: { show: vi.fn() } as unknown as NotificationService },
+      ],
+    });
+    await TestBed.compileComponents();
+    const fixture: ComponentFixture<ContractDetails> = TestBed.createComponent(ContractDetails);
+    fixture.componentRef.setInput('id', 'CT9');
+    await tick(fixture);
+    return fixture;
+  }
+
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('shows the real cost-derived figures when every read resolves', async () => {
+    // POSITIVE CONTROL FIRST: without it the assertions below could pass because
+    // nothing renders at all.
+    const text = host(await render(stub())).textContent ?? '';
+    expect(text).not.toContain('Limited data');
+    expect(text).toMatch(/40,000\.00/);   // 50,000 revenue - 10,000 actual cost
+    expect(text).toContain('Order Revenue');
+  });
+
+  it('shows Limited data and a Retry instead of a 100% margin when a cost read is FORBIDDEN', async () => {
+    // THE DEFECT THIS WAVE INTRODUCED. /resources is gated by READ_RULES to the
+    // staffing roles, which EXCLUDES sales, so resourcesRes 401s. The
+    // status()==='error' ? [] : value() accessor then yields [], the labour cost
+    // sums to nothing, and margin = revenue - 0 renders as Margin = Order Revenue
+    // at Margin % 100.0 — P1-10's exact symptom, with a confident number in place
+    // of the crash it replaced. Remove the moneyFiguresState() gate and this test
+    // sees 50,000.00 and 100.0%.
+    const text = host(await render(stub({
+      getResources: () => throwError(() => new Error('401 Unauthorized')),
+    }))).textContent ?? '';
+
+    expect(text).toContain('Limited data');
+    expect(text).toContain('Retry');
+    expect(text).not.toContain('100.0%');
+    // Note: the Orders table further down legitimately shows the real €50,000.00
+    // ORDER amount — that read succeeded — so this asserts the absence of the
+    // DERIVED figures, not of every occurrence of the number.
+    // Every money region is covered, not just the KPI strip: the per-project
+    // table, the billing control strip and the billing plan strip too.
+    expect(text).not.toContain('Order Revenue');
+    expect(text).not.toContain('Actual To Date');
+    expect(text).not.toContain('Retention Held');
+  });
+
+  it('covers the per-project table, which shows the same money', async () => {
+    const text = host(await render(stub({
+      getTimeEntries: () => throwError(() => new Error('401 Unauthorized')),
+    }))).textContent ?? '';
+
+    expect(text).toContain('Limited data — per-project figures are unavailable.');
+    expect(text).not.toContain('Alpha');
+  });
+});

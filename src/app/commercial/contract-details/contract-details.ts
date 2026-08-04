@@ -107,6 +107,27 @@ interface BillingControlRow {
           </div>
         </div>
 
+        <!--
+          MONEY STRIP GATE (round 2). An errored or forbidden read must never
+          reach a currency pipe: the status()==='error' ? [] : value() accessors
+          make the page survive, but an empty array renders as 0.00, which is a
+          claim, not a blank.
+        -->
+        @if (moneyFiguresState() === 'error') {
+          <div class="command-empty command-card p-10 text-center text-ink-muted" role="alert">
+            <p class="font-semibold text-[var(--cc-ink)]">Limited data — contract figures are unavailable.</p>
+            <p class="mt-1 text-sm">One of the reads these amounts are derived from failed, so no figure is shown rather than a zero.</p>
+            <button type="button" class="command-button mt-3" (click)="reloadMoneyData()">
+              <mat-icon class="text-[18px] w-[18px] h-[18px]">refresh</mat-icon> Retry
+            </button>
+          </div>
+        } @else if (moneyFiguresState() === 'loading') {
+          <div class="grid grid-cols-2 lg:grid-cols-6 gap-4" aria-busy="true" aria-label="Loading contract figures">
+            @for (tile of [1, 2, 3, 4, 5, 6]; track tile) {
+              <div class="command-skeleton h-24"></div>
+            }
+          </div>
+        } @else {
         <!-- KPI row -->
         <div class="grid grid-cols-2 lg:grid-cols-6 gap-4">
           <div class="command-kpi">
@@ -142,12 +163,31 @@ interface BillingControlRow {
             <p class="command-kpi-value">{{ kpis().eac | currency: c.currency }}</p>
           </div>
         </div>
+        }
 
         <!-- Projects under this contract -->
         <div class="command-card overflow-hidden">
           <div class="command-card-header">
             <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Projects under this contract</h2>
           </div>
+          <!-- The per-project figures are the SAME money, so the same gate: under
+               a failed read this table showed Actual Cost 0.00 and Margin % 100.0
+               per project. -->
+          @if (moneyFiguresState() === 'error') {
+            <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted" role="alert">
+              <p class="font-semibold text-[var(--cc-ink)]">Limited data — per-project figures are unavailable.</p>
+              <p class="mt-1 text-sm">A read these amounts are derived from failed; no figure is shown rather than a zero.</p>
+              <button type="button" class="command-button mt-3" (click)="reloadMoneyData()">
+                <mat-icon class="text-[18px] w-[18px] h-[18px]">refresh</mat-icon> Retry
+              </button>
+            </div>
+          } @else if (moneyFiguresState() === 'loading') {
+            <div class="p-4 space-y-2" aria-busy="true" aria-label="Loading per-project figures">
+              @for (row of [1, 2, 3]; track row) {
+                <div class="command-skeleton h-10"></div>
+              }
+            </div>
+          } @else {
           <div class="overflow-x-auto">
             <table class="command-data-table">
               <thead>
@@ -193,6 +233,7 @@ interface BillingControlRow {
               </tbody>
             </table>
           </div>
+          }
         </div>
 
         <!-- Negotiated Rates (design spec §7) -->
@@ -316,6 +357,21 @@ interface BillingControlRow {
             </button>
           </div>
 
+          @if (moneyFiguresState() === 'error') {
+            <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted" role="alert">
+              <p class="font-semibold text-[var(--cc-ink)]">Limited data — billing control amounts are unavailable.</p>
+              <p class="mt-1 text-sm">A read these amounts are derived from failed; no figure is shown rather than a zero.</p>
+              <button type="button" class="command-button mt-3" (click)="reloadMoneyData()">
+                <mat-icon class="text-[18px] w-[18px] h-[18px]">refresh</mat-icon> Retry
+              </button>
+            </div>
+          } @else if (moneyFiguresState() === 'loading') {
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 p-4" aria-busy="true" aria-label="Loading billing control amounts">
+              @for (tile of [1, 2, 3]; track tile) {
+                <div class="command-skeleton h-24"></div>
+              }
+            </div>
+          } @else {
           <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 p-4">
             <div class="command-kpi info">
               <p class="command-kpi-label">Expected To Date</p>
@@ -330,7 +386,12 @@ interface BillingControlRow {
               <p class="command-kpi-value">{{ billingVarianceToDate() | currency: c.currency }}</p>
             </div>
           </div>
+          }
 
+          <!-- The per-period rows are the same money as the strip above, so they
+               share its gate: under a failed read this table printed
+               Expected 0.00 / Variance = Actual for every period. -->
+          @if (moneyFiguresState() === 'ready') {
           <div class="overflow-x-auto">
             <table class="command-data-table">
               <thead>
@@ -378,6 +439,7 @@ interface BillingControlRow {
               </tbody>
             </table>
           </div>
+          }
         </div>
 
         <!-- Billing -->
@@ -389,6 +451,21 @@ interface BillingControlRow {
             </div>
           </div>
 
+          @if (moneyFiguresState() === 'error') {
+            <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted" role="alert">
+              <p class="font-semibold text-[var(--cc-ink)]">Limited data — billing plan amounts are unavailable.</p>
+              <p class="mt-1 text-sm">A read these amounts are derived from failed; no figure is shown rather than a zero.</p>
+              <button type="button" class="command-button mt-3" (click)="reloadMoneyData()">
+                <mat-icon class="text-[18px] w-[18px] h-[18px]">refresh</mat-icon> Retry
+              </button>
+            </div>
+          } @else if (moneyFiguresState() === 'loading') {
+            <div class="grid grid-cols-1 sm:grid-cols-5 gap-4 p-4" aria-busy="true" aria-label="Loading billing plan amounts">
+              @for (tile of [1, 2, 3, 4, 5]; track tile) {
+                <div class="command-skeleton h-24"></div>
+              }
+            </div>
+          } @else {
           <div class="grid grid-cols-2 lg:grid-cols-5 gap-4 p-4">
             <div class="command-kpi info">
               <p class="command-kpi-label">Planned</p>
@@ -411,6 +488,7 @@ interface BillingControlRow {
               <p class="command-kpi-value">{{ billingKpis().retentionHeld | currency: c.currency }}</p>
             </div>
           </div>
+          }
 
           <div class="overflow-x-auto">
             <table class="command-data-table">
@@ -1334,6 +1412,44 @@ export class ContractDetails {
   protected recognitionDataError = computed<boolean>(() =>
     this.recognitionInputs().some(res => res.status() === 'error'),
   );
+
+  /**
+   * Every read a money figure ANYWHERE on this screen derives from — the
+   * recognition inputs plus the order/cost side. One list, so the gates below
+   * cannot drift apart the way recognitionDataReady() and the ungated KPI strip
+   * did.
+   */
+  private moneyInputs() {
+    return [...this.recognitionInputs(), this.ordersRes, this.orderLinesRes, this.financialsRes];
+  }
+
+  /**
+   * P1-10, REINTRODUCED BY THIS WAVE'S OWN FIX AND NOW CLOSED. The
+   * `status() === 'error' ? [] : value()` accessors above stop one failed read
+   * aborting the page — but on their own they turn a failed read into an EMPTY
+   * array, and an empty array is a NUMBER. The live case is role `sales`:
+   * /resources is gated by READ_RULES to the staffing roles, which excludes
+   * sales, so `resourcesRes` 401s; `actualLaborCostForProject` then sums nothing,
+   * and `margin = revenue - 0` renders as Margin = Order Revenue, Margin % =
+   * 100.0, EAC = 0.00. Confident wrong figures are worse than the crash they
+   * replaced.
+   *
+   * So every money region on this screen is gated on this ONE state — the four of
+   * them (KPI strip, projects table, billing control, billing plan) plus
+   * recognitionDataReady()'s narrower gate over a subset of the same list.
+   */
+  protected moneyFiguresState = computed<'error' | 'loading' | 'ready'>(() => {
+    const inputs = this.moneyInputs();
+    if (inputs.some(res => res.status() === 'error')) return 'error';
+    // Pre-authReady the gated resources resolve SUCCESSFULLY with empty defaults,
+    // so readiness has to be part of the state or SSR ships zeros.
+    if (!this.auth.authReady() || inputs.some(res => res.isLoading())) return 'loading';
+    return 'ready';
+  });
+
+  protected reloadMoneyData(): void {
+    for (const res of this.moneyInputs()) res.reload();
+  }
 
   protected reloadRecognitionData(): void {
     for (const res of this.recognitionInputs()) res.reload();
