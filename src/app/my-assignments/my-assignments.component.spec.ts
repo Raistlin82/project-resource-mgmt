@@ -56,7 +56,6 @@ const SUBMITTED_ENTRY: TimeEntry = {
 function setup(overrides: {
   createMyTimeEntry?: ReturnType<typeof vi.fn>;
   requests?: ResourceRequest[];
-  canManageStaffing?: boolean;
   canSubmitOwnTime?: boolean;
 } = {}) {
   const createMyTimeEntry = overrides.createMyTimeEntry ?? vi.fn(() => of(SUBMITTED_ENTRY));
@@ -70,7 +69,6 @@ function setup(overrides: {
   const auth = {
     authReady: signal(true),
     hasResourceIdentity: signal(true),
-    canManageStaffing: signal(overrides.canManageStaffing ?? false),
     canSubmitOwnTime: signal(overrides.canSubmitOwnTime ?? true),
   } as unknown as AuthService;
   const notifications = {
@@ -187,21 +185,49 @@ describe('MyAssignmentsComponent time entry submission', () => {
     expect(createMyTimeEntry).not.toHaveBeenCalled();
   });
 
-  it('hides staffing and time-entry actions when the access policy denies them', async () => {
-    const { fixture } = setup({ canManageStaffing: false, canSubmitOwnTime: false });
-    await flush(fixture);
+  /**
+   * REWRITTEN: these two tests could not fail. Both asserted
+   * `[aria-label="Edit Hours"]` is null — a selector that exists NOWHERE in
+   * src/ except those two lines, so the expectation was unfalsifiable. One also
+   * asserted the text 'Allocation Calendar', which renders unconditionally
+   * (my-assignments.component.ts:259). And both flipped `canManageStaffing`,
+   * which THIS COMPONENT NEVER READS (its 4 occurrences were all in the spec) —
+   * so the input the tests varied to justify their titles had no effect at all.
+   *
+   * What actually varies is canSubmitOwnTime, which gates the "Log actual time"
+   * button. Asserted as a PAIR, so absence is proven against a positive control
+   * rather than against a typo.
+   */
+  it('offers the log-time action only when the access policy allows own-time submission', async () => {
+    const denied = setup({ canSubmitOwnTime: false });
+    await flush(denied.fixture);
+    const deniedHost = denied.fixture.nativeElement as HTMLElement;
+    expect(deniedHost.querySelector('[aria-label="Log actual time"]')).toBeNull();
+    // ...and the form cannot be opened by other means either.
+    denied.fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
+    denied.fixture.detectChanges();
+    expect(deniedHost.querySelector('[data-test="submit-time-entry"]')).toBeNull();
 
-    const host = fixture.nativeElement as HTMLElement;
-    expect(host.querySelector('[aria-label="Edit Hours"]')).toBeNull();
-    expect(host.querySelector('[aria-label="Log actual time"]')).toBeNull();
+    TestBed.resetTestingModule();
+
+    const allowed = setup({ canSubmitOwnTime: true });
+    await flush(allowed.fixture);
+    const allowedHost = allowed.fixture.nativeElement as HTMLElement;
+    expect(allowedHost.querySelector('[aria-label="Log actual time"]')).not.toBeNull();
   });
 
-  it('keeps assignedHours read-only even for staffing managers and points to day-level booking', async () => {
-    const { fixture } = setup({ canManageStaffing: true, canSubmitOwnTime: false });
+  it('renders assignedHours as text with no editable control, and says where hours are edited', async () => {
+    const { fixture } = setup();
     await flush(fixture);
 
     const host = fixture.nativeElement as HTMLElement;
-    expect(host.querySelector('[aria-label="Edit Hours"]')).toBeNull();
-    expect(host.textContent).toContain('Allocation Calendar');
+    // assignedHours left the client-writable surface (P1-20): the number is
+    // rendered, and there is no input, select or textarea bound to it anywhere on
+    // the row. Add one back and this fails.
+    expect(host.textContent).toContain('40h');
+    const editableOutsideTheTimeEntryForm = [...host.querySelectorAll('input, select, textarea')]
+      .filter(el => el.closest('form') === null);
+    expect(editableOutsideTheTimeEntryForm).toEqual([]);
+    expect(host.textContent).toContain('Planned hours are edited per day in the Allocation Calendar.');
   });
 });

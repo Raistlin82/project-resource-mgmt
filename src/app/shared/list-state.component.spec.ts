@@ -40,6 +40,22 @@ class FailedResourceHostComponent {
   }
 }
 
+/**
+ * A consumer that FORGOT the <ng-template> wrapper. The contract's own failure
+ * mode: nothing renders (a visible blank), rather than the binding crashing the
+ * view. Pins the contract so re-adding an <ng-content/> alongside the outlet —
+ * which would resurrect the eager-evaluation bug for these consumers — is caught.
+ */
+@Component({
+  imports: [ListStateComponent],
+  template: `
+    <app-list-state [loading]="false" [error]="false" label="customers">
+      <div data-test="bare">bare projected content</div>
+    </app-list-state>
+  `,
+})
+class BareContentHostComponent {}
+
 describe('ListStateComponent', () => {
   function setup() {
     const fixture = TestBed.createComponent(HostComponent);
@@ -108,11 +124,34 @@ describe('ListStateComponent', () => {
     expect(fixture.nativeElement.querySelector('[role="alert"]')).toBeNull();
   });
 
+  /**
+   * MUTATION COVERAGE, stated so this is not re-flagged as a test that cannot
+   * fail. It DOES fail against the bug it is for: render the content outlet in
+   * the error branch as well (the P1-02 regression) and all three assertions go
+   * red — verified by mutation.
+   *
+   * It does NOT fail against a revert to plain `<ng-content />`, because an
+   * <ng-template> child is projected-but-never-instantiated there, so nothing
+   * throws. The test that catches THAT revert is 'projects content (and never an
+   * error/skeleton) once resolved' above: under <ng-content /> a template-wrapped
+   * child renders nothing at all.
+   */
   it('does not evaluate resource-backed content while showing an error', () => {
     const fixture = TestBed.createComponent(FailedResourceHostComponent);
 
     expect(() => fixture.detectChanges()).not.toThrow();
     expect(fixture.nativeElement.querySelector('[role="alert"]')).not.toBeNull();
     expect(fixture.nativeElement.querySelector('[data-test="dangerous"]')).toBeNull();
+  });
+
+  it('renders nothing for a consumer that forgot the <ng-template> wrapper', () => {
+    const fixture = TestBed.createComponent(BareContentHostComponent);
+    fixture.detectChanges();
+
+    // The contract is template-only: bare projected content has no outlet. Add an
+    // <ng-content /> back alongside the outlet and this fails — which is the
+    // point, because that is what reintroduces eager binding evaluation.
+    expect(fixture.nativeElement.querySelector('[data-test="bare"]')).toBeNull();
+    expect((fixture.nativeElement as HTMLElement).textContent).not.toContain('bare projected content');
   });
 });

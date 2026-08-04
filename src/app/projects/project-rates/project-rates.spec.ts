@@ -233,12 +233,25 @@ describe('ProjectRates — inherited vs override (Task 5)', () => {
     expect(options).toContain('Project Manager');   // in the catalog, held by nobody
   });
 
-  it('offers only the base currency, so no inert non-EUR rate can be created (P1-12)', async () => {
+  it('offers only the base currency even when the FX catalog carries others (P1-12)', async () => {
     // sellRateFor reads nothing but a BASE_CURRENCY row, so an FX-driven picker
     // offered a save that was guaranteed to move no revenue. Existing non-EUR
     // rows are still RENDERED (with the "Not applied" badge, asserted below) —
     // only creating a new one is closed off.
-    const fixture = await setUp(baseStub());
+    //
+    // THE FX ROWS ARE THE POINT. baseStub()'s default is `getFxRates: () => of([])`,
+    // and the reverted implementation was
+    // `[...new Set([BASE_CURRENCY, ...fxRates.map(r => r.currency)])]` — which over
+    // an EMPTY list is also ['EUR']. So without a non-EUR row injected here this
+    // test passed identically before and after the fix it was written for.
+    // contract-details.spec.ts:215 gets this right; this is the same shape.
+    const fixture = await setUp(baseStub({
+      getFxRates: () => of([
+        { currency: 'EUR', rateToBase: 1 },
+        { currency: 'USD', rateToBase: 0.91 },
+        { currency: 'GBP', rateToBase: 1.17 },
+      ]),
+    }));
     const h = host(fixture);
 
     const addButton = [...h.querySelectorAll('button')].find(b => b.textContent?.trim().includes('Add Override'));
