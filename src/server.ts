@@ -5618,23 +5618,32 @@ apiRouter.get('/storage-status', (_req, res) => res.json({
 // RBAC: '/integrations' is gated (reads AND mutations) to
 // finance/delivery-executive/admin via READ_RULES + the mutation rules above.
 
-/** Assemble the full FinanceData snapshot from the repositories. */
+/**
+ * Assemble the full FinanceData snapshot from the repositories.
+ *
+ * `contracts` was already part of this envelope (customerProfitability /
+ * arAgingByCustomer walk project -> contract -> customer via it). Negotiated
+ * sell rates (design spec §4/§6) are new: one `repos.negotiatedRates.list()`
+ * call here, shared by every consumer of this snapshot — the as-incurred
+ * branch of recognitionSchedule then resolves per-entry via sellRateFor, never
+ * issuing its own per-row query.
+ */
 async function loadFinanceData(): Promise<FinanceData> {
   const [
     requests, assignments, resources, orders, orderLines, financials,
     timeEntries, billingItems, contracts, customers, milestones,
-    changeRequests, projects, fxRates,
+    changeRequests, projects, fxRates, negotiatedRates,
   ] = await Promise.all([
     repos.requests.list(), repos.assignments.list(), repos.resources.list(),
     repos.orders.list(), repos.orderLines.list(), repos.projectFinancials.list(),
     repos.timeEntries.list(), repos.billingPlanItems.list(), repos.contracts.list(),
     repos.customers.list(), repos.milestones.list(), repos.changeRequests.list(),
-    repos.projects.list(), repos.fxRates.list(),
+    repos.projects.list(), repos.fxRates.list(), repos.negotiatedRates.list(),
   ]);
   return {
     requests, assignments, resources, orders, orderLines, financials,
     timeEntries, billingItems, contracts, customers, milestones,
-    changeRequests, projects, fxRates,
+    changeRequests, projects, fxRates, negotiatedRates,
   };
 }
 

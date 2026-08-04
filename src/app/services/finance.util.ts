@@ -1,4 +1,5 @@
-import { Assignment, Resource, ResourceRequest, Order, OrderLine, FinancialItem, TimeEntry, BillingPlanItem, Contract, Customer, Milestone, ChangeRequest, Project, FxRate, BASE_CURRENCY } from './api.service';
+import { Assignment, Resource, ResourceRequest, Order, OrderLine, FinancialItem, TimeEntry, BillingPlanItem, Contract, Customer, Milestone, ChangeRequest, Project, FxRate, NegotiatedRate, BASE_CURRENCY } from './api.service';
+import { sellRateFor } from './sell-rate.util';
 
 /** All raw data needed to compute financial rollups. */
 export interface FinanceData {
@@ -17,6 +18,15 @@ export interface FinanceData {
   changeRequests?: ChangeRequest[];
   /** Optional project master data; used only to label portfolio-level alert rows. */
   projects?: Project[];
+  /**
+   * Optional negotiated sell rates (design spec §4/§6). Consumed ONLY by the
+   * as-incurred (TimeAndMaterials/Capped/Expense) branch of recognitionSchedule,
+   * via sellRateFor, alongside `projects`/`contracts` for the project-override /
+   * contract-period precedence. Absent or empty behaves exactly as before this
+   * feature existed (falls through to each resource's reference billRate) — that
+   * is the no-regression guarantee, not an incidental default.
+   */
+  negotiatedRates?: NegotiatedRate[];
   /**
    * Optional FX rate table (base-currency value of 1 unit of each currency).
    * When supplied, monetary amounts that carry a currency (order lines via their
@@ -205,7 +215,17 @@ export function computeProjectFinancials(projectId: string, d: FinanceData): Pro
   };
 }
 
-/** Company-wide billability: billable value (hours × billRate) vs cost (hours × costRate). */
+/**
+ * Company-wide billability: billable value (hours × billRate) vs cost (hours × costRate).
+ *
+ * DELIBERATELY stays on the resource's reference `billRate`, never on a
+ * negotiated sell rate: this figure has no project (it rolls up a resource's
+ * assignments across every project it's on) and answers "what is our time
+ * worth", not "what do we invoice a customer" — the negotiated price is a
+ * property of a (contract-or-project, role) pair, not of the person. Do not
+ * "fix" this to use sellRateFor; that would be conflating two different
+ * questions, not correcting an inconsistency.
+ */
 export function resourceBillability(resourceId: string, d: FinanceData): { cost: number; billable: number; hours: number } {
   const res = d.resources.find(r => r.id === resourceId);
   const costRate = res?.costRate ?? 0;
@@ -694,7 +714,21 @@ export function recognitionSchedule(
       let booked = 0;
       const cap = Number.isFinite(item.capAmount) ? (item.capAmount as number) : Infinity;
       for (const t of entries) {
-        const rate = data.resources.find(r => r.id === t.resourceId)?.billRate ?? 0;
+        // Price this entry at the negotiated SELL rate (design spec §4/§6): a
+        // project override on t.projectId, else the project's contract rate
+        // (only for hours dated inside that contract's period), else the
+        // resource's own reference billRate — today's resolution, and the
+        // no-regression guarantee when negotiatedRates is absent/empty.
+        const resource = data.resources.find(r => r.id === t.resourceId);
+        const rate = sellRateFor({
+          projectId: t.projectId,
+          role: resource?.role,
+          date: t.date,
+          referenceBillRate: resource?.billRate,
+          rates: data.negotiatedRates ?? [],
+          projects: data.projects ?? [],
+          contracts: data.contracts ?? [],
+        }) ?? 0;
         let value = finite(t.hours) * rate;
         if (booked + value > cap) value = Math.max(0, cap - booked);
         if (value <= 0) continue;
