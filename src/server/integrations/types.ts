@@ -89,6 +89,8 @@ export interface SupplierInfo {
 export interface EInvoiceBuildInput {
   order: Order;
   customer: Customer;
+  /** ISO-2 code resolved from the country catalog when Customer stores a display name. */
+  customerCountryCode?: string;
   contract?: Contract;
   lines: OrderLine[];
   supplier: SupplierInfo;

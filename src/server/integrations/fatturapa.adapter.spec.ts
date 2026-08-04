@@ -69,6 +69,7 @@ function makeLine(id: string, description: string, amount: number): OrderLine {
 function build(overrides: {
   order?: Partial<Order>;
   customer?: Partial<Customer>;
+  customerCountryCode?: string;
   contract?: Contract;
   lines?: OrderLine[];
   supplier?: Partial<SupplierInfo>;
@@ -76,6 +77,7 @@ function build(overrides: {
   return new FatturaPaAdapter().buildInvoiceXml({
     order: makeOrder(overrides.order),
     customer: makeCustomer(overrides.customer),
+    ...(overrides.customerCountryCode ? { customerCountryCode: overrides.customerCountryCode } : {}),
     ...(overrides.contract ? { contract: overrides.contract } : {}),
     lines: overrides.lines ?? [makeLine('l1', 'Consulting services', 1000)],
     supplier: makeSupplier(overrides.supplier),
@@ -183,6 +185,17 @@ describe('FatturaPaAdapter.buildInvoiceXml() — structure', () => {
     expect(xml).toContain('<TipoDocumento>TD01</TipoDocumento>');
   });
 
+  it('emits a credit note as TD04 with positive document amounts', () => {
+    const xml = build({ order: { amount: -250 }, lines: [] });
+
+    expect(xml).toContain('<TipoDocumento>TD04</TipoDocumento>');
+    expect(xml).toContain('<PrezzoUnitario>250.00</PrezzoUnitario>');
+    expect(xml).toContain('<PrezzoTotale>250.00</PrezzoTotale>');
+    expect(xml).toContain('<ImponibileImporto>250.00</ImponibileImporto>');
+    expect(xml).toContain('<ImportoTotaleDocumento>305.00</ImportoTotaleDocumento>');
+    expect(xml).not.toContain('<PrezzoTotale>-250.00</PrezzoTotale>');
+  });
+
   it('renders supplier as CedentePrestatore and customer as CessionarioCommittente', () => {
     const xml = build();
     const header = xml.slice(xml.indexOf('<CedentePrestatore>'), xml.indexOf('</CedentePrestatore>'));
@@ -190,6 +203,16 @@ describe('FatturaPaAdapter.buildInvoiceXml() — structure', () => {
     expect(header).toContain('<IdCodice>01234567890</IdCodice>');
     const cessionario = xml.slice(xml.indexOf('<CessionarioCommittente>'), xml.indexOf('</CessionarioCommittente>'));
     expect(cessionario).toContain('<Denominazione>ACME S.p.A.</Denominazione>');
+  });
+
+  it('uses the catalog ISO code and never writes a country name as the customer city', () => {
+    const xml = build({ customer: { country: 'Germany' }, customerCountryCode: 'DE' });
+    const cessionario = xml.slice(xml.indexOf('<CessionarioCommittente>'), xml.indexOf('</CessionarioCommittente>'));
+
+    expect(cessionario).toContain('<IdPaese>DE</IdPaese>');
+    expect(cessionario).toContain('<Nazione>DE</Nazione>');
+    expect(cessionario).toContain('<Comune>N/D</Comune>');
+    expect(cessionario).not.toContain('<Comune>Germany</Comune>');
   });
 
   it('uses a placeholder VAT for the customer (Customer entity carries no VAT number)', () => {
@@ -306,6 +329,23 @@ describe('FatturaPaAdapter.buildInvoiceXml() — synthetic line fallback', () =>
 });
 
 describe('FatturaPaAdapter.buildInvoiceXml() — validation', () => {
+  it('rejects purchase orders and customer orders outside the issued lifecycle', () => {
+    const ineligibleOrders: Partial<Order>[] = [
+      { type: 'Purchase', status: 'Invoiced' },
+      { type: 'Customer', status: 'Open' },
+    ];
+
+    for (const order of ineligibleOrders) {
+      try {
+        build({ order });
+        expect.unreachable('expected buildInvoiceXml to reject an ineligible order');
+      } catch (error) {
+        expect(error).toBeInstanceOf(EInvoiceValidationError);
+        expect((error as EInvoiceValidationError).code).toBe('INELIGIBLE_ORDER');
+      }
+    }
+  });
+
   it('throws a typed error when the order has no invoice number', () => {
     const call = (): unknown => build({ order: { invoiceNumber: undefined, status: 'Open' } });
     expect(call).toThrowError(EInvoiceValidationError);

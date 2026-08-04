@@ -191,34 +191,36 @@ flowchart TD
 
 ---
 
-### Generate a FatturaPA e-invoice XML
+### Generate a FatturaPA XML preview
 
-**Purpose.** Generate a simplified Italian **FatturaElettronica v1.2 (FPR12)**
-XML for one **invoiced order**, as a downloadable local artifact.
+**Purpose.** Generate an inspectable Italian **FatturaElettronica v1.2 (FPR12)**
+preview for one issued customer order. It is a review artifact, not a
+submission-ready tax document.
 
 **Scope.**
 - *In:* selecting an order that carries an invoice number and downloading its
   FPR12 XML.
-- *Out:* SDI transmission. No `Sistema di Interscambio` call, no credentials, no
-  network. The active adapter key is `fatturapa`.
+- *Out:* fiscal master-data completion and SDI transmission. The customer model
+  does not store VAT/tax id or a full registered address; placeholders are made
+  explicit. No `Sistema di Interscambio` call, credentials or network are used.
 
 **RACI.**
 
 | Step | Responsible | Accountable | Consulted | Informed |
 |------|-------------|-------------|-----------|----------|
 | Select invoiced order | finance | finance | — | — |
-| Generate FPR12 XML | finance | delivery-executive | — | accounting |
-| Submit to SDI (out of app) | finance / accounting | finance | — | — |
+| Generate/review preview XML | finance | delivery-executive | accounting | — |
+| Build and submit the official document (external system) | accounting | finance | tax adviser | — |
 
 **Process flow.**
 
 ```mermaid
 flowchart TD
   A["Open config/integrations"] --> B["E-invoice card: pick an invoiced order"]
-  B --> C["Click Generate FatturaPA XML"]
+  B --> C["Click Generate FatturaPA preview"]
   C --> D["GET /api/integrations/einvoice/orders/:id"]
   D --> E["Resolve order → contract → customer → order lines"]
-  E --> F{"order has invoiceNumber & supplier VAT?"}
+  E --> F{"eligible customer order, invoiceNumber & supplier VAT?"}
   F -->|yes| G["FatturaPaAdapter.buildInvoiceXml"]
   G --> H["Blob download <country><vat>_<invoice>.xml"]
   F -->|no| I["400 EInvoiceValidationError"]
@@ -233,28 +235,32 @@ flowchart TD
      orders carrying a non-empty `invoiceNumber` (filtered client-side from
      `GET /orders`). Select one.
    - **Output:** the selected order id; the **Generate** button enables.
-2. **Generate the XML.**
-   - **Who:** `finance` (+). **How:** click **Generate FatturaPA XML** →
+2. **Generate the preview.**
+   - **Who:** `finance` (+). **How:** click **Generate FatturaPA preview** →
      `einvoiceXmlUrl(orderId)` → `GET /api/integrations/einvoice/orders/:id`. The
      server resolves the order → its contract → its customer, gathers the order
      lines, supplies supplier (CedentePrestatore) master data from
      `INTEGRATION_SUPPLIER_*` env vars (with demo defaults), and calls the
-     adapter, which emits a well-formed FPR12 document at a flat 22% VAT.
+     adapter, which emits a simplified FPR12-shaped preview at a flat 22% VAT.
    - **Output:** a downloaded `<IdPaese><PartitaIVA>_<Numero>.xml`.
-3. **Submit to SDI (outside the app).**
-   - **Who:** `finance` / accounting. **How:** route the XML through the real SDI
-     channel separately — the app never transmits.
-   - **Output:** invoice submitted in the external channel.
+3. **Prepare the official document (outside the app).**
+   - **Who:** accounting. **How:** use the preview only as an input to a fiscal
+     system that holds the missing customer identifiers/address and performs XSD,
+     business-rule and tax validation before SDI transmission.
+   - **Output:** an independently validated official document. The preview from
+     this application must never be submitted as-is.
 
 **Exceptions & edge cases.**
 
 | Situation | System response |
 |-----------|-----------------|
 | Order has no invoice number | Not selectable (dropdown excludes it); a direct call returns `400 MISSING_INVOICE_NUMBER`. |
+| Purchase order or customer order outside `Invoiced`/`Paid` | Not selectable; direct calls return `400 INELIGIBLE_ORDER`. |
 | Supplier VAT missing | `400 MISSING_SUPPLIER_VAT`. |
 | Order not found / broken contract→customer chain | `404`. |
 | No invoiced orders at all | Card shows "No invoiced orders available…". |
-| Customer has no VAT number | Document still well-formed: a placeholder `partita IVA` (`00000000000`) is used for the CessionarioCommittente. |
+| Customer fiscal/address data is unavailable | The preview uses visible placeholders and is explicitly marked not submission-ready. |
+| Negative credit-note order | Emitted as `TD04` with positive document amounts; the domain amount remains negative for accounting. |
 | Caller lacks finance-grade role | `403`/`401`. |
 
 **Metrics.**
@@ -262,7 +268,7 @@ flowchart TD
 | Metric | How to read it |
 |--------|----------------|
 | Invoiced-order coverage | Orders with an invoice number eligible for export. |
-| Document validity | Each XML satisfies the modeled SDI checks (mandatory `PrezzoUnitario`, Σ-lines = imponibile). |
+| Preview consistency | Mandatory price fields and internal line/tax totals reconcile; fiscal/XSD/SDI validity is deliberately not claimed. |
 
 **Related.** Invoicing/billing in
 [`billing-and-revenue.md`](billing-and-revenue.md);

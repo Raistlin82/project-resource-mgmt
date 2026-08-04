@@ -31,7 +31,10 @@ export type {
   SupplierInfo,
 } from './types';
 
-export type EInvoiceErrorCode = 'MISSING_INVOICE_NUMBER' | 'MISSING_SUPPLIER_VAT';
+export type EInvoiceErrorCode =
+  | 'INELIGIBLE_ORDER'
+  | 'MISSING_INVOICE_NUMBER'
+  | 'MISSING_SUPPLIER_VAT';
 
 /** Typed validation error thrown by {@link FatturaPaAdapter.buildInvoiceXml}. */
 export class EInvoiceValidationError extends Error {
@@ -132,7 +135,8 @@ function progressivoInvio(invoiceNumber: string): string {
  * Produces a well-formed, simplified `FatturaElettronica` FPR12 document:
  * - Header: DatiTrasmissione, CedentePrestatore (supplier), CessionarioCommittente
  *   (customer, with placeholder VAT — the `Customer` entity carries none).
- * - Body: DatiGeneraliDocumento (TD01, Divisa, Data, Numero, ImportoTotaleDocumento),
+ * - Body: DatiGeneraliDocumento (TD01 invoice / TD04 credit note, Divisa, Data,
+ *   Numero, ImportoTotaleDocumento),
  *   DettaglioLinee, DatiRiepilogo at a flat 22.00% AliquotaIVA.
  *
  * Totals: ImponibileImporto = rounded sum of line amounts; Imposta = 22% of the
@@ -143,22 +147,30 @@ export class FatturaPaAdapter implements EInvoiceAdapter {
     return {
       kind: 'einvoice',
       key: 'fatturapa',
-      name: 'FatturaPA e-invoice (FPR12)',
+      name: 'FatturaPA preview (FPR12)',
       description:
-        'Generates a simplified Italian FatturaElettronica v1.2 XML (formato FPR12) for an invoiced order ' +
-        'as a downloadable local artifact. Not connected to SDI: no transmission, no credentials, no network.',
+        'Generates a simplified Italian FatturaElettronica v1.2 preview for an invoiced order. ' +
+        'Customer fiscal identifiers and address data are placeholders: the artifact is not submission-ready ' +
+        'and is never transmitted to SDI.',
       connected: false,
       mode: 'local-artifact',
     };
   }
 
   buildInvoiceXml(input: EInvoiceBuildInput): ExportArtifact {
-    const { order, customer, contract, lines, supplier } = input;
+    const { order, customer, customerCountryCode, contract, lines, supplier } = input;
 
     if (order.invoiceNumber === undefined || order.invoiceNumber.trim() === '') {
       throw new EInvoiceValidationError(
         'MISSING_INVOICE_NUMBER',
         `Order ${order.id} has no invoice number: only invoiced orders can be exported as FatturaPA.`,
+      );
+    }
+
+    if (order.type !== 'Customer' || (order.status !== 'Invoiced' && order.status !== 'Paid')) {
+      throw new EInvoiceValidationError(
+        'INELIGIBLE_ORDER',
+        'Only invoiced or paid customer orders can be exported as FatturaPA.',
       );
     }
     if (supplier.vatNumber.trim() === '') {
@@ -174,10 +186,13 @@ export class FatturaPaAdapter implements EInvoiceAdapter {
     // normalise defensively so a full ISO timestamp can never leak into the XML.
     const invoiceDate = (order.invoiceDate ?? order.orderDate).slice(0, 10);
     const supplierCountry = countryCode(supplier.country, 'IT');
-    const customerCountry = countryCode(customer.country, 'IT');
+    const customerCountry = countryCode(customerCountryCode ?? customer.country, 'IT');
     const codiceDestinatario = supplier.codiceDestinatario ?? DEFAULT_CODICE_DESTINATARIO;
 
-    const normalized = normalizeLines(order, contract, lines);
+    const isCreditNote = order.amount < 0;
+    const documentType = isCreditNote ? 'TD04' : 'TD01';
+    const normalized = normalizeLines(order, contract, lines)
+      .map(line => isCreditNote ? { ...line, amount: Math.abs(line.amount) } : line);
     const imponibile = round2(normalized.reduce((sum, l) => sum + l.amount, 0));
     const imposta = round2(imponibile * (FATTURAPA_VAT_RATE_PCT / 100));
     const importoTotale = round2(imponibile + imposta);
@@ -251,7 +266,7 @@ export class FatturaPaAdapter implements EInvoiceAdapter {
       '      <Sede>\n' +
       '        <Indirizzo>N/D</Indirizzo>\n' +
       '        <CAP>00000</CAP>\n' +
-      `        <Comune>${escapeXml(customer.country ?? 'N/D')}</Comune>\n` +
+      '        <Comune>N/D</Comune>\n' +
       `        <Nazione>${escapeXml(customerCountry)}</Nazione>\n` +
       '      </Sede>\n' +
       '    </CessionarioCommittente>\n' +
@@ -259,7 +274,7 @@ export class FatturaPaAdapter implements EInvoiceAdapter {
       '  <FatturaElettronicaBody>\n' +
       '    <DatiGenerali>\n' +
       '      <DatiGeneraliDocumento>\n' +
-      '        <TipoDocumento>TD01</TipoDocumento>\n' +
+      `        <TipoDocumento>${documentType}</TipoDocumento>\n` +
       `        <Divisa>${escapeXml(order.currency)}</Divisa>\n` +
       `        <Data>${escapeXml(invoiceDate)}</Data>\n` +
       `        <Numero>${escapeXml(invoiceNumber)}</Numero>\n` +

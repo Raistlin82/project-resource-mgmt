@@ -80,11 +80,13 @@ yields a valid empty artifact.
 
 ### E-invoicing — `FatturaPA` (FPR12)
 
-Generates a simplified Italian **FatturaElettronica v1.2** XML
-(`FormatoTrasmissione = FPR12`, fattura verso privati) for one **invoiced** order.
-Specifics that keep it schema-valid:
+Generates a simplified Italian **FatturaElettronica v1.2** XML preview
+(`FormatoTrasmissione = FPR12`, fattura verso privati) for one issued customer
+order. It is deliberately not submission-ready because the domain does not hold
+the customer's fiscal identifiers and registered address:
 
-- `TipoDocumento` **TD01**; `CedentePrestatore` from supplier master data
+- `TipoDocumento` **TD01** for invoices and **TD04** for negative credit notes;
+  `CedentePrestatore` from supplier master data
   (env-driven, see below) with `RegimeFiscale RF01`; `CessionarioCommittente` from
   the customer (with a placeholder VAT, since the `Customer` entity carries none).
 - A flat **22% VAT** (`AliquotaIVA 22.00`): `ImponibileImporto` = rounded sum of
@@ -98,9 +100,12 @@ Specifics that keep it schema-valid:
 - XML text is escaped (`escapeXml`); `Data` is normalized to an `xs:date`
   (`YYYY-MM-DD`).
 
-**Validation.** A missing invoice number (`MISSING_INVOICE_NUMBER`) or missing
-supplier VAT (`MISSING_SUPPLIER_VAT`) throws a typed `EInvoiceValidationError` —
-the route maps it to a `400`. Only invoiced orders can be exported.
+**Validation.** An ineligible order (`INELIGIBLE_ORDER`), missing invoice number
+(`MISSING_INVOICE_NUMBER`) or missing supplier VAT (`MISSING_SUPPLIER_VAT`)
+throws a typed `EInvoiceValidationError`; the route maps it to a `400`. Only
+`Invoiced`/`Paid` customer orders are eligible. Placeholder customer fiscal and
+address fields mean consumers must treat the result as a preview and rebuild or
+enrich it in a validated fiscal system before any SDI submission.
 
 ### CRM — `WebhookJsonOutbox`
 

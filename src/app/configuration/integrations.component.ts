@@ -42,8 +42,8 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
           <div class="command-eyebrow">Configuration</div>
           <h1 class="command-title">Integrations</h1>
           <p class="command-subtitle">
-            Standards-compliant export connectors for ERP, e-invoicing, CRM and BI. Each one turns your live
-            data into a ready-to-use file and runs locally — no external credentials and no network calls.
+            Local export previews for ERP, e-invoicing, CRM and BI. Each adapter turns live data into an
+            inspectable file without sending it to an external service.
           </p>
         </div>
       </header>
@@ -77,7 +77,7 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
                 (JSON)
               </button>
             </div>
-            <p class="text-xs text-[var(--cc-muted)]">Revenue-recognition journal for 2026, monthly periods. Σ debit always equals Σ credit.</p>
+            <p class="text-xs text-[var(--cc-muted)]">Monthly revenue-recognition journal; the export window is derived from dated financial activity. Σ debit always equals Σ credit.</p>
           </div>
         </section>
 
@@ -114,10 +114,14 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
             </div>
             <button type="button" class="command-button" [disabled]="!selectedOrderId() || busy() !== null" (click)="downloadInvoiceXml()">
               <mat-icon class="text-[20px] w-[20px] h-[20px]">description</mat-icon>
-              Generate FatturaPA XML
+              Generate FatturaPA preview
             </button>
+            <p class="text-xs text-[var(--cc-muted)]">
+              Preview only: customer fiscal identifiers and address data are not stored by this application,
+              so this XML is not submission-ready and is never sent to SDI.
+            </p>
             @if (invoicedOrders().length === 0) {
-              <p class="text-xs text-[var(--cc-muted)]">No invoiced orders available. Only orders carrying an invoice number can be exported.</p>
+              <p class="text-xs text-[var(--cc-muted)]">No eligible customer invoices available. Only Invoiced or Paid customer orders can be exported.</p>
             }
           </div>
         </section>
@@ -282,9 +286,14 @@ export class IntegrationsComponent {
   readonly crmDescriptor = computed(() => this.descriptorFor('crm'));
   readonly biDescriptor = computed(() => this.descriptorFor('bi'));
 
-  /** Only orders carrying an invoice number can be exported as FatturaPA. */
+  /** FatturaPA is only valid for issued customer invoices, never purchases/open orders. */
   readonly invoicedOrders = computed(() =>
-    this.data().orders.filter(o => typeof o.invoiceNumber === 'string' && o.invoiceNumber.length > 0),
+    this.data().orders.filter(o =>
+      o.type === 'Customer'
+      && (o.status === 'Invoiced' || o.status === 'Paid')
+      && typeof o.invoiceNumber === 'string'
+      && o.invoiceNumber.length > 0,
+    ),
   );
 
   readonly selectedOrderId = signal('');
