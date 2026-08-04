@@ -157,7 +157,7 @@ const REMOTE_LOCATION = 'Remote';
                   <td>{{ r.role }}</td>
                   <td>{{ r.organization || '—' }}</td>
                   <td>{{ r.location || '—' }}</td>
-                  <td class="text-right tabular-nums">{{ r.capacity }}</td>
+                  <td class="text-right tabular-nums">{{ r.capacity | number:'1.0-2' }}</td>
                   <td class="tabular-nums">{{ r.hireDate || '—' }}</td>
                   <td>
                     @if (isTerminated(r)) {

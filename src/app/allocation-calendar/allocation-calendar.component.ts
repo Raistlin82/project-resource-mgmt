@@ -33,6 +33,7 @@ import {
 } from '../services/calendar.util';
 import { MULTI_FTE_MAX, dailyCapFor, isMultiFteEligible, kindOf } from '../services/resource-kind.util';
 import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
+import { DecimalPipe } from '@angular/common';
 
 /** The three collections the calendar loads together, keyed on the assignment. */
 interface CalendarData {
@@ -84,7 +85,7 @@ function daysByMonth(days: AssignmentDay[]): Record<string, Record<string, numbe
 @Component({
   selector: 'app-allocation-calendar',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, FormsModule, ResourceKindBadgeComponent],
+  imports: [MatIconModule, FormsModule, DecimalPipe, ResourceKindBadgeComponent],
   host: { class: 'contents' },
   template: `
     <!-- tabindex="-1": the dialog container is programmatically focusable (never
@@ -101,7 +102,7 @@ function daysByMonth(days: AssignmentDay[]): Record<string, Record<string, numbe
             {{ resourceName() || 'Resource' }}
             <app-resource-kind-badge [kind]="resourceKind()" />
             <span class="text-ink-muted">•</span>
-            <span class="font-mono tabular-nums">{{ contractHoursPerDay() }}h / day</span>
+            <span class="font-mono tabular-nums">{{ contractHoursPerDay() | number:'1.0-2' }}h / day</span>
           </p>
           <!-- The per-day capacity hint is a CLIENT check on THIS assignment only; the
                true cross-assignment total per day is validated server-side at save. -->
@@ -155,7 +156,7 @@ function daysByMonth(days: AssignmentDay[]): Record<string, Record<string, numbe
                 <div class="flex items-center gap-3">
                   <span class="text-xs font-semibold text-ink-secondary font-mono tabular-nums"
                         [class.text-critical-text]="tracksSaturation() && monthTotal(month) > monthTarget(month)">
-                    {{ monthTotal(month) }}h / {{ monthTarget(month) }}h
+                    {{ monthTotal(month) | number:'1.0-2' }}h / {{ monthTarget(month) | number:'1.0-2' }}h
                   </span>
                   @if (isOpen(month)) {
                     <div class="flex items-center gap-1.5">
@@ -204,7 +205,7 @@ function daysByMonth(days: AssignmentDay[]): Record<string, Record<string, numbe
                       } @else {
                         <div class="text-sm font-mono tabular-nums mt-1 py-0.5"
                              [class.text-critical-text]="over(month, cell.date)"
-                             [class.text-ink]="!over(month, cell.date)">{{ hoursFor(month, cell.date) }}</div>
+                             [class.text-ink]="!over(month, cell.date)">{{ hoursFor(month, cell.date) | number:'1.0-2' }}</div>
                       }
                       <!-- Non-colour over-capacity signal (WCAG 1.4.1): a text+icon marker so
                            the state is perceivable without relying on the red highlight alone. -->

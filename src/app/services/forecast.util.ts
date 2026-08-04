@@ -244,7 +244,11 @@ export function capacityForecast(
   const requestById = new Map<string, ResourceRequest>();
   for (const r of data.requests) requestById.set(r.id, r);
 
-  // Pre-resolve committed bookings (assignment hours + its window).
+  // Pre-resolve committed bookings: the assignment's HOURS, time-phased over the
+  // linked REQUEST's window (resolveWindow below reads req.startDate/endDate, not
+  // the assignment's own dates). That is P1-16's remaining half — recorded in the
+  // reconciliation report's §10, not silently — so this comment must not read as
+  // "the assignment's window".
   const committedBookings = data.assignments.filter(isCommittedAssignment).map(a => {
     const req = requestById.get(a.requestId);
     const win = resolveWindow(req?.startDate, req?.endDate, horizonStart);

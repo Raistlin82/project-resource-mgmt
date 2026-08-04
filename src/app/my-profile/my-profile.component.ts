@@ -76,9 +76,9 @@ import { forkJoin, of } from 'rxjs';
                 @for (month of nextSixMonths; track month.name) {
                   <tr class="text-sm text-ink-secondary hover:bg-surface-muted transition-colors group">
                     <td class="py-4 pr-4 font-bold text-[var(--cc-ink)]">{{ month.name }}</td>
-                    <td class="py-4 px-4 font-medium font-mono tabular-nums">{{ profile()?.capacity! * 4 }}</td>
-                    <td class="py-4 px-4 font-medium font-mono tabular-nums">{{ getAssignedHoursForMonth() }}</td>
-                    <td class="py-4 px-4 font-medium font-mono tabular-nums">{{ (profile()?.capacity! * 4) - getAssignedHoursForMonth() }}</td>
+                    <td class="py-4 px-4 font-medium font-mono tabular-nums">{{ profile()?.capacity! * 4 | number:'1.0-2' }}</td>
+                    <td class="py-4 px-4 font-medium font-mono tabular-nums">{{ getAssignedHoursForMonth() | number:'1.0-2' }}</td>
+                    <td class="py-4 px-4 font-medium font-mono tabular-nums">{{ (profile()?.capacity! * 4) - getAssignedHoursForMonth() | number:'1.0-2' }}</td>
                     <td class="py-4 pl-4">
                       @let util = ((getAssignedHoursForMonth() / (profile()?.capacity! * 4)) * 100);
                       <div class="flex items-center gap-3">

@@ -290,7 +290,7 @@ interface WeekColumn {
                     <div class="min-w-0">
                       <div class="truncate font-semibold text-ink">{{ row.resourceName }}</div>
                       <div class="truncate text-[11px] uppercase tracking-wide text-ink-muted">{{ row.role }}</div>
-                      <div class="mt-0.5 font-mono tabular-nums text-[11px] text-ink-muted">{{ row.capacity }}h/wk</div>
+                      <div class="mt-0.5 font-mono tabular-nums text-[11px] text-ink-muted">{{ row.capacity | number:'1.0-2' }}h/wk</div>
                     </div>
                     @if (row.hasConflict) {
                       <span

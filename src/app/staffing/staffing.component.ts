@@ -63,7 +63,7 @@ interface DimensionMeter {
                 }
                 <div class="flex justify-between items-start mb-3">
                   <h3 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ req.name }}</h3>
-                  <span class="command-status">{{ req.requiredEffort }}h</span>
+                  <span class="command-status">{{ req.requiredEffort | number:'1.0-2' }}h</span>
                 </div>
                 <p class="text-sm font-semibold text-[var(--cc-muted)] mb-4 uppercase tracking-wider">{{ req.requiredRole }}</p>
                 <div class="flex gap-2 flex-wrap">

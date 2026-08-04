@@ -3647,20 +3647,19 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
   const visibleResourceIds = feedGlobalRole
     ? undefined
     : feedActorResourceId === undefined
-      // DEFENSIVE, CURRENTLY UNREACHABLE: `actorResourceId` resolves via
-      // `actorId(req)` (`id = req.verifiedUserId || String(req.header('X-User-Id')
-      // || 'system')`), which can never be falsy — `verifyBearer` yields
-      // 'unknown' rather than '', and the unauthenticated fallback is the
-      // literal 'system' — so `actorResourceId`'s own `?? (id || undefined)`
-      // always yields the (truthy) id, never `undefined`. This branch is
-      // therefore dead today. It is kept, rather than deleted, and made
-      // RESTRICTIVE (an empty scope — the roleFallback-only rows below, not an
-      // unrestricted feed) so that if `actorId`/`actorResourceId` ever change to
-      // make it reachable, the feed cannot silently diverge from
-      // `decideOneApproval`'s OWN treatment of an unresolved `deciderResourceId`:
-      // there, `scopeMatch` reduces to `roleFallback` alone, never to "anything
-      // goes". An empty `Set` (not `undefined`) is what makes the loop below
-      // apply exactly that: only no-manager-anywhere rows survive.
+      // REACHABLE, AND RESTRICTIVE ON PURPOSE. (This comment used to claim the
+      // branch was dead, arguing from an `?? (id || undefined)` fallback inside
+      // `actorResourceId` that no longer exists: that function now ends at
+      // `return user?.resourceId`, so any principal with no matching row in the
+      // user directory — a verified token whose `resource_id` claim is absent, or
+      // a demo header naming nobody — lands here with `undefined`.)
+      //
+      // An empty scope, never an unrestricted feed. This mirrors
+      // `decideOneApproval`'s OWN treatment of an unresolved `deciderResourceId`,
+      // where `scopeMatch` reduces to `roleFallback` alone and never to "anything
+      // goes"; an empty `Set` (not `undefined`) is what makes the loop below
+      // apply exactly that, so only no-manager-anywhere rows survive. Diverging
+      // here would show rows the decide endpoint then refuses.
       ? new Set<string>()
       : scopeOf(feedActorResourceId, resources, orgNodes);
   // PERFORMANCE: `accountableApproversOf` is O(resources.length) per call (it

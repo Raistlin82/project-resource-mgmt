@@ -143,7 +143,7 @@ interface UtilizationData {
             <div class="command-card p-6 sm:p-8 flex flex-col sm:flex-row sm:items-center justify-between gap-6">
               <div>
                 <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">{{ selectedResource()?.name }}</h2>
-                <p class="text-[var(--cc-muted)] font-medium mt-2">{{ selectedResource()?.role }} <span class="mx-2 text-ink-muted">•</span> Capacity: <span class="font-bold text-[var(--cc-ink)] font-mono tabular-nums">{{ selectedResource()?.capacity }}h/week</span></p>
+                <p class="text-[var(--cc-muted)] font-medium mt-2">{{ selectedResource()?.role }} <span class="mx-2 text-ink-muted">•</span> Capacity: <span class="font-bold text-[var(--cc-ink)] font-mono tabular-nums">{{ selectedResource()?.capacity | number:'1.0-2' }}h/week</span></p>
               </div>
               <div class="text-left sm:text-right command-card-muted p-4">
                 <div class="text-4xl font-black tracking-tighter font-mono tabular-nums" [class]="getUtilizationColorText(selectedResource()?.utilization || 0)">
@@ -241,7 +241,7 @@ interface UtilizationData {
                   <div class="p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                     <div>
                       <div class="font-bold text-[var(--cc-ink)]">{{ getRequestName(entry.requestId) }}</div>
-                      <div class="text-sm text-[var(--cc-muted)] mt-1 font-mono tabular-nums">{{ entry.date }} · {{ entry.hours }}h · {{ entry.notes || 'No notes' }}</div>
+                      <div class="text-sm text-[var(--cc-muted)] mt-1 font-mono tabular-nums">{{ entry.date }} · {{ entry.hours | number:'1.0-2' }}h · {{ entry.notes || 'No notes' }}</div>
                     </div>
                     <div class="flex items-center gap-2">
                       <span class="command-status"

@@ -92,7 +92,7 @@ interface WeekDay {
             </div>
             <div>
               <p class="command-kpi-label">Total Assigned Hours</p>
-              <p class="command-kpi-value">{{ totalAssignedHours() }}h</p>
+              <p class="command-kpi-value">{{ totalAssignedHours() | number:'1.0-2' }}h</p>
             </div>
           </div>
         </div>
@@ -253,9 +253,9 @@ interface WeekDay {
                   
                   <div class="flex items-center gap-4">
                     <div class="text-right">
-                      <div class="text-xl font-semibold text-[var(--cc-ink)] font-mono tabular-nums">{{ assignment.assignedHours }}h</div>
+                      <div class="text-xl font-semibold text-[var(--cc-ink)] font-mono tabular-nums">{{ assignment.assignedHours | number:'1.0-2' }}h</div>
                       <div class="text-xs text-[var(--cc-muted)] uppercase tracking-wider">Total Assigned</div>
-                      <div class="text-xs text-positive-text font-semibold mt-1 font-mono tabular-nums">{{ approvedHours(assignment.id) }}h approved actual</div>
+                      <div class="text-xs text-positive-text font-semibold mt-1 font-mono tabular-nums">{{ approvedHours(assignment.id) | number:'1.0-2' }}h approved actual</div>
                       <div class="text-xs text-[var(--cc-muted)] mt-1">Planned hours are edited per day in the Allocation Calendar.</div>
                     </div>
                     @if (canSubmitOwnTime()) {
@@ -310,7 +310,7 @@ interface WeekDay {
                     @for (entry of timeEntriesForAssignment(assignment.id); track entry.id) {
                       <div class="command-card-muted px-4 py-3 text-sm">
                         <div class="flex items-center justify-between gap-3">
-                          <span class="font-semibold text-ink-secondary font-mono tabular-nums">{{ entry.date }} · {{ entry.hours }}h</span>
+                          <span class="font-semibold text-ink-secondary font-mono tabular-nums">{{ entry.date }} · {{ entry.hours | number:'1.0-2' }}h</span>
                           <span class="command-chip"
                                 [class.is-positive]="entry.status === 'Approved'"
                                 [class.is-caution]="entry.status === 'Submitted'"
