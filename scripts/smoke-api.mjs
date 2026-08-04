@@ -3797,12 +3797,30 @@ async function checkOrgTreeIntegrity() {
  *     role-existence check is exercised against genuine data, not a fixture
  *     invented for the test.
  *   - no resource anywhere holds the literal role 'Nobody Has This' (check 6).
+ *   - 'Project Manager' (check 14) IS a genuine project-roles catalog entry
+ *     (seed.ts projectRoles id '2') but NO seeded resource holds it as `role` —
+ *     the fixture that actually distinguishes a catalog check from the
+ *     resources-based one implemented, unlike check 6's string which fails
+ *     under either mechanism.
  *
  * Every "expect 400" check below deliberately uses a FRESH, otherwise-unique
  * (contractId, role, currency) key of its own (never CT1+Developer+EUR, which
  * check 1 owns) so a check that wrongly returns 200 pre-implementation cannot
  * leave a row behind that later collides with — or is mistaken for evidence
  * for — a different check.
+ *
+ * ROUND 2 (coordinator review): checks 13a-c and 14 added.
+ *   - 13a-c close a CRITICAL gap the first round missed: every check past the
+ *     null-rejection loop gates on `!== undefined`, which is PUT's fall-back-
+ *     to-existing semantics — on POST (no existing row) an OMITTED key (not an
+ *     explicit null) left the merged value `undefined` and silently skipped
+ *     role-existence, uniqueness AND the numeric check, so a required column
+ *     could be omitted outright rather than nulled. See the checks' own
+ *     comment for the exact pre-fix repro.
+ *   - 14 closes a MINOR gap: check 6 cannot prove which of two candidate role
+ *     checks (catalog vs. resources-held) actually governs, since its string
+ *     fails under both. 14 uses a role that is real in one and absent in the
+ *     other.
  */
 async function checkNegotiatedRates() {
   const EMPLOYEE_HEADERS = { 'X-User-Id': '9', 'X-User-Role': 'employee' };
@@ -3981,6 +3999,77 @@ async function checkNegotiatedRates() {
       "GET /api/negotiated-rates as an 'employee' -> 403",
       status === 403,
       `status=${status}, body=${JSON.stringify(body)}`,
+    );
+  }
+
+  // 13a-c) ROUND 2 (coordinator review, critical) — a required field OMITTED
+  // OUTRIGHT on POST is a DIFFERENT bug from an explicit null (checks 8/10
+  // above): every check past the null-rejection loop gates on `!== undefined`,
+  // which is exactly PUT's "field not touched, fall back to existing"
+  // semantics — but POST has no existing row to fall back to, so an absent key
+  // leaves the merged value `undefined` and each downstream check (xor is the
+  // one exception, since it treats an absent contractId/projectId as meaningful)
+  // silently no-ops. Pre-fix, `POST {contractId:'CT1'}` (role/currency/billRate
+  // ALL absent) passed the null loop (nothing is `=== null`), passed xor and
+  // the FK check, then skipped role-existence, uniqueness AND the numeric
+  // check entirely, and the row was created with three missing notNull
+  // columns — a 200 in-memory, an unmapped 23502-as-500 on Postgres. Each
+  // sub-check below omits exactly ONE of the three REQUIRED_NEGOTIATED_RATE_FIELDS
+  // (never null — that path is already covered by checks 8/10), with the
+  // OTHER two present and valid, so a check can only pass by covering the
+  // specific omitted field, not by coincidentally tripping some other rule.
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: CONTRACT_ID, currency: 'EUR', billRate: 700 }, // role OMITTED, not null
+    });
+    check(
+      'POST /api/negotiated-rates with role OMITTED OUTRIGHT (not null) -> 400',
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+  }
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: CONTRACT_ID, role: 'Designer', billRate: 700 }, // currency OMITTED, not null
+    });
+    check(
+      'POST /api/negotiated-rates with currency OMITTED OUTRIGHT (not null) -> 400',
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+  }
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: CONTRACT_ID, role: 'Consultant', currency: 'EUR' }, // billRate OMITTED, not null
+    });
+    check(
+      'POST /api/negotiated-rates with billRate OMITTED OUTRIGHT (not null) -> 400',
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
+    );
+  }
+
+  // 14) ROUND 2 (coordinator review, minor) — PIN THE ROLE-CHECK SEMANTICS.
+  // Check 6 ('Nobody Has This') fails under EITHER candidate mechanism (the
+  // project-roles CATALOG, or roles actually HELD by a resource), so it cannot
+  // prove which one governs. 'Project Manager' is a genuine project-roles
+  // catalog entry (src/db/seed.ts projectRoles id '2') that NO seeded resource
+  // holds as its role (resources '1'-'6' hold only Developer/Consultant/
+  // Designer) — accepted under a catalog check, rejected under the one
+  // actually implemented (repos.resources). This is the fixture that pins the
+  // deliberate semantics, not merely 'some invalid string'.
+  {
+    const bad = await req('POST', '/negotiated-rates', {
+      headers: RBAC_HEADERS,
+      body: { contractId: CONTRACT_ID, role: 'Project Manager', currency: 'EUR', billRate: 700 },
+    });
+    check(
+      "POST /api/negotiated-rates {role:'Project Manager'} -> 400 (a real project-roles CATALOG entry, but held by NO seeded resource — pins the resources-based check, not a catalog check)",
+      bad.status === 400,
+      `status=${bad.status}, body=${JSON.stringify(bad.body)}`,
     );
   }
 }

@@ -4600,11 +4600,15 @@ apiRouter.delete('/billing-plan-items/:id', async (req, res) => {
 // No cross-record lock (unlike ORG_TREE_LOCK above): the org-tree guard reasons
 // over the WHOLE tree (parent/child/level, a graph), so an unserialized
 // concurrent write can leave the graph inconsistent. This validator reasons
-// over a single collection's own uniqueness key, the same shape as
-// `/contracts`/`/orders`/`/order-lines` above (none of which lock either) — a
-// race here would at worst let two near-simultaneous POSTs both insert the
-// same key, and `sellRateFor` (src/app/services/sell-rate.util.ts) already
-// resolves that deterministically (first match), so no data is corrupted.
+// over a single collection's own uniqueness key instead — a narrower shape
+// than the org tree's, though NOT one shared by `/contracts`/`/orders`/
+// `/order-lines` (those only run FK lookups and numeric checks; none of them
+// scan their own collection for a same-key duplicate the way this does). On
+// its own merits: a race here would at worst let two near-simultaneous POSTs
+// both insert the same key, `sellRateFor` (src/app/services/sell-rate.util.ts)
+// already resolves that deterministically (first match), and this collection
+// is low-frequency and finance/sales-gated (no high-concurrency writers) — so
+// no data is actually corrupted, unlike the org tree's graph-wide guards.
 
 /** Every notNull column on negotiated_rates (src/db/schema.ts), declared ONCE
  *  so the null-rejection covers the class rather than a hand-picked subset. */
@@ -4635,6 +4639,23 @@ const REQUIRED_NEGOTIATED_RATE_FIELDS = ['role', 'currency', 'billRate'] as cons
  * anyone is ever staffed against it). A negotiated rate prices an actual
  * profile someone is billed AS, so this checks against the roles ACTUALLY
  * held by a resource today (`repos.resources`), not the catalog.
+ *
+ * ROUND 2 (coordinator review, critical) — OMITTED is not the same bug as
+ * NULL. Every check below the null loop reads `body.field === undefined ?
+ * existing?.field : body.field`, which is exactly PUT's fall-back-to-existing
+ * semantics: a field the client didn't touch should keep its stored value. On
+ * POST there IS no existing row, so an outright-OMITTED (not nulled) required
+ * field resolved to `undefined` and every one of those checks silently
+ * no-opped — `POST {contractId:'CT1'}` alone used to pass xor and the FK
+ * check, then skip role-existence, uniqueness AND the numeric check entirely,
+ * creating a row missing three notNull columns (200 in-memory, unmapped 23502
+ * as an opaque 500 on Postgres — the exact two-adapters-disagree class this
+ * whole task exists to close, reached by omission instead of by an explicit
+ * null). Closed by extending the SAME declared list: on POST (`ctx ===
+ * undefined`, so there is nothing to inherit from) every
+ * REQUIRED_NEGOTIATED_RATE_FIELDS entry must also be PRESENT, not merely
+ * non-null. PUT's fall-back-to-existing behaviour is untouched — this check
+ * is gated OFF whenever `ctx` is supplied.
  */
 async function validateNegotiatedRate(
   body: Partial<NegotiatedRate>,
@@ -4652,6 +4673,15 @@ async function validateNegotiatedRate(
   // Postgres — the two adapters silently disagreeing.
   for (const field of REQUIRED_NEGOTIATED_RATE_FIELDS) {
     if (body[field] === null) return `${field} is required and cannot be cleared`;
+  }
+  // 1b. Required-PRESENT on POST only (see the ROUND 2 doc note above): with
+  // no existing row to inherit from, an omitted key is not "unchanged", it is
+  // simply missing. PUT keeps its fall-back-to-existing behaviour untouched —
+  // this loop runs ONLY when there is no ctx (i.e. no existing row at all).
+  if (ctx === undefined) {
+    for (const field of REQUIRED_NEGOTIATED_RATE_FIELDS) {
+      if (body[field] === undefined) return `${field} is required`;
+    }
   }
 
   const all = await repos.negotiatedRates.list();
