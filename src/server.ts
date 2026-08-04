@@ -5657,23 +5657,42 @@ apiRouter.get('/storage-status', (_req, res) => res.json({
  * call here, shared by every consumer of this snapshot — the as-incurred
  * branch of recognitionSchedule then resolves per-entry via sellRateFor, never
  * issuing its own per-row query.
+ *
+ * `hoursPerDay` travels WITH those rates and is not optional in practice: a
+ * negotiated rate is stored in EUR/DAY while every other rate in the envelope is
+ * EUR/HOUR, so this is the divisor `sellRateFor` converts with. Omitting it does
+ * not fail loudly — it silently prices at the default 8h day — which is exactly
+ * why it is fetched here, next to the rates it belongs to.
+ *
+ * KNOWN, ADJUDICATED INCONSISTENCY (recorded, deliberately NOT fixed here).
+ * `resources` below is `repos.resources.list()` — the RAW rows, whose `billRate`
+ * is the per-resource override in EUR per DAY. The client surfaces instead read
+ * `/api/resources`, which resolves it to EUR per HOUR via `withEffectiveRates`.
+ * So in THIS envelope only, the `referenceBillRate` fallback of `sellRateFor` is
+ * fed a €/day value, and the as-incurred figures in the GL/BI exports overstate
+ * un-negotiated T&M by a factor of hoursPerDay. That predates negotiated rates
+ * (the pre-feature code multiplied the same raw column by hours) and switching it
+ * to `resolveResourceRates` moves every exported artifact's numbers, so it was
+ * ruled its own change — see the 2026-08-04 user decision 2 in the SDD ledger.
+ * The NEGOTIATED path here is correct: it converts with `hoursPerDay`.
  */
 async function loadFinanceData(): Promise<FinanceData> {
   const [
     requests, assignments, resources, orders, orderLines, financials,
     timeEntries, billingItems, contracts, customers, milestones,
-    changeRequests, projects, fxRates, negotiatedRates,
+    changeRequests, projects, fxRates, negotiatedRates, hoursPerDay,
   ] = await Promise.all([
     repos.requests.list(), repos.assignments.list(), repos.resources.list(),
     repos.orders.list(), repos.orderLines.list(), repos.projectFinancials.list(),
     repos.timeEntries.list(), repos.billingPlanItems.list(), repos.contracts.list(),
     repos.customers.list(), repos.milestones.list(), repos.changeRequests.list(),
     repos.projects.list(), repos.fxRates.list(), repos.negotiatedRates.list(),
+    getHoursPerDay(),
   ]);
   return {
     requests, assignments, resources, orders, orderLines, financials,
     timeEntries, billingItems, contracts, customers, milestones,
-    changeRequests, projects, fxRates, negotiatedRates,
+    changeRequests, projects, fxRates, negotiatedRates, hoursPerDay,
   };
 }
 

@@ -35,6 +35,7 @@ import {
 } from '../../services/finance.util';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { DEFAULT_HOURS_PER_DAY } from '../../services/sell-rate.util';
 
 interface BillingActualEvent {
   period: string;
@@ -877,6 +878,13 @@ export class ContractDetails {
     stream: ({ params: ready }) => (ready ? this.api.getNegotiatedRates() : of<NegotiatedRate[]>([])),
     defaultValue: [] as NegotiatedRate[],
   });
+  // The org's working hours/day — the EUR/DAY -> EUR/HOUR divisor sellRateFor
+  // needs to price a negotiated rate (see FinanceData.hoursPerDay). An OPEN read
+  // (like projects/milestones below), so it is not keyed on authReady; it IS
+  // included in recognitionDataReady() below, because a money figure must never
+  // render from a partial envelope — pricing 8 hours with the wrong divisor is a
+  // believable wrong number, which is worse than a loading state.
+  private hoursPerDayRes = rxResource({ stream: () => this.api.getHoursPerDay(), defaultValue: { value: DEFAULT_HOURS_PER_DAY } });
   private milestonesRes = rxResource({ stream: () => this.api.getMilestones(), defaultValue: [] as Milestone[] });
   // REFERENCE-DATA INTEGRITY (Phase B): `currency` is a config-value FK to the
   // configured currency set (fx-rates). Gated on authReady() with the other
@@ -966,6 +974,7 @@ export class ContractDetails {
     projects: this.projects(),
     contracts: this.contracts(),
     negotiatedRates: this.negotiatedRates(),
+    hoursPerDay: this.hoursPerDayRes.value().value,
   }));
 
   contractProjects = computed(() => this.projects().filter(p => p.contractId === this.id()));
@@ -1191,7 +1200,10 @@ export class ContractDetails {
    * True once every read the as-incurred (T&M) branch of recognitionSchedule/
    * recognitionJournal depends on — via sellRateFor's project-override /
    * contract-period precedence — has resolved its REAL (post-auth) value:
-   * contracts, projects, negotiatedRates, resources, timeEntries, billingItems.
+   * contracts, projects, negotiatedRates, resources, timeEntries, billingItems,
+   * hoursPerDay (the EUR/day -> EUR/hour divisor for a negotiated rate: without
+   * it the figure prices at the default-8 assumption instead of the configured
+   * working day, which is a plausible wrong number, not a missing one).
    *
    * This screen has NO shared forkJoin (unlike reporting.ts/dashboard.component.ts) —
    * each collection is its own independent rxResource, and the page's only gate
@@ -1212,7 +1224,8 @@ export class ContractDetails {
     && !this.negotiatedRatesRes.isLoading()
     && !this.resourcesRes.isLoading()
     && !this.timeEntriesRes.isLoading()
-    && !this.billingPlanRes.isLoading(),
+    && !this.billingPlanRes.isLoading()
+    && !this.hoursPerDayRes.isLoading(),
   );
 
   /** YYYY-MM bounds spanning every dated signal that could carry recognition for this contract. */

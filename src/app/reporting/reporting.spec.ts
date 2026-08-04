@@ -48,6 +48,9 @@ async function setup(resources: Resource[] = RESOURCES, overrides: Partial<ApiSe
     getCustomers: empty,
     getFxRates: empty,
     getNegotiatedRates: empty,
+    // The EUR/day -> EUR/hour divisor for a negotiated rate. 8 is the seeded and
+    // default working day, so the figures below read as "one 8h day per day rate".
+    getHoursPerDay: () => of({ value: 8 }),
     ...overrides,
   } as unknown as ApiService;
   const authStub = { authReady: signal(true), isAuthenticated: signal(true) } as unknown as AuthService;

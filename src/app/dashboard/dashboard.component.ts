@@ -3,7 +3,7 @@ import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/c
 import { rxResource } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { Router, RouterLink } from '@angular/router';
-import { forkJoin, of } from 'rxjs';
+import { forkJoin, of, map } from 'rxjs';
 import { AuthService } from '../services/auth.service';
 import {
   ApiService,
@@ -42,6 +42,7 @@ import {
 } from '../shared/charts';
 import { ListStateComponent } from '../shared/list-state.component';
 import { countsTowardDeliveryCapacity, kindOf } from '../services/resource-kind.util';
+import { DEFAULT_HOURS_PER_DAY } from '../services/sell-rate.util';
 
 interface DashboardData {
   resources: Resource[];
@@ -57,6 +58,11 @@ interface DashboardData {
   changeRequests: ChangeRequest[];
   contracts: Contract[];
   negotiatedRates: NegotiatedRate[];
+  /**
+   * The org's working hours/day — the EUR/DAY -> EUR/HOUR divisor sellRateFor
+   * needs for a negotiated rate. In this same envelope, never a second load.
+   */
+  hoursPerDay: number;
 }
 
 type DeliveryHealth = 'green' | 'amber' | 'red';
@@ -533,6 +539,7 @@ export class DashboardComponent {
     changeRequests: [],
     contracts: [],
     negotiatedRates: [],
+    hoursPerDay: DEFAULT_HOURS_PER_DAY,
   };
 
   // FX rates feed FinanceData so portfolio rollups (margin, revenue, EAC, VAC)
@@ -578,6 +585,10 @@ export class DashboardComponent {
             // same tick as everything else.
             contracts: this.api.getContracts(),
             negotiatedRates: this.api.getNegotiatedRates(),
+            // The €/day -> €/hour divisor for those rates (see FinanceData's
+            // `hoursPerDay`): an open read, but in THIS forkJoin so the revenue
+            // chart never paints from a partial envelope.
+            hoursPerDay: this.api.getHoursPerDay().pipe(map(r => r.value)),
           })
         : of(DashboardComponent.EMPTY_DATA),
     defaultValue: DashboardComponent.EMPTY_DATA,
@@ -605,6 +616,7 @@ export class DashboardComponent {
       // recognitionSchedule via sellRateFor (design spec §4/§6).
       contracts: d.contracts,
       negotiatedRates: d.negotiatedRates,
+      hoursPerDay: d.hoursPerDay,
       // Normalise multi-currency amounts to base for portfolio money rollups.
       fxRates: this.fxRates(),
     };

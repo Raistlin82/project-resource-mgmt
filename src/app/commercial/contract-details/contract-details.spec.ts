@@ -85,6 +85,8 @@ describe('ContractDetails — recognition figure gating (Task 4, round 3)', () =
       getMilestones: () => of([]),
       getFxRates: () => of([]),
       getNegotiatedRates: () => negotiatedRates$,
+      // 8h working day: the EUR/day -> EUR/hour divisor for `rate` above.
+      getHoursPerDay: () => of({ value: 8 }),
     } as unknown as ApiService;
     const authStub = { authReady: signal(true), canApproveFinancials: signal(true) } as unknown as AuthService;
     const notifyStub = { show: vi.fn() } as unknown as NotificationService;
@@ -153,6 +155,7 @@ describe('ContractDetails — Negotiated Rates table (Task 5)', () => {
       getMilestones: () => of([]),
       getFxRates: () => of([]),
       getNegotiatedRates: () => of([]),
+      getHoursPerDay: () => of({ value: 8 }),
       ...overrides,
     } as unknown as ApiService;
   }

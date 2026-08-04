@@ -118,8 +118,15 @@ function usable(rate) {
     && typeof rate.billRate === 'number' && Number.isFinite(rate.billRate) && rate.billRate >= 0;
 }
 
-function sellRateFor({ projectId, role, date, referenceBillRate, rates, projects, contracts }) {
+function hoursPerDayOrDefault(hoursPerDay) {
+  return typeof hoursPerDay === 'number' && Number.isFinite(hoursPerDay) && hoursPerDay > 0 ? hoursPerDay : 8;
+}
+
+function sellRateFor({ projectId, role, date, referenceBillRate, hoursPerDay, rates, projects, contracts }) {
   if (projectId === undefined || role === undefined) return referenceBillRate;
+  // UNITS: a negotiated billRate is stored in EUR/DAY, the referenceBillRate
+  // /api/resources serves is already EUR/HOUR. Every path returns EUR/HOUR.
+  const perHour = (dayRate) => dayRate / hoursPerDayOrDefault(hoursPerDay);
 
   const contractId = projects.find((p) => p.id === projectId)?.contractId;
   const contract = contractId !== undefined ? contracts.find((c) => c.id === contractId) : undefined;
@@ -127,12 +134,12 @@ function sellRateFor({ projectId, role, date, referenceBillRate, rates, projects
 
   if (projectPeriodOk) {
     const onProject = rates.find((r) => r.projectId === projectId && r.role === role && usable(r));
-    if (onProject !== undefined) return onProject.billRate;
+    if (onProject !== undefined) return perHour(onProject.billRate);
   }
 
   if (contract !== undefined && withinPeriod(date, contract)) {
     const onContract = rates.find((r) => r.contractId === contractId && r.role === role && usable(r));
-    if (onContract !== undefined) return onContract.billRate;
+    if (onContract !== undefined) return perHour(onContract.billRate);
   }
 
   return referenceBillRate;
@@ -146,7 +153,7 @@ const finite = (v) => (Number.isFinite(v) ? v : 0);
  * "after", and `[]` for "before" (sellRateFor with an empty table always
  * falls through to referenceBillRate, which IS the pre-feature computation).
  */
-function revenueByProject({ timeEntries, resources, projects, contracts, rates }) {
+function revenueByProject({ timeEntries, resources, projects, contracts, rates, hoursPerDay }) {
   const totals = new Map(); // projectId -> revenue
   for (const t of timeEntries) {
     if (t.status !== 'Approved') continue;
@@ -156,6 +163,7 @@ function revenueByProject({ timeEntries, resources, projects, contracts, rates }
       role: resource?.role,
       date: t.date,
       referenceBillRate: resource?.billRate,
+      hoursPerDay,
       rates,
       projects,
       contracts,
@@ -172,18 +180,23 @@ async function main() {
   console.log(`Negotiated-rate impact target: ${API}`);
   console.log('---------------------------------------------------------------');
 
-  const [timeEntries, resources, projects, contracts, negotiatedRates] = await Promise.all([
+  const [timeEntries, resources, projects, contracts, negotiatedRates, hoursPerDaySetting] = await Promise.all([
     req('/time-entries'),
     req('/resources'),
     req('/projects'),
     req('/contracts'),
     req('/negotiated-rates'),
+    req('/settings/hours-per-day'),
   ]);
+  // The EUR/day -> EUR/hour divisor. /resources already serves an HOURLY
+  // billRate (withEffectiveRates divides by this same setting server-side),
+  // so without it the two sides of the multiplication are in different units.
+  const hoursPerDay = hoursPerDayOrDefault(hoursPerDaySetting?.value);
 
-  console.log(`INFO  ${timeEntries.length} time entries, ${resources.length} resources, ${projects.length} projects, ${contracts.length} contracts, ${negotiatedRates.length} negotiated rate(s)`);
+  console.log(`INFO  ${timeEntries.length} time entries, ${resources.length} resources, ${projects.length} projects, ${contracts.length} contracts, ${negotiatedRates.length} negotiated rate(s), hoursPerDay=${hoursPerDay}`);
 
-  const after = revenueByProject({ timeEntries, resources, projects, contracts, rates: negotiatedRates });
-  const before = revenueByProject({ timeEntries, resources, projects, contracts, rates: [] });
+  const after = revenueByProject({ timeEntries, resources, projects, contracts, rates: negotiatedRates, hoursPerDay });
+  const before = revenueByProject({ timeEntries, resources, projects, contracts, rates: [], hoursPerDay });
 
   const projectIds = new Set([...before.keys(), ...after.keys()]);
   const EPS = 1e-6; // guard against float noise, not a real difference

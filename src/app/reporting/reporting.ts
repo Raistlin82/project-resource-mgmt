@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, inject, signal, computed, PLATFORM_ID } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { isPlatformBrowser, CurrencyPipe, DecimalPipe } from '@angular/common';
-import { forkJoin, of } from 'rxjs';
+import { forkJoin, of, map } from 'rxjs';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, OrderLine, FinancialItem, TimeEntry, Issue, ChangeRequest, Milestone, BillingPlanItem, Contract, Customer, FxRate, NegotiatedRate, BASE_CURRENCY } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
@@ -9,6 +9,7 @@ import { computeProjectFinancials, FinanceData, arAging, arAgingByCustomer, dsoO
 import { NotificationService } from '../services/notification.service';
 import { toCsv, downloadCsv } from '../services/export.util';
 import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
+import { DEFAULT_HOURS_PER_DAY } from '../services/sell-rate.util';
 import { CommandBarChartComponent, CommandTrendChartComponent, CommandDonutChartComponent, BarSeries, TrendSeries } from '../shared/charts';
 import { ListStateComponent } from '../shared/list-state.component';
 
@@ -41,6 +42,13 @@ interface ReportingData {
   contracts: Contract[];
   customers: Customer[];
   negotiatedRates: NegotiatedRate[];
+  /**
+   * The org's working hours/day. Loaded HERE, in the same forkJoin, because a
+   * negotiated rate is stored in EUR/DAY and `sellRateFor` needs this divisor to
+   * price it in EUR/HOUR — without it the recognition figures on this page silently
+   * fall back to the default-8 assumption instead of the configured value.
+   */
+  hoursPerDay: number;
 }
 
 interface ArAgingBarRow extends ArAgingBucketTotal {
@@ -833,9 +841,14 @@ export class Reporting {
             // never a second independent load — so it settles at the same tick
             // and never makes a figure change under the user's eyes after paint.
             negotiatedRates: this.api.getNegotiatedRates(),
+            // €/day -> €/hour divisor for the negotiated rates above. An OPEN
+            // read, but it joins this SAME forkJoin rather than a second
+            // independent one so the priced figure never renders from a partial
+            // envelope (a money figure must never do that).
+            hoursPerDay: this.api.getHoursPerDay().pipe(map(r => r.value)),
           })
-        : of<ReportingData>({ resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [], negotiatedRates: [] }),
-    defaultValue: { resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [], negotiatedRates: [] },
+        : of<ReportingData>({ resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [], negotiatedRates: [], hoursPerDay: DEFAULT_HOURS_PER_DAY }),
+    defaultValue: { resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [], negotiatedRates: [], hoursPerDay: DEFAULT_HOURS_PER_DAY },
   });
 
   /**
@@ -893,7 +906,7 @@ export class Reporting {
 
   private financeData = computed<FinanceData>(() => {
     const d = this.dataRes.value();
-    return { requests: d.requests, assignments: d.assignments, resources: d.resources, orders: d.orders, orderLines: d.orderLines, financials: d.financials, timeEntries: d.timeEntries, changeRequests: d.changeRequests, projects: d.projects, billingItems: d.billingItems, contracts: d.contracts, customers: d.customers, milestones: d.milestones, fxRates: this.fxRes.value(), negotiatedRates: d.negotiatedRates };
+    return { requests: d.requests, assignments: d.assignments, resources: d.resources, orders: d.orders, orderLines: d.orderLines, financials: d.financials, timeEntries: d.timeEntries, changeRequests: d.changeRequests, projects: d.projects, billingItems: d.billingItems, contracts: d.contracts, customers: d.customers, milestones: d.milestones, fxRates: this.fxRes.value(), negotiatedRates: d.negotiatedRates, hoursPerDay: d.hoursPerDay };
   });
 
   /** Real per-project profitability (revenue/margin) from the commercial + finance data. */
