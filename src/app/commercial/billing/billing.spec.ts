@@ -1,9 +1,9 @@
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { Observable, of, Subject, throwError } from 'rxjs';
 import { Billing } from './billing';
 import {
-  ApiService, BillingPlanItem, Contract, Customer, NegotiatedRate, Project, Resource, TimeEntry,
+  ApiService, BillingPlanItem, Contract, Customer, FxRate, NegotiatedRate, Project, Resource, TimeEntry,
 } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
@@ -131,5 +131,137 @@ describe('Billing — T&M Accrued prices at the negotiated sell rate (final revi
     const text = tmAccruedTile(fixture).textContent ?? '';
 
     expect(text).toContain('€2,000');
+  });
+});
+
+/**
+ * The rest of this file comes from `codex/ui-defect-remediation`. It exercises a
+ * different concern — the KPI strip's loading/error envelope (P1-02/P1-10), the
+ * per-project invoice cutoff (P1-13) and the conditional billing validators
+ * (P1-29) — over a deliberately SPARSE stub, so it keeps its own setup helper
+ * rather than reusing the negotiated-rate fixture above.
+ *
+ * UNITS: `getHoursPerDay` is part of the stub because the merged component needs
+ * the EUR/day -> EUR/hour divisor. The branch's own fixture predated that and
+ * used `billRate: 100` as if a negotiated rate were hourly; under the correct
+ * semantics the same 1,000 expectation needs an 800 €/day rate over an 8h day.
+ */
+async function setupSparse(overrides: Partial<Record<keyof ApiService, unknown>> = {}): Promise<ComponentFixture<Billing>> {
+  const empty = () => of([]);
+  const api = {
+    getBillingPlanItems: empty,
+    getContracts: empty,
+    getCustomers: empty,
+    getProjects: empty,
+    getMilestones: empty,
+    getOrders: empty,
+    getTimeEntries: empty,
+    getResources: empty,
+    getFxRates: () => of<FxRate[]>([{ currency: 'EUR', rateToBase: 1 }]),
+    getNegotiatedRates: empty,
+    getHoursPerDay: () => of({ value: 8 }),
+    ...overrides,
+  } as unknown as ApiService;
+  TestBed.configureTestingModule({
+    imports: [Billing],
+    providers: [
+      { provide: ApiService, useValue: api },
+      { provide: AuthService, useValue: { authReady: signal(true) } },
+      { provide: NotificationService, useValue: { show: vi.fn() } },
+    ],
+  });
+  await TestBed.compileComponents();
+  return TestBed.createComponent(Billing);
+}
+
+describe('Billing financial KPI completeness', () => {
+  it('does not render financial KPI values while one required dependency is pending', async () => {
+    const fxRates = new Subject<FxRate[]>();
+    const fixture = await setupSparse({ getFxRates: () => fxRates as Observable<FxRate[]> });
+
+    await tick(fixture);
+
+    expect(host(fixture).querySelector('section[aria-label="Billing metrics"]')).toBeNull();
+    expect(host(fixture).textContent).toContain('Loading billing financial data');
+    fxRates.next([{ currency: 'EUR', rateToBase: 1 }]);
+    fxRates.complete();
+  });
+
+  it('shows an error state instead of zero-valued KPI tiles when a dependency fails', async () => {
+    const fixture = await setupSparse({ getFxRates: () => throwError(() => new Error('FX unavailable')) });
+
+    await tick(fixture);
+
+    expect(host(fixture).querySelector('section[aria-label="Billing metrics"]')).toBeNull();
+    expect(host(fixture).querySelector('[role="alert"]')?.textContent).toContain('billing financial data');
+  });
+});
+
+describe('Billing T&M accrued correctness', () => {
+  it('uses the negotiated sell rate and excludes only entries through the latest invoice cutoff', async () => {
+    const contract: Contract = {
+      id: 'CT1', customerId: 'C1', name: 'Framework', type: 'T&M', totalValue: 0,
+      currency: 'EUR', status: 'Active', startDate: '2026-01-01', endDate: '2026-12-31',
+    };
+    const project: Project = {
+      id: 'P1', name: 'Delivery', location: 'Rome', startDate: '2026-01-01',
+      endDate: '2026-12-31', status: 'Active', contractId: 'CT1',
+    };
+    const resource: Resource = {
+      id: 'R1', name: 'Developer', role: 'Developer', skills: [], projectRoles: [],
+      externalExperience: [], utilization: 80, capacity: 40, billRate: 200,
+    };
+    const entries: TimeEntry[] = [
+      { id: 'TE-OLD', assignmentId: 'A1', requestId: 'Q1', resourceId: 'R1', projectId: 'P1', date: '2026-02-10', hours: 10, status: 'Approved' },
+      { id: 'TE-NEW', assignmentId: 'A1', requestId: 'Q1', resourceId: 'R1', projectId: 'P1', date: '2026-03-10', hours: 10, status: 'Approved' },
+    ];
+    const invoiced: BillingPlanItem = {
+      id: 'BP1', contractId: 'CT1', projectId: 'P1', type: 'TimeAndMaterials',
+      label: 'February T&M', amount: 1_000, currency: 'EUR', status: 'Invoiced',
+      issuedDate: '2026-02-28T23:59:59.000Z',
+    };
+    /** 800 EUR per DAY -> 100 EUR per hour at the stub's 8h working day. */
+    const rate: NegotiatedRate = {
+      id: 'NR1', contractId: 'CT1', role: 'Developer', currency: 'EUR', billRate: 800,
+    };
+    const fixture = await setupSparse({
+      getBillingPlanItems: () => of([invoiced]),
+      getContracts: () => of([contract]),
+      getProjects: () => of([project]),
+      getResources: () => of([resource]),
+      getTimeEntries: () => of(entries),
+      getNegotiatedRates: () => of([rate]),
+    });
+
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // February is covered by the invoice cutoff. March remains unbilled and is
+    // priced at the negotiated 100 EUR/hour, not the 200 reference rate:
+    // 10h x 100 = 1,000. The un-converted day rate would give 8,000.
+    expect(fixture.componentInstance.kpis().tmAccrued).toBe(1_000);
+  });
+});
+
+describe('Billing conditional form validation', () => {
+  it('blocks missing type fields, out-of-range percentages, and fractional payment terms', async () => {
+    const fixture = await setupSparse();
+    await fixture.whenStable();
+    const form = fixture.componentInstance.form;
+    form.patchValue({
+      type: 'Capped', contractId: 'CT1', label: 'Capped delivery', amount: 100,
+      currency: 'EUR', capAmount: null, taxRatePct: 22, retentionPct: 0,
+      paymentTermsDays: 30,
+    });
+    expect(form.invalid).toBe(true);
+
+    form.controls.capAmount.setValue(150);
+    expect(form.valid).toBe(true);
+
+    form.controls.taxRatePct.setValue(101);
+    expect(form.invalid).toBe(true);
+    form.controls.taxRatePct.setValue(22);
+    form.controls.paymentTermsDays.setValue(1.5);
+    expect(form.invalid).toBe(true);
   });
 });

@@ -12,6 +12,7 @@ import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.
 import { DEFAULT_HOURS_PER_DAY } from '../services/sell-rate.util';
 import { CommandBarChartComponent, CommandTrendChartComponent, CommandDonutChartComponent, BarSeries, TrendSeries } from '../shared/charts';
 import { ListStateComponent } from '../shared/list-state.component';
+import { todayLocalIso } from '../services/local-date.util';
 
 interface Kpi {
   label: string;
@@ -198,6 +199,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           </div>
           @defer (hydrate on viewport) {
             <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="block" [rows]="1" label="utilization" (retry)="reloadData()">
+              <ng-template>
               @if (utilizationChartCategories().length > 0) {
                 <command-bar-chart
                   [categories]="utilizationChartCategories()"
@@ -211,6 +213,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
               } @else {
                 <p class="text-ink-muted text-sm">No resources to chart yet.</p>
               }
+              </ng-template>
             </app-list-state>
           } @placeholder {
             <div class="command-skeleton h-64"></div>
@@ -226,6 +229,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           </div>
           @defer (hydrate on viewport) {
             <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="block" [rows]="1" label="project margin" (retry)="reloadData()">
+              <ng-template>
               @if (marginChartCategories().length > 0) {
                 <command-bar-chart
                   [categories]="marginChartCategories()"
@@ -249,6 +253,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
               } @else {
                 <p class="text-ink-muted text-sm">No projects with customer revenue yet. Add Customer orders in Commercial → Orders.</p>
               }
+              </ng-template>
             </app-list-state>
           } @placeholder {
             <div class="command-skeleton h-64"></div>
@@ -266,6 +271,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
         </div>
         @defer (hydrate on viewport) {
           <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="block" [rows]="1" label="recognised revenue" (retry)="reloadData()">
+            <ng-template>
             @if (recognizedTrendCategories().length > 0) {
               <command-trend-chart
                 [categories]="recognizedTrendCategories()"
@@ -277,6 +283,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
             } @else {
               <p class="text-ink-muted text-sm">No dated revenue-recognition data to trend yet.</p>
             }
+            </ng-template>
           </app-list-state>
         } @placeholder {
           <div class="command-skeleton h-64"></div>
@@ -320,7 +327,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
                   </td>
                   <td class="px-6 sm:px-8 py-5 text-ink-secondary font-medium">{{ report.lastGenerated }}</td>
                   <td class="px-6 sm:px-8 py-5 text-right">
-                    <button type="button" (click)="exportReport()" class="text-accent-text hover:text-accent-strong hover:underline font-semibold text-sm transition-colors opacity-0 group-hover:opacity-100 focus-within:opacity-100 flex items-center justify-end gap-1 ml-auto">
+                    <button type="button" (click)="exportReport()" class="text-accent-text hover:text-accent-strong hover:underline font-semibold text-sm transition-colors opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 flex items-center justify-end gap-1 ml-auto">
                       Export <mat-icon class="text-[16px] w-[16px] h-[16px]">download</mat-icon>
                     </button>
                   </td>
@@ -340,6 +347,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
       <!-- Per-project drill-down with stacked cost-driver mini-bar -->
       @defer (hydrate on viewport) {
       <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="6" [columns]="10" label="margin &amp; variance" (retry)="reloadData()">
+      <ng-template>
       <div class="command-card overflow-hidden">
         <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-muted">
           <h3 class="text-xl font-bold text-ink tracking-tight">Project Margin &amp; Variance</h3>
@@ -419,6 +427,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           </table>
         </div>
       </div>
+      </ng-template>
       </app-list-state>
       } @placeholder {
         <div class="command-skeleton h-64"></div>
@@ -427,6 +436,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
       <!-- Threshold-breach alerts -->
       @defer (hydrate on viewport) {
       <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="4" label="portfolio alerts" (retry)="reloadData()">
+      <ng-template>
       <div class="command-card overflow-hidden">
         <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-surface-muted">
           <h3 class="text-xl font-bold text-ink tracking-tight">Portfolio Alerts</h3>
@@ -460,6 +470,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           }
         </ul>
       </div>
+      </ng-template>
       </app-list-state>
       } @placeholder {
         <div class="command-skeleton h-48"></div>
@@ -468,6 +479,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
       <!-- Margin-Compression alerts (project + customer, severity-graded) -->
       @defer (hydrate on viewport) {
       <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="4" label="margin-compression alerts" (retry)="reloadData()">
+      <ng-template>
       <div class="command-card overflow-hidden">
         <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-muted">
           <div>
@@ -517,6 +529,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           }
         </ul>
       </div>
+      </ng-template>
       </app-list-state>
       } @placeholder {
         <div class="command-skeleton h-48"></div>
@@ -569,6 +582,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
       <!-- Top customers by revenue (bar chart) -->
       @defer (hydrate on viewport) {
       <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="block" [rows]="1" label="customer revenue" (retry)="reloadData()">
+        <ng-template>
         <div class="command-card p-6 sm:p-8">
           <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-8">
             <h3 class="text-xl font-bold text-ink tracking-tight">Top Customers by Revenue</h3>
@@ -588,6 +602,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
             <p class="text-ink-muted text-sm">No customer revenue to chart yet.</p>
           }
         </div>
+        </ng-template>
       </app-list-state>
       } @placeholder {
         <div class="command-skeleton h-64"></div>
@@ -596,6 +611,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
       <!-- Top customers by margin -->
       @defer (hydrate on viewport) {
       <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="6" [columns]="7" label="customer profitability" (retry)="reloadData()">
+      <ng-template>
       <div class="command-card overflow-hidden">
         <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-muted">
           <h3 class="text-xl font-bold text-ink tracking-tight">Top Customers by Margin <span class="ml-1 text-xs font-semibold text-ink-muted normal-case tracking-normal">{{ baseCurrency }} (base)</span></h3>
@@ -656,6 +672,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           </table>
         </div>
       </div>
+      </ng-template>
       </app-list-state>
       } @placeholder {
         <div class="command-skeleton h-64"></div>
@@ -690,6 +707,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
       <!-- Aging bar chart (0-30 / 31-60 / 61-90 / 90+) -->
       @defer (hydrate on viewport) {
       <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="block" [rows]="1" label="A/R aging" (retry)="reloadData()">
+      <ng-template>
       <div class="command-card p-6 sm:p-8">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-8">
           <h3 class="text-xl font-bold text-ink tracking-tight">A/R Aging</h3>
@@ -731,6 +749,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           }
         </div>
       </div>
+      </ng-template>
       </app-list-state>
       } @placeholder {
         <div class="command-skeleton h-64"></div>
@@ -739,6 +758,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
       <!-- Per-customer A/R table -->
       @defer (hydrate on viewport) {
       <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="5" [columns]="4" label="A/R by customer" (retry)="reloadData()">
+      <ng-template>
       <div class="command-card overflow-hidden">
         <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-muted">
           <h3 class="text-xl font-bold text-ink tracking-tight">A/R by Customer <span class="ml-1 text-xs font-semibold text-ink-muted normal-case">{{ baseCurrency }} (base)</span></h3>
@@ -778,6 +798,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           </table>
         </div>
       </div>
+      </ng-template>
       </app-list-state>
       } @placeholder {
         <div class="command-skeleton h-48"></div>
@@ -1013,7 +1034,7 @@ export class Reporting {
 
   // --- Accounts Receivable (A/R aging) ---------------------------------------
   /** As-of date for aging; resolved once per construction (YYYY-MM-DD). */
-  private readonly today = new Date().toISOString().slice(0, 10);
+  private readonly today = todayLocalIso();
 
   private arResult = computed(() => arAging(this.dataRes.value().billingItems, this.today, this.fxRes.value()));
   arTotalOutstanding = computed(() => this.arResult().totalOutstanding);

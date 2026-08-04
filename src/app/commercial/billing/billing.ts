@@ -1,9 +1,9 @@
 import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, PLATFORM_ID, signal } from '@angular/core';
 import { CurrencyPipe, DatePipe, DecimalPipe, isPlatformBrowser, PercentPipe } from '@angular/common';
-import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
+import { AbstractControl, FormControl, FormGroup, ReactiveFormsModule, ValidationErrors, Validators } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
-import { concatMap, from, of, switchMap, toArray } from 'rxjs';
+import { of } from 'rxjs';
 import {
   ApiService,
   BASE_CURRENCY,
@@ -25,6 +25,8 @@ import { convertToBase, daysOverdue } from '../../services/finance.util';
 import { sellRateFor, DEFAULT_HOURS_PER_DAY } from '../../services/sell-rate.util';
 import { CsvColumn, downloadCsv, toCsv } from '../../services/export.util';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { ListStateComponent } from '../../shared/list-state.component';
+import { billingPlanValidationError } from '../../services/billing-validation.util';
 
 type BillingStatus = BillingPlanItem['status'];
 type Recurrence = NonNullable<BillingPlanItem['recurrence']>;
@@ -93,7 +95,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
 @Component({
   selector: 'app-billing',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CurrencyPipe, DatePipe, DecimalPipe, PercentPipe, MatIconModule, ReactiveFormsModule, ModalDialogDirective],
+  imports: [CurrencyPipe, DatePipe, DecimalPipe, PercentPipe, MatIconModule, ReactiveFormsModule, ModalDialogDirective, ListStateComponent],
   template: `
     <div class="command-page space-y-6 p-4 sm:p-6 lg:p-8">
       <!-- HEADER -->
@@ -121,6 +123,10 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
       </header>
 
       <!-- KPI STRIP -->
+      <app-list-state [loading]="financialDataLoading()" [error]="financialDataError()"
+                      skeleton="cards" [rows]="4" label="billing financial data"
+                      (retry)="reloadFinancialData()">
+        <ng-template>
       <section class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-8 gap-4" aria-label="Billing metrics">
         <article class="command-kpi info">
           <p class="command-kpi-label">Planned</p>
@@ -168,6 +174,8 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
           <p class="command-kpi-note">On Ready &amp; Invoiced conditions</p>
         </article>
       </section>
+        </ng-template>
+      </app-list-state>
 
       <!-- TYPE LEGEND -->
       <section class="command-card-muted rounded-lg px-4 py-3" aria-label="Billing type legend">
@@ -470,7 +478,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                 @case ('Capped') {
                   <div>
                     <label for="bCap" class="block text-sm font-semibold text-ink-secondary mb-1.5">Cap Amount *</label>
-                    <input id="bCap" type="number" formControlName="capAmount" class="command-input" placeholder="Not-to-exceed">
+                    <input id="bCap" type="number" min="0" formControlName="capAmount" class="command-input" placeholder="Not-to-exceed">
                   </div>
                 }
                 @case ('Progress') {
@@ -482,7 +490,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                 @case ('Expense') {
                   <div>
                     <label for="bMarkup" class="block text-sm font-semibold text-ink-secondary mb-1.5">Markup %</label>
-                    <input id="bMarkup" type="number" formControlName="markupPct" class="command-input" placeholder="e.g. 10">
+                    <input id="bMarkup" type="number" min="0" max="100" formControlName="markupPct" class="command-input" placeholder="e.g. 10">
                   </div>
                 }
               }
@@ -492,7 +500,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                 <label for="bAmount" class="block text-sm font-semibold text-ink-secondary mb-1.5">
                   {{ selectedType() === 'CreditNote' ? 'Credit Amount *' : 'Amount *' }}
                 </label>
-                <input id="bAmount" type="number" formControlName="amount" class="command-input" [placeholder]="selectedType() === 'CreditNote' ? 'Entered as a credit' : '0.00'">
+                <input id="bAmount" type="number" min="0" formControlName="amount" class="command-input" [placeholder]="selectedType() === 'CreditNote' ? 'Entered as a credit' : '0.00'">
                 @if (selectedType() === 'CreditNote') {
                   <p class="text-xs text-critical-text mt-1.5">Stored as a negative value (credit note).</p>
                 }
@@ -511,19 +519,19 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
               <!-- Tax -->
               <div>
                 <label for="bTax" class="block text-sm font-semibold text-ink-secondary mb-1.5">Tax (IVA) %</label>
-                <input id="bTax" type="number" formControlName="taxRatePct" class="command-input" placeholder="22">
+                <input id="bTax" type="number" min="0" max="100" formControlName="taxRatePct" class="command-input" placeholder="22">
               </div>
 
               <!-- Retention -->
               <div>
                 <label for="bRetention" class="block text-sm font-semibold text-ink-secondary mb-1.5">Retention %</label>
-                <input id="bRetention" type="number" formControlName="retentionPct" class="command-input" placeholder="0">
+                <input id="bRetention" type="number" min="0" max="100" formControlName="retentionPct" class="command-input" placeholder="0">
               </div>
 
               <!-- Payment terms -->
               <div>
                 <label for="bTerms" class="block text-sm font-semibold text-ink-secondary mb-1.5">Payment Terms (days)</label>
-                <input id="bTerms" type="number" formControlName="paymentTermsDays" class="command-input" placeholder="30">
+                <input id="bTerms" type="number" min="0" step="1" formControlName="paymentTermsDays" class="command-input" placeholder="30">
               </div>
 
               <!-- Expected date -->
@@ -809,16 +817,55 @@ export class Billing {
     defaultValue: [] as FxRate[],
   });
 
-  readonly items = this.itemsRes.value;
-  readonly contracts = this.contractsRes.value;
-  readonly customers = this.customersRes.value;
-  readonly projects = this.projectsRes.value;
-  readonly milestones = this.milestonesRes.value;
-  readonly orders = this.ordersRes.value;
-  readonly timeEntries = this.timeEntriesRes.value;
-  readonly resources = this.resourcesRes.value;
-  readonly fxRates = this.fxRatesRes.value;
-  readonly negotiatedRates = this.negotiatedRatesRes.value;
+  // Never dereference rxResource.value() in an error state: the KPI state panel
+  // must be able to render instead of ResourceValueError aborting the template.
+  readonly items = computed(() => this.itemsRes.status() === 'error' ? [] : this.itemsRes.value());
+  readonly contracts = computed(() => this.contractsRes.status() === 'error' ? [] : this.contractsRes.value());
+  readonly customers = computed(() => this.customersRes.status() === 'error' ? [] : this.customersRes.value());
+  readonly projects = computed(() => this.projectsRes.status() === 'error' ? [] : this.projectsRes.value());
+  readonly milestones = computed(() => this.milestonesRes.status() === 'error' ? [] : this.milestonesRes.value());
+  readonly orders = computed(() => this.ordersRes.status() === 'error' ? [] : this.ordersRes.value());
+  readonly timeEntries = computed(() => this.timeEntriesRes.status() === 'error' ? [] : this.timeEntriesRes.value());
+  readonly resources = computed(() => this.resourcesRes.status() === 'error' ? [] : this.resourcesRes.value());
+  readonly fxRates = computed(() => this.fxRatesRes.status() === 'error' ? [] : this.fxRatesRes.value());
+  readonly negotiatedRates = computed(() => this.negotiatedRatesRes.status() === 'error' ? [] : this.negotiatedRatesRes.value());
+
+  /**
+   * Financial KPIs are meaningful only once every input has resolved. Includes
+   * `hoursPerDayRes`: it is the EUR/day -> EUR/hour divisor for a negotiated
+   * rate, so a strip rendered without it prices at the default-8 assumption
+   * rather than the configured working day.
+   */
+  readonly financialDataLoading = computed(() => !this.auth.authReady()
+    || this.itemsRes.isLoading()
+    || this.contractsRes.isLoading()
+    || this.projectsRes.isLoading()
+    || this.timeEntriesRes.isLoading()
+    || this.resourcesRes.isLoading()
+    || this.fxRatesRes.isLoading()
+    || this.negotiatedRatesRes.isLoading()
+    || this.hoursPerDayRes.isLoading());
+  readonly financialDataError = computed(() => [
+    this.itemsRes,
+    this.contractsRes,
+    this.projectsRes,
+    this.timeEntriesRes,
+    this.resourcesRes,
+    this.fxRatesRes,
+    this.negotiatedRatesRes,
+    this.hoursPerDayRes,
+  ].some(resource => resource.status() === 'error'));
+
+  reloadFinancialData(): void {
+    this.itemsRes.reload();
+    this.contractsRes.reload();
+    this.projectsRes.reload();
+    this.timeEntriesRes.reload();
+    this.resourcesRes.reload();
+    this.fxRatesRes.reload();
+    this.negotiatedRatesRes.reload();
+    this.hoursPerDayRes.reload();
+  }
 
   /**
    * True once every read the T&M Accrued tile prices with has resolved. A MONEY
@@ -826,7 +873,9 @@ export class Billing {
    * resources landed but negotiatedRates still in flight, `sellRateFor` falls
    * through to the reference rate and the tile shows a BELIEVABLE WRONG number
    * that later jumps — worse than a dash, which reads as "still loading". Same
-   * rule, same treatment as contract-details.ts's recognitionDataReady().
+   * rule, same treatment as contract-details.ts's recognitionDataReady(). This
+   * is narrower than `financialDataLoading` above on purpose: the strip-level
+   * gate can be satisfied while a reload of just the rate inputs is in flight.
    */
   protected readonly tmAccruedReady = computed<boolean>(() =>
     !this.itemsRes.isLoading()
@@ -887,16 +936,42 @@ export class Billing {
     label: new FormControl('', { nonNullable: true, validators: Validators.required }),
     milestoneId: new FormControl('', { nonNullable: true }),
     recurrence: new FormControl<Recurrence>('Monthly', { nonNullable: true }),
-    capAmount: new FormControl<number | null>(null),
-    progressPct: new FormControl<number | null>(null),
-    markupPct: new FormControl<number | null>(null),
+    capAmount: new FormControl<number | null>(null, [Validators.min(0)]),
+    progressPct: new FormControl<number | null>(null, [Validators.min(0), Validators.max(100)]),
+    markupPct: new FormControl<number | null>(null, [Validators.min(0), Validators.max(100)]),
     amount: new FormControl<number | null>(null, { validators: [Validators.required, Validators.min(0)] }),
     currency: new FormControl(BASE_CURRENCY, { nonNullable: true, validators: Validators.required }),
-    taxRatePct: new FormControl<number>(22, { nonNullable: true }),
-    retentionPct: new FormControl<number>(0, { nonNullable: true }),
-    paymentTermsDays: new FormControl<number>(30, { nonNullable: true }),
+    taxRatePct: new FormControl<number>(22, { nonNullable: true, validators: [Validators.min(0), Validators.max(100)] }),
+    retentionPct: new FormControl<number>(0, { nonNullable: true, validators: [Validators.min(0), Validators.max(100)] }),
+    paymentTermsDays: new FormControl<number>(30, { nonNullable: true, validators: [Validators.min(0), Validators.pattern(/^\d+$/)] }),
     expectedDate: new FormControl('', { nonNullable: true }),
-  });
+  }, { validators: Billing.billingPlanFormValidator });
+
+  private static billingPlanFormValidator(control: AbstractControl): ValidationErrors | null {
+    const raw = control.value as Record<string, unknown>;
+    const type = raw['type'] as BillingType | undefined;
+    const rawAmount = raw['amount'] as number | null | undefined;
+    const error = billingPlanValidationError({
+      type,
+      contractId: raw['contractId'] as string | undefined,
+      projectId: (raw['projectId'] as string | undefined) || undefined,
+      label: raw['label'] as string | undefined,
+      milestoneId: (raw['milestoneId'] as string | undefined) || undefined,
+      recurrence: raw['recurrence'] as BillingPlanItem['recurrence'],
+      capAmount: (raw['capAmount'] as number | null | undefined) ?? undefined,
+      progressPct: (raw['progressPct'] as number | null | undefined) ?? undefined,
+      markupPct: (raw['markupPct'] as number | null | undefined) ?? undefined,
+      amount: rawAmount === null || rawAmount === undefined
+        ? undefined
+        : type === 'CreditNote' ? -Math.abs(rawAmount) : rawAmount,
+      currency: raw['currency'] as string | undefined,
+      status: 'Planned',
+      taxRatePct: raw['taxRatePct'] as number | undefined,
+      retentionPct: raw['retentionPct'] as number | undefined,
+      paymentTermsDays: raw['paymentTermsDays'] as number | undefined,
+    });
+    return error ? { billingPlan: error } : null;
+  }
 
   readonly selectedType = toSignal(this.form.controls.type.valueChanges, { initialValue: this.form.controls.type.value });
   private readonly formProjectId = toSignal(this.form.controls.projectId.valueChanges, { initialValue: this.form.controls.projectId.value });
@@ -1026,48 +1101,64 @@ export class Billing {
   });
 
   /**
-   * T&M accrued = approved hours × the NEGOTIATED SELL RATE, for hours not yet
-   * captured by an Invoiced/Paid item.
+   * Unbilled T&M accrued: approved hours × the NEGOTIATED SELL RATE, for hours
+   * an issued as-incurred condition has not already covered.
    *
-   * Priced through the SAME `sellRateFor` resolution as recognitionSchedule
-   * (design spec §4/§6) — project override, else the project's contract rate for
-   * hours dated inside that contract's period, else the resource's own reference
-   * billRate. It used to read `resource.billRate` directly, so for any project
-   * with a negotiated rate this tile reported a different number than the
-   * dashboard, reporting and contract-details reported for the identical hours.
-   * One price prices T&M everywhere is the whole premise of the feature.
+   * PRICING (from main): the SAME `sellRateFor` resolution recognitionSchedule
+   * uses (design spec §4/§6) — project override, else the project's contract rate
+   * for hours dated inside that contract's period, else the resource's own
+   * reference billRate. Reading `resource.billRate` directly made this tile
+   * disagree with Dashboard, Reporting and Contract Details about the identical
+   * hours. One price prices T&M everywhere is the premise of the feature.
    *
-   * UNITS: `sellRateFor` returns €/HOUR on every path (it divides a stored €/day
-   * negotiated rate by hoursPerDay), which is what multiplying by raw `t.hours`
-   * requires.
+   * UNITS: `sellRateFor` returns €/HOUR on every path — it divides a stored €/day
+   * negotiated rate by `hoursPerDay` — which is what multiplying by raw
+   * `entry.hours` requires. `hoursPerDay` MUST stay on this call: without it a
+   * 1150 €/day override prices an 8h day at 9,200 € instead of 1,150 €.
+   *
+   * COVERAGE (P1-13, from the UX branch): the old rule treated a project as fully
+   * billed the moment ANY invoiced/paid item mentioned it, so one invoice made
+   * every future approved hour on that project vanish from Unbilled forever.
+   * Coverage is now a per-project cutoff at the latest `issuedDate` of an
+   * invoiced/paid AS-INCURRED condition, and only entries dated after it accrue.
    */
   private tmAccrued(): number {
     const resources = this.resourcesById();
-    // Projects already covered by an invoiced/paid billing item are considered billed.
-    const billedProjects = new Set(
-      this.items()
-        .filter(i => (i.status === 'Invoiced' || i.status === 'Paid') && i.projectId)
-        .map(i => i.projectId as string),
-    );
-    const rates = this.negotiatedRates();
     const projects = this.projects();
     const contracts = this.contracts();
+    const rates = this.negotiatedRates();
     const hoursPerDay = this.hoursPerDayRes.value().value;
+    const asIncurredTypes = new Set<BillingType>(['TimeAndMaterials', 'Capped', 'Expense']);
+    const billedThroughByProject = new Map<string, number>();
+    for (const item of this.items()) {
+      if (!asIncurredTypes.has(item.type)
+        || (item.status !== 'Invoiced' && item.status !== 'Paid')
+        || !item.issuedDate) continue;
+      const cutoff = Date.parse(item.issuedDate);
+      if (!Number.isFinite(cutoff)) continue;
+      const projectIds = item.projectId
+        ? [item.projectId]
+        : projects.filter(project => project.contractId === item.contractId).map(project => project.id);
+      for (const projectId of projectIds) {
+        billedThroughByProject.set(projectId, Math.max(billedThroughByProject.get(projectId) ?? -Infinity, cutoff));
+      }
+    }
     return this.timeEntries()
-      .filter(t => t.status === 'Approved' && !billedProjects.has(t.projectId))
-      .reduce((s, t) => {
-        const resource = resources.get(t.resourceId);
+      .filter(t => t.status === 'Approved'
+        && (Date.parse(t.date) || 0) > (billedThroughByProject.get(t.projectId) ?? -Infinity))
+      .reduce((sum, entry) => {
+        const resource = resources.get(entry.resourceId);
         const rate = sellRateFor({
-          projectId: t.projectId,
+          projectId: entry.projectId,
           role: resource?.role,
-          date: t.date,
+          date: entry.date,
           referenceBillRate: resource?.billRate,
           hoursPerDay,
           rates,
           projects,
           contracts,
         }) ?? 0;
-        return s + t.hours * rate;
+        return sum + entry.hours * rate;
       }, 0);
   }
 
@@ -1282,40 +1373,24 @@ export class Billing {
     this.busyId.set(item.id);
     const issuedDate = new Date().toISOString();
 
-    this.api.createOrder({
-      contractId: item.contractId,
-      type: 'Customer',
-      amount: item.amount,
-      currency: item.currency,
-      status: 'Invoiced',
-      orderDate: issuedDate,
-    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
-      next: order => {
-        this.api.updateBillingPlanItem(item.id, { status: 'Invoiced', orderId: order.id, issuedDate })
-          .pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
-            next: () => {
-              this.itemsRes.reload();
-              this.ordersRes.reload();
-              this.notifications.show(`Invoice generated for "${item.label}".`, 'success');
-              this.busyId.set(null);
-            },
-            error: () => {
-              this.notifications.show('Invoice order created, but condition update failed.', 'error');
-              this.busyId.set(null);
-            },
-          });
-      },
-      error: () => {
-        this.notifications.show('Failed to generate invoice.', 'error');
-        this.busyId.set(null);
-      },
-    });
+    this.api.generateBillingInvoice(item.id, issuedDate)
+      .pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+        next: () => {
+          this.itemsRes.reload();
+          this.ordersRes.reload();
+          this.notifications.show(`Invoice generated for "${item.label}".`, 'success');
+          this.busyId.set(null);
+        },
+        error: () => {
+          this.notifications.show('Failed to generate invoice. You can safely retry.', 'error');
+          this.busyId.set(null);
+        },
+      });
   }
 
   /**
-   * Generate one Customer invoice per selected Ready condition, processed
-   * sequentially: for each item create an Invoiced Order, then stamp the
-   * condition (status/orderId/issuedDate). Reloads once at the end.
+   * Generate selected invoices through the server batch operation. Each item is
+   * atomic and idempotent; partial failures remain selected for a safe retry.
    */
   generateSelectedInvoices(): void {
     if (this.batchRunning() || this.busyId() !== null) return;
@@ -1328,47 +1403,31 @@ export class Billing {
     this.batchRunning.set(true);
     const issuedDate = new Date().toISOString();
 
-    from(targets)
-      .pipe(
-        concatMap(item =>
-          this.api
-            .createOrder({
-              contractId: item.contractId,
-              type: 'Customer',
-              amount: item.amount,
-              currency: item.currency,
-              status: 'Invoiced',
-              orderDate: issuedDate,
-            })
-            .pipe(
-              switchMap(order =>
-                this.api.updateBillingPlanItem(item.id, {
-                  status: 'Invoiced',
-                  orderId: order.id,
-                  issuedDate,
-                }),
-              ),
-            ),
-        ),
-        toArray(),
-        takeUntilDestroyed(this.destroyRef),
-      )
+    this.api.generateBillingInvoices(targets.map(item => item.id), issuedDate)
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: results => {
+        next: response => {
           this.itemsRes.reload();
           this.ordersRes.reload();
-          this.selectedIds.set(new Set<string>());
+          this.selectedIds.set(new Set(response.failures.map(failure => failure.id)));
           this.batchRunning.set(false);
-          const n = results.length;
-          this.notifications.show(`Generated ${n} ${n === 1 ? 'invoice' : 'invoices'}.`, 'success');
+          const n = response.results.length;
+          if (response.failures.length) {
+            this.notifications.show(
+              `Generated ${n} ${n === 1 ? 'invoice' : 'invoices'}; ${response.failures.length} failed and remain selected for retry.`,
+              'error',
+            );
+          } else {
+            this.notifications.show(`Generated ${n} ${n === 1 ? 'invoice' : 'invoices'}.`, 'success');
+          }
         },
         error: () => {
-          // Some invoices may have been issued before the failure; reload to reflect reality.
+          // A response may be lost after the server commits; reload and keep the
+          // selection intact because retrying the same ids is idempotent.
           this.itemsRes.reload();
           this.ordersRes.reload();
-          this.selectedIds.set(new Set<string>());
           this.batchRunning.set(false);
-          this.notifications.show('Invoice batch failed before completing. Review the conditions and retry.', 'error');
+          this.notifications.show('Invoice batch response failed. Review the refreshed conditions and safely retry.', 'error');
         },
       });
   }
