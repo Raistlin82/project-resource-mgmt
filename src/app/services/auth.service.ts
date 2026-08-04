@@ -2,7 +2,10 @@ import { Injectable, signal, computed, inject, afterNextRender, PLATFORM_ID } fr
 import { isPlatformBrowser } from '@angular/common';
 import { OAuthService, AuthConfig } from 'angular-oauth2-oidc';
 import { filter } from 'rxjs/operators';
+import { Router } from '@angular/router';
 import { UserRole } from './api.service';
+import { capabilitiesForRoles, resourceIdFromOidcClaims } from './access-policy.util';
+import { AuthRuntimeMetadata, resolveAuthRuntimeConfig, safeOAuthReturnPath } from './auth-runtime.util';
 
 /**
  * Single source of truth for the current user's identity, backed by Keycloak
@@ -25,12 +28,6 @@ import { UserRole } from './api.service';
  *   bootstrap.
  */
 
-/** Issuer/client wiring for the local Keycloak realm. */
-// Keycloak runs on host :8081 (the user's openHAB owns :8080). In production
-// this is overridden by the deployed realm URL.
-const ISSUER = 'http://localhost:8081/realms/psa';
-const CLIENT_ID = 'psa-web';
-
 /**
  * Highest-privilege-wins ordering. The first matching role in this list (when
  * scanning the user's realm roles) becomes the effective {@link role}.
@@ -44,17 +41,6 @@ const ROLE_PRIORITY: readonly UserRole[] = [
   'pm',
   'employee',
 ];
-
-/**
- * The app keys mock data by resource id ('1' | '2' | '3'). Map the Keycloak
- * username to the corresponding resource id so the demo data keeps lining up.
- */
-const USERNAME_TO_RESOURCE_ID: Readonly<Record<string, string>> = {
-  julie: '1',
-  john: '2',
-  alice: '3',
-};
-const DEFAULT_RESOURCE_ID = '1';
 
 /**
  * Decode the payload of a JWT (base64url middle segment) into a plain claims
@@ -86,6 +72,7 @@ function decodeJwtPayload(token: string | null | undefined): Record<string, unkn
 @Injectable({ providedIn: 'root' })
 export class AuthService {
   private readonly oauth = inject(OAuthService);
+  private readonly router = inject(Router);
   private readonly platformId = inject(PLATFORM_ID);
   private readonly isBrowser = isPlatformBrowser(this.platformId);
 
@@ -107,25 +94,45 @@ export class AuthService {
   private readonly _authReady = signal(false);
   readonly authReady = this._authReady.asReadonly();
 
-  /** Stable user id: resource id derived from the username (data is keyed by it). */
+  /**
+   * Stable resource id for the signed-in OIDC principal. Empty means the
+   * identity is not linked to a resource; it must never default to a colleague.
+   */
   readonly userId = computed<string>(() => {
-    const claims = this._claims();
-    if (!claims) return DEFAULT_RESOURCE_ID;
-    const username = this.preferredUsername(claims);
-    return USERNAME_TO_RESOURCE_ID[username.toLowerCase()] ?? DEFAULT_RESOURCE_ID;
+    return resourceIdFromOidcClaims(this._claims()) ?? '';
   });
 
-  /** Highest-privilege role from realm_access.roles; 'employee' when anonymous. */
+  readonly hasResourceIdentity = computed(() => this.userId() !== '');
+
+  /** Every recognized application role carried by the verified principal. */
+  readonly roles = computed<readonly UserRole[]>(() => {
+    const claims = this._claims();
+    if (!claims) return ['employee'];
+    const recognized = this.realmRoles(claims)
+      .filter((role): role is UserRole => ROLE_PRIORITY.includes(role as UserRole));
+    return recognized.length ? [...new Set(recognized)] : ['employee'];
+  });
+
+  /** Primary role is display-only; authorization uses the additive role set. */
   readonly role = computed<UserRole>(() => {
-    const claims = this._claims();
-    if (!claims) return 'employee';
-    return this.highestRole(this.realmRoles(claims));
+    return this.highestRole(this.roles());
   });
 
-  readonly isManager = computed(() => ['resource-manager', 'delivery-executive', 'admin'].includes(this.role()));
-  readonly canManageCommercial = computed(() => ['sales', 'finance', 'delivery-executive', 'admin'].includes(this.role()));
-  readonly canApproveFinancials = computed(() => ['finance', 'delivery-executive', 'admin'].includes(this.role()));
-  readonly canApproveDelivery = computed(() => ['pm', 'delivery-executive', 'admin'].includes(this.role()));
+  private readonly capabilities = computed(() => capabilitiesForRoles(this.roles()));
+
+  readonly isManager = computed(() => this.capabilities().canManageResources);
+  readonly canReadStaffing = computed(() => this.capabilities().canReadStaffing);
+  readonly canManageStaffing = computed(() => this.capabilities().canManageStaffing);
+  readonly canManageResources = computed(() => this.capabilities().canManageResources);
+  readonly canReadCommercial = computed(() => this.capabilities().canReadCommercial);
+  readonly canManageCommercial = computed(() => this.capabilities().canManageCommercial);
+  readonly canReadFinancials = computed(() => this.capabilities().canReadFinancials);
+  readonly canManageProjects = computed(() => this.capabilities().canManageProjects);
+  readonly canManageConfiguration = computed(() => this.capabilities().canManageConfiguration);
+  readonly canViewPortfolioDashboard = computed(() => this.capabilities().canViewPortfolioDashboard);
+  readonly canSubmitOwnTime = computed(() => this.capabilities().canSubmitOwnTime && this.hasResourceIdentity());
+  readonly canApproveFinancials = computed(() => this.capabilities().canReadFinancials);
+  readonly canApproveDelivery = computed(() => this.hasAnyRole(['pm', 'delivery-executive', 'admin']));
 
   /** Whether a user is currently signed in (always false on the server). */
   readonly isAuthenticated = computed(() => this._claims() !== null);
@@ -148,13 +155,13 @@ export class AuthService {
   }
 
   hasAnyRole(roles: UserRole[]): boolean {
-    return roles.includes(this.role());
+    return this.roles().some(role => roles.includes(role));
   }
 
   /** Start the Keycloak login (Authorization Code Flow + PKCE). */
   login(): void {
     if (this.isBrowser) {
-      this.oauth.initCodeFlow();
+      this.oauth.initCodeFlow(this.currentAppPath());
     }
   }
 
@@ -170,15 +177,23 @@ export class AuthService {
    * compiling; ignored once a real Keycloak session is established.
    */
   setUser(id: string, role: UserRole = 'employee'): void {
-    this._claims.set({ preferred_username: id, realm_access: { roles: [role] } });
+    const mappedResourceId = resourceIdFromOidcClaims({ preferred_username: id })
+      ?? (/^\d+$/.test(id) ? id : undefined);
+    this._claims.set({
+      preferred_username: id,
+      ...(mappedResourceId ? { resource_id: mappedResourceId } : {}),
+      realm_access: { roles: [role] },
+    });
   }
 
   // --- bootstrap -----------------------------------------------------------
 
   private async init(): Promise<void> {
+    const runtime = await this.fetchRuntimeMetadata();
+    const authConfig = resolveAuthRuntimeConfig(runtime);
     const config: AuthConfig = {
-      issuer: ISSUER,
-      clientId: CLIENT_ID,
+      issuer: authConfig.issuer,
+      clientId: authConfig.clientId,
       redirectUri: window.location.origin + '/',
       responseType: 'code',
       scope: 'openid profile email',
@@ -195,18 +210,22 @@ export class AuthService {
     // Does the SERVER run in header-trust (local/dev) mode? Decided by the
     // backend, never the client, so the dev-only behaviours below cannot be
     // forced on in production.
-    const demoMode = await this.fetchDemoMode();
+    const demoMode = runtime.demoMode === true;
 
     try {
       await this.oauth.loadDiscoveryDocumentAndTryLogin();
       this.syncClaims();
       if (this.isAuthenticated()) {
         this.oauth.setupAutomaticSilentRefresh();
+        const returnPath = safeOAuthReturnPath(this.oauth.state);
+        if (returnPath && returnPath !== this.currentAppPath()) {
+          await this.router.navigateByUrl(returnPath, { replaceUrl: true });
+        }
       } else if (!demoMode) {
         // PRODUCTION: authentication is mandatory. Never show the app
         // anonymously — redirect straight to the Keycloak login. The browser
         // navigates away, so nothing below runs.
-        this.oauth.initCodeFlow();
+        this.oauth.initCodeFlow(this.currentAppPath());
         return;
       }
       // DEV + not signed in: anonymous browsing is allowed (the Sign in control
@@ -230,24 +249,28 @@ export class AuthService {
     }
   }
 
-  /** Ask the backend whether it runs in header-trust (local/dev) mode. */
-  private async fetchDemoMode(): Promise<boolean> {
+  /** Load public deployment metadata and whether local demo auth is enabled. */
+  private async fetchRuntimeMetadata(): Promise<AuthRuntimeMetadata & { demoMode?: boolean }> {
     try {
       const res = await fetch('/api/storage-status');
       if (res.ok) {
-        const meta = (await res.json()) as { demoMode?: boolean };
-        return meta.demoMode === true;
+        return (await res.json()) as AuthRuntimeMetadata & { demoMode?: boolean };
       }
     } catch {
-      // ignore — treat as production (no demo access)
+      // Ignore: secure defaults keep demo mode disabled and use local OIDC wiring.
     }
-    return false;
+    return {};
+  }
+
+  private currentAppPath(): string {
+    return `${window.location.pathname}${window.location.search}${window.location.hash}`;
   }
 
   /** Local/dev demo identity: full-access admin, no IdP required. */
   private applyDemoAdmin(): void {
     this._claims.set({
       preferred_username: 'admin',
+      resource_id: '1',
       name: 'Demo Admin',
       realm_access: { roles: ['admin'] },
     });
