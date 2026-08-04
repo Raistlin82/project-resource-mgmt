@@ -45,8 +45,11 @@ import {
   CommercialWriteError,
   createOrderWithLine as createOrderWithLineWrite,
   generateBillingInvoice as generateBillingInvoiceWrite,
+  markBillingInvoicePaid as markBillingInvoicePaidWrite,
+  billingPlanStatusTransitionError,
   isValidCommercialIdempotencyKey,
   type BillingInvoiceResult,
+  type BillingPaymentResult,
   type OrderWithLineRequest,
 } from './server/commercial-write.util';
 import { InvoiceNumberCoordinator, type InvoiceNumberTransactionRunner } from './server/invoice-number.util';
@@ -5066,6 +5069,46 @@ function generateInvoiceForBillingItem(id: string, issuedDate: string): Promise<
       }, id, issuedDate)));
 }
 
+/**
+ * PAYMENT is two records, so it is one operation. Marking a billing condition
+ * Paid must also move its linked customer order to Paid; the client used to PUT
+ * only the billing item, which left the order 'Invoiced' forever and made Orders
+ * show a paid invoice as outstanding. `markBillingInvoicePaid` was written for
+ * exactly this and was never imported — the guards it carries (Invoiced-before-
+ * Paid, same-contract, customer-order-only, compensation on failure) were
+ * unreachable and its three unit tests were credited against dead code.
+ *
+ * Idempotent by state, not by key: both records already Paid is a replay
+ * (`replayed: true`), never a 409, so a lost response is safe to retry. Both
+ * repositories are taken from ONE transaction, and the same
+ * `billing:<id>` lock the invoice path uses serialises it against generation.
+ */
+function markBillingItemPaid(id: string, paidDate: string): Promise<BillingPaymentResult> {
+  return withLock(`billing:${id}`, () =>
+    withRepositoriesTransaction(
+      transactionRepos => markBillingInvoicePaidWrite({
+        billingPlanItems: transactionRepos.billingPlanItems,
+        orders: transactionRepos.orders,
+      }, id, paidDate),
+      { advisoryLockKeys: [`billing:${id}`] },
+    ));
+}
+
+apiRouter.post('/billing-plan-items/:id/mark-paid', async (req, res, next) => {
+  const paidDate = (req.body as Record<string, unknown> | undefined)?.['paidDate'] ?? new Date().toISOString();
+  const dateErr = validateDateFields({ paidDate }, ['paidDate']);
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
+  try {
+    res.json(await markBillingItemPaid(req.params.id, paidDate as string));
+  } catch (error) {
+    if (error instanceof CommercialWriteError) {
+      res.status(error.status).json({ error: error.message });
+      return;
+    }
+    next(error);
+  }
+});
+
 apiRouter.post('/billing-plan-items/:id/generate-invoice', async (req, res, next) => {
   const issuedDate = (req.body as Record<string, unknown> | undefined)?.['issuedDate'] ?? new Date().toISOString();
   const dateErr = validateDateFields({ issuedDate }, ['issuedDate']);
@@ -5170,6 +5213,18 @@ apiRouter.put('/billing-plan-items/:id', async (req, res) => {
     if (validationErr) return { status: 400, body: { error: validationErr } };
     const referenceErr = await validateBillingPlanReferences(merged);
     if (referenceErr) return { status: 400, body: { error: referenceErr } };
+
+    // INVOICED AND PAID ARE NOT CLIENT-SETTABLE. `billingPlanValidationError`
+    // validates enum membership only, so before this guard a client could PUT
+    // status:'Paid' onto a 'Planned' item with no orderId — and BILLED_STATUSES
+    // (finance.util.ts) then counts it as billed, moving the Paid/Unbilled KPIs
+    // with no invoice and no order behind it. Both transitions are owned by a
+    // server operation that also writes the linked order:
+    // POST :id/generate-invoice and POST :id/mark-paid. A re-PUT of the status
+    // the item already has stays allowed, so ordinary full-object updates of an
+    // Invoiced/Paid row are unaffected.
+    const statusTransitionErr = billingPlanStatusTransitionError(prev.status, body.status);
+    if (statusTransitionErr) return { status: 409, body: { error: statusTransitionErr } };
 
     // #14 CAPPED not-to-exceed: reject an overcap amount; otherwise apply any
     // accrued-T&M cap-breach flag (or clear a stale one) onto the merged item.

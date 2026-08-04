@@ -5004,6 +5004,118 @@ async function checkAccountableApproverRules() {
 }
 
 /**
+ * INVOICE -> PAYMENT LIFECYCLE, both records, end to end.
+ *
+ * WHY THIS EXISTS. `markBillingInvoicePaid` shipped with three passing unit
+ * tests and no import: no route reached it, so the client kept PUTting only the
+ * billing item and every linked customer order stayed 'Invoiced' forever. Unit
+ * tests could not see that — only the live wiring can. Every check below is an
+ * assertion about the ORDER as much as about the billing item.
+ *
+ * Uses contract CT1 / project '1' (Fixed-Price, no negotiated rate) and cleans
+ * up everything it creates, so it is order-independent.
+ */
+async function checkBillingPaymentLifecycle() {
+  const CONTRACT = 'CT1';
+  const PROJECT = '1';
+
+  const created = await req('POST', '/billing-plan-items', {
+    body: {
+      contractId: CONTRACT, projectId: PROJECT, type: 'Advance',
+      label: 'Smoke payment lifecycle', amount: 1234.5, currency: 'EUR',
+      status: 'Ready', expectedDate: '2026-09-30', paymentTermsDays: 30,
+    },
+  });
+  if (!check('POST /api/billing-plan-items (payment lifecycle setup) -> 200', created.status === 200, `status=${created.status} error=${created.body?.error ?? ''}`)) return;
+  const itemId = created.body.id;
+
+  // A Ready item has no invoice yet, so payment is not a legal transition. 409,
+  // not a silent success that would move the Paid KPI with no invoice behind it.
+  const early = await req('POST', `/billing-plan-items/${itemId}/mark-paid`, { body: { paidDate: '2026-10-01' } });
+  check(
+    'POST /billing-plan-items/:id/mark-paid before any invoice -> 409',
+    early.status === 409,
+    `status=${early.status} error=${early.body?.error ?? ''}`,
+  );
+
+  const invoiced = await req('POST', `/billing-plan-items/${itemId}/generate-invoice`, { body: { issuedDate: '2026-09-30' } });
+  const orderId = invoiced.body?.order?.id;
+  check(
+    'POST /billing-plan-items/:id/generate-invoice -> 200 with an Invoiced customer order',
+    invoiced.status === 200
+      && invoiced.body?.billingItem?.status === 'Invoiced'
+      && invoiced.body?.order?.status === 'Invoiced'
+      && invoiced.body?.order?.type === 'Customer'
+      && typeof invoiced.body?.order?.invoiceNumber === 'string',
+    `status=${invoiced.status} item=${invoiced.body?.billingItem?.status} order=${invoiced.body?.order?.status} invoiceNumber=${invoiced.body?.order?.invoiceNumber}`,
+  );
+
+  // THE GUARD: 'Paid' is owned by the operation that also writes the order.
+  // Before it, this PUT succeeded and BILLED_STATUSES counted the row as billed
+  // with the order still outstanding.
+  const forgedPaid = await req('PUT', `/billing-plan-items/${itemId}`, { body: { status: 'Paid', paidDate: '2026-10-01' } });
+  check(
+    'PUT /billing-plan-items/:id {status:Paid} -> 409 (server-owned transition)',
+    forgedPaid.status === 409,
+    `status=${forgedPaid.status} error=${forgedPaid.body?.error ?? ''}`,
+  );
+  const afterForged = await req('GET', '/billing-plan-items');
+  const stillInvoiced = (afterForged.body || []).find(i => i.id === itemId);
+  check(
+    'the refused PUT left the item Invoiced, not Paid',
+    stillInvoiced?.status === 'Invoiced',
+    `status=${stillInvoiced?.status}`,
+  );
+
+  // A field update that re-sends the status the item already has must still work
+  // (the edit form re-PUTs every field).
+  const benignPut = await req('PUT', `/billing-plan-items/${itemId}`, { body: { status: 'Invoiced', label: 'Smoke payment lifecycle (edited)' } });
+  check(
+    'PUT /billing-plan-items/:id re-sending the CURRENT status -> 200',
+    benignPut.status === 200 && benignPut.body?.label === 'Smoke payment lifecycle (edited)',
+    `status=${benignPut.status} label=${benignPut.body?.label}`,
+  );
+
+  const paid = await req('POST', `/billing-plan-items/${itemId}/mark-paid`, { body: { paidDate: '2026-10-01' } });
+  check(
+    'POST /billing-plan-items/:id/mark-paid -> 200 and moves BOTH records to Paid',
+    paid.status === 200
+      && paid.body?.billingItem?.status === 'Paid'
+      && paid.body?.billingItem?.paidDate === '2026-10-01'
+      && paid.body?.order?.status === 'Paid'
+      && paid.body?.replayed === false,
+    `status=${paid.status} item=${paid.body?.billingItem?.status} paidDate=${paid.body?.billingItem?.paidDate} order=${paid.body?.order?.status} replayed=${paid.body?.replayed}`,
+  );
+
+  // The order is the half the old client-side write never touched. Read it back
+  // from its own collection, not from the operation's response envelope.
+  const orders = await req('GET', '/orders');
+  const storedOrder = (orders.body || []).find(o => o.id === orderId);
+  check(
+    'GET /orders shows the linked customer order as Paid',
+    storedOrder?.status === 'Paid',
+    `orderId=${orderId} status=${storedOrder?.status}`,
+  );
+
+  // Idempotent by STATE: a retry after a lost response must not 409, and must
+  // not overwrite the recorded payment date.
+  const replay = await req('POST', `/billing-plan-items/${itemId}/mark-paid`, { body: { paidDate: '2026-11-15' } });
+  check(
+    'POST /billing-plan-items/:id/mark-paid twice -> 200 replayed, paidDate unchanged',
+    replay.status === 200 && replay.body?.replayed === true && replay.body?.billingItem?.paidDate === '2026-10-01',
+    `status=${replay.status} replayed=${replay.body?.replayed} paidDate=${replay.body?.billingItem?.paidDate}`,
+  );
+
+  // Cleanup: generated order line, billing item, generated order.
+  const lines = await req('GET', '/order-lines');
+  for (const line of (lines.body || []).filter(l => l.orderId === orderId)) {
+    await req('DELETE', `/order-lines/${line.id}`);
+  }
+  await req('DELETE', `/billing-plan-items/${itemId}`);
+  if (orderId) await req('DELETE', `/orders/${orderId}`);
+}
+
+/**
  * D task 4 — refuse a `Resource.managerId` assignment that would close a
  * cycle in the ORG CHART (distinct from the ORG TREE cycle guard exercised
  * above — see org-scope.util's module doc for the two axes). Uses
@@ -5424,6 +5536,15 @@ async function main() {
     await checkNegotiatedRates();
   } catch (err) {
     console.log(`FAIL  negotiated-rates integrity flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the billing payment
+  // lifecycle never masks or blocks any of the prior section results.
+  try {
+    await checkBillingPaymentLifecycle();
+  } catch (err) {
+    console.log(`FAIL  billing payment lifecycle — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

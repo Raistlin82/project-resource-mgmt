@@ -1438,13 +1438,22 @@ export class Billing {
       });
   }
 
+  /**
+   * PAYMENT IS TWO RECORDS. This used to PUT only the billing item, which left
+   * the linked customer order 'Invoiced' forever — Orders then showed a paid
+   * invoice as outstanding, with nothing to repair it. The server operation
+   * moves both in one transaction and is idempotent by state, so a lost response
+   * is safe to retry. `ordersRes` is reloaded too, because the order it changed
+   * is on this screen's own envelope.
+   */
   markPaid(item: BillingPlanItem): void {
     if (item.status !== 'Invoiced' || this.busyId()) return;
     this.busyId.set(item.id);
-    this.api.updateBillingPlanItem(item.id, { status: 'Paid', paidDate: new Date().toISOString() })
+    this.api.markBillingInvoicePaid(item.id, new Date().toISOString())
       .pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
         next: () => {
           this.itemsRes.reload();
+          this.ordersRes.reload();
           this.notifications.show(`"${item.label}" marked paid.`, 'success');
           this.busyId.set(null);
         },

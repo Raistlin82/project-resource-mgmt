@@ -13,6 +13,37 @@ export class CommercialWriteError extends Error {
   }
 }
 
+/**
+ * Statuses that mean "an invoice exists" and are therefore owned by a server
+ * operation that also writes the linked customer order — never by a plain PUT.
+ */
+const SERVER_OWNED_BILLING_STATUSES: readonly BillingPlanItem['status'][] = ['Invoiced', 'Paid'];
+
+/**
+ * Guard for `PUT /billing-plan-items/:id`. Returns an error message when the
+ * client is trying to *reach* Invoiced or Paid through a plain field update.
+ *
+ * Without it, a client can set `status:'Paid'` on a 'Planned' item with no
+ * `orderId` and no invoice: `BILLED_STATUSES` (finance.util.ts) then counts that
+ * row as billed, so the Paid and Unbilled KPIs move on a payment that never
+ * happened. Both transitions have an endpoint that writes both records —
+ * `POST :id/generate-invoice` and `POST :id/mark-paid`.
+ *
+ * Re-sending the status the item ALREADY has is allowed: full-object updates of
+ * an Invoiced/Paid row (the edit form re-PUTs every field) must keep working, and
+ * a no-op transition changes nothing.
+ */
+export function billingPlanStatusTransitionError(
+  currentStatus: BillingPlanItem['status'],
+  requestedStatus: BillingPlanItem['status'] | undefined,
+): string | null {
+  if (requestedStatus === undefined) return null;
+  if (requestedStatus === currentStatus) return null;
+  if (!SERVER_OWNED_BILLING_STATUSES.includes(requestedStatus)) return null;
+  const endpoint = requestedStatus === 'Paid' ? 'mark-paid' : 'generate-invoice';
+  return `status '${requestedStatus}' is set by POST /billing-plan-items/:id/${endpoint}, which also updates the linked customer order; it cannot be set directly`;
+}
+
 export interface BillingInvoiceResult {
   billingItem: BillingPlanItem;
   order: Order;

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { BillingPlanItem, Order, OrderLine, Project } from '../app/services/api.service';
 import { InMemoryRepository } from '../db/repository';
 import {
+  billingPlanStatusTransitionError,
   createOrderWithLine,
   generateBillingInvoice,
   markBillingInvoicePaid,
@@ -392,5 +393,33 @@ describe('commercial compound writes', () => {
     )).rejects.toThrow('same contract');
     expect((await billingPlanItems.get('BP-PAY-MISMATCH'))?.status).toBe('Invoiced');
     expect((await orders.get('ORD-OTHER'))?.status).toBe('Invoiced');
+  });
+});
+
+describe('billingPlanStatusTransitionError', () => {
+  it('refuses to reach Invoiced or Paid through a plain field update', () => {
+    // Before this guard a client could PUT status:'Paid' onto a Planned item
+    // with no orderId; BILLED_STATUSES then counted it as billed, moving the
+    // Paid and Unbilled KPIs on a payment that never happened.
+    expect(billingPlanStatusTransitionError('Planned', 'Paid'))
+      .toContain('/mark-paid');
+    expect(billingPlanStatusTransitionError('Ready', 'Invoiced'))
+      .toContain('/generate-invoice');
+    expect(billingPlanStatusTransitionError('Invoiced', 'Paid'))
+      .toContain('/mark-paid');
+  });
+
+  it('allows every transition the server does not own', () => {
+    expect(billingPlanStatusTransitionError('Planned', 'Ready')).toBeNull();
+    expect(billingPlanStatusTransitionError('Ready', 'Blocked')).toBeNull();
+    expect(billingPlanStatusTransitionError('Invoiced', 'Blocked')).toBeNull();
+    // No status in the patch at all: an ordinary field update.
+    expect(billingPlanStatusTransitionError('Invoiced', undefined)).toBeNull();
+  });
+
+  it('allows re-sending the status the item already has', () => {
+    // The edit form re-PUTs every field, so an Invoiced row must stay editable.
+    expect(billingPlanStatusTransitionError('Invoiced', 'Invoiced')).toBeNull();
+    expect(billingPlanStatusTransitionError('Paid', 'Paid')).toBeNull();
   });
 });

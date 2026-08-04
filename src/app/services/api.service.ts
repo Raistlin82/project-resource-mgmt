@@ -731,6 +731,16 @@ export interface BillingInvoiceResult {
   replayed: boolean;
 }
 
+/**
+ * Payment moves the billing condition AND its linked customer order. `replayed`
+ * is true when both were already Paid, so a lost response is safe to retry.
+ */
+export interface BillingPaymentResult {
+  billingItem: BillingPlanItem;
+  order: Order;
+  replayed: boolean;
+}
+
 export interface BillingInvoiceBatchResult {
   results: BillingInvoiceResult[];
   failures: { id: string; status: number; error: string }[];
@@ -1299,6 +1309,15 @@ export class ApiService {
   }
   generateBillingInvoices(ids: string[], issuedDate: string): Observable<BillingInvoiceBatchResult> {
     return this.http.post<BillingInvoiceBatchResult>(`${this.baseUrl}/billing-plan-items/generate-invoices`, { ids, issuedDate });
+  }
+  /**
+   * Marks a condition paid THROUGH THE SERVER OPERATION that also moves the
+   * linked customer order to Paid. A plain PUT of `status:'Paid'` left the order
+   * 'Invoiced' forever, so Orders showed a paid invoice as outstanding — and the
+   * server now refuses that PUT.
+   */
+  markBillingInvoicePaid(id: string, paidDate: string): Observable<BillingPaymentResult> {
+    return this.http.post<BillingPaymentResult>(`${this.baseUrl}/billing-plan-items/${id}/mark-paid`, { paidDate });
   }
   updateBillingPlanItem(id: string, i: Partial<BillingPlanItem>): Observable<BillingPlanItem> { return this.http.put<BillingPlanItem>(`${this.baseUrl}/billing-plan-items/${id}`, i); }
   deleteBillingPlanItem(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/billing-plan-items/${id}`); }
