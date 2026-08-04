@@ -252,6 +252,14 @@ describe('commercial compound writes', () => {
     const dependencies: OrderWithLineWriteDependencies = {
       orders,
       orderLines,
+      // P1 must exist on CT1: createOrderWithLine validates the line's project
+      // against the order's contract BEFORE it writes anything, so an empty
+      // projects repo would fail attribution instead of reaching the rollback
+      // path this test is about.
+      projects: new InMemoryRepository<Project>([{
+        id: 'P1', name: 'Alpha', location: 'Rome', startDate: '2026-01-01',
+        endDate: '2026-12-31', status: 'Active', contractId: 'CT1',
+      }]),
       createOrder: async order => {
         orderCreateAttempts += 1;
         return orders.create(order);
