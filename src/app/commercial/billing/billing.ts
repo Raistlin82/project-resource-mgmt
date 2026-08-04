@@ -879,15 +879,19 @@ export class Billing {
    * is narrower than `financialDataLoading` above on purpose: the strip-level
    * gate can be satisfied while a reload of just the rate inputs is in flight.
    */
-  protected readonly tmAccruedReady = computed<boolean>(() =>
-    !this.itemsRes.isLoading()
-    && !this.timeEntriesRes.isLoading()
-    && !this.resourcesRes.isLoading()
-    && !this.negotiatedRatesRes.isLoading()
-    && !this.projectsRes.isLoading()
-    && !this.contractsRes.isLoading()
-    && !this.hoursPerDayRes.isLoading(),
-  );
+  protected readonly tmAccruedReady = computed<boolean>(() => [
+    this.itemsRes,
+    this.timeEntriesRes,
+    this.resourcesRes,
+    this.negotiatedRatesRes,
+    this.projectsRes,
+    this.contractsRes,
+    this.hoursPerDayRes,
+    // NOT LOADING IS NOT RESOLVED: an errored resource reports isLoading()
+    // false, so an isLoading()-only gate lets a FAILED envelope price the tile.
+    // Today the strip-level financialDataError() hides this tile first, but the
+    // narrower gate must not depend on the wider one to stay correct.
+  ].every(res => !res.isLoading() && res.status() !== 'error'));
 
   /** Reporting/base currency the aggregate KPI strip is denominated in. */
   readonly baseCurrency = BASE_CURRENCY;

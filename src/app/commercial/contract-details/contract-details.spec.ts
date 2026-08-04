@@ -125,6 +125,79 @@ describe('ContractDetails — recognition figure gating (Task 4, round 3)', () =
     expect(resolvedText).not.toMatch(/2,000\.00/);
     expect(resolvedText).not.toMatch(/8,000\.00/);
   });
+
+  it('does not render Total Recognized when a dependency ERRORED, and offers a retry instead', async () => {
+    // An errored resource reports isLoading() === false. A gate written only on
+    // isLoading() therefore passes, and the figure renders priced off the
+    // reference billRate at the default-8 divisor — 10h x 200 €/h = 2,000
+    // instead of the negotiated 1,000. Reachable in production the moment a
+    // principal-gated read 401s. Revert recognitionDataReady() to the
+    // isLoading()-only form and this test sees "Total Recognized" and 2,000.00.
+    const contract: Contract = {
+      id: 'CT2', customerId: 'C1', name: 'T&M Framework', type: 'T&M', totalValue: 0,
+      currency: 'EUR', status: 'Active', startDate: '2020-01-01', endDate: '2030-12-31',
+    };
+    const customer: Customer = { id: 'C1', name: 'Acme Co' };
+    const project: Project = {
+      id: 'P2', name: 'Project Beta', location: 'Remote', startDate: '2020-01-01',
+      endDate: '2030-12-31', status: 'Active', contractId: 'CT2',
+    };
+    const resource: Resource = {
+      id: 'R1', name: 'Dev One', role: 'Developer', skills: [], projectRoles: [],
+      externalExperience: [], utilization: 80, capacity: 40, billRate: 200,
+    };
+    const entry: TimeEntry = {
+      id: 'TE1', assignmentId: 'a1', requestId: 'r1', resourceId: 'R1',
+      projectId: 'P2', date: '2026-05-01', hours: 10, status: 'Approved',
+    };
+    const item: BillingPlanItem = {
+      id: 'BP1', contractId: 'CT2', projectId: 'P2', type: 'TimeAndMaterials',
+      label: 'T&M', amount: 0, currency: 'EUR', status: 'Ready',
+    };
+
+    const apiStub = {
+      getContracts: () => of([contract]),
+      getCustomers: () => of([customer]),
+      getProjects: () => of([project]),
+      getOrders: () => of([]),
+      getOrderLines: () => of([]),
+      getRequests: () => of([]),
+      getAssignments: () => of([]),
+      getResources: () => of([resource]),
+      getProjectFinancials: () => of([]),
+      getTimeEntries: () => of([entry]),
+      getBillingPlanItems: () => of([item]),
+      getMilestones: () => of([]),
+      getFxRates: () => of([]),
+      getProjectRoles: () => of([]),
+      // The failing read: exactly what a 401 on a principal-gated GET produces.
+      getNegotiatedRates: () => throwError(() => new Error('401 Unauthorized')),
+      getHoursPerDay: () => of({ value: 8 }),
+    } as unknown as ApiService;
+    const authStub = { authReady: signal(true), canApproveFinancials: signal(true) } as unknown as AuthService;
+    const notifyStub = { show: vi.fn() } as unknown as NotificationService;
+
+    TestBed.configureTestingModule({
+      imports: [ContractDetails],
+      providers: [
+        provideRouter([]),
+        { provide: ApiService, useValue: apiStub },
+        { provide: AuthService, useValue: authStub },
+        { provide: NotificationService, useValue: notifyStub },
+      ],
+    });
+    await TestBed.compileComponents();
+    const fixture: ComponentFixture<ContractDetails> = TestBed.createComponent(ContractDetails);
+    fixture.componentRef.setInput('id', 'CT2');
+    await tick(fixture);
+
+    const text = host(fixture).textContent ?? '';
+    expect(text).not.toContain('Total Recognized');
+    expect(text).not.toMatch(/2,000\.00/);
+    // And it must not claim to still be loading something that already failed.
+    expect(text).not.toContain('Loading recognition data');
+    expect(text).toContain('Recognition figures are unavailable');
+  });
 });
 
 describe('ContractDetails — Negotiated Rates table (Task 5)', () => {

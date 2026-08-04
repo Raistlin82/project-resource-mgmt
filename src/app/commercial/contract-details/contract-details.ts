@@ -569,6 +569,16 @@ interface BillingControlRow {
                 No dated billing items or approved time entries to build a recognition schedule for this contract.
               </div>
             }
+          } @else if (recognitionDataError()) {
+            <!-- An errored read is NOT a slow read: saying "Loading…" forever is a
+                 lie the user cannot act on, and rendering the figure anyway would
+                 print a wrong number. Say what happened and offer the retry. -->
+            <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted">
+              <p>Recognition figures are unavailable — one of the reads they are derived from failed.</p>
+              <button type="button" class="command-button mt-3" (click)="reloadRecognitionData()">
+                <mat-icon class="text-[18px] w-[18px] h-[18px]">refresh</mat-icon> Retry
+              </button>
+            </div>
           } @else {
             <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted">
               Loading recognition data…
@@ -654,6 +664,16 @@ interface BillingControlRow {
                 No journal movement to preview — there is nothing recognized or deferred for this contract yet.
               </div>
             }
+          } @else if (recognitionDataError()) {
+            <!-- An errored read is NOT a slow read: saying "Loading…" forever is a
+                 lie the user cannot act on, and rendering the figure anyway would
+                 print a wrong number. Say what happened and offer the retry. -->
+            <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted">
+              <p>Recognition figures are unavailable — one of the reads they are derived from failed.</p>
+              <button type="button" class="command-button mt-3" (click)="reloadRecognitionData()">
+                <mat-icon class="text-[18px] w-[18px] h-[18px]">refresh</mat-icon> Retry
+              </button>
+            </div>
           } @else {
             <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted">
               Loading recognition data…
@@ -915,20 +935,29 @@ export class ContractDetails {
     defaultValue: [] as FxRate[],
   });
 
-  contracts = this.contractsRes.value;
-  customers = this.customersRes.value;
-  projects = this.projectsRes.value;
-  orders = this.ordersRes.value;
-  orderLines = this.orderLinesRes.value;
-  requests = this.requestsRes.value;
-  assignments = this.assignmentsRes.value;
-  resources = this.resourcesRes.value;
-  financials = this.financialsRes.value;
-  timeEntries = this.timeEntriesRes.value;
-  billingPlanItems = this.billingPlanRes.value;
-  milestones = this.milestonesRes.value;
-  fxRates = this.fxRatesRes.value;
-  negotiatedRates = this.negotiatedRatesRes.value;
+  // NEVER dereference rxResource.value() in an error state: it throws
+  // ResourceValueError, which aborts the whole template — so ONE failed read
+  // takes the entire contract page down, including the panels that would have
+  // explained the failure. The money figures are separately suppressed by
+  // recognitionDataReady() below; these accessors only keep the page renderable.
+  // Same rule, same treatment as billing.ts:822-832.
+  contracts = computed(() => this.contractsRes.status() === 'error' ? [] : this.contractsRes.value());
+  customers = computed(() => this.customersRes.status() === 'error' ? [] : this.customersRes.value());
+  projects = computed(() => this.projectsRes.status() === 'error' ? [] : this.projectsRes.value());
+  orders = computed(() => this.ordersRes.status() === 'error' ? [] : this.ordersRes.value());
+  orderLines = computed(() => this.orderLinesRes.status() === 'error' ? [] : this.orderLinesRes.value());
+  requests = computed(() => this.requestsRes.status() === 'error' ? [] : this.requestsRes.value());
+  assignments = computed(() => this.assignmentsRes.status() === 'error' ? [] : this.assignmentsRes.value());
+  resources = computed(() => this.resourcesRes.status() === 'error' ? [] : this.resourcesRes.value());
+  financials = computed(() => this.financialsRes.status() === 'error' ? [] : this.financialsRes.value());
+  timeEntries = computed(() => this.timeEntriesRes.status() === 'error' ? [] : this.timeEntriesRes.value());
+  billingPlanItems = computed(() => this.billingPlanRes.status() === 'error' ? [] : this.billingPlanRes.value());
+  milestones = computed(() => this.milestonesRes.status() === 'error' ? [] : this.milestonesRes.value());
+  fxRates = computed(() => this.fxRatesRes.status() === 'error' ? [] : this.fxRatesRes.value());
+  negotiatedRates = computed(() => this.negotiatedRatesRes.status() === 'error' ? [] : this.negotiatedRatesRes.value());
+  private hoursPerDay = computed(() => this.hoursPerDayRes.status() === 'error'
+    ? DEFAULT_HOURS_PER_DAY
+    : this.hoursPerDayRes.value().value);
 
   /** Canonical recurrence enum (matches BillingPlanItem['recurrence'] and billing's RECURRENCES). */
   readonly recurrences: readonly NonNullable<BillingPlanItem['recurrence']>[] = ['Monthly', 'Quarterly', 'Annual'];
@@ -1005,7 +1034,7 @@ export class ContractDetails {
     projects: this.projects(),
     contracts: this.contracts(),
     negotiatedRates: this.negotiatedRates(),
-    hoursPerDay: this.hoursPerDayRes.value().value,
+    hoursPerDay: this.hoursPerDay(),
   }));
 
   contractProjects = computed(() => this.projects().filter(p => p.contractId === this.id()));
@@ -1275,15 +1304,40 @@ export class ContractDetails {
    * figure (not the whole page) because everything else here is fine to show
    * as soon as it individually has data.
    */
+  private recognitionInputs() {
+    return [
+      this.contractsRes,
+      this.projectsRes,
+      this.negotiatedRatesRes,
+      this.resourcesRes,
+      this.timeEntriesRes,
+      this.billingPlanRes,
+      this.hoursPerDayRes,
+    ];
+  }
+
+  /**
+   * NOT LOADING IS NOT THE SAME AS RESOLVED. An errored resource reports
+   * `isLoading() === false`, so a gate written only on `isLoading()` lets a
+   * FAILED envelope through — and then `sellRateFor` falls through to the
+   * reference billRate at the default-8 divisor and Total Recognized renders a
+   * believable wrong figure from a read that never arrived. That is the exact
+   * outcome the doc comment above exists to prevent, so the gate must assert the
+   * resolved state positively: neither loading nor errored, for all seven.
+   * billing.ts:financialDataLoading/financialDataError models the same rule.
+   */
   protected recognitionDataReady = computed<boolean>(() =>
-    !this.contractsRes.isLoading()
-    && !this.projectsRes.isLoading()
-    && !this.negotiatedRatesRes.isLoading()
-    && !this.resourcesRes.isLoading()
-    && !this.timeEntriesRes.isLoading()
-    && !this.billingPlanRes.isLoading()
-    && !this.hoursPerDayRes.isLoading(),
+    this.recognitionInputs().every(res => !res.isLoading() && res.status() !== 'error'),
   );
+
+  /** True when one of those seven reads FAILED — a Retry, not a spinner. */
+  protected recognitionDataError = computed<boolean>(() =>
+    this.recognitionInputs().some(res => res.status() === 'error'),
+  );
+
+  protected reloadRecognitionData(): void {
+    for (const res of this.recognitionInputs()) res.reload();
+  }
 
   /** YYYY-MM bounds spanning every dated signal that could carry recognition for this contract. */
   private recognitionWindow = computed<{ from: string; to: string } | null>(() => {
