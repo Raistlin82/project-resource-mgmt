@@ -41,7 +41,13 @@ type PendingDelete = { kind: 'country'; code: string } | { kind: 'city'; id: str
             </thead>
             <tbody>
               @for (c of countries(); track c.code) {
-                <tr [class.bg-accent-tint]="selectedCountry() === c.code" class="cursor-pointer" (click)="selectCountry(c.code)">
+                <tr [class.bg-accent-tint]="selectedCountry() === c.code"
+                    [attr.aria-selected]="selectedCountry() === c.code"
+                    class="cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
+                    tabindex="0"
+                    (click)="selectCountry(c.code)"
+                    (keydown.enter)="selectCountry(c.code)"
+                    (keydown.space)="selectCountry(c.code); $event.preventDefault()">
                   <td><span class="font-mono font-bold tracking-wide text-[var(--cc-primary-text)]">{{ c.code }}</span></td>
                   <td class="font-bold">{{ c.name }}</td>
                   <td class="text-right">{{ cityCount(c.code) }}</td>

@@ -14,11 +14,11 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
   template: `
     <div [class]="projectId() ? '' : 'command-page space-y-6'">
       <div class="space-y-6">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-4">
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div class="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
             @if (!projectId()) {
               <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Project Partners</h2>
-              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
+              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block w-full min-w-0 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)] sm:w-auto">
                 <option value="" disabled>Select a project...</option>
                 @for (p of projects(); track p.id) {
                   <option [value]="p.id">{{ p.name }}</option>
@@ -28,7 +28,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
               <h2 class="font-display text-lg font-bold text-[var(--cc-ink)]">Project Partners</h2>
             }
           </div>
-          <button (click)="openForm()" class="command-button">
+          <button (click)="openForm()" class="command-button self-start sm:self-auto">
             <mat-icon class="text-sm">person_add</mat-icon> Invite Partner
           </button>
         </div>
@@ -40,8 +40,8 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
             <p class="text-[var(--cc-muted)] mt-1">Please select a project from the dropdown above to view partners.</p>
           </div>
         } @else {
-        <div class="command-card overflow-hidden">
-          <table class="command-data-table">
+        <div class="command-card overflow-x-auto">
+          <table class="command-data-table min-w-[44rem]">
             <thead>
               <tr>
                 <th class="px-6 py-4 font-medium">Company</th>

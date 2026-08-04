@@ -26,11 +26,11 @@ function initialsOf(name: string): string {
   template: `
     <div [class]="projectId() ? '' : 'command-page space-y-6'">
       <div class="space-y-6">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-4">
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div class="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
             @if (!projectId()) {
               <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Documents</h2>
-              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
+              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block w-full min-w-0 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)] sm:w-auto">
                 <option value="" disabled>Select a project...</option>
                 @for (p of projects(); track p.id) {
                   <option [value]="p.id">{{ p.name }}</option>
@@ -40,7 +40,7 @@ function initialsOf(name: string): string {
               <h2 class="font-display text-lg font-bold text-[var(--cc-ink)]">Documents</h2>
             }
           </div>
-          <button (click)="openForm()" class="command-button">
+          <button (click)="openForm()" class="command-button self-start sm:self-auto">
             <mat-icon class="text-sm">note_add</mat-icon> Add Document Entry
           </button>
         </div>
@@ -62,7 +62,7 @@ function initialsOf(name: string): string {
                      [class.bg-accent-tint]="doc.type === 'word'" [class.text-accent-text]="doc.type === 'word'" [class.ring-accent]="doc.type === 'word'">
                   <mat-icon>{{ doc.type === 'pdf' ? 'picture_as_pdf' : 'description' }}</mat-icon>
                 </div>
-                <button type="button" (click)="deleteDocument(doc)" aria-label="Delete document" class="text-[var(--cc-muted)] hover:text-critical-text opacity-0 group-hover:opacity-100 transition-opacity">
+                <button type="button" (click)="deleteDocument(doc)" [attr.aria-label]="'Delete ' + doc.name" class="text-[var(--cc-muted)] hover:text-critical-text opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100">
                   <mat-icon class="text-sm">delete</mat-icon>
                 </button>
               </div>
