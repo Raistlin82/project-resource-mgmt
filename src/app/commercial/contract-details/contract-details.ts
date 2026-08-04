@@ -282,7 +282,16 @@ interface BillingControlRow {
                 @if (!contractNegotiatedRates().length) {
                   <tr>
                     <td colspan="4" class="px-6 sm:px-8 py-10 text-center text-ink-muted">
-                      No negotiated rates for this contract. T&amp;M revenue prices at each profile's reference rate card.
+                      @if (moneyFiguresState() === 'error') {
+                        <!-- "None" is a FACT. Under a failed read it is not one, and
+                             printing it under the Limited-data banner above states
+                             as fact the very thing the banner says is unknown. -->
+                        <span>Unavailable — a read this list depends on failed.</span>
+                      } @else if (moneyFiguresState() === 'loading') {
+                        <span>Loading…</span>
+                      } @else {
+                        No negotiated rates for this contract. T&amp;M revenue prices at each profile's reference rate card.
+                      }
                     </td>
                   </tr>
                 }
@@ -531,7 +540,16 @@ interface BillingControlRow {
                 @if (!contractBillingPlan().length) {
                   <tr>
                     <td colspan="6" class="px-6 sm:px-8 py-10 text-center text-ink-muted">
-                      No billing plan items for this contract.
+                      @if (moneyFiguresState() === 'error') {
+                        <!-- "None" is a FACT. Under a failed read it is not one, and
+                             printing it under the Limited-data banner above states
+                             as fact the very thing the banner says is unknown. -->
+                        <span>Unavailable — a read this list depends on failed.</span>
+                      } @else if (moneyFiguresState() === 'loading') {
+                        <span>Loading…</span>
+                      } @else {
+                        No billing plan items for this contract.
+                      }
                     </td>
                   </tr>
                 }
@@ -802,7 +820,16 @@ interface BillingControlRow {
                 @if (!contractOrders().length) {
                   <tr>
                     <td colspan="4" class="px-6 sm:px-8 py-10 text-center text-ink-muted">
-                      No orders for this contract.
+                      @if (moneyFiguresState() === 'error') {
+                        <!-- "None" is a FACT. Under a failed read it is not one, and
+                             printing it under the Limited-data banner above states
+                             as fact the very thing the banner says is unknown. -->
+                        <span>Unavailable — a read this list depends on failed.</span>
+                      } @else if (moneyFiguresState() === 'loading') {
+                        <span>Loading…</span>
+                      } @else {
+                        No orders for this contract.
+                      }
                     </td>
                   </tr>
                 }
@@ -1418,9 +1445,32 @@ export class ContractDetails {
    * recognition inputs plus the order/cost side. One list, so the gates below
    * cannot drift apart the way recognitionDataReady() and the ungated KPI strip
    * did.
+   *
+   * `requestsRes` and `assignmentsRes` ARE in this list, and their absence was a
+   * defect the comment above was already claiming they were not: EAC derives from
+   * them. `computeProjectFinancials` -> `plannedLaborCostForProject`
+   * (finance.util.ts) reads `d.requests` to find the project's requests and
+   * `d.assignments` to price their assigned hours, feeding
+   * `etc = max(0, plannedLaborCost - actualLaborCost)` and therefore `eac`. If
+   * either read fails, `plannedLaborCost` collapses to 0, EAC understates, and
+   * without them here `moneyFiguresState()` would still say 'ready'. No role can
+   * trigger it today — requests, assignments and resources share one READ_RULES
+   * set — but this screen deliberately has no shared forkJoin, so an independent
+   * transient failure of one of them is exactly the case it is built to allow.
+   *
+   * A comment asserting completeness that the list does not deliver is the failure
+   * mode this branch has been paying for all week, so: if a figure on this screen
+   * reads a collection, that collection belongs here.
    */
   private moneyInputs() {
-    return [...this.recognitionInputs(), this.ordersRes, this.orderLinesRes, this.financialsRes];
+    return [
+      ...this.recognitionInputs(),
+      this.ordersRes,
+      this.orderLinesRes,
+      this.financialsRes,
+      this.requestsRes,
+      this.assignmentsRes,
+    ];
   }
 
   /**

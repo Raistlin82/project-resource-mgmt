@@ -464,6 +464,48 @@ describe('ContractDetails — money regions never show a fabricated figure (P1-1
     expect(text).not.toContain('Retention Held');
   });
 
+  it('never states "none" as a fact under its own Limited-data banner', async () => {
+    // ROUND 3. Orders, Negotiated Rates and Billing Plan items all derive from
+    // resources in moneyInputs(), so when one fails the banner appears above —
+    // and these three printed "No orders for this contract" / "No negotiated
+    // rates" / "No billing plan items" underneath it. An empty list presented as
+    // fact next to a notice saying the data is missing.
+    const text = host(await render(stub({
+      getOrders: () => throwError(() => new Error('401 Unauthorized')),
+    }))).textContent ?? '';
+
+    expect(text).toContain('Limited data');
+    expect(text).not.toContain('No orders for this contract');
+    expect(text).not.toContain('No negotiated rates for this contract');
+    expect(text).not.toContain('No billing plan items for this contract');
+    expect(text).toContain('Unavailable — a read this list depends on failed.');
+  });
+
+  it('still says "none" when the reads succeed and there genuinely is nothing', async () => {
+    // The positive control: the fix must not turn every empty list into
+    // "unavailable", which would be the same lie in the other direction.
+    const text = host(await render(stub())).textContent ?? '';
+    expect(text).not.toContain('Unavailable — a read this list depends on failed.');
+    expect(text).toContain('No negotiated rates for this contract');
+    expect(text).toContain('No billing plan items for this contract');
+  });
+
+  it('gates EAC on the requests and assignments it derives from', async () => {
+    // moneyInputs() claimed to hold "every read a money figure derives from" and
+    // did not hold these two. plannedLaborCostForProject reads d.requests and
+    // d.assignments; if either fails, plannedLaborCost collapses to 0 and EAC
+    // understates while the gate still said 'ready'. Drop either from
+    // moneyInputs() and this test sees the figures instead of the banner.
+    for (const failing of ['getRequests', 'getAssignments'] as const) {
+      const text = host(await render(stub({
+        [failing]: () => throwError(() => new Error('transient')),
+      }))).textContent ?? '';
+      expect(text, failing).toContain('Limited data');
+      expect(text, failing).not.toContain('Order Revenue');
+      TestBed.resetTestingModule();
+    }
+  });
+
   it('covers the per-project table, which shows the same money', async () => {
     const text = host(await render(stub({
       getTimeEntries: () => throwError(() => new Error('401 Unauthorized')),
