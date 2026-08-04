@@ -2,7 +2,14 @@ import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
 import { AllocationCalendarComponent } from './allocation-calendar.component';
-import { ApiService, AssignmentAllocation, Holiday, PlanningPeriod } from '../services/api.service';
+import {
+  ApiService,
+  AssignmentAllocation,
+  AssignmentAllocationResult,
+  AssignmentMonth,
+  Holiday,
+  PlanningPeriod,
+} from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { MULTI_FTE_MAX, type ResourceKind } from '../services/resource-kind.util';
@@ -26,10 +33,34 @@ function setup(kind: ResourceKind, overrides: Partial<AssignmentAllocation> = {}
   const getAssignmentAllocation = vi.fn(() => of({ ...allocationFor(kind), ...overrides }));
   const getPlanningPeriods = vi.fn(() => of(PERIODS));
   const getHolidays = vi.fn(() => of(HOLIDAYS));
+  const saveAssignmentAllocation = vi.fn((_id: string, month: string, dailyHours: Record<string, number>) =>
+    of({
+      id: 'A1',
+      requestId: 'REQ1',
+      resourceId: 'R1',
+      assignedHours: Object.values(dailyHours).reduce((sum, hours) => sum + hours, 0),
+      status: 'Draft',
+      month,
+      contractHoursPerDay: 8,
+      days: Object.entries(dailyHours)
+        .filter(([, hours]) => hours > 0)
+        .map(([date, hours], index) => ({ id: `D${index}`, assignmentId: 'A1', date, hours })),
+    } satisfies AssignmentAllocationResult),
+  );
+  const submitAssignmentMonth = vi.fn((_id: string, month: string) =>
+    of({
+      id: `A1:${month}`,
+      assignmentId: 'A1',
+      month,
+      status: 'Requested',
+    } satisfies AssignmentMonth),
+  );
   const api = {
     getAssignmentAllocation,
     getPlanningPeriods,
     getHolidays,
+    saveAssignmentAllocation,
+    submitAssignmentMonth,
   } as unknown as ApiService;
   const authStub = { authReady: signal(true), isAuthenticated: signal(true) } as unknown as AuthService;
   const notifyStub = { show: vi.fn() } as unknown as NotificationService;
@@ -44,7 +75,7 @@ function setup(kind: ResourceKind, overrides: Partial<AssignmentAllocation> = {}
   });
   const fixture = TestBed.createComponent(AllocationCalendarComponent);
   fixture.componentRef.setInput('assignmentId', 'A1');
-  return { fixture, api };
+  return { fixture, api, saveAssignmentAllocation, submitAssignmentMonth };
 }
 
 async function flush(fixture: { detectChanges: () => void; whenStable: () => Promise<unknown> }) {
@@ -173,5 +204,39 @@ describe('AllocationCalendarComponent', () => {
       .filter(v => v !== '');
     expect(values.at(-1)).toBe(String(MULTI_FTE_MAX));
     expect(values.every(v => Number(v) > 0 && Number(v) <= MULTI_FTE_MAX)).toBe(true);
+  });
+
+  it('persists dirty daily hours before submitting the month for approval', async () => {
+    const { fixture, saveAssignmentAllocation, submitAssignmentMonth } = setup('internal', {
+      months: [{ id: 'A1:2026-09', assignmentId: 'A1', month: '2026-09', status: 'Draft' }],
+    });
+    await flush(fixture);
+
+    fixture.componentInstance['setHours']('2026-09', '2026-09-01', 6);
+    fixture.componentInstance['submitMonth']('2026-09');
+
+    expect(saveAssignmentAllocation).toHaveBeenCalledWith(
+      'A1',
+      '2026-09',
+      expect.objectContaining({ '2026-09-01': 6 }),
+    );
+    expect(submitAssignmentMonth).toHaveBeenCalledWith('A1', '2026-09', undefined);
+    expect(saveAssignmentAllocation.mock.invocationCallOrder[0])
+      .toBeLessThan(submitAssignmentMonth.mock.invocationCallOrder[0]);
+  });
+
+  it('asks for confirmation instead of closing when daily hours are dirty', async () => {
+    const { fixture } = setup('internal');
+    await flush(fixture);
+    const closed = vi.fn();
+    fixture.componentInstance.closed.subscribe(closed);
+
+    fixture.componentInstance['setHours']('2026-09', '2026-09-01', 4);
+    fixture.detectChanges();
+    (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('[aria-label="Close"]')!.click();
+    fixture.detectChanges();
+
+    expect(closed).not.toHaveBeenCalled();
+    expect((fixture.nativeElement as HTMLElement).textContent).toContain('Unsaved changes');
   });
 });

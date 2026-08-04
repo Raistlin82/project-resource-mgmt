@@ -14,7 +14,7 @@ import {
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormsModule } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
-import { forkJoin, of } from 'rxjs';
+import { forkJoin, of, switchMap, tap } from 'rxjs';
 import {
   ApiService,
   AssignmentAllocation,
@@ -62,6 +62,13 @@ const EMPTY_DATA: CalendarData = {
   holidays: [],
 };
 
+/** Normalize persisted day rows into the edit-map shape used by the calendar. */
+function daysByMonth(days: AssignmentDay[]): Record<string, Record<string, number>> {
+  const map: Record<string, Record<string, number>> = {};
+  for (const day of days) (map[monthOf(day.date)] ??= {})[day.date] = day.hours;
+  return map;
+}
+
 /**
  * Daily allocation calendar (B1, Task 8). Given an assignment id (+ an optional
  * resource name for the header), it renders a grid of months × days for the spanned months
@@ -80,7 +87,8 @@ const EMPTY_DATA: CalendarData = {
   imports: [MatIconModule, FormsModule, ResourceKindBadgeComponent],
   host: { class: 'contents' },
   template: `
-    <div class="command-card w-full max-w-5xl max-h-[92vh] overflow-hidden flex flex-col">
+    <div class="command-card w-full max-w-5xl max-h-[92vh] overflow-hidden flex flex-col"
+         (keydown.escape)="onEscape($event)">
       <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] flex items-start justify-between bg-gradient-to-br from-surface-muted to-transparent">
         <div>
           <h2 id="allocCalTitle" class="font-display text-2xl font-bold text-[var(--cc-ink)] tracking-tight">Allocation calendar</h2>
@@ -98,7 +106,7 @@ const EMPTY_DATA: CalendarData = {
             <span>The capacity indicator only considers this assignment. The resource's daily total across all assignments is verified by the server on save: green does not guarantee the outcome.</span>
           </p>
         </div>
-        <button type="button" (click)="closed.emit()" aria-label="Close" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
+        <button type="button" (click)="requestClose()" aria-label="Close" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
           <mat-icon>close</mat-icon>
         </button>
       </div>
@@ -233,13 +241,13 @@ const EMPTY_DATA: CalendarData = {
               @if (isOpen(month)) {
                 <div class="flex justify-end items-center gap-3 mt-4 pt-4 border-t border-[var(--cc-line)]">
                   <button type="button" (click)="submitMonth(month)"
-                          [disabled]="!canSubmit(month) || submittingMonth() === month"
+                          [disabled]="!canSubmit(month) || submittingMonth() !== null || savingMonth() !== null"
                           [attr.aria-label]="'Submit month for approval — ' + monthLabel(month)"
                           class="command-button secondary disabled:opacity-50 disabled:cursor-not-allowed">
                     <mat-icon class="text-[18px] w-[18px] h-[18px]">send</mat-icon>
                     {{ submittingMonth() === month ? 'Submitting…' : 'Submit month for approval' }}
                   </button>
-                  <button type="button" (click)="saveMonth(month)" [disabled]="savingMonth() === month"
+                  <button type="button" (click)="saveMonth(month)" [disabled]="savingMonth() !== null || submittingMonth() !== null"
                           [attr.aria-label]="'Save month — ' + monthLabel(month)"
                           class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
                     <mat-icon class="text-[18px] w-[18px] h-[18px]">save</mat-icon>
@@ -252,8 +260,23 @@ const EMPTY_DATA: CalendarData = {
         }
       </div>
 
-      <div class="p-6 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end">
-        <button type="button" (click)="closed.emit()" class="command-button secondary">Close</button>
+      <div class="p-6 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)]">
+        @if (confirmingClose()) {
+          <div role="alert" class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <p class="font-semibold text-ink">Unsaved changes</p>
+              <p class="text-sm text-ink-muted">Discard your calendar edits and close?</p>
+            </div>
+            <div class="flex justify-end gap-3">
+              <button type="button" (click)="continueEditing()" class="command-button secondary">Continue editing</button>
+              <button type="button" (click)="discardChanges()" class="command-button">Discard changes</button>
+            </div>
+          </div>
+        } @else {
+          <div class="flex justify-end">
+            <button type="button" (click)="requestClose()" class="command-button secondary">Close</button>
+          </div>
+        }
       </div>
     </div>
   `,
@@ -397,11 +420,13 @@ export class AllocationCalendarComponent {
    */
   protected edited = linkedSignal<AssignmentDay[], Record<string, Record<string, number>>>({
     source: () => this.data.value().allocation.days,
-    computation: (days) => {
-      const map: Record<string, Record<string, number>> = {};
-      for (const d of days) (map[monthOf(d.date)] ??= {})[d.date] = d.hours;
-      return map;
-    },
+    computation: daysByMonth,
+  });
+
+  /** Last server-confirmed hours, kept separate from the editable buffer. */
+  private persisted = linkedSignal<AssignmentDay[], Record<string, Record<string, number>>>({
+    source: () => this.data.value().allocation.days,
+    computation: daysByMonth,
   });
 
   /**
@@ -427,6 +452,14 @@ export class AllocationCalendarComponent {
   protected submittingMonth = signal<string | null>(null);
   /** In-flight planner-note edits, keyed by month, before they are blurred to the server. */
   private plannerNoteDrafts = signal<Record<string, string>>({});
+  /** True while the inline discard confirmation is replacing the normal footer. */
+  protected confirmingClose = signal(false);
+
+  /** Any hour or note draft that differs from the last server-confirmed value. */
+  private hasUnsavedChanges = computed(() => this.months().some(month =>
+    this.monthHasUnsavedHours(month) ||
+    this.plannerNoteDraft(month) !== (this.monthRow(month)?.plannerNote ?? ''),
+  ));
 
   protected isOpen(month: string): boolean {
     return this.data.value().periods.find(p => p.id === month)?.status === 'Open';
@@ -443,6 +476,29 @@ export class AllocationCalendarComponent {
     const status = this.monthStatus(month);
     return this.isOpen(month) && (status === 'Draft' || status === 'Rejected');
   };
+
+  protected requestClose(): void {
+    if (this.hasUnsavedChanges()) {
+      this.confirmingClose.set(true);
+      return;
+    }
+    this.closed.emit();
+  }
+
+  /** Intercept Escape before the ancestor modal directive can bypass dirty-state checks. */
+  protected onEscape(event: Event): void {
+    event.preventDefault();
+    event.stopPropagation();
+    this.requestClose();
+  }
+
+  protected continueEditing(): void {
+    this.confirmingClose.set(false);
+  }
+
+  protected discardChanges(): void {
+    this.closed.emit();
+  }
 
   /** command-status tone modifier for a month's lifecycle status (same palette as
    *  the assignment-level status chip: Draft neutral, Requested amber, Allocated
@@ -496,9 +552,19 @@ export class AllocationCalendarComponent {
    * into `monthRows` — no full `data.reload()` (see saveMonth's doc comment for why).
    */
   protected submitMonth(month: string): void {
-    if (this.submittingMonth() !== null) return;
+    if (this.submittingMonth() !== null || this.savingMonth() !== null || !this.canSubmit(month)) return;
     this.submittingMonth.set(month);
-    this.api.submitAssignmentMonth(this.assignmentId(), month, this.plannerNoteDraft(month) || undefined)
+    const id = this.assignmentId();
+    const note = this.plannerNoteDraft(month) || undefined;
+    const submit = () => this.api.submitAssignmentMonth(id, month, note);
+    const request$ = this.monthHasUnsavedHours(month)
+      ? this.api.saveAssignmentAllocation(id, month, this.dailyHoursForMonth(month)).pipe(
+          tap(result => this.applyPersistedHours(month, result.days)),
+          switchMap(submit),
+        )
+      : submit();
+
+    request$
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: row => {
@@ -533,6 +599,14 @@ export class AllocationCalendarComponent {
    */
   editedHours(month: string): Record<string, number> {
     return this.edited()[month] ?? {};
+  }
+
+  /** Compare sparse maps with absent and explicit zero treated as the same value. */
+  private monthHasUnsavedHours(month: string): boolean {
+    const edited = this.edited()[month] ?? {};
+    const persisted = this.persisted()[month] ?? {};
+    const dates = new Set([...Object.keys(edited), ...Object.keys(persisted)]);
+    return [...dates].some(date => (edited[date] ?? 0) !== (persisted[date] ?? 0));
   }
 
   /** True iff this single day's hours exceed the daily cap (client hint only).
@@ -632,12 +706,9 @@ export class AllocationCalendarComponent {
    * a capacity 400), so we only clear the in-flight flag here.
    */
   protected saveMonth(month: string): void {
-    if (this.savingMonth() !== null) return;
+    if (this.savingMonth() !== null || this.submittingMonth() !== null) return;
     const id = this.assignmentId();
-    const dailyHours: Record<string, number> = {};
-    for (const cell of this.cellsByMonth()[month] ?? []) {
-      if (cell.working) dailyHours[cell.date] = this.hoursFor(month, cell.date);
-    }
+    const dailyHours = this.dailyHoursForMonth(month);
     this.savingMonth.set(month);
     this.api.saveAssignmentAllocation(id, month, dailyHours)
       .pipe(takeUntilDestroyed(this.destroyRef))
@@ -646,9 +717,7 @@ export class AllocationCalendarComponent {
           this.savingMonth.set(null);
           // Server-truth for THIS month only (0-hour days are dropped server-side).
           // Replace just this month's slice; sibling months keep their local edits.
-          const persisted: Record<string, number> = {};
-          for (const d of result.days) persisted[d.date] = d.hours;
-          this.edited.update(map => ({ ...map, [month]: persisted }));
+          this.applyPersistedHours(month, result.days);
           this.notifications.show(this.saveMessage(month, result.status), 'success');
           // `result.status` above is the ASSIGNMENT's derived rollup, not this
           // month's own lifecycle row (B3) — the save may have just lazily
@@ -661,6 +730,23 @@ export class AllocationCalendarComponent {
         },
         error: () => this.savingMonth.set(null),
       });
+  }
+
+  /** Payload used by both explicit Save and the atomic save-before-submit path. */
+  private dailyHoursForMonth(month: string): Record<string, number> {
+    const dailyHours: Record<string, number> = {};
+    for (const cell of this.cellsByMonth()[month] ?? []) {
+      if (cell.working) dailyHours[cell.date] = this.hoursFor(month, cell.date);
+    }
+    return dailyHours;
+  }
+
+  /** Accept server truth for one month without disturbing sibling-month edits. */
+  private applyPersistedHours(month: string, days: AssignmentDay[]): void {
+    const persisted: Record<string, number> = {};
+    for (const day of days) persisted[day.date] = day.hours;
+    this.edited.update(map => ({ ...map, [month]: persisted }));
+    this.persisted.update(map => ({ ...map, [month]: persisted }));
   }
 
   /**
