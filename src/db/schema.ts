@@ -31,6 +31,7 @@ import {
   boolean,
   jsonb,
   index,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 import type {
@@ -777,6 +778,9 @@ export const orders = pgTable(
   (t) => [
     index('orders_contract_id_idx').on(t.contractId),
     index('orders_partner_id_idx').on(t.partnerId),
+    // Legal invoice identity: PostgreSQL allows multiple NULLs in a unique
+    // index, while every issued number must be globally unique.
+    uniqueIndex('orders_invoice_number_unique').on(t.invoiceNumber),
   ],
 );
 

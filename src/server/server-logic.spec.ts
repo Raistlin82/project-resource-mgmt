@@ -2,8 +2,8 @@
  * Focused unit tests for the pure server helpers (no Express, no DB).
  *
  * Covers:
- *   - `maxIdSeq` (server.ts): the restart-safe id-suffix scanner that prevents
- *     PK collisions on prefixed ids (TE…/AL…/AR…) after a Postgres restart.
+ *   - `maxIdSeq`: retained compatibility parsing for legacy numeric/prefixed ids
+ *     (new entities use process-independent UUIDs).
  *   - the time-entry transition guard (`isAllowedTimeEntryTransition`, exported
  *     from staffing.util) the POST/PUT handlers enforce.
  *   - the POST /time-entries create-path invariant: the initial status is FORCED
