@@ -127,10 +127,14 @@ describe('Reporting — negotiated sell rates reach the rendered T&M figure (Tas
 
     const project: Project = { id: 'P2', name: 'Project Beta', location: 'Remote', startDate: '2020-01-01', endDate: '2030-12-31', status: 'Active', contractId: 'CT2' };
     const contract: Contract = { id: 'CT2', customerId: 'C1', name: 'T&M Framework', type: 'T&M', totalValue: 0, currency: 'USD', status: 'Active', startDate: '2020-01-01', endDate: '2030-12-31' };
-    const rate: NegotiatedRate = { id: 'nr1', contractId: 'CT2', role: 'Developer', currency: 'EUR', billRate: 1000 };
-    // Reference billRate (1500) is ABOVE the negotiated rate (1000) — a personal
-    // override must never beat a negotiated price (design spec §4/§6).
-    const resource: Resource = { id: 'R1', name: 'Dev One', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 80, capacity: 40, billRate: 1500 };
+    // UNITS (the C1 fix): a NegotiatedRate.billRate is EUR per DAY, while a
+    // Resource.billRate as /api/resources serves it is EUR per HOUR. So this
+    // fixture is a negotiated 800 €/day (= 100 €/h at the default 8h day)
+    // against a personal override of 200 €/h (= 1600 €/day).
+    const rate: NegotiatedRate = { id: 'nr1', contractId: 'CT2', role: 'Developer', currency: 'EUR', billRate: 800 };
+    // The reference rate is ABOVE the negotiated one — a personal override must
+    // never beat a negotiated price (design spec §4/§6).
+    const resource: Resource = { id: 'R1', name: 'Dev One', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 80, capacity: 40, billRate: 200 };
     const entry: TimeEntry = { id: 'TE1', assignmentId: 'a1', requestId: 'r1', resourceId: 'R1', projectId: 'P2', date, hours: 10, status: 'Approved' };
     const item: BillingPlanItem = { id: 'BP1', contractId: 'CT2', projectId: 'P2', type: 'TimeAndMaterials', label: 'T&M', amount: 0, currency: 'EUR', status: 'Ready' };
 
@@ -143,12 +147,15 @@ describe('Reporting — negotiated sell rates reach the rendered T&M figure (Tas
     });
     await flush(fixture);
 
-    // 10h x negotiated 1000 = 10000, compact-formatted "€10K" by the trend chart's
-    // own `eurCompact` formatter. 10h x the reference 1500 would render "€15K" —
-    // asserted on the RENDERED DOM (not a signal), scoped to the chart's own card
-    // so it cannot be satisfied by an unrelated tile elsewhere on the page.
+    // 10h x the negotiated 800 €/day resolved to 100 €/HOUR = 1000, compact-
+    // formatted "€1K" by the trend chart's own `eurCompact` formatter. 10h x the
+    // reference 200 €/h would render "€2K", and the pre-fix bug (the €/day figure
+    // multiplied by raw hours) would have rendered "€8K" — asserted on the
+    // RENDERED DOM (not a signal), scoped to the chart's own card so it cannot be
+    // satisfied by an unrelated tile elsewhere on the page.
     const text = recognisedRevenueTrendCard(fixture).textContent ?? '';
-    expect(text).toContain('€10K');
-    expect(text).not.toContain('€15K');
+    expect(text).toContain('€1K');
+    expect(text).not.toContain('€2K');
+    expect(text).not.toContain('€8K');
   });
 });

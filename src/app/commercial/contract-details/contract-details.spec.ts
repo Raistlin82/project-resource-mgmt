@@ -44,11 +44,11 @@ describe('ContractDetails — recognition figure gating (Task 4, round 3)', () =
       id: 'P2', name: 'Project Beta', location: 'Remote', startDate: '2020-01-01',
       endDate: '2030-12-31', status: 'Active', contractId: 'CT2',
     };
-    // Reference billRate (1500) is ABOVE the negotiated rate (1000) — the
-    // resolved figure must reflect the negotiated price, not the reference.
+    // The hourly reference (200 €/h) is ABOVE the negotiated hourly price
+    // (100 €/h) — the resolved figure must reflect the negotiated price.
     const resource: Resource = {
       id: 'R1', name: 'Dev One', role: 'Developer', skills: [], projectRoles: [],
-      externalExperience: [], utilization: 80, capacity: 40, billRate: 1500,
+      externalExperience: [], utilization: 80, capacity: 40, billRate: 200,
     };
     const entry: TimeEntry = {
       id: 'TE1', assignmentId: 'a1', requestId: 'r1', resourceId: 'R1',
@@ -58,7 +58,10 @@ describe('ContractDetails — recognition figure gating (Task 4, round 3)', () =
       id: 'BP1', contractId: 'CT2', projectId: 'P2', type: 'TimeAndMaterials',
       label: 'T&M', amount: 0, currency: 'EUR', status: 'Ready',
     };
-    const rate: NegotiatedRate = { id: 'nr1', contractId: 'CT2', role: 'Developer', currency: 'EUR', billRate: 1000 };
+    // UNITS (the C1 fix): the negotiated rate is 800 EUR per DAY, which at the
+    // default 8h working day resolves to 100 EUR per HOUR; the resource's own
+    // reference billRate is already hourly (200 €/h = 1600 €/day).
+    const rate: NegotiatedRate = { id: 'nr1', contractId: 'CT2', role: 'Developer', currency: 'EUR', billRate: 800 };
 
     // Every OTHER read this screen makes resolves synchronously; negotiatedRates
     // deliberately does NOT — a Subject under our control standing in for "this
@@ -112,11 +115,13 @@ describe('ContractDetails — recognition figure gating (Task 4, round 3)', () =
     await tick(fixture);
 
     // CHECKPOINT 2 — resolved: the figure renders, and at the negotiated price
-    // (10h x 1000 = 10,000), not the reference (10h x 1500 = 15,000).
+    // (10h x 100 €/h = 1,000), not the reference (10h x 200 €/h = 2,000) and not
+    // the un-converted day rate (10h x 800 = 8,000 — the C1 unit bug).
     const resolvedText = host(fixture).textContent ?? '';
     expect(resolvedText).toContain('Total Recognized');
-    expect(resolvedText).toMatch(/10,000\.00/);
-    expect(resolvedText).not.toMatch(/15,000\.00/);
+    expect(resolvedText).toMatch(/1,000\.00/);
+    expect(resolvedText).not.toMatch(/2,000\.00/);
+    expect(resolvedText).not.toMatch(/8,000\.00/);
   });
 });
 

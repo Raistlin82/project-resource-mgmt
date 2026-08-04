@@ -1,5 +1,5 @@
 import { Assignment, Resource, ResourceRequest, Order, OrderLine, FinancialItem, TimeEntry, BillingPlanItem, Contract, Customer, Milestone, ChangeRequest, Project, FxRate, NegotiatedRate, BASE_CURRENCY } from './api.service';
-import { sellRateFor } from './sell-rate.util';
+import { sellRateFor, hoursPerDayOrDefault } from './sell-rate.util';
 
 /** All raw data needed to compute financial rollups. */
 export interface FinanceData {
@@ -27,6 +27,18 @@ export interface FinanceData {
    * is the no-regression guarantee, not an incidental default.
    */
   negotiatedRates?: NegotiatedRate[];
+  /**
+   * Optional working hours/day (the `hoursPerDay` setting). REQUIRED to price a
+   * negotiated rate correctly: `NegotiatedRate.billRate` is stored in EUR per
+   * DAY while every other rate this layer touches is EUR per HOUR, so
+   * `sellRateFor` needs this divisor to return one unit. Absent falls back to
+   * `DEFAULT_HOURS_PER_DAY` (8) — the same fallback the server's
+   * `getHoursPerDay()` applies — so a builder that has not wired it yet prices
+   * as the default configuration rather than dividing by undefined. Ignored
+   * entirely when no negotiated rate resolves (the reference rate is already
+   * hourly), which is why every pre-feature fixture can leave it out.
+   */
+  hoursPerDay?: number;
   /**
    * Optional FX rate table (base-currency value of 1 unit of each currency).
    * When supplied, monetary amounts that carry a currency (order lines via their
@@ -719,12 +731,16 @@ export function recognitionSchedule(
         // (only for hours dated inside that contract's period), else the
         // resource's own reference billRate — today's resolution, and the
         // no-regression guarantee when negotiatedRates is absent/empty.
+        // UNITS: sellRateFor returns €/HOUR on every path (it divides a stored
+        // €/day negotiated rate by hoursPerDay), which is what the raw-hours
+        // multiplication below requires. Both sides of this `*` are hourly.
         const resource = data.resources.find(r => r.id === t.resourceId);
         const rate = sellRateFor({
           projectId: t.projectId,
           role: resource?.role,
           date: t.date,
           referenceBillRate: resource?.billRate,
+          hoursPerDay: hoursPerDayOrDefault(data.hoursPerDay),
           rates: data.negotiatedRates ?? [],
           projects: data.projects ?? [],
           contracts: data.contracts ?? [],
