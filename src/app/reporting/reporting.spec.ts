@@ -79,6 +79,20 @@ function utilizationKpi(fixture: { componentInstance: Reporting }): string {
   return kpi!.value;
 }
 
+/**
+ * The "Recognised Revenue Trend" card, located by its own heading rather than
+ * a global textContent scan — so an assertion against it can never be
+ * satisfied by an unrelated tile that happens to render a similar-looking
+ * figure elsewhere on this large page.
+ */
+function recognisedRevenueTrendCard(fixture: { nativeElement: unknown }): HTMLElement {
+  const heading = Array.from(host(fixture).querySelectorAll('h3')).find(h => h.textContent?.includes('Recognised Revenue Trend'));
+  expect(heading, 'the Recognised Revenue Trend heading must exist').toBeDefined();
+  const card = heading!.closest('.command-card');
+  expect(card, 'the Recognised Revenue Trend card must exist').toBeDefined();
+  return card as HTMLElement;
+}
+
 describe('Reporting — internal-capacity KPIs (C1)', () => {
   it('averages utilization over internal resources only, ignoring dummy and subco', async () => {
     const fixture = await setup();
@@ -131,8 +145,9 @@ describe('Reporting — negotiated sell rates reach the rendered T&M figure (Tas
 
     // 10h x negotiated 1000 = 10000, compact-formatted "€10K" by the trend chart's
     // own `eurCompact` formatter. 10h x the reference 1500 would render "€15K" —
-    // asserted on the RENDERED DOM (not a signal) so this pins what a user actually sees.
-    const text = host(fixture).textContent ?? '';
+    // asserted on the RENDERED DOM (not a signal), scoped to the chart's own card
+    // so it cannot be satisfied by an unrelated tile elsewhere on the page.
+    const text = recognisedRevenueTrendCard(fixture).textContent ?? '';
     expect(text).toContain('€10K');
     expect(text).not.toContain('€15K');
   });

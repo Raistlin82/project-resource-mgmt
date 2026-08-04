@@ -362,91 +362,104 @@ interface BillingControlRow {
             </div>
           </div>
 
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 p-4">
-            <div class="command-kpi green">
-              <p class="command-kpi-label">Recognized To Date</p>
-              <p class="command-kpi-value">{{ recognitionSummary().cumulative | currency: c.currency }}</p>
-            </div>
-            <div class="command-kpi info">
-              <p class="command-kpi-label">Total Recognized</p>
-              <p class="command-kpi-value">{{ recognitionSummary().totalRecognized | currency: c.currency }}</p>
-            </div>
-            <div class="command-kpi" [class.warning]="recognitionSummary().deferred > 0">
-              <p class="command-kpi-label">Deferred (Advance)</p>
-              <p class="command-kpi-value">{{ recognitionSummary().deferred | currency: c.currency }}</p>
-            </div>
-          </div>
-
-          @if (recognitionPeriods().length) {
-            <!-- Cumulative recognition trend -->
-            <div class="px-4 pb-2">
-              <p class="command-section-label">Cumulative recognition</p>
-              <div class="mt-3 space-y-2">
-                @for (row of recognitionPeriods(); track row.period) {
-                  <div class="flex items-center gap-3">
-                    <span class="w-16 shrink-0 font-mono tabular-nums text-xs text-ink-muted">{{ row.period }}</span>
-                    <div class="relative h-6 flex-1 rounded-md bg-surface-muted ring-1 ring-line overflow-hidden">
-                      <div class="absolute inset-y-0 left-0 rounded-md bg-accent transition-[width]"
-                           [style.width.%]="cumulativeBarPct(row)"
-                           [attr.aria-label]="'Cumulative recognized through ' + row.period"
-                           role="img"></div>
-                      <!-- per-period recognized marker -->
-                      <div class="absolute inset-y-0 left-0 border-r-2 border-accent-strong/40"
-                           [style.width.%]="recognizedBarPct(row)"></div>
-                    </div>
-                    <span class="w-28 shrink-0 text-right font-mono tabular-nums text-xs text-ink-secondary">
-                      {{ row.cumulative | currency: c.currency: 'symbol': '1.0-0' }}
-                    </span>
-                  </div>
-                }
+          <!--
+            GATE (round 3): every read the as-incurred branch needs (contracts,
+            projects, negotiatedRates, resources, timeEntries, billingItems) must
+            have resolved before this money figure renders — see
+            recognitionDataReady()'s doc comment. Never render a partial-envelope
+            figure: $0/loading reads honest, a plausible-but-wrong number does not.
+          -->
+          @if (recognitionDataReady()) {
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 p-4">
+              <div class="command-kpi green">
+                <p class="command-kpi-label">Recognized To Date</p>
+                <p class="command-kpi-value">{{ recognitionSummary().cumulative | currency: c.currency }}</p>
               </div>
-              <p class="command-note mt-3">
-                Bars show cumulative revenue recognized through each month; the darker edge marks that month's incremental recognition.
-              </p>
+              <div class="command-kpi info">
+                <p class="command-kpi-label">Total Recognized</p>
+                <p class="command-kpi-value">{{ recognitionSummary().totalRecognized | currency: c.currency }}</p>
+              </div>
+              <div class="command-kpi" [class.warning]="recognitionSummary().deferred > 0">
+                <p class="command-kpi-label">Deferred (Advance)</p>
+                <p class="command-kpi-value">{{ recognitionSummary().deferred | currency: c.currency }}</p>
+              </div>
             </div>
 
-            <!-- Period detail table -->
-            <div class="overflow-x-auto">
-              <table class="command-data-table">
-                <thead>
-                  <tr>
-                    <th>Period</th>
-                    <th class="text-right">Recognized</th>
-                    <th class="text-right">Cumulative</th>
-                    <th class="text-right">Deferred</th>
-                  </tr>
-                </thead>
-                <tbody>
+            @if (recognitionPeriods().length) {
+              <!-- Cumulative recognition trend -->
+              <div class="px-4 pb-2">
+                <p class="command-section-label">Cumulative recognition</p>
+                <div class="mt-3 space-y-2">
                   @for (row of recognitionPeriods(); track row.period) {
-                    <tr>
-                      <td class="font-mono font-semibold">{{ row.period }}</td>
-                      <td class="text-right font-mono tabular-nums"
-                          [class.text-critical-text]="row.recognized < 0"
-                          [class.text-ink-secondary]="row.recognized >= 0">
-                        {{ row.recognized | currency: c.currency }}
-                      </td>
-                      <td class="text-right font-mono tabular-nums text-ink-secondary">{{ row.cumulative | currency: c.currency }}</td>
-                      <td class="text-right font-mono tabular-nums"
-                          [class.text-caution-text]="row.deferred > 0"
-                          [class.text-ink-muted]="row.deferred === 0">
-                        {{ row.deferred | currency: c.currency }}
-                      </td>
-                    </tr>
+                    <div class="flex items-center gap-3">
+                      <span class="w-16 shrink-0 font-mono tabular-nums text-xs text-ink-muted">{{ row.period }}</span>
+                      <div class="relative h-6 flex-1 rounded-md bg-surface-muted ring-1 ring-line overflow-hidden">
+                        <div class="absolute inset-y-0 left-0 rounded-md bg-accent transition-[width]"
+                             [style.width.%]="cumulativeBarPct(row)"
+                             [attr.aria-label]="'Cumulative recognized through ' + row.period"
+                             role="img"></div>
+                        <!-- per-period recognized marker -->
+                        <div class="absolute inset-y-0 left-0 border-r-2 border-accent-strong/40"
+                             [style.width.%]="recognizedBarPct(row)"></div>
+                      </div>
+                      <span class="w-28 shrink-0 text-right font-mono tabular-nums text-xs text-ink-secondary">
+                        {{ row.cumulative | currency: c.currency: 'symbol': '1.0-0' }}
+                      </span>
+                    </div>
                   }
-                </tbody>
-                <tfoot>
-                  <tr class="border-t-2 border-line">
-                    <td class="font-semibold text-ink-secondary">Total</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().totalRecognized | currency: c.currency }}</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().cumulative | currency: c.currency }}</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().deferred | currency: c.currency }}</td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
+                </div>
+                <p class="command-note mt-3">
+                  Bars show cumulative revenue recognized through each month; the darker edge marks that month's incremental recognition.
+                </p>
+              </div>
+
+              <!-- Period detail table -->
+              <div class="overflow-x-auto">
+                <table class="command-data-table">
+                  <thead>
+                    <tr>
+                      <th>Period</th>
+                      <th class="text-right">Recognized</th>
+                      <th class="text-right">Cumulative</th>
+                      <th class="text-right">Deferred</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (row of recognitionPeriods(); track row.period) {
+                      <tr>
+                        <td class="font-mono font-semibold">{{ row.period }}</td>
+                        <td class="text-right font-mono tabular-nums"
+                            [class.text-critical-text]="row.recognized < 0"
+                            [class.text-ink-secondary]="row.recognized >= 0">
+                          {{ row.recognized | currency: c.currency }}
+                        </td>
+                        <td class="text-right font-mono tabular-nums text-ink-secondary">{{ row.cumulative | currency: c.currency }}</td>
+                        <td class="text-right font-mono tabular-nums"
+                            [class.text-caution-text]="row.deferred > 0"
+                            [class.text-ink-muted]="row.deferred === 0">
+                          {{ row.deferred | currency: c.currency }}
+                        </td>
+                      </tr>
+                    }
+                  </tbody>
+                  <tfoot>
+                    <tr class="border-t-2 border-line">
+                      <td class="font-semibold text-ink-secondary">Total</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().totalRecognized | currency: c.currency }}</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().cumulative | currency: c.currency }}</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().deferred | currency: c.currency }}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            } @else {
+              <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted">
+                No dated billing items or approved time entries to build a recognition schedule for this contract.
+              </div>
+            }
           } @else {
             <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted">
-              No dated billing items or approved time entries to build a recognition schedule for this contract.
+              Loading recognition data…
             </div>
           }
         </div>
@@ -463,65 +476,75 @@ interface BillingControlRow {
                 Every entry is balanced by construction.
               </p>
             </div>
-            <span class="command-status shrink-0"
-                  [class.green]="journalTotalsRow().balanced"
-                  [class.red]="!journalTotalsRow().balanced">
-              <mat-icon class="text-[16px] w-[16px] h-[16px]">
-                {{ journalTotalsRow().balanced ? 'check_circle' : 'error' }}
-              </mat-icon>
-              {{ journalTotalsRow().balanced ? 'Balanced' : 'Out of balance' }}
-            </span>
+            @if (recognitionDataReady()) {
+              <span class="command-status shrink-0"
+                    [class.green]="journalTotalsRow().balanced"
+                    [class.red]="!journalTotalsRow().balanced">
+                <mat-icon class="text-[16px] w-[16px] h-[16px]">
+                  {{ journalTotalsRow().balanced ? 'check_circle' : 'error' }}
+                </mat-icon>
+                {{ journalTotalsRow().balanced ? 'Balanced' : 'Out of balance' }}
+              </span>
+            }
           </div>
 
-          @if (journalEntries().length) {
-            <div class="overflow-x-auto">
-              <table class="command-data-table">
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Memo</th>
-                    <th>Account</th>
-                    <th class="text-right">Debit</th>
-                    <th class="text-right">Credit</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  @for (entry of journalEntries(); track entry.date) {
-                    @for (line of entry.lines; track $index; let first = $first) {
-                      <tr [class.border-t-2]="first" [class.border-line]="first">
-                        <td class="font-mono font-semibold align-top">{{ first ? entry.date : '' }}</td>
-                        <td class="text-[var(--cc-muted)] align-top">{{ first ? entry.memo : '' }}</td>
-                        <td class="text-ink-secondary">{{ line.account }}</td>
-                        <td class="text-right font-mono tabular-nums"
-                            [class.text-ink-secondary]="line.debit > 0"
-                            [class.text-ink-muted]="line.debit === 0">
-                          {{ line.debit > 0 ? (line.debit | currency: c.currency) : '—' }}
-                        </td>
-                        <td class="text-right font-mono tabular-nums"
-                            [class.text-ink-secondary]="line.credit > 0"
-                            [class.text-ink-muted]="line.credit === 0">
-                          {{ line.credit > 0 ? (line.credit | currency: c.currency) : '—' }}
-                        </td>
-                      </tr>
+          <!-- Same GATE as the recognition schedule above: journalEntries() is
+               derived from the same partial-envelope-sensitive data(). -->
+          @if (recognitionDataReady()) {
+            @if (journalEntries().length) {
+              <div class="overflow-x-auto">
+                <table class="command-data-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Memo</th>
+                      <th>Account</th>
+                      <th class="text-right">Debit</th>
+                      <th class="text-right">Credit</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (entry of journalEntries(); track entry.date) {
+                      @for (line of entry.lines; track $index; let first = $first) {
+                        <tr [class.border-t-2]="first" [class.border-line]="first">
+                          <td class="font-mono font-semibold align-top">{{ first ? entry.date : '' }}</td>
+                          <td class="text-[var(--cc-muted)] align-top">{{ first ? entry.memo : '' }}</td>
+                          <td class="text-ink-secondary">{{ line.account }}</td>
+                          <td class="text-right font-mono tabular-nums"
+                              [class.text-ink-secondary]="line.debit > 0"
+                              [class.text-ink-muted]="line.debit === 0">
+                            {{ line.debit > 0 ? (line.debit | currency: c.currency) : '—' }}
+                          </td>
+                          <td class="text-right font-mono tabular-nums"
+                              [class.text-ink-secondary]="line.credit > 0"
+                              [class.text-ink-muted]="line.credit === 0">
+                            {{ line.credit > 0 ? (line.credit | currency: c.currency) : '—' }}
+                          </td>
+                        </tr>
+                      }
                     }
-                  }
-                </tbody>
-                <tfoot>
-                  <tr class="border-t-2 border-line-strong">
-                    <td class="font-semibold text-ink-secondary" colspan="3">Totals</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ journalTotalsRow().debit | currency: c.currency }}</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ journalTotalsRow().credit | currency: c.currency }}</td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-            <p class="command-note px-4 py-3">
-              Σ Debit {{ journalTotalsRow().debit | currency: c.currency }} = Σ Credit {{ journalTotalsRow().credit | currency: c.currency }}.
-              These entries are a preview and have not been posted to the ledger.
-            </p>
+                  </tbody>
+                  <tfoot>
+                    <tr class="border-t-2 border-line-strong">
+                      <td class="font-semibold text-ink-secondary" colspan="3">Totals</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ journalTotalsRow().debit | currency: c.currency }}</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ journalTotalsRow().credit | currency: c.currency }}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+              <p class="command-note px-4 py-3">
+                Σ Debit {{ journalTotalsRow().debit | currency: c.currency }} = Σ Credit {{ journalTotalsRow().credit | currency: c.currency }}.
+                These entries are a preview and have not been posted to the ledger.
+              </p>
+            } @else {
+              <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted">
+                No journal movement to preview — there is nothing recognized or deferred for this contract yet.
+              </div>
+            }
           } @else {
             <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted">
-              No journal movement to preview — there is nothing recognized or deferred for this contract yet.
+              Loading recognition data…
             </div>
           }
         </div>
@@ -963,6 +986,34 @@ export class ContractDetails {
       marginPct: revenue > 0 ? (margin / revenue) * 100 : 0,
     };
   });
+
+  /**
+   * True once every read the as-incurred (T&M) branch of recognitionSchedule/
+   * recognitionJournal depends on — via sellRateFor's project-override /
+   * contract-period precedence — has resolved its REAL (post-auth) value:
+   * contracts, projects, negotiatedRates, resources, timeEntries, billingItems.
+   *
+   * This screen has NO shared forkJoin (unlike reporting.ts/dashboard.component.ts) —
+   * each collection is its own independent rxResource, and the page's only gate
+   * (`@if (contract(); as c)`) depends on contractsRes alone. Without this guard,
+   * the recognition card could render as soon as contracts/resources/timeEntries/
+   * billingItems have landed while projects or negotiatedRates are still in
+   * flight: sellRateFor would then silently fall through to the reference
+   * billRate for every entry, and the page would show a PLAUSIBLE BUT WRONG
+   * "Total Recognized" that jumps once the remaining reads complete. A money
+   * figure must never render from a partial envelope — $0 while loading reads as
+   * "still loading"; a believable wrong number does not. Gating only THIS
+   * figure (not the whole page) because everything else here is fine to show
+   * as soon as it individually has data.
+   */
+  protected recognitionDataReady = computed<boolean>(() =>
+    !this.contractsRes.isLoading()
+    && !this.projectsRes.isLoading()
+    && !this.negotiatedRatesRes.isLoading()
+    && !this.resourcesRes.isLoading()
+    && !this.timeEntriesRes.isLoading()
+    && !this.billingPlanRes.isLoading(),
+  );
 
   /** YYYY-MM bounds spanning every dated signal that could carry recognition for this contract. */
   private recognitionWindow = computed<{ from: string; to: string } | null>(() => {
