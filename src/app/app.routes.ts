@@ -35,6 +35,25 @@ export const routes: Routes = [
   { path: 'billing', title: 'Billing', canMatch: [commercialGuard, financeGuard], loadComponent: () => import('./commercial/billing/billing').then(m => m.Billing) },
 
   // Reporting
+  //
+  // AUDIENCE DECISION, RECORDED RATHER THAN SILENT (review §4.4). P1-09 opens
+  // "Reporting è funzione PM/RM" and asks for capability-separated datasets. This
+  // branch resolved the 403-becomes-empty symptom the other way — by REVOKING the
+  // audience: canViewPortfolioDashboard() is false for pm and resource-manager
+  // (access-policy.util.ts), and app.ts hides the nav entry, so both roles lost a
+  // screen the issue calls their function.
+  //
+  // Kept as-is in this fix wave, deliberately, and escalated instead of
+  // half-fixed: reporting.ts still fail-fasts ONE forkJoin over contracts,
+  // customers, orders, orderLines, financials and billingItems, ~7 of whose 16
+  // reads a PM cannot read. Restoring the route without splitting that envelope
+  // would either re-open P1-09's original symptom (403 -> silent zeros) or render
+  // money figures from a partial envelope, which the same review calls a
+  // Critical. The real fix is the issue's own second option — a portfolio
+  // endpoint, or per-capability datasets with an explicit "not available for your
+  // role" state instead of zeros — and it is a feature, not a line.
+  //
+  // Tracked in .superpowers/ux-remediation/reconciliation-report.md §10.
   { path: 'reporting', title: 'Reporting', canMatch: [roleGuard(a => a.canViewPortfolioDashboard())], loadComponent: () => import('./reporting/reporting').then(m => m.Reporting) },
   { path: 'capacity', title: 'Capacity', canMatch: [capacityGuard], loadComponent: () => import('./capacity/capacity.component').then(m => m.CapacityComponent) },
   { path: 'allocation-approvals', title: 'Allocation Approvals', canMatch: [allocationApprovalsGuard], loadComponent: () => import('./allocation-approvals/allocation-approvals.component').then(m => m.AllocationApprovalsComponent) },
