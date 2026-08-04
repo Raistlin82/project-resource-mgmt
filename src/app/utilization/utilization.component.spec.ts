@@ -3,7 +3,7 @@ import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
 import { of } from 'rxjs';
 import { UtilizationComponent } from './utilization.component';
-import { ApiService, type Resource, type ResourceOrganization } from '../services/api.service';
+import { ApiService, type Resource, type ResourceOrganization, type UserRole } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 
@@ -27,7 +27,7 @@ const RESOURCES: Resource[] = [
   { ...base, id: 'x1', name: 'Outside Otto', role: 'Developer', utilization: 90, kind: 'internal', organization: 'Consulting' },
 ] as Resource[];
 
-function setup({ resources = RESOURCES, orgs = ORGS, userId = 'm1' } = {}) {
+function setup({ resources = RESOURCES, orgs = ORGS, userId = 'm1', role = 'resource-manager' as UserRole } = {}) {
   const apiStub = {
     getResources: vi.fn(() => of(resources)),
     getAssignments: vi.fn(() => of([])),
@@ -37,7 +37,7 @@ function setup({ resources = RESOURCES, orgs = ORGS, userId = 'm1' } = {}) {
   } as unknown as ApiService;
   const authStub = {
     authReady: signal(true), isAuthenticated: signal(true),
-    role: signal('resource-manager'), userId: signal(userId),
+    role: signal(role), userId: signal(userId),
   } as unknown as AuthService;
   const notifyStub = { success: vi.fn(), error: vi.fn() } as unknown as NotificationService;
 
@@ -102,6 +102,26 @@ describe('UtilizationComponent — team scope', () => {
     expect(host.querySelector('[data-test="kpi-internal-note"]')).not.toBeNull();
   });
 
+  it('excludes a placeholder from the average in Direct reports too, when it has a manager', async () => {
+    // None of the other fixtures give a dummy/subco a `managerId`, so this is
+    // the only case that exercises `countedForAverage` on the DIRECT branch —
+    // its own comment says the internal-only rule is not `teamScope`-conditional
+    // ("a placeholder given a manager would otherwise land in the direct one
+    // too"), but nothing else here proves it.
+    const resources = [
+      ...RESOURCES,
+      { ...base, id: 'p2', name: 'Direct Dummy', role: 'Developer', utilization: 0, kind: 'dummy', managerId: 'm1' },
+    ] as Resource[];
+    const { fixture, host } = setup({ resources });
+    await flush(fixture);
+    const shown = names(host).join(' ');
+    expect(shown).toContain('Direct Dana');
+    expect(shown).toContain('Direct Dummy');
+    // Dana alone counts (80) — the dummy is listed but never in the denominator.
+    expect(host.querySelector('[data-test="team-average"]')!.textContent).toContain('80');
+    expect(host.querySelector('[data-test="kpi-internal-note"]')).not.toBeNull();
+  });
+
   it('the average follows the view', async () => {
     const { fixture, host } = setup();
     await flush(fixture);
@@ -126,4 +146,24 @@ describe('UtilizationComponent — team scope', () => {
     await flush(fixture);
     expect(host.querySelector('[data-test="team-scope-org"]')).not.toBeNull();
   });
+
+  it.each(['admin', 'delivery-executive'] as const)(
+    '%s sees their OWN org scope in All my org, not the whole company',
+    async role => {
+      // Both roles are omniscient in the Allocation Approvals feed, but
+      // `managedResources` never reads `auth.role()` — only `scopeOf(userId, ...)`
+      // — so the design's "same scope for every role" decision must hold for
+      // them too. 'Outside Otto' sits on 'Consulting', a capability m1 does not
+      // manage: whole-company visibility would surface him, `scopeOf(m1, ...)`
+      // must not.
+      const { fixture, host } = setup({ role });
+      await flush(fixture);
+      host.querySelector<HTMLButtonElement>('[data-test="team-scope-org"]')!.click();
+      fixture.detectChanges();
+      const shown = names(host).join(' ');
+      expect(shown).toContain('Direct Dana');
+      expect(shown).toContain('Subtree Sven');
+      expect(shown).not.toContain('Outside Otto');
+    },
+  );
 });

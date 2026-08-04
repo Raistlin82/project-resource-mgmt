@@ -32,7 +32,13 @@ interface UtilizationData {
             {{ averageUtilization() | number:'1.0-0' }}%
           </span>
           @if (hasUncountedRows()) {
-            <span data-test="kpi-internal-note" class="command-kpi-note">internal only</span>
+            <!-- command-kpi-note (src/styles.css) carries margin-top: 0.55rem for its
+                 usual home stacked under a KPI value in a .command-kpi card. Here it
+                 is a flex sibling of the percentage instead, so that top margin would
+                 offset it out of vertical alignment; the mt-0! Tailwind v4 important
+                 modifier (same pattern as border-critical! on list-state.component.ts)
+                 zeroes it for this one usage without a new command-* rule. -->
+            <span data-test="kpi-internal-note" class="command-kpi-note mt-0!">internal only</span>
           }
         </div>
       </div>
