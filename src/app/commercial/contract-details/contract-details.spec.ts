@@ -156,6 +156,12 @@ describe('ContractDetails — Negotiated Rates table (Task 5)', () => {
       getFxRates: () => of([]),
       getNegotiatedRates: () => of([]),
       getHoursPerDay: () => of({ value: 8 }),
+      // The project-roles CATALOG — the same authority the server validates a
+      // rate's role against. 'Project Manager' is in it and held by no resource.
+      getProjectRoles: () => of([
+        { id: '1', code: 'DEV', name: 'Developer', description: 'Software Developer', restricted: false },
+        { id: '2', code: 'PM', name: 'Project Manager', description: 'Project Manager', restricted: false },
+      ]),
       ...overrides,
     } as unknown as ApiService;
   }
@@ -188,6 +194,22 @@ describe('ContractDetails — Negotiated Rates table (Task 5)', () => {
     expect(rows[0].textContent).toContain('Developer');
     // Rendered through `number:'1.0-2'` (two-decimal display rule) — locale grouping applies.
     expect(rows[0].textContent).toContain('1,000');
+  });
+
+  it('offers every catalog role, including one no resource holds (final review, finding 5)', async () => {
+    // Same finding as project-rates.spec.ts: the server accepts any catalog role
+    // so a rate can be negotiated before the profile is staffed, and a picker
+    // built from the staffed roles hides exactly that workflow.
+    const fixture = await setUp(baseStub());
+    const h = host(fixture);
+
+    const addButton = [...h.querySelectorAll('button')].find(b => b.textContent?.trim().includes('Add Rate'));
+    addButton!.click();
+    await tick(fixture);
+
+    const options = [...h.querySelectorAll<HTMLOptionElement>('#rateRole option')].map(o => o.value);
+    expect(options).toContain('Developer');
+    expect(options).toContain('Project Manager');   // in the catalog, held by nobody
   });
 
   it('sends contractId and never projectId when adding on a contract', async () => {

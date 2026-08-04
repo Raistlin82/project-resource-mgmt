@@ -3,7 +3,7 @@ import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { DecimalPipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { of } from 'rxjs';
-import { ApiService, BASE_CURRENCY, FxRate, NegotiatedRate, Project, Resource } from '../../services/api.service';
+import { ApiService, BASE_CURRENCY, FxRate, NegotiatedRate, Project, ProjectRole } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
@@ -187,10 +187,20 @@ export class ProjectRates {
   });
   private negotiatedRates = this.negotiatedRatesRes.value;
 
-  private resourcesRes = rxResource<Resource[], boolean>({
+  // ROLE OPTIONS COME FROM THE PROJECT-ROLES CATALOG — the SAME authority the
+  // server validates a rate's role against (validateRoleRefs, src/server.ts),
+  // widened to the catalog this wave precisely so a price can be negotiated
+  // BEFORE anyone with that profile is hired. Building the picker from
+  // `resources.map(r => r.role)` made that workflow unreachable from the UI
+  // (hand-posting to the API was the only way) while the shipped SOP described
+  // it. It also read a collection this screen's own audience cannot always see:
+  // /resources is gated to the staffing roles, which EXCLUDES `sales` — one of
+  // the roles allowed to manage negotiated rates — so for a sales user the old
+  // picker was empty AND fired a 403. /project-roles is an open read.
+  private rolesRes = rxResource<ProjectRole[], boolean>({
     params: () => this.auth.authReady(),
-    stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
-    defaultValue: [] as Resource[],
+    stream: ({ params: ready }) => (ready ? this.api.getProjectRoles() : of<ProjectRole[]>([])),
+    defaultValue: [] as ProjectRole[],
   });
   private fxRatesRes = rxResource<FxRate[], boolean>({
     params: () => this.auth.authReady(),
@@ -198,7 +208,8 @@ export class ProjectRates {
     defaultValue: [] as FxRate[],
   });
 
-  roleOptions = computed<string[]>(() => [...new Set(this.resourcesRes.value().map(r => r.role))].sort());
+  /** Catalog role NAMES — the stored value on a rate, matching what the server checks. */
+  roleOptions = computed<string[]>(() => [...new Set(this.rolesRes.value().map(r => r.name))].sort());
   currencyOptions = computed<string[]>(() => [...new Set([BASE_CURRENCY, ...this.fxRatesRes.value().map(r => r.currency)])]);
 
   /**

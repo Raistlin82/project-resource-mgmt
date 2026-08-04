@@ -2,7 +2,7 @@ import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { of, throwError } from 'rxjs';
 import { ProjectRates } from './project-rates';
-import { ApiService, NegotiatedRate, Project, Resource } from '../../services/api.service';
+import { ApiService, NegotiatedRate, Project, ProjectRole, Resource } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 
@@ -32,6 +32,16 @@ describe('ProjectRates — inherited vs override (Task 5)', () => {
     externalExperience: [], utilization: 80, capacity: 40, billRate: 1200,
   };
   const contractRate: NegotiatedRate = { id: 'NR1', contractId: 'CT1', role: 'Developer', currency: 'EUR', billRate: 1000 };
+  /**
+   * The project-roles CATALOG — the authority the SERVER validates a rate's role
+   * against (validateRoleRefs, src/server.ts). 'Project Manager' is in it and is
+   * held by NO resource above, which is the whole point: a sell rate is
+   * negotiated BEFORE anyone with that profile is hired.
+   */
+  const projectRoles: ProjectRole[] = [
+    { id: '1', code: 'DEV', name: 'Developer', description: 'Software Developer', restricted: false },
+    { id: '2', code: 'PM', name: 'Project Manager', description: 'Project Manager', restricted: false },
+  ];
 
   function baseStub(overrides: Partial<Record<string, () => unknown>> = {}) {
     return {
@@ -39,6 +49,7 @@ describe('ProjectRates — inherited vs override (Task 5)', () => {
       getResources: () => of([resource]),
       getFxRates: () => of([]),
       getNegotiatedRates: () => of([contractRate]),
+      getProjectRoles: () => of(projectRoles),
       ...overrides,
     } as unknown as ApiService;
   }
@@ -202,6 +213,24 @@ describe('ProjectRates — inherited vs override (Task 5)', () => {
 
     expect(h.querySelectorAll('[data-test="project-rate-row"]').length).toBe(0);
     expect(h.querySelectorAll('[data-test="inherited-rate"]').length).toBe(0);
+  });
+
+  it('offers every catalog role, including one no resource holds (final review, finding 5)', async () => {
+    // The server was widened THIS wave to accept any project-roles catalog role,
+    // precisely so a price can be negotiated before anyone with that profile is
+    // hired — and docs/functional/commercial.md now describes that workflow. A
+    // picker built from `resources.map(r => r.role)` makes it unreachable from
+    // the UI: the only way to create such a rate would be to hand-post to the API.
+    const fixture = await setUp(baseStub());
+    const h = host(fixture);
+
+    const addButton = [...h.querySelectorAll('button')].find(b => b.textContent?.trim().includes('Add Override'));
+    addButton!.click();
+    await tick(fixture);
+
+    const options = [...h.querySelectorAll<HTMLOptionElement>('#projectRateRole option')].map(o => o.value);
+    expect(options).toContain('Developer');
+    expect(options).toContain('Project Manager');   // in the catalog, held by nobody
   });
 
   it('flags a non-EUR rate as not applied, since sellRateFor only ever reads EUR (Task 5 review, Finding 1)', async () => {

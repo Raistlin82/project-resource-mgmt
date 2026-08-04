@@ -19,6 +19,7 @@ import {
   Order,
   OrderLine,
   Project,
+  ProjectRole,
   Resource,
   ResourceRequest,
   TimeEntry,
@@ -885,6 +886,9 @@ export class ContractDetails {
   // render from a partial envelope — pricing 8 hours with the wrong divisor is a
   // believable wrong number, which is worse than a loading state.
   private hoursPerDayRes = rxResource({ stream: () => this.api.getHoursPerDay(), defaultValue: { value: DEFAULT_HOURS_PER_DAY } });
+  // Role options for the rate form come from the project-roles CATALOG — the same
+  // authority the server validates against (see roleOptions below). Open read.
+  private rolesRes = rxResource({ stream: () => this.api.getProjectRoles(), defaultValue: [] as ProjectRole[] });
   private milestonesRes = rxResource({ stream: () => this.api.getMilestones(), defaultValue: [] as Milestone[] });
   // REFERENCE-DATA INTEGRITY (Phase B): `currency` is a config-value FK to the
   // configured currency set (fx-rates). Gated on authReady() with the other
@@ -985,8 +989,17 @@ export class ContractDetails {
 
   contractNegotiatedRates = computed(() => this.negotiatedRates().filter(r => r.contractId === this.id()));
 
-  /** Role options for the rate form's select: distinct roles actually held by a resource today. */
-  roleOptions = computed<string[]>(() => [...new Set(this.resources().map(r => r.role))].sort());
+  /**
+   * Role options for the rate form's select: the project-roles CATALOG, which is
+   * the SAME authority the server validates a rate's role against
+   * (validateRoleRefs, src/server.ts) — widened to the catalog this wave so a
+   * price can be negotiated BEFORE anyone with that profile is hired, the
+   * workflow docs/functional/commercial.md now describes. Sourced from the
+   * staffed roles (`resources.map(r => r.role)`) this picker could not offer an
+   * unstaffed profile at all, making that workflow reachable only by hand-posting
+   * to the API. Stored value is the catalog NAME.
+   */
+  roleOptions = computed<string[]>(() => [...new Set(this.rolesRes.value().map(r => r.name))].sort());
 
   /** Currency options for the rate form's select: base currency + every configured fx-rate currency. */
   rateCurrencyOptions = computed<string[]>(() => [...new Set([BASE_CURRENCY, ...this.fxRates().map(r => r.currency)])]);
