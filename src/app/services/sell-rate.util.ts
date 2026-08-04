@@ -7,7 +7,14 @@
  * different question and is NOT touched by this layer.
  *
  * PRECEDENCE, first match wins:
- *   1. a rate on THIS PROJECT for this role;
+ *   1. a rate on THIS PROJECT for this role — but ONLY if the project has no
+ *      contract at all, or its contract exists and the hours' date falls
+ *      INSIDE that contract's period. An override has no period of its own —
+ *      it borrows its project's contract period — because if the contract has
+ *      expired, nothing may be invoiced on that project, override or not.
+ *      Do not "simplify" this back to an unconditional override: that lets
+ *      hours be billed outside the contract, which is exactly what the
+ *      validity model exists to prevent;
  *   2. a rate on the project's CONTRACT for this role, but only for hours DATED
  *      INSIDE that contract's period (§4.1 — the contract already carries its own
  *      validity, so none was invented);
@@ -57,18 +64,23 @@ export function sellRateFor(args: {
   const { projectId, role, date, referenceBillRate, rates, projects, contracts } = args;
   if (projectId === undefined || role === undefined) return referenceBillRate;
 
-  // 1. project override — no date limit of its own; it is scoped by the project.
-  const onProject = rates.find(r => r.projectId === projectId && r.role === role && usable(r));
-  if (onProject !== undefined) return onProject.billRate;
+  const contractId = projects.find(p => p.id === projectId)?.contractId;
+  const contract = contractId !== undefined ? contracts.find(c => c.id === contractId) : undefined;
+  // No contract at all -> nothing to bound the override. A contract that
+  // exists -> the override borrows ITS period; an unknown/expired contract
+  // means the override does not apply either (see the class comment).
+  const projectPeriodOk = contractId === undefined || (contract !== undefined && withinPeriod(date, contract));
+
+  // 1. project override — bounded by the project's own contract period, if any.
+  if (projectPeriodOk) {
+    const onProject = rates.find(r => r.projectId === projectId && r.role === role && usable(r));
+    if (onProject !== undefined) return onProject.billRate;
+  }
 
   // 2. contract rate, only for hours dated inside the contract's own period.
-  const contractId = projects.find(p => p.id === projectId)?.contractId;
-  if (contractId !== undefined) {
-    const contract = contracts.find(c => c.id === contractId);
-    if (contract !== undefined && withinPeriod(date, contract)) {
-      const onContract = rates.find(r => r.contractId === contractId && r.role === role && usable(r));
-      if (onContract !== undefined) return onContract.billRate;
-    }
+  if (contract !== undefined && withinPeriod(date, contract)) {
+    const onContract = rates.find(r => r.contractId === contractId && r.role === role && usable(r));
+    if (onContract !== undefined) return onContract.billRate;
   }
 
   // 3. today's behaviour.

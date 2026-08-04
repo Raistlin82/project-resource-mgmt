@@ -51,6 +51,13 @@ describe('sellRateFor — precedence', () => {
     expect(call({ projectId: 'P9', date: '2099-01-01' })).toBe(1300);
   });
 
+  it('does not let a project override survive its own contract expiring', () => {
+    // P2's contract is C1, which ends 2026-12-31. The project override (N2)
+    // must not outlive it: an expired contract may bill nothing on this
+    // project, override or not, so this falls all the way to the reference.
+    expect(call({ projectId: 'P2', date: '2027-02-01' })).toBe(1200);
+  });
+
   it('ignores a rate in a non-base currency', () => {
     expect(call({ role: 'Designer' })).toBe(1200);   // N3 is USD
   });
