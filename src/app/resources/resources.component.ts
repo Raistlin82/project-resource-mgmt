@@ -8,6 +8,7 @@ import {
 } from '@angular/core';
 import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { of } from 'rxjs';
+import { DecimalPipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { ApiService, Resource, ProjectRole, Country, City, ResourceOrganization, RateCard, Vendor } from '../services/api.service';
@@ -44,7 +45,7 @@ const REMOTE_LOCATION = 'Remote';
 @Component({
   selector: 'app-resources',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective, ListStateComponent, ResourceKindBadgeComponent],
+  imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective, ListStateComponent, ResourceKindBadgeComponent, DecimalPipe],
   template: `
     <div class="max-w-6xl mx-auto space-y-8">
       <div class="flex items-center justify-between">
@@ -351,18 +352,18 @@ const REMOTE_LOCATION = 'Remote';
                 <div>
                   <label for="res-cost" class="block text-sm font-medium text-ink-secondary mb-1">Cost rate (€/day)</label>
                   <input id="res-cost" type="number" min="0" step="1" formControlName="costRateOverride" class="command-input"
-                         [placeholder]="inheritedRate() ? ('Inherited: ' + inheritedRate()!.costRate) : 'e.g. 600'">
+                         [placeholder]="inheritedRate() ? ('Inherited: ' + (inheritedRate()!.costRate | number:'1.0-2')) : 'e.g. 600'">
                 </div>
                 <div>
                   <label for="res-bill" class="block text-sm font-medium text-ink-secondary mb-1">Bill rate (€/day)</label>
                   <input id="res-bill" type="number" min="0" step="1" formControlName="billRateOverride" class="command-input"
-                         [placeholder]="inheritedRate() ? ('Inherited: ' + inheritedRate()!.billRate) : 'e.g. 1120'">
+                         [placeholder]="inheritedRate() ? ('Inherited: ' + (inheritedRate()!.billRate | number:'1.0-2')) : 'e.g. 1120'">
                 </div>
               </div>
               @if (inheritedRate(); as ir) {
                 <p class="-mt-2 text-xs text-[var(--cc-muted)]">
                   Leave empty to inherit the <strong class="text-ink-secondary">{{ form.controls.role.value }}</strong>
-                  rate card (cost {{ ir.costRate }} · bill {{ ir.billRate }} {{ ir.currency }}/day). Enter a value to override.
+                  rate card (cost {{ ir.costRate | number:'1.0-2' }} · bill {{ ir.billRate | number:'1.0-2' }} {{ ir.currency }}/day). Enter a value to override.
                 </p>
               } @else if (form.controls.role.value) {
                 <p class="-mt-2 text-xs text-[var(--cc-muted)]">No rate card for this role — enter cost/bill rates manually, or define one under Configuration → Rate Cards.</p>

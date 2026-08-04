@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, DestroyRef, computed, effect, inject, signal } from '@angular/core';
 import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
+import { DecimalPipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { of } from 'rxjs';
@@ -14,7 +15,7 @@ const BASE_CURRENCY = 'EUR';
 @Component({
   selector: 'app-manage-rate-cards',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective],
+  imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective, DecimalPipe],
   template: `
     <div class="max-w-5xl mx-auto space-y-8">
       <div class="flex items-center justify-between">
@@ -67,8 +68,8 @@ const BASE_CURRENCY = 'EUR';
                 <td class="font-bold">{{ it.role }}</td>
                 <td>{{ it.organization || 'All organizations' }}</td>
                 <td><span class="font-mono text-[var(--cc-muted)]">{{ it.currency }}</span></td>
-                <td class="text-right tabular-nums">{{ it.costRate }}</td>
-                <td class="text-right tabular-nums">{{ it.billRate }}</td>
+                <td class="text-right tabular-nums">{{ it.costRate | number:'1.0-2' }}</td>
+                <td class="text-right tabular-nums">{{ it.billRate | number:'1.0-2' }}</td>
                 <td class="text-right">
                   <button type="button" (click)="openForm(it)" [attr.aria-label]="'Edit ' + it.role" [attr.title]="'Edit ' + it.role" class="text-ink-muted hover:text-accent-text transition-colors p-1">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>

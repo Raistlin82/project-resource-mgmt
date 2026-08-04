@@ -30,14 +30,18 @@ describe('NotificationService', () => {
     expect(service.items().length).toBe(0);
   });
 
-  it('keeps error toasts sticky (no auto-dismiss)', () => {
+  it('auto-dismisses error toasts too, but only after a longer timeout', () => {
     service.error('Request failed');
     expect(service.items().length).toBe(1);
 
-    // Errors must not scroll away unseen: still present long after the timeout.
-    vi.advanceTimersByTime(60000);
+    // Not gone at the non-error timeout — an error gets more time to be read.
+    vi.advanceTimersByTime(5000);
     expect(service.items().length).toBe(1);
     expect(service.items()[0].type).toBe('error');
+
+    // But it is still finite: gone by the error timeout.
+    vi.advanceTimersByTime(7000);
+    expect(service.items().length).toBe(0);
   });
 
   it('success() shows an auto-dismissing success toast', () => {
@@ -49,13 +53,13 @@ describe('NotificationService', () => {
     expect(service.items().length).toBe(0);
   });
 
-  it('does not let repeated errors auto-clear, so a flaky backend keeps them visible', () => {
+  it('auto-clears repeated errors once each has had its full read time', () => {
     service.error('fail 1');
     service.error('fail 2');
     service.error('fail 3');
 
-    vi.advanceTimersByTime(60000);
-    expect(service.items().length).toBe(3);
+    vi.advanceTimersByTime(12000);
+    expect(service.items().length).toBe(0);
   });
 
   it('dismiss removes a specific toast by id without disturbing others', () => {

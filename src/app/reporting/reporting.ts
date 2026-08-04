@@ -1,14 +1,15 @@
 import { ChangeDetectionStrategy, Component, inject, signal, computed, PLATFORM_ID } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { isPlatformBrowser, CurrencyPipe, DecimalPipe } from '@angular/common';
-import { forkJoin, of } from 'rxjs';
+import { forkJoin, of, map } from 'rxjs';
 import { rxResource } from '@angular/core/rxjs-interop';
-import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, OrderLine, FinancialItem, TimeEntry, Issue, ChangeRequest, Milestone, BillingPlanItem, Contract, Customer, FxRate, BASE_CURRENCY } from '../services/api.service';
+import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, OrderLine, FinancialItem, TimeEntry, Issue, ChangeRequest, Milestone, BillingPlanItem, Contract, Customer, FxRate, NegotiatedRate, BASE_CURRENCY } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { computeProjectFinancials, FinanceData, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, realizationMetrics, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, recognitionSchedule, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity } from '../services/finance.util';
 import { NotificationService } from '../services/notification.service';
 import { toCsv, downloadCsv } from '../services/export.util';
 import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
+import { DEFAULT_HOURS_PER_DAY } from '../services/sell-rate.util';
 import { CommandBarChartComponent, CommandTrendChartComponent, CommandDonutChartComponent, BarSeries, TrendSeries } from '../shared/charts';
 import { ListStateComponent } from '../shared/list-state.component';
 
@@ -40,6 +41,14 @@ interface ReportingData {
   billingItems: BillingPlanItem[];
   contracts: Contract[];
   customers: Customer[];
+  negotiatedRates: NegotiatedRate[];
+  /**
+   * The org's working hours/day. Loaded HERE, in the same forkJoin, because a
+   * negotiated rate is stored in EUR/DAY and `sellRateFor` needs this divisor to
+   * price it in EUR/HOUR — without it the recognition figures on this page silently
+   * fall back to the default-8 assumption instead of the configured value.
+   */
+  hoursPerDay: number;
 }
 
 interface ArAgingBarRow extends ArAgingBucketTotal {
@@ -826,9 +835,20 @@ export class Reporting {
             billingItems: this.api.getBillingPlanItems(),
             contracts: this.api.getContracts(),
             customers: this.api.getCustomers(),
+            // Negotiated sell rates (design spec §4/§6) feed the as-incurred T&M
+            // branch of recognitionSchedule via financeData() below. Loaded in
+            // the SAME forkJoin as every other principal-gated collection here —
+            // never a second independent load — so it settles at the same tick
+            // and never makes a figure change under the user's eyes after paint.
+            negotiatedRates: this.api.getNegotiatedRates(),
+            // €/day -> €/hour divisor for the negotiated rates above. An OPEN
+            // read, but it joins this SAME forkJoin rather than a second
+            // independent one so the priced figure never renders from a partial
+            // envelope (a money figure must never do that).
+            hoursPerDay: this.api.getHoursPerDay().pipe(map(r => r.value)),
           })
-        : of<ReportingData>({ resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [] }),
-    defaultValue: { resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [] },
+        : of<ReportingData>({ resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [], negotiatedRates: [], hoursPerDay: DEFAULT_HOURS_PER_DAY }),
+    defaultValue: { resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [], negotiatedRates: [], hoursPerDay: DEFAULT_HOURS_PER_DAY },
   });
 
   /**
@@ -886,7 +906,7 @@ export class Reporting {
 
   private financeData = computed<FinanceData>(() => {
     const d = this.dataRes.value();
-    return { requests: d.requests, assignments: d.assignments, resources: d.resources, orders: d.orders, orderLines: d.orderLines, financials: d.financials, timeEntries: d.timeEntries, changeRequests: d.changeRequests, projects: d.projects, billingItems: d.billingItems, contracts: d.contracts, customers: d.customers, milestones: d.milestones, fxRates: this.fxRes.value() };
+    return { requests: d.requests, assignments: d.assignments, resources: d.resources, orders: d.orders, orderLines: d.orderLines, financials: d.financials, timeEntries: d.timeEntries, changeRequests: d.changeRequests, projects: d.projects, billingItems: d.billingItems, contracts: d.contracts, customers: d.customers, milestones: d.milestones, fxRates: this.fxRes.value(), negotiatedRates: d.negotiatedRates, hoursPerDay: d.hoursPerDay };
   });
 
   /** Real per-project profitability (revenue/margin) from the commercial + finance data. */
@@ -1314,7 +1334,7 @@ export class Reporting {
     const csv = toCsv(this.arBuckets(), [
       { key: 'bucket', header: 'Bucket (days)' },
       { key: 'count', header: 'Invoices' },
-      { key: 'amount', header: `Amount (${this.baseCurrency} base)` },
+      { key: 'amount', header: `Amount (${this.baseCurrency} base)`, map: r => r.amount.toFixed(2) },
     ]);
     downloadCsv('AR_Aging.csv', csv);
     this.notificationService.show('A/R aging exported', 'success');
@@ -1325,8 +1345,8 @@ export class Reporting {
     if (!isPlatformBrowser(this.platformId)) return;
     const csv = toCsv(this.arByCustomer(), [
       { key: 'customerName', header: 'Customer' },
-      { key: 'totalOutstanding', header: `Outstanding (${this.baseCurrency} base)` },
-      { key: 'overdue', header: `Overdue (${this.baseCurrency} base)` },
+      { key: 'totalOutstanding', header: `Outstanding (${this.baseCurrency} base)`, map: r => r.totalOutstanding.toFixed(2) },
+      { key: 'overdue', header: `Overdue (${this.baseCurrency} base)`, map: r => r.overdue.toFixed(2) },
       { key: 'oldestBucket', header: 'Oldest Bucket (days)' },
     ]);
     downloadCsv('AR_By_Customer.csv', csv);
@@ -1339,14 +1359,14 @@ export class Reporting {
     const cur = this.baseCurrency;
     const csv = toCsv(this.marginRows(), [
       { key: 'name', header: 'Project' },
-      { key: 'revenue', header: `Revenue (${cur} base)` },
-      { key: 'laborCost', header: `Labor (${cur} base)` },
-      { key: 'externalCost', header: `External (${cur} base)` },
-      { key: 'expenseCost', header: `Expense (${cur} base)` },
-      { key: 'margin', header: `Margin (${cur} base)` },
+      { key: 'revenue', header: `Revenue (${cur} base)`, map: r => r.revenue.toFixed(2) },
+      { key: 'laborCost', header: `Labor (${cur} base)`, map: r => r.laborCost.toFixed(2) },
+      { key: 'externalCost', header: `External (${cur} base)`, map: r => r.externalCost.toFixed(2) },
+      { key: 'expenseCost', header: `Expense (${cur} base)`, map: r => r.expenseCost.toFixed(2) },
+      { key: 'margin', header: `Margin (${cur} base)`, map: r => r.margin.toFixed(2) },
       { key: 'marginPct', header: 'Margin %', map: r => r.marginPct.toFixed(1) },
-      { key: 'eac', header: `EAC (${cur} base)` },
-      { key: 'vac', header: `VAC (${cur} base)` },
+      { key: 'eac', header: `EAC (${cur} base)`, map: r => r.eac.toFixed(2) },
+      { key: 'vac', header: `VAC (${cur} base)`, map: r => r.vac.toFixed(2) },
       { key: 'burnPct', header: 'Burn %', map: r => r.burnPct.toFixed(0) },
     ]);
     downloadCsv('Margin_And_Variance.csv', csv);
@@ -1359,9 +1379,9 @@ export class Reporting {
     const cur = this.baseCurrency;
     const csv = toCsv(this.customerRows(), [
       { key: 'customerName', header: 'Customer' },
-      { key: 'revenue', header: `Revenue (${cur} base)` },
-      { key: 'cost', header: `Cost (${cur} base)` },
-      { key: 'margin', header: `Margin (${cur} base)` },
+      { key: 'revenue', header: `Revenue (${cur} base)`, map: r => r.revenue.toFixed(2) },
+      { key: 'cost', header: `Cost (${cur} base)`, map: r => r.cost.toFixed(2) },
+      { key: 'margin', header: `Margin (${cur} base)`, map: r => r.margin.toFixed(2) },
       { key: 'marginPct', header: 'Margin %', map: r => r.marginPct.toFixed(1) },
       { key: 'sharePct', header: 'Revenue Share %', map: r => r.sharePct.toFixed(1) },
       { key: 'projectIds', header: 'Projects', map: r => String(r.projectIds.length) },
@@ -1378,8 +1398,8 @@ export class Reporting {
       { key: 'scope', header: 'Scope' },
       { key: 'name', header: 'Name', map: a => a.name ?? a.id },
       { key: 'severity', header: 'Severity', map: a => this.severityLabel(a.severity) },
-      { key: 'revenue', header: `Revenue (${cur} base)` },
-      { key: 'cost', header: `Cost (${cur} base)` },
+      { key: 'revenue', header: `Revenue (${cur} base)`, map: a => a.revenue.toFixed(2) },
+      { key: 'cost', header: `Cost (${cur} base)`, map: a => a.cost.toFixed(2) },
       { key: 'marginPct', header: 'Margin %', map: a => a.marginPct.toFixed(1) },
       { key: 'gapPts', header: 'Gap (pts)', map: a => a.gapPts.toFixed(1) },
       { key: 'reasons', header: 'Reasons', map: a => a.reasons.join('; ') },

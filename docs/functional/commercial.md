@@ -15,13 +15,13 @@
 ## Who can do what (RBAC ground truth)
 
 The commercial collections — `/customers`, `/contracts`, `/orders`,
-`/order-lines`, `/billing-plan-items` — share a single RBAC rule on both the read
-and the write side in `src/server.ts`:
+`/order-lines`, `/billing-plan-items`, `/negotiated-rates` — share a single RBAC
+rule on both the read and the write side in `src/server.ts`:
 
 | Concern | Collections | Roles allowed |
 | --- | --- | --- |
-| Read (GET) | `/customers`, `/contracts`, `/orders`, `/order-lines`, `/billing-plan-items` | `sales`, `finance`, `delivery-executive`, `admin` |
-| Mutate (POST/PUT/DELETE) | same five collections | `sales`, `finance`, `delivery-executive`, `admin` |
+| Read (GET) | `/customers`, `/contracts`, `/orders`, `/order-lines`, `/billing-plan-items`, `/negotiated-rates` | `sales`, `finance`, `delivery-executive`, `admin` |
+| Mutate (POST/PUT/DELETE) | same six collections | `sales`, `finance`, `delivery-executive`, `admin` |
 
 On the client, the matching routes (`customers`, `contracts`, `contracts/:id`,
 `orders`) are gated by `commercialGuard`, which resolves to
@@ -232,6 +232,143 @@ flowchart TD
 
 - [Contract 360 review](#contract-360-review)
 - [Define Billing Conditions per contract](billing-and-revenue.md#define-billing-conditions-per-contract)
+- [Negotiate a Sell Rate for a Contract or a Project](#negotiate-a-sell-rate-for-a-contract-or-a-project)
+
+---
+
+### Negotiate a Sell Rate for a Contract or a Project
+
+**Purpose.** Price Time & Materials revenue at what was actually negotiated
+with **this** customer, instead of billing every customer the same profile at
+its company-wide reference rate. A **negotiated rate** sets the €/day sell
+price for a role under a specific contract; a **project override** replaces
+that price for one project under the contract, without touching the
+contract's own rate.
+
+**Scope.** Creating, editing and deleting rows in `/negotiated-rates` from the
+Contract 360 view's "Negotiated Rates" card (contract-level rate) and from a
+project's **Rates** tab (project-level override). Only **Time & Materials**
+billing is affected — see "Fixed Price and Milestone revenue is unaffected"
+below.
+
+**RACI**
+
+| Activity | Responsible | Accountable | Consulted | Informed |
+| --- | --- | --- | --- | --- |
+| Negotiate a contract-level rate | sales | delivery-executive | finance | admin |
+| Add a project-level override | sales | delivery-executive | finance | — |
+
+**Process flow**
+
+```mermaid
+flowchart TD
+  A["Open Contract 360 (or a project's Rates tab)"] --> B["Click 'Add Rate' / 'Add Override'"]
+  B --> C["Select Role (must exist in the project-roles catalog)"]
+  C --> D["Select Currency (must be a configured currency) + Bill rate (EUR/day)"]
+  D --> E["POST /negotiated-rates { contractId XOR projectId, role, currency, billRate }"]
+  E --> F{"xor / FK / role / currency / duplicate / numeric OK?"}
+  F -- "No (400)" --> G["Error shown inline; form stays open"]
+  F -- "Yes" --> H["Rate saved; T&M revenue for hours dated inside the contract's period now prices at this rate"]
+```
+
+**Detailed steps**
+
+1. **Negotiate the contract-level rate.**
+   - **Who:** sales. **When:** the commercial terms for a role are agreed with
+     the customer. **How:** on the Contract 360 view, open the **Negotiated
+     Rates** card and click **Add Rate**; pick a **Role** (validated against
+     the project-roles catalog — a role need not be held by any resource yet,
+     because a rate is negotiated, and a contract signed, before anyone with
+     that profile is ever hired or staffed), **Currency** (must be a
+     configured currency) and **Bill rate (€/day)**. **Output:**
+     `POST /negotiated-rates { contractId, role, currency, billRate }`.
+   - **Validity.** The rate carries no dates of its own — it applies to hours
+     **dated inside the contract's own `startDate`/`endDate`**. A
+     renegotiation is a **new contract**, not an edit to this row.
+2. **Override it for one project.**
+   - **Who:** sales. **When:** one project under the contract negotiated a
+     different price for the same role (e.g. a discount scoped to a specific
+     engagement). **How:** on that project's **Rates** tab, every
+     contract-level row appears greyed out ("Inherited from contract"); click
+     its edit icon (or **Add Override**) to create a project-scoped row for
+     the same role and currency. **Output:**
+     `POST /negotiated-rates { projectId, role, currency, billRate }` — the
+     project's row and the contract's row now both exist, and the project's
+     wins for that role (see precedence below).
+   - **Validity of the override.** It borrows the **project's own contract's**
+     period if the project has one; a project with no contract at all applies
+     with no date limit.
+3. **Resolution precedence** (`sellRateFor`,
+   `src/app/services/sell-rate.util.ts`) — first match wins, evaluated **per
+   hour, at that hour's own date**:
+   - **Units.** What you enter and what the tables show is a **€/day** price,
+     like a rate card. What resolution returns is a **€/hour** price: the day
+     rate is divided by the configured working hours/day (Configuration →
+     Rate Cards → *hours per day*, 8 by default) before it is multiplied by
+     the hours logged. So a 1000 €/day rate bills one 8-hour day as 1000 €,
+     not 8000 €. The resource's reference rate needs no conversion — it is
+     already hourly by the time any screen sees it.
+   1. a rate on **this project** for the role, if the hours' date falls inside
+      the project's contract's period (or the project has no contract at
+      all);
+   2. else a rate on the project's **contract** for the role, if the hours'
+      date falls inside the contract's own period;
+   3. else the resource's own **reference bill rate** — their personal
+      override on the rate card if one is set, else the rate card default.
+      This third step is exactly what T&M revenue priced at before this
+      feature existed.
+   - **A personal override on a resource never beats a negotiated price.** If
+     the customer signed 1000 €/day for a role and the person actually
+     staffed on it carries a personal override of 1200 €/day on their own
+     rate card, 1000 is what gets billed — a personal override is a company
+     default cost/price, not a customer-specific sell price, and it is only
+     reached once nothing was negotiated for that (contract-or-project,
+     role).
+4. **Delete or correct a rate.**
+   - **Who:** sales / finance. **How:** the delete icon on the row
+     (`DELETE /negotiated-rates/:id`), or edit via the row's edit icon
+     (`PUT /negotiated-rates/:id`). Deleting a rate simply removes it from
+     consideration; hours already recognized are not retroactively re-priced
+     (recognition is computed fresh on every read).
+
+**Exceptions**
+
+| Condition | System behaviour | Resolution |
+| --- | --- | --- |
+| Neither/both of `contractId`/`projectId` supplied | API 400: "exactly one of contractId or projectId is required" | Pick exactly one parent |
+| `contractId` does not exist | API 400: "contractId must reference an existing contract" | Pick a valid contract |
+| `projectId` does not exist | API 400: "projectId must reference an existing project" | Pick a valid project |
+| `role` does not exist in the project-roles catalog | API 400: "role must reference an existing project role (catalog name)" | Pick a role from the project-roles catalog (it need not be staffed yet) |
+| `currency` empty or not a configured currency | API 400: "currency is required..." / "currency must be a configured currency..." | Pick a configured currency |
+| A rate already exists for the same (contract-or-project, role, currency) | API 400: "a negotiated rate already exists for this key (existing id …)" | Edit the existing row instead of creating a duplicate |
+| `billRate` negative or NaN | API 400: "billRate must be a non-negative number" | Enter ≥ 0 |
+| Non-commercial role / unauthenticated | 403 / 401 | Use a commercial role (`sales`, `finance`, `delivery-executive`, `admin`) / sign in |
+
+**Fixed Price and Milestone revenue is unaffected.** A negotiated rate only
+ever prices **as-incurred** billing — `TimeAndMaterials`, `Capped`, `Expense`
+— because those are the only billing types whose revenue is
+`hours × the resolved hourly rate` (see **Units** above: the negotiated €/day
+price is converted first)
+(`recognitionSchedule` in `src/app/services/finance.util.ts`, via
+`sellRateFor`). `Milestone` (SAL) and `Progress` (POC) revenue is recognized
+as a share of the billing item's own fixed `amount`/`capAmount` and never
+multiplies anyone's hours by anyone's rate — entering a negotiated rate on a
+Fixed Price contract has **no effect** on what that contract recognizes. See
+[Revenue Recognition schedule](billing-and-revenue.md#revenue-recognition-schedule)
+for the full recognition-method table.
+
+**Metrics**
+
+| Metric | Definition | Source |
+| --- | --- | --- |
+| Negotiated rates per contract | Row count of `/negotiated-rates` where `contractId` = this contract | Contract 360 → Negotiated Rates |
+| Project overrides | Row count of `/negotiated-rates` where `projectId` = this project | Project → Rates tab |
+
+**Related**
+
+- [Create a Contract under a customer](#create-a-contract-under-a-customer)
+- [Contract 360 review](#contract-360-review)
+- [Revenue Recognition schedule](billing-and-revenue.md#revenue-recognition-schedule)
 
 ---
 
@@ -243,9 +380,11 @@ billing plan, the dated revenue-recognition schedule, the balanced GL journal
 preview, and all orders — so commercial and finance stakeholders can review
 health before acting.
 
-**Scope.** The read-only Contract details screen (`contracts/:id`). It also hosts
-one mutation — adding an **Expected Billing** plan item — documented in
-[billing-and-revenue.md](billing-and-revenue.md#define-billing-conditions-per-contract).
+**Scope.** The read-only Contract details screen (`contracts/:id`). It also
+hosts two mutations — adding an **Expected Billing** plan item, documented in
+[billing-and-revenue.md](billing-and-revenue.md#define-billing-conditions-per-contract),
+and maintaining the contract's **Negotiated Rates**, documented in
+[Negotiate a Sell Rate for a Contract or a Project](#negotiate-a-sell-rate-for-a-contract-or-a-project).
 The recognition schedule and journal preview themselves are covered in the
 billing page; here we cover the review workflow.
 
@@ -327,6 +466,7 @@ flowchart TD
 
 **Related**
 
+- [Negotiate a Sell Rate for a Contract or a Project](#negotiate-a-sell-rate-for-a-contract-or-a-project)
 - [Revenue Recognition schedule](billing-and-revenue.md#revenue-recognition-schedule)
 - [Double-entry Journal preview](billing-and-revenue.md#double-entry-journal-preview)
 - [AR Aging & DSO](billing-and-revenue.md#ar-aging--dso-collections-monitoring)

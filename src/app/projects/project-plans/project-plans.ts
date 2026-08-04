@@ -2,7 +2,7 @@ import { ChangeDetectionStrategy, Component, signal, computed, input, inject, De
 import { rxResource, toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { of } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
-import { DatePipe } from '@angular/common';
+import { DatePipe, DecimalPipe } from '@angular/common';
 import { FormsModule, ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { ApiService, Project, WorkPackage, Milestone, Resource } from '../../services/api.service';
 import { NotificationService } from '../../services/notification.service';
@@ -12,7 +12,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 @Component({
   selector: 'app-project-plans',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DatePipe, FormsModule, ReactiveFormsModule, ModalDialogDirective],
+  imports: [MatIconModule, DatePipe, DecimalPipe, FormsModule, ReactiveFormsModule, ModalDialogDirective],
   template: `
     <div [class]="projectId() ? '' : 'command-page space-y-6'">
       <div class="space-y-8">
@@ -104,7 +104,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
                                [class.bg-surface-muted]="wp.progress === 0"
                                [style.width.%]="wp.progress"></div>
                         </div>
-                        <span class="text-xs font-mono tabular-nums font-medium w-8 text-right">{{ wp.progress }}%</span>
+                        <span class="text-xs font-mono tabular-nums font-medium w-8 text-right">{{ wp.progress | number:'1.0-0' }}%</span>
                       </div>
                     </td>
                     <td class="py-4 px-4 text-right">

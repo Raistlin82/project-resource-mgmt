@@ -582,6 +582,133 @@ describe('finance.util recognitionSchedule', () => {
     expect(rows[3].recognized).toBe(2000);  // late
     expect(rows[3].cumulative).toBe(3500);  // nothing lost
   });
+
+  // --- Negotiated sell rates (design spec §6): the as-incurred T&M branch must
+  // price hours at the negotiated sell rate, not blindly at the resource's own
+  // reference billRate. Precedence: project override -> contract rate (dated) ->
+  // reference billRate (today's behaviour / no-regression guarantee).
+  //
+  // UNITS ARE PART OF EVERY FIXTURE BELOW. A NegotiatedRate.billRate is EUR per
+  // DAY; a Resource.billRate is EUR per HOUR (withEffectiveRates already divided
+  // it by hoursPerDay). `hoursPerDay` is therefore stated explicitly here and the
+  // expected figures are hours × the CONVERTED hourly price. The earlier version
+  // of these cases asserted `10 * 1000 = 10000` for a 1000 €/DAY rate, which is
+  // exactly the ~8x inflation the fixtures could not see.
+  const HPD = 8;
+  it('prices as-incurred revenue at the negotiated contract rate', () => {
+    // 10 approved hours; reference 150 €/h (= 1200 €/day), contract rate 1000 €/day.
+    const d: FinanceData = {
+      ...data,
+      resources: [res('1', 75, 1200 / HPD)],
+      projects: [{ ...proj('P', 'P'), contractId: 'CT1' }],
+      contracts: [contract('CT1', 'C1')],
+      timeEntries: [time('t1', 'a1', 'r1', '1', 'P', 10, 'Approved')], // Jan
+      billingItems: [bill('tm1', 'P', 'TimeAndMaterials', 0, 'Ready')],
+      negotiatedRates: [{ id: 'nr1', contractId: 'CT1', role: 'Dev', currency: 'EUR', billRate: 1000 }],
+      hoursPerDay: HPD,
+    };
+    // The CONTRACT price (1000/day = 125/h), not the reference (150/h).
+    const rows = recognitionSchedule(d, periods, { projectId: 'P' });
+    expect(rows[0].recognized).toBe(10 * (1000 / HPD));  // 1250, NOT 10000
+  });
+
+  it('lets a project override beat the contract rate in revenue', () => {
+    const d: FinanceData = {
+      ...data,
+      resources: [res('1', 75, 1200 / HPD)],
+      projects: [{ ...proj('P', 'P'), contractId: 'CT1' }],
+      contracts: [contract('CT1', 'C1')],
+      timeEntries: [time('t1', 'a1', 'r1', '1', 'P', 10, 'Approved')],
+      billingItems: [bill('tm1', 'P', 'TimeAndMaterials', 0, 'Ready')],
+      negotiatedRates: [
+        { id: 'nrContract', contractId: 'CT1', role: 'Dev', currency: 'EUR', billRate: 1000 },
+        { id: 'nrProject', projectId: 'P', role: 'Dev', currency: 'EUR', billRate: 1150 },
+      ],
+      hoursPerDay: HPD,
+    };
+    const rows = recognitionSchedule(d, periods, { projectId: 'P' });
+    // project override (1150/day) beats the contract rate (1000/day)
+    expect(rows[0].recognized).toBe(10 * (1150 / HPD));  // 1437.50
+  });
+
+  it('scales the negotiated price with the configured hours/day', () => {
+    // Proves recognitionSchedule actually READS data.hoursPerDay rather than
+    // silently defaulting: the same 1000 €/day rate on a 4h working day is
+    // 250 €/h, so the same 10 hours recognize twice as much.
+    const base: FinanceData = {
+      ...data,
+      resources: [res('1', 75, 1200 / HPD)],
+      projects: [{ ...proj('P', 'P'), contractId: 'CT1' }],
+      contracts: [contract('CT1', 'C1')],
+      timeEntries: [time('t1', 'a1', 'r1', '1', 'P', 10, 'Approved')],
+      billingItems: [bill('tm1', 'P', 'TimeAndMaterials', 0, 'Ready')],
+      negotiatedRates: [{ id: 'nr1', contractId: 'CT1', role: 'Dev', currency: 'EUR', billRate: 1000 }],
+    };
+    expect(recognitionSchedule({ ...base, hoursPerDay: 4 }, periods, { projectId: 'P' })[0].recognized).toBe(2500);
+    // Absent -> DEFAULT_HOURS_PER_DAY (8), the same fallback the server applies.
+    expect(recognitionSchedule(base, periods, { projectId: 'P' })[0].recognized).toBe(1250);
+  });
+
+  it('does not let a higher personal rate raise the invoice', () => {
+    // reference 1500 €/day worth of hourly rate, contract 1000 €/day -> 1000 wins.
+    const d: FinanceData = {
+      ...data,
+      resources: [res('1', 75, 1500 / HPD)], // the resource's own reference rate is ABOVE the negotiated price
+      projects: [{ ...proj('P', 'P'), contractId: 'CT1' }],
+      contracts: [contract('CT1', 'C1')],
+      timeEntries: [time('t1', 'a1', 'r1', '1', 'P', 10, 'Approved')],
+      billingItems: [bill('tm1', 'P', 'TimeAndMaterials', 0, 'Ready')],
+      negotiatedRates: [{ id: 'nr1', contractId: 'CT1', role: 'Dev', currency: 'EUR', billRate: 1000 }],
+      hoursPerDay: HPD,
+    };
+    const rows = recognitionSchedule(d, periods, { projectId: 'P' });
+    // the customer signed 1000/day; the resource's own 1500/day must never leak into the invoice
+    expect(rows[0].recognized).toBe(10 * (1000 / HPD));
+  });
+
+  it('prices hours dated outside the contract period at the reference rate', () => {
+    const d: FinanceData = {
+      ...data,
+      resources: [res('1', 75, 1200 / HPD)],
+      projects: [{ ...proj('P', 'P'), contractId: 'CT1' }],
+      contracts: [{ ...contract('CT1', 'C1'), startDate: '2026-01-01', endDate: '2026-01-31' }],
+      // Mar hours fall OUTSIDE the Jan-only contract period.
+      timeEntries: [{ ...time('t1', 'a1', 'r1', '1', 'P', 10, 'Approved'), date: '2026-03-09' }],
+      billingItems: [bill('tm1', 'P', 'TimeAndMaterials', 0, 'Ready')],
+      negotiatedRates: [{ id: 'nr1', contractId: 'CT1', role: 'Dev', currency: 'EUR', billRate: 1000 }],
+      hoursPerDay: HPD,
+    };
+    const rows = recognitionSchedule(d, periods, { projectId: 'P' });
+    // falls through to the reference rate (150/h), not the contract's 1000/day
+    expect(rows[2].recognized).toBe(10 * (1200 / HPD));  // 1500
+  });
+
+  it('is byte-identical to the pre-feature figures when no rate is negotiated', () => {
+    // The no-regression case: same fixture as the pre-existing T&M test above
+    // ('T&M is recognized as-incurred...'), empty negotiatedRates, same totals.
+    const d: FinanceData = {
+      ...data,
+      timeEntries: [
+        time('t1', 'a1', 'r1', '1', 'P', 10, 'Approved'),                          // Jan (date 2026-01-02) -> 1400
+        { ...time('t2', 'a1', 'r1', '1', 'P', 20, 'Approved'), date: '2026-03-09' }, // Mar -> 2800
+        { ...time('t3', 'a1', 'r1', '1', 'P', 99, 'Submitted'), date: '2026-03-09' },// not approved -> ignored
+      ],
+      billingItems: [
+        bill('tm1', 'P', 'TimeAndMaterials', 0, 'Ready'),
+      ],
+      negotiatedRates: [], // explicitly empty: nothing has been negotiated
+    };
+    const rows = recognitionSchedule(d, periods, { projectId: 'P' });
+    expect(rows.map(r => r.recognized)).toEqual([1400, 0, 2800, 0]);
+    expect(rows[3].cumulative).toBe(4200);
+
+    // The field can also be entirely ABSENT (as every pre-existing FinanceData
+    // fixture in this file is) with byte-identical results — that is the actual
+    // no-regression guarantee, not merely an empty array.
+    const withoutField: FinanceData = { ...d };
+    delete (withoutField as { negotiatedRates?: unknown }).negotiatedRates;
+    expect(recognitionSchedule(withoutField, periods, { projectId: 'P' })).toEqual(rows);
+  });
 });
 
 describe('finance.util effective budget (change requests)', () => {

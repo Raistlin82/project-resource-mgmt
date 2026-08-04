@@ -3,7 +3,7 @@ import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/c
 import { rxResource } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { Router, RouterLink } from '@angular/router';
-import { forkJoin, of } from 'rxjs';
+import { forkJoin, of, map } from 'rxjs';
 import { AuthService } from '../services/auth.service';
 import {
   ApiService,
@@ -11,9 +11,11 @@ import {
   BASE_CURRENCY,
   BillingPlanItem,
   ChangeRequest,
+  Contract,
   FinancialItem,
   FxRate,
   Issue,
+  NegotiatedRate,
   Order,
   OrderLine,
   Project,
@@ -40,6 +42,7 @@ import {
 } from '../shared/charts';
 import { ListStateComponent } from '../shared/list-state.component';
 import { countsTowardDeliveryCapacity, kindOf } from '../services/resource-kind.util';
+import { DEFAULT_HOURS_PER_DAY } from '../services/sell-rate.util';
 
 interface DashboardData {
   resources: Resource[];
@@ -53,6 +56,13 @@ interface DashboardData {
   billingItems: BillingPlanItem[];
   issues: Issue[];
   changeRequests: ChangeRequest[];
+  contracts: Contract[];
+  negotiatedRates: NegotiatedRate[];
+  /**
+   * The org's working hours/day — the EUR/DAY -> EUR/HOUR divisor sellRateFor
+   * needs for a negotiated rate. In this same envelope, never a second load.
+   */
+  hoursPerDay: number;
 }
 
 type DeliveryHealth = 'green' | 'amber' | 'red';
@@ -420,7 +430,7 @@ interface ProjectCommandRow {
                     </div>
                     <div class="rounded-md bg-[var(--cc-panel-muted)] px-3 py-2">
                       <div class="command-kpi-label">Schedule</div>
-                      <div class="font-mono font-semibold">{{ change.impactScheduleDays }}d</div>
+                      <div class="font-mono font-semibold">{{ change.impactScheduleDays | number:'1.0-1' }}d</div>
                     </div>
                   </div>
                 </div>
@@ -527,6 +537,9 @@ export class DashboardComponent {
     billingItems: [],
     issues: [],
     changeRequests: [],
+    contracts: [],
+    negotiatedRates: [],
+    hoursPerDay: DEFAULT_HOURS_PER_DAY,
   };
 
   // FX rates feed FinanceData so portfolio rollups (margin, revenue, EAC, VAC)
@@ -561,6 +574,21 @@ export class DashboardComponent {
             billingItems: this.api.getBillingPlanItems(),
             issues: this.api.getProjectIssues(),
             changeRequests: this.api.getChangeRequests(),
+            // Negotiated sell rates (design spec §4/§6) need BOTH `contracts`
+            // (previously not fetched here at all) and `negotiatedRates` to
+            // resolve via sellRateFor: without `contracts`, a project's own
+            // contract can never be found, `projectPeriodOk` resolves false,
+            // and every as-incurred entry silently falls back to the reference
+            // billRate — the negotiated price would never surface here even
+            // though `negotiatedRates` was present. Both added to this SAME
+            // forkJoin (never a second independent load) so they settle at the
+            // same tick as everything else.
+            contracts: this.api.getContracts(),
+            negotiatedRates: this.api.getNegotiatedRates(),
+            // The €/day -> €/hour divisor for those rates (see FinanceData's
+            // `hoursPerDay`): an open read, but in THIS forkJoin so the revenue
+            // chart never paints from a partial envelope.
+            hoursPerDay: this.api.getHoursPerDay().pipe(map(r => r.value)),
           })
         : of(DashboardComponent.EMPTY_DATA),
     defaultValue: DashboardComponent.EMPTY_DATA,
@@ -584,6 +612,11 @@ export class DashboardComponent {
       // CR-adjusted budgets feed burn/EAC/VAC; projects label the alert rows.
       changeRequests: d.changeRequests,
       projects: d.projects,
+      // Contract periods + negotiated rates feed the as-incurred T&M branch of
+      // recognitionSchedule via sellRateFor (design spec §4/§6).
+      contracts: d.contracts,
+      negotiatedRates: d.negotiatedRates,
+      hoursPerDay: d.hoursPerDay,
       // Normalise multi-currency amounts to base for portfolio money rollups.
       fxRates: this.fxRates(),
     };

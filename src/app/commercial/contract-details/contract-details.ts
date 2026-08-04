@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, inject, input, signal } from '@angular/core';
-import { CurrencyPipe, DatePipe } from '@angular/common';
+import { CurrencyPipe, DatePipe, DecimalPipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { RouterLink } from '@angular/router';
 import { rxResource, toSignal } from '@angular/core/rxjs-interop';
@@ -15,9 +15,11 @@ import {
   FinancialItem,
   FxRate,
   Milestone,
+  NegotiatedRate,
   Order,
   OrderLine,
   Project,
+  ProjectRole,
   Resource,
   ResourceRequest,
   TimeEntry,
@@ -34,6 +36,7 @@ import {
 } from '../../services/finance.util';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
+import { DEFAULT_HOURS_PER_DAY } from '../../services/sell-rate.util';
 
 interface BillingActualEvent {
   period: string;
@@ -58,7 +61,7 @@ interface BillingControlRow {
 @Component({
   selector: 'app-contract-details',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CurrencyPipe, DatePipe, MatIconModule, ReactiveFormsModule, RouterLink, ModalDialogDirective],
+  imports: [CurrencyPipe, DatePipe, DecimalPipe, MatIconModule, ReactiveFormsModule, RouterLink, ModalDialogDirective],
   template: `
     <div class="command-page space-y-6 p-4 sm:p-6 lg:p-8">
       @if (contract(); as c) {
@@ -189,6 +192,114 @@ interface BillingControlRow {
             </table>
           </div>
         </div>
+
+        <!-- Negotiated Rates (design spec §7) -->
+        <div class="command-card overflow-hidden">
+          <div class="command-card-header">
+            <div>
+              <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Negotiated Rates</h2>
+              <p class="mt-1 text-sm text-[var(--cc-muted)]">Per-profile sell price for Time &amp; Materials revenue on this contract. A project under this contract can override any row.</p>
+            </div>
+            <button type="button" (click)="openRateForm()" class="command-button">
+              <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon>
+              Add Rate
+            </button>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="command-data-table">
+              <thead>
+                <tr>
+                  <th>Role</th>
+                  <th>Currency</th>
+                  <th class="text-right">Bill rate (€/day)</th>
+                  <th class="text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (rate of contractNegotiatedRates(); track rate.id) {
+                  <tr data-test="negotiated-rate-row">
+                    <td class="font-medium">
+                      {{ rate.role }}
+                      @if (rate.currency !== BASE_CURRENCY) {
+                        <span class="command-status amber ml-1.5" title="sellRateFor only reads EUR-denominated rates; this row is not yet applied to any invoice.">Not applied (EUR only)</span>
+                      }
+                    </td>
+                    <td class="font-mono text-ink-secondary">{{ rate.currency }}</td>
+                    <td class="text-right font-mono tabular-nums">{{ rate.billRate | number:'1.0-2' }}</td>
+                    <td class="text-right">
+                      <button type="button" (click)="openRateForm(rate)" [attr.aria-label]="'Edit rate for ' + rate.role" class="text-ink-muted hover:text-accent-text p-1.5 rounded-lg transition-colors">
+                        <mat-icon class="text-[18px] w-[18px] h-[18px]">edit</mat-icon>
+                      </button>
+                      <button type="button" (click)="deleteRate(rate)" [attr.aria-label]="'Delete rate for ' + rate.role" class="text-ink-muted hover:text-critical-text p-1.5 rounded-lg transition-colors ml-1">
+                        <mat-icon class="text-[18px] w-[18px] h-[18px]">delete</mat-icon>
+                      </button>
+                    </td>
+                  </tr>
+                }
+                @if (!contractNegotiatedRates().length) {
+                  <tr>
+                    <td colspan="4" class="px-6 sm:px-8 py-10 text-center text-ink-muted">
+                      No negotiated rates for this contract. T&amp;M revenue prices at each profile's reference rate card.
+                    </td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        @if (showRateForm()) {
+          <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+               appModal ariaLabelledby="rateModalTitle" (dismiss)="closeRateForm()">
+            <div class="command-card w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
+              <div class="command-card-header">
+                <h2 id="rateModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">
+                  {{ editingRateId() ? 'Edit Negotiated Rate' : 'Add Negotiated Rate' }}
+                </h2>
+                <button type="button" (click)="closeRateForm()" aria-label="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
+                  <mat-icon>close</mat-icon>
+                </button>
+              </div>
+              <div class="p-6 sm:p-8 overflow-y-auto flex-1 space-y-6">
+                <div>
+                  <label for="rateRole" class="block text-sm font-semibold text-ink-secondary mb-1.5">Role *</label>
+                  <!-- Never [value] on a <select> whose <option>s come from an @for — the
+                       write lands before Angular has inserted the options and is silently
+                       dropped. Per-option [selected], driven by a plain (change) handler. -->
+                  <select id="rateRole" (change)="onRateRoleChange($event)" class="command-select">
+                    <option value="" [selected]="rateRole() === ''">Select a role...</option>
+                    @for (role of roleOptions(); track role) {
+                      <option [value]="role" [selected]="role === rateRole()">{{ role }}</option>
+                    }
+                  </select>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                  <div>
+                    <label for="rateCurrency" class="block text-sm font-semibold text-ink-secondary mb-1.5">Currency *</label>
+                    <select id="rateCurrency" (change)="onRateCurrencyChange($event)" class="command-select">
+                      @for (code of rateCurrencyOptions(); track code) {
+                        <option [value]="code" [selected]="code === rateCurrency()">{{ code }}</option>
+                      }
+                    </select>
+                  </div>
+                  <div>
+                    <label for="rateBillRate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Bill rate (€/day) *</label>
+                    <input id="rateBillRate" type="number" min="0" step="1" [value]="rateBillRate()" (input)="onRateBillRateChange($event)" class="command-input" placeholder="e.g. 1000">
+                  </div>
+                </div>
+                @if (rateError(); as err) {
+                  <p role="alert" data-test="negotiated-rate-error" class="text-xs text-critical-text">{{ err }}</p>
+                }
+              </div>
+              <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
+                <button type="button" (click)="closeRateForm()" class="command-button secondary">Cancel</button>
+                <button type="button" (click)="saveRate(c)" [disabled]="!rateFormValid()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                  Save Rate
+                </button>
+              </div>
+            </div>
+          </div>
+        }
 
         <!-- Billing expected vs actual -->
         <div class="command-card overflow-hidden">
@@ -361,91 +472,104 @@ interface BillingControlRow {
             </div>
           </div>
 
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 p-4">
-            <div class="command-kpi green">
-              <p class="command-kpi-label">Recognized To Date</p>
-              <p class="command-kpi-value">{{ recognitionSummary().cumulative | currency: c.currency }}</p>
-            </div>
-            <div class="command-kpi info">
-              <p class="command-kpi-label">Total Recognized</p>
-              <p class="command-kpi-value">{{ recognitionSummary().totalRecognized | currency: c.currency }}</p>
-            </div>
-            <div class="command-kpi" [class.warning]="recognitionSummary().deferred > 0">
-              <p class="command-kpi-label">Deferred (Advance)</p>
-              <p class="command-kpi-value">{{ recognitionSummary().deferred | currency: c.currency }}</p>
-            </div>
-          </div>
-
-          @if (recognitionPeriods().length) {
-            <!-- Cumulative recognition trend -->
-            <div class="px-4 pb-2">
-              <p class="command-section-label">Cumulative recognition</p>
-              <div class="mt-3 space-y-2">
-                @for (row of recognitionPeriods(); track row.period) {
-                  <div class="flex items-center gap-3">
-                    <span class="w-16 shrink-0 font-mono tabular-nums text-xs text-ink-muted">{{ row.period }}</span>
-                    <div class="relative h-6 flex-1 rounded-md bg-surface-muted ring-1 ring-line overflow-hidden">
-                      <div class="absolute inset-y-0 left-0 rounded-md bg-accent transition-[width]"
-                           [style.width.%]="cumulativeBarPct(row)"
-                           [attr.aria-label]="'Cumulative recognized through ' + row.period"
-                           role="img"></div>
-                      <!-- per-period recognized marker -->
-                      <div class="absolute inset-y-0 left-0 border-r-2 border-accent-strong/40"
-                           [style.width.%]="recognizedBarPct(row)"></div>
-                    </div>
-                    <span class="w-28 shrink-0 text-right font-mono tabular-nums text-xs text-ink-secondary">
-                      {{ row.cumulative | currency: c.currency: 'symbol': '1.0-0' }}
-                    </span>
-                  </div>
-                }
+          <!--
+            GATE (round 3): every read the as-incurred branch needs (contracts,
+            projects, negotiatedRates, resources, timeEntries, billingItems) must
+            have resolved before this money figure renders — see
+            recognitionDataReady()'s doc comment. Never render a partial-envelope
+            figure: $0/loading reads honest, a plausible-but-wrong number does not.
+          -->
+          @if (recognitionDataReady()) {
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 p-4">
+              <div class="command-kpi green">
+                <p class="command-kpi-label">Recognized To Date</p>
+                <p class="command-kpi-value">{{ recognitionSummary().cumulative | currency: c.currency }}</p>
               </div>
-              <p class="command-note mt-3">
-                Bars show cumulative revenue recognized through each month; the darker edge marks that month's incremental recognition.
-              </p>
+              <div class="command-kpi info">
+                <p class="command-kpi-label">Total Recognized</p>
+                <p class="command-kpi-value">{{ recognitionSummary().totalRecognized | currency: c.currency }}</p>
+              </div>
+              <div class="command-kpi" [class.warning]="recognitionSummary().deferred > 0">
+                <p class="command-kpi-label">Deferred (Advance)</p>
+                <p class="command-kpi-value">{{ recognitionSummary().deferred | currency: c.currency }}</p>
+              </div>
             </div>
 
-            <!-- Period detail table -->
-            <div class="overflow-x-auto">
-              <table class="command-data-table">
-                <thead>
-                  <tr>
-                    <th>Period</th>
-                    <th class="text-right">Recognized</th>
-                    <th class="text-right">Cumulative</th>
-                    <th class="text-right">Deferred</th>
-                  </tr>
-                </thead>
-                <tbody>
+            @if (recognitionPeriods().length) {
+              <!-- Cumulative recognition trend -->
+              <div class="px-4 pb-2">
+                <p class="command-section-label">Cumulative recognition</p>
+                <div class="mt-3 space-y-2">
                   @for (row of recognitionPeriods(); track row.period) {
-                    <tr>
-                      <td class="font-mono font-semibold">{{ row.period }}</td>
-                      <td class="text-right font-mono tabular-nums"
-                          [class.text-critical-text]="row.recognized < 0"
-                          [class.text-ink-secondary]="row.recognized >= 0">
-                        {{ row.recognized | currency: c.currency }}
-                      </td>
-                      <td class="text-right font-mono tabular-nums text-ink-secondary">{{ row.cumulative | currency: c.currency }}</td>
-                      <td class="text-right font-mono tabular-nums"
-                          [class.text-caution-text]="row.deferred > 0"
-                          [class.text-ink-muted]="row.deferred === 0">
-                        {{ row.deferred | currency: c.currency }}
-                      </td>
-                    </tr>
+                    <div class="flex items-center gap-3">
+                      <span class="w-16 shrink-0 font-mono tabular-nums text-xs text-ink-muted">{{ row.period }}</span>
+                      <div class="relative h-6 flex-1 rounded-md bg-surface-muted ring-1 ring-line overflow-hidden">
+                        <div class="absolute inset-y-0 left-0 rounded-md bg-accent transition-[width]"
+                             [style.width.%]="cumulativeBarPct(row)"
+                             [attr.aria-label]="'Cumulative recognized through ' + row.period"
+                             role="img"></div>
+                        <!-- per-period recognized marker -->
+                        <div class="absolute inset-y-0 left-0 border-r-2 border-accent-strong/40"
+                             [style.width.%]="recognizedBarPct(row)"></div>
+                      </div>
+                      <span class="w-28 shrink-0 text-right font-mono tabular-nums text-xs text-ink-secondary">
+                        {{ row.cumulative | currency: c.currency: 'symbol': '1.0-0' }}
+                      </span>
+                    </div>
                   }
-                </tbody>
-                <tfoot>
-                  <tr class="border-t-2 border-line">
-                    <td class="font-semibold text-ink-secondary">Total</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().totalRecognized | currency: c.currency }}</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().cumulative | currency: c.currency }}</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().deferred | currency: c.currency }}</td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
+                </div>
+                <p class="command-note mt-3">
+                  Bars show cumulative revenue recognized through each month; the darker edge marks that month's incremental recognition.
+                </p>
+              </div>
+
+              <!-- Period detail table -->
+              <div class="overflow-x-auto">
+                <table class="command-data-table">
+                  <thead>
+                    <tr>
+                      <th>Period</th>
+                      <th class="text-right">Recognized</th>
+                      <th class="text-right">Cumulative</th>
+                      <th class="text-right">Deferred</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (row of recognitionPeriods(); track row.period) {
+                      <tr>
+                        <td class="font-mono font-semibold">{{ row.period }}</td>
+                        <td class="text-right font-mono tabular-nums"
+                            [class.text-critical-text]="row.recognized < 0"
+                            [class.text-ink-secondary]="row.recognized >= 0">
+                          {{ row.recognized | currency: c.currency }}
+                        </td>
+                        <td class="text-right font-mono tabular-nums text-ink-secondary">{{ row.cumulative | currency: c.currency }}</td>
+                        <td class="text-right font-mono tabular-nums"
+                            [class.text-caution-text]="row.deferred > 0"
+                            [class.text-ink-muted]="row.deferred === 0">
+                          {{ row.deferred | currency: c.currency }}
+                        </td>
+                      </tr>
+                    }
+                  </tbody>
+                  <tfoot>
+                    <tr class="border-t-2 border-line">
+                      <td class="font-semibold text-ink-secondary">Total</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().totalRecognized | currency: c.currency }}</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().cumulative | currency: c.currency }}</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().deferred | currency: c.currency }}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            } @else {
+              <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted">
+                No dated billing items or approved time entries to build a recognition schedule for this contract.
+              </div>
+            }
           } @else {
             <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted">
-              No dated billing items or approved time entries to build a recognition schedule for this contract.
+              Loading recognition data…
             </div>
           }
         </div>
@@ -462,65 +586,75 @@ interface BillingControlRow {
                 Every entry is balanced by construction.
               </p>
             </div>
-            <span class="command-status shrink-0"
-                  [class.green]="journalTotalsRow().balanced"
-                  [class.red]="!journalTotalsRow().balanced">
-              <mat-icon class="text-[16px] w-[16px] h-[16px]">
-                {{ journalTotalsRow().balanced ? 'check_circle' : 'error' }}
-              </mat-icon>
-              {{ journalTotalsRow().balanced ? 'Balanced' : 'Out of balance' }}
-            </span>
+            @if (recognitionDataReady()) {
+              <span class="command-status shrink-0"
+                    [class.green]="journalTotalsRow().balanced"
+                    [class.red]="!journalTotalsRow().balanced">
+                <mat-icon class="text-[16px] w-[16px] h-[16px]">
+                  {{ journalTotalsRow().balanced ? 'check_circle' : 'error' }}
+                </mat-icon>
+                {{ journalTotalsRow().balanced ? 'Balanced' : 'Out of balance' }}
+              </span>
+            }
           </div>
 
-          @if (journalEntries().length) {
-            <div class="overflow-x-auto">
-              <table class="command-data-table">
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Memo</th>
-                    <th>Account</th>
-                    <th class="text-right">Debit</th>
-                    <th class="text-right">Credit</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  @for (entry of journalEntries(); track entry.date) {
-                    @for (line of entry.lines; track $index; let first = $first) {
-                      <tr [class.border-t-2]="first" [class.border-line]="first">
-                        <td class="font-mono font-semibold align-top">{{ first ? entry.date : '' }}</td>
-                        <td class="text-[var(--cc-muted)] align-top">{{ first ? entry.memo : '' }}</td>
-                        <td class="text-ink-secondary">{{ line.account }}</td>
-                        <td class="text-right font-mono tabular-nums"
-                            [class.text-ink-secondary]="line.debit > 0"
-                            [class.text-ink-muted]="line.debit === 0">
-                          {{ line.debit > 0 ? (line.debit | currency: c.currency) : '—' }}
-                        </td>
-                        <td class="text-right font-mono tabular-nums"
-                            [class.text-ink-secondary]="line.credit > 0"
-                            [class.text-ink-muted]="line.credit === 0">
-                          {{ line.credit > 0 ? (line.credit | currency: c.currency) : '—' }}
-                        </td>
-                      </tr>
+          <!-- Same GATE as the recognition schedule above: journalEntries() is
+               derived from the same partial-envelope-sensitive data(). -->
+          @if (recognitionDataReady()) {
+            @if (journalEntries().length) {
+              <div class="overflow-x-auto">
+                <table class="command-data-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Memo</th>
+                      <th>Account</th>
+                      <th class="text-right">Debit</th>
+                      <th class="text-right">Credit</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (entry of journalEntries(); track entry.date) {
+                      @for (line of entry.lines; track $index; let first = $first) {
+                        <tr [class.border-t-2]="first" [class.border-line]="first">
+                          <td class="font-mono font-semibold align-top">{{ first ? entry.date : '' }}</td>
+                          <td class="text-[var(--cc-muted)] align-top">{{ first ? entry.memo : '' }}</td>
+                          <td class="text-ink-secondary">{{ line.account }}</td>
+                          <td class="text-right font-mono tabular-nums"
+                              [class.text-ink-secondary]="line.debit > 0"
+                              [class.text-ink-muted]="line.debit === 0">
+                            {{ line.debit > 0 ? (line.debit | currency: c.currency) : '—' }}
+                          </td>
+                          <td class="text-right font-mono tabular-nums"
+                              [class.text-ink-secondary]="line.credit > 0"
+                              [class.text-ink-muted]="line.credit === 0">
+                            {{ line.credit > 0 ? (line.credit | currency: c.currency) : '—' }}
+                          </td>
+                        </tr>
+                      }
                     }
-                  }
-                </tbody>
-                <tfoot>
-                  <tr class="border-t-2 border-line-strong">
-                    <td class="font-semibold text-ink-secondary" colspan="3">Totals</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ journalTotalsRow().debit | currency: c.currency }}</td>
-                    <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ journalTotalsRow().credit | currency: c.currency }}</td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-            <p class="command-note px-4 py-3">
-              Σ Debit {{ journalTotalsRow().debit | currency: c.currency }} = Σ Credit {{ journalTotalsRow().credit | currency: c.currency }}.
-              These entries are a preview and have not been posted to the ledger.
-            </p>
+                  </tbody>
+                  <tfoot>
+                    <tr class="border-t-2 border-line-strong">
+                      <td class="font-semibold text-ink-secondary" colspan="3">Totals</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ journalTotalsRow().debit | currency: c.currency }}</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ journalTotalsRow().credit | currency: c.currency }}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+              <p class="command-note px-4 py-3">
+                Σ Debit {{ journalTotalsRow().debit | currency: c.currency }} = Σ Credit {{ journalTotalsRow().credit | currency: c.currency }}.
+                These entries are a preview and have not been posted to the ledger.
+              </p>
+            } @else {
+              <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted">
+                No journal movement to preview — there is nothing recognized or deferred for this contract yet.
+              </div>
+            }
           } @else {
             <div class="command-empty px-6 sm:px-8 py-10 text-center text-ink-muted">
-              No journal movement to preview — there is nothing recognized or deferred for this contract yet.
+              Loading recognition data…
             </div>
           }
         </div>
@@ -672,6 +806,9 @@ export class ContractDetails {
   private notification = inject(NotificationService);
   private auth = inject(AuthService);
 
+  /** Exposed for the template's "not applied" check — sellRateFor only ever reads a BASE_CURRENCY row. */
+  readonly BASE_CURRENCY = BASE_CURRENCY;
+
   id = input.required<string>();
 
   // Principal-gated reads (contracts, customers, orders, order-lines, resources,
@@ -732,6 +869,26 @@ export class ContractDetails {
     stream: ({ params: ready }) => (ready ? this.api.getBillingPlanItems() : of<BillingPlanItem[]>([])),
     defaultValue: [] as BillingPlanItem[],
   });
+  // Negotiated sell rates (design spec §4/§6) feed the as-incurred T&M branch of
+  // recognitionSchedule via sellRateFor (see `data` below). /negotiated-rates is
+  // principal-gated server-side the same way contracts/customers/orders are, so
+  // this follows THAT gated idiom (keyed on auth.authReady()) rather than the
+  // ungated one used for the open reads (projects, milestones).
+  private negotiatedRatesRes = rxResource<NegotiatedRate[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getNegotiatedRates() : of<NegotiatedRate[]>([])),
+    defaultValue: [] as NegotiatedRate[],
+  });
+  // The org's working hours/day — the EUR/DAY -> EUR/HOUR divisor sellRateFor
+  // needs to price a negotiated rate (see FinanceData.hoursPerDay). An OPEN read
+  // (like projects/milestones below), so it is not keyed on authReady; it IS
+  // included in recognitionDataReady() below, because a money figure must never
+  // render from a partial envelope — pricing 8 hours with the wrong divisor is a
+  // believable wrong number, which is worse than a loading state.
+  private hoursPerDayRes = rxResource({ stream: () => this.api.getHoursPerDay(), defaultValue: { value: DEFAULT_HOURS_PER_DAY } });
+  // Role options for the rate form come from the project-roles CATALOG — the same
+  // authority the server validates against (see roleOptions below). Open read.
+  private rolesRes = rxResource({ stream: () => this.api.getProjectRoles(), defaultValue: [] as ProjectRole[] });
   private milestonesRes = rxResource({ stream: () => this.api.getMilestones(), defaultValue: [] as Milestone[] });
   // REFERENCE-DATA INTEGRITY (Phase B): `currency` is a config-value FK to the
   // configured currency set (fx-rates). Gated on authReady() with the other
@@ -755,6 +912,7 @@ export class ContractDetails {
   billingPlanItems = this.billingPlanRes.value;
   milestones = this.milestonesRes.value;
   fxRates = this.fxRatesRes.value;
+  negotiatedRates = this.negotiatedRatesRes.value;
 
   /** Canonical recurrence enum (matches BillingPlanItem['recurrence'] and billing's RECURRENCES). */
   readonly recurrences: readonly NonNullable<BillingPlanItem['recurrence']>[] = ['Monthly', 'Quarterly', 'Annual'];
@@ -811,11 +969,119 @@ export class ContractDetails {
     timeEntries: this.timeEntries(),
     billingItems: this.billingPlanItems(),
     milestones: this.milestones(),
+    // `projects`/`contracts` were already loaded (contractProjects/contractOrders
+    // below use them) but not previously fed into FinanceData. Both are REQUIRED
+    // for sellRateFor's project-override / contract-period precedence (design
+    // spec §4/§6) to resolve correctly, not merely to carry `negotiatedRates`:
+    // without `contracts` here, a project's own contract can never be found and
+    // every negotiated rate silently falls back to the reference billRate.
+    projects: this.projects(),
+    contracts: this.contracts(),
+    negotiatedRates: this.negotiatedRates(),
+    hoursPerDay: this.hoursPerDayRes.value().value,
   }));
 
   contractProjects = computed(() => this.projects().filter(p => p.contractId === this.id()));
 
   contractOrders = computed(() => this.orders().filter(o => o.contractId === this.id()));
+
+  // --- Negotiated Rates (design spec §7) --------------------------------
+
+  contractNegotiatedRates = computed(() => this.negotiatedRates().filter(r => r.contractId === this.id()));
+
+  /**
+   * Role options for the rate form's select: the project-roles CATALOG, which is
+   * the SAME authority the server validates a rate's role against
+   * (validateRoleRefs, src/server.ts) — widened to the catalog this wave so a
+   * price can be negotiated BEFORE anyone with that profile is hired, the
+   * workflow docs/functional/commercial.md now describes. Sourced from the
+   * staffed roles (`resources.map(r => r.role)`) this picker could not offer an
+   * unstaffed profile at all, making that workflow reachable only by hand-posting
+   * to the API. Stored value is the catalog NAME.
+   */
+  roleOptions = computed<string[]>(() => [...new Set(this.rolesRes.value().map(r => r.name))].sort());
+
+  /** Currency options for the rate form's select: base currency + every configured fx-rate currency. */
+  rateCurrencyOptions = computed<string[]>(() => [...new Set([BASE_CURRENCY, ...this.fxRates().map(r => r.currency)])]);
+
+  showRateForm = signal(false);
+  editingRateId = signal<string | null>(null);
+  rateRole = signal('');
+  rateCurrency = signal(BASE_CURRENCY);
+  rateBillRate = signal<number | null>(null);
+  rateError = signal<string | null>(null);
+
+  rateFormValid = computed(() => !!this.rateRole() && !!this.rateCurrency() && this.rateBillRate() !== null && this.rateBillRate()! >= 0);
+
+  onRateRoleChange(event: Event): void {
+    this.rateRole.set((event.target as HTMLSelectElement).value);
+  }
+
+  onRateCurrencyChange(event: Event): void {
+    this.rateCurrency.set((event.target as HTMLSelectElement).value);
+  }
+
+  onRateBillRateChange(event: Event): void {
+    const raw = (event.target as HTMLInputElement).value;
+    this.rateBillRate.set(raw === '' ? null : Number(raw));
+  }
+
+  openRateForm(existing?: NegotiatedRate): void {
+    this.rateError.set(null);
+    if (existing) {
+      this.editingRateId.set(existing.id);
+      this.rateRole.set(existing.role);
+      this.rateCurrency.set(existing.currency);
+      this.rateBillRate.set(existing.billRate);
+    } else {
+      this.editingRateId.set(null);
+      this.rateRole.set('');
+      this.rateCurrency.set(BASE_CURRENCY);
+      this.rateBillRate.set(null);
+    }
+    this.showRateForm.set(true);
+  }
+
+  closeRateForm(): void {
+    this.showRateForm.set(false);
+    this.editingRateId.set(null);
+    this.rateError.set(null);
+  }
+
+  saveRate(contract: Contract): void {
+    if (!this.rateFormValid()) return;
+    // contractId ONLY — projectId is never sent from this surface (spec §3's xor).
+    const payload: Partial<NegotiatedRate> = {
+      contractId: contract.id,
+      role: this.rateRole(),
+      currency: this.rateCurrency(),
+      billRate: this.rateBillRate() ?? 0,
+    };
+    const id = this.editingRateId();
+    const done = () => {
+      this.negotiatedRatesRes.reload();
+      this.notification.show('Negotiated rate saved', 'success');
+      this.closeRateForm();
+    };
+    // Surface the server's own refusal text (400s from validateNegotiatedRate,
+    // src/server.ts) INLINE, and do NOT close the form — the coordinator's
+    // requirement, not just the generic toast the error interceptor also fires.
+    const fail = (e: unknown) => {
+      this.rateError.set((e as { error?: { error?: string } })?.error?.error ?? 'Could not save the negotiated rate.');
+    };
+    if (id) {
+      this.api.updateNegotiatedRate(id, payload).subscribe({ next: done, error: fail });
+    } else {
+      this.api.createNegotiatedRate(payload).subscribe({ next: done, error: fail });
+    }
+  }
+
+  deleteRate(rate: NegotiatedRate): void {
+    this.api.deleteNegotiatedRate(rate.id).subscribe(() => {
+      this.negotiatedRatesRes.reload();
+      this.notification.show('Negotiated rate deleted', 'success');
+    });
+  }
 
   contractBillingPlan = computed(() =>
     this.billingPlanItems()
@@ -943,6 +1209,38 @@ export class ContractDetails {
     };
   });
 
+  /**
+   * True once every read the as-incurred (T&M) branch of recognitionSchedule/
+   * recognitionJournal depends on — via sellRateFor's project-override /
+   * contract-period precedence — has resolved its REAL (post-auth) value:
+   * contracts, projects, negotiatedRates, resources, timeEntries, billingItems,
+   * hoursPerDay (the EUR/day -> EUR/hour divisor for a negotiated rate: without
+   * it the figure prices at the default-8 assumption instead of the configured
+   * working day, which is a plausible wrong number, not a missing one).
+   *
+   * This screen has NO shared forkJoin (unlike reporting.ts/dashboard.component.ts) —
+   * each collection is its own independent rxResource, and the page's only gate
+   * (`@if (contract(); as c)`) depends on contractsRes alone. Without this guard,
+   * the recognition card could render as soon as contracts/resources/timeEntries/
+   * billingItems have landed while projects or negotiatedRates are still in
+   * flight: sellRateFor would then silently fall through to the reference
+   * billRate for every entry, and the page would show a PLAUSIBLE BUT WRONG
+   * "Total Recognized" that jumps once the remaining reads complete. A money
+   * figure must never render from a partial envelope — $0 while loading reads as
+   * "still loading"; a believable wrong number does not. Gating only THIS
+   * figure (not the whole page) because everything else here is fine to show
+   * as soon as it individually has data.
+   */
+  protected recognitionDataReady = computed<boolean>(() =>
+    !this.contractsRes.isLoading()
+    && !this.projectsRes.isLoading()
+    && !this.negotiatedRatesRes.isLoading()
+    && !this.resourcesRes.isLoading()
+    && !this.timeEntriesRes.isLoading()
+    && !this.billingPlanRes.isLoading()
+    && !this.hoursPerDayRes.isLoading(),
+  );
+
   /** YYYY-MM bounds spanning every dated signal that could carry recognition for this contract. */
   private recognitionWindow = computed<{ from: string; to: string } | null>(() => {
     const ym = (iso: string | undefined): string => {
@@ -1067,15 +1365,15 @@ export class ContractDetails {
       case 'Recurring':
         return item.recurrence ?? 'Recurring';
       case 'Progress':
-        return item.progressPct != null ? `${item.progressPct}% complete` : 'Progress';
+        return item.progressPct != null ? `${item.progressPct.toFixed(0)}% complete` : 'Progress';
       case 'Capped':
-        return item.capAmount != null ? `Capped @ ${item.capAmount}` : 'Capped';
+        return item.capAmount != null ? `Capped @ ${item.capAmount.toFixed(2)}` : 'Capped';
       case 'TimeAndMaterials':
         return 'Time & Materials';
       case 'Advance':
         return 'Advance';
       case 'Expense':
-        return item.markupPct != null ? `Expense +${item.markupPct}%` : 'Expense';
+        return item.markupPct != null ? `Expense +${item.markupPct.toFixed(1)}%` : 'Expense';
       case 'CreditNote':
         return 'Credit Note';
       default:

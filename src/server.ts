@@ -9,13 +9,14 @@ import { db } from './db/client';
 import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
-import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter, AllocationApprovalRow, AllocationApprovalItem, SubstitutionMonthOutcome, SubstitutionResult } from './app/services/api.service';
+import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter, AllocationApprovalRow, AllocationApprovalItem, SubstitutionMonthOutcome, SubstitutionResult, NegotiatedRate } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, decisionToAssignmentStatus, allocationApproverStep } from './app/services/staffing.util';
 import { deriveAssignmentStatus, monthRowId, parseMonthRowId, monthlyAggregateHours, type MonthStatus } from './app/services/allocation-month.util';
 import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity, monthlyTargetHours } from './app/services/calendar.util';
 import { planSubstitution, planGiveBack, planSubstitutionBooking, type SubstitutionPlan } from './app/services/substitution.util';
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
+import { sellRateFor } from './app/services/sell-rate.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { isResourceKind, RESOURCE_KINDS, kindOf, dailyCapFor } from './app/services/resource-kind.util';
 import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, scopeOf, accountableApproversOf, nodeManagersAbove, isTerminatedAsOf, type OrgLevel } from './app/services/org-scope.util';
@@ -523,7 +524,7 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
   }
 
   const rules: { test: (path: string) => boolean; roles: UserRole[] }[] = [
-    { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
+    { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items', '/negotiated-rates'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
     { test: p => ['/project-financials', '/project-cost-centers', '/cost-centers'].some(prefix => p.startsWith(prefix)), roles: ['finance', 'delivery-executive', 'admin'] },
     // Sensitive financial rates (costRate/billRate) live on resources; restrict who may rewrite them.
     { test: p => p.startsWith('/resources'), roles: ['resource-manager', 'delivery-executive', 'admin'] },
@@ -579,7 +580,7 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
  */
 const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   { test: p => p.startsWith('/audit-logs'), roles: ['admin', 'delivery-executive'] },
-  { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
+  { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items', '/negotiated-rates'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
   // Internal budget/cost-center plans expose financial planning data and must
   // match their finance-grade mutation rule. Commercial users can still read
   // billing-plan items through the commercial rule above.
@@ -4390,24 +4391,57 @@ function isCappedNature(item: Pick<BillingPlanEntry, 'type' | 'capAmount'>): boo
 const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
 
 /**
- * Accrued T&M for a project, DERIVED as Σ(approved time-entry hours × resource
- * billRate) — the same as-incurred rule the finance util's recognitionSchedule
- * uses. Resource billRates are denominated in the base currency (EUR), so the
- * returned accrual is a BASE-currency figure; the caller converts a per-item cap
- * into base before comparing. Returns undefined when accrual is not derivable
- * (no projectId), so the caller can skip the accrued<=cap check rather than
- * treat "no data" as zero accrual.
+ * Accrued T&M for a project, DERIVED as Σ(approved time-entry hours × the
+ * NEGOTIATED SELL RATE) — the same as-incurred rule the finance util's
+ * `recognitionSchedule` applies, resolved through the very same `sellRateFor`
+ * (project override -> the project's contract rate for hours dated inside that
+ * contract's period -> the resource's own effective billRate). That parity claim
+ * used to be stated here and was false: this function summed
+ * `hours × resource.billRate` while recognitionSchedule priced at the negotiated
+ * rate, and THIS figure is what decides whether the `[CAP-EXCEEDED]`
+ * not-to-exceed flag is written into a billing item's notes. A negotiated
+ * discount therefore fired the flag on an accrual the customer will never be
+ * billed, and a negotiated premium let a genuine breach of a not-to-exceed
+ * ceiling pass unflagged.
+ *
+ * UNITS: `resolveResourceRates` yields an EUR/HOUR reference rate and
+ * `sellRateFor` returns EUR/HOUR on every path (dividing a stored EUR/DAY
+ * negotiated rate by the configured hours/day), so both factors of the
+ * multiplication below are hourly.
+ *
+ * Rates are EUR (the base currency) — `sellRateFor` only ever resolves a
+ * base-currency row — so the returned accrual is a BASE-currency figure; the
+ * caller converts a per-item cap into base before comparing. Returns undefined
+ * when accrual is not derivable (no projectId), so the caller can skip the
+ * accrued<=cap check rather than treat "no data" as zero accrual.
  */
 async function accruedTAndM(item: Pick<BillingPlanEntry, 'projectId'>): Promise<number | undefined> {
   if (!item.projectId) return undefined;
-  const [entries, rawResources] = await Promise.all([repos.timeEntries.list(), repos.resources.list()]);
+  const [entries, rawResources, projects, contracts, negotiatedRates, hoursPerDay] = await Promise.all([
+    repos.timeEntries.list(),
+    repos.resources.list(),
+    repos.projects.list(),
+    repos.contracts.list(),
+    repos.negotiatedRates.list(),
+    getHoursPerDay(),
+  ]);
   // Phase E: use EFFECTIVE bill rates (override ?? rate card), not the raw column.
   const resources = await resolveResourceRates(rawResources);
-  const billRateById = new Map(resources.map(r => [r.id, r.billRate ?? 0]));
+  const resourceById = new Map(resources.map(r => [r.id, r]));
   let accrued = 0;
   for (const t of entries) {
     if (t.status !== 'Approved' || t.projectId !== item.projectId) continue;
-    const rate = billRateById.get(t.resourceId) ?? 0;
+    const resource = resourceById.get(t.resourceId);
+    const rate = sellRateFor({
+      projectId: t.projectId,
+      role: resource?.role,
+      date: t.date,
+      referenceBillRate: resource?.billRate,
+      hoursPerDay,
+      rates: negotiatedRates as unknown as NegotiatedRate[],
+      projects: projects as unknown as { id: string; contractId?: string }[],
+      contracts: contracts as unknown as { id: string; startDate: string; endDate?: string }[],
+    }) ?? 0;
     const hours = Number.isFinite(t.hours) ? t.hours : 0;
     accrued += hours * rate;
   }
@@ -4581,6 +4615,251 @@ apiRouter.put('/billing-plan-items/:id', async (req, res) => {
 });
 apiRouter.delete('/billing-plan-items/:id', async (req, res) => {
   await repos.billingPlanItems.remove(req.params.id);
+  res.status(204).send();
+});
+
+// --- Negotiated sell rates (Task 3, design spec §5) -------------------------
+//
+// `/negotiated-rates` is a bespoke handler set, NOT mounted with `crud()` — it
+// carries referential-integrity rules `crud()` cannot express, following the
+// same shape as `/resource-organizations` above: a required-field list
+// declared ONCE (`REQUIRED_NEGOTIATED_RATE_FIELDS`) so the pick()-forwards-null
+// class (see the note at `REQUIRED_ORG_FIELDS`) is rejected for the whole class
+// of notNull columns rather than a hand-picked subset, a single validator
+// called from both POST and PUT, and the SAME `pick()` allow-list literally
+// duplicated in both handlers (a field missing from one list is not writable
+// through that verb and fails SILENTLY — see the note at
+// `/resource-organizations`'s POST/PUT for the exact same trap).
+//
+// No cross-record lock (unlike ORG_TREE_LOCK above): the org-tree guard reasons
+// over the WHOLE tree (parent/child/level, a graph), so an unserialized
+// concurrent write can leave the graph inconsistent. This validator reasons
+// over a single collection's own uniqueness key instead — a narrower shape
+// than the org tree's, though NOT one shared by `/contracts`/`/orders`/
+// `/order-lines` (those only run FK lookups and numeric checks; none of them
+// scan their own collection for a same-key duplicate the way this does). On
+// its own merits: a race here would at worst let two near-simultaneous POSTs
+// both insert the same key, `sellRateFor` (src/app/services/sell-rate.util.ts)
+// already resolves that deterministically (first match), and this collection
+// is low-frequency and finance/sales-gated (no high-concurrency writers) — so
+// no data is actually corrupted, unlike the org tree's graph-wide guards.
+
+/** Every notNull column on negotiated_rates (src/db/schema.ts), declared ONCE
+ *  so the null-rejection covers the class rather than a hand-picked subset. */
+const REQUIRED_NEGOTIATED_RATE_FIELDS = ['role', 'currency', 'billRate'] as const;
+
+/**
+ * Validate a `/negotiated-rates` body against every rule in design spec §5, in
+ * the order the spec lists them: the null/empty-string-rejection loop first,
+ * then contractId XOR projectId, then FK existence (whichever side is
+ * supplied), then role existence, then currency validity, then same-key
+ * uniqueness (self-excluded on PUT), then the numeric check. Returns a
+ * 400-suitable message, or null when the body is acceptable. Both POST and
+ * PUT call this same function so the rule can never drift between the two
+ * verbs.
+ *
+ * `ctx.id` is the record's own id on PUT (absent on POST) — mirrors
+ * `validateOrgTreeNode`'s signature above. A field omitted from `body` (POST
+ * of a full row, or a partial PUT patch) falls back to the EXISTING row's
+ * value so a partial PUT is validated against its full, post-merge shape —
+ * exactly what check 9 in the smoke suite (PUT changing only billRate) needs
+ * to keep passing its own xor/FK/role/uniqueness checks unchanged.
+ *
+ * ROLE CHECK (user decision, superseding an earlier reading of spec §5) —
+ * against the project-roles CATALOG, via the SAME `validateRoleRefs` helper
+ * every other role reference in the app already uses (resources,
+ * requests/`requiredRole`), not a second rule. An earlier draft checked
+ * roles actually HELD by a resource today (`repos.resources`), reasoning that
+ * a role no resource holds is a typo. That reasoning has it backwards: a
+ * sell rate is negotiated with a customer BEFORE anyone with that profile is
+ * ever hired, and a contract is signed before staffing begins — so a
+ * catalog role with no resource staffed on it yet is a perfectly legitimate,
+ * forward-looking configuration, not an error. Checking against
+ * `repos.resources` would reject the exact rates this feature exists to let
+ * sales negotiate early. Only a role absent from the catalog too (a genuine
+ * typo) is rejected.
+ *
+ * CURRENCY CHECK (this branch's closing work) — reuses the SAME
+ * `validateCurrency` helper `/contracts`, `/orders` and `/rate-cards` already
+ * call — no second currency rule. Before this check existed, `currency: ''`
+ * was accepted by every rule below untouched (the null-rejection loop only
+ * ever caught an explicit `null`) and produced a row that LOOKED saved but
+ * was silently never read again: `sellRateFor`
+ * (`src/app/services/sell-rate.util.ts`) only ever resolves a rate whose
+ * currency is the base currency, so an empty-string row never participated
+ * in resolution. The null-rejection loop below now treats `''` the same as
+ * `null` for every required column (closing the empty-string gap for `role`
+ * too, not only `currency`), and this step additionally rejects a non-empty
+ * but unconfigured currency code.
+ *
+ * ROUND 2 (coordinator review, critical) — OMITTED is not the same bug as
+ * NULL. Every check below the null loop reads `body.field === undefined ?
+ * existing?.field : body.field`, which is exactly PUT's fall-back-to-existing
+ * semantics: a field the client didn't touch should keep its stored value. On
+ * POST there IS no existing row, so an outright-OMITTED (not nulled) required
+ * field resolved to `undefined` and every one of those checks silently
+ * no-opped — `POST {contractId:'CT1'}` alone used to pass xor and the FK
+ * check, then skip role-existence, uniqueness AND the numeric check entirely,
+ * creating a row missing three notNull columns (200 in-memory, unmapped 23502
+ * as an opaque 500 on Postgres — the exact two-adapters-disagree class this
+ * whole task exists to close, reached by omission instead of by an explicit
+ * null). Closed by extending the SAME declared list: on POST (`ctx ===
+ * undefined`, so there is nothing to inherit from) every
+ * REQUIRED_NEGOTIATED_RATE_FIELDS entry must also be PRESENT, not merely
+ * non-null. PUT's fall-back-to-existing behaviour is untouched — this check
+ * is gated OFF whenever `ctx` is supplied.
+ */
+async function validateNegotiatedRate(
+  body: Partial<NegotiatedRate>,
+  ctx?: { id?: string },
+): Promise<string | null> {
+  // 1. Null/empty-string-rejection loop — every notNull column, rejected as a
+  // class BEFORE anything below (the `??` merges, the xor, the uniqueness
+  // key) ever sees a masked corruption. Two distinct classes closed here:
+  //   - pick() forwards an explicit JSON null (it filters only undefined),
+  //     and a naive `body.role ?? existing?.role` cannot tell "the client
+  //     didn't touch this field" from "the client sent null" — it would fall
+  //     back to the EXISTING value for every check below while the object
+  //     handed to the repo still carries the literal null, corrupting the
+  //     row in-memory (repository.ts's explicit-null-clears rule deletes the
+  //     key) and raising an unmapped NOT NULL violation (23502) as an opaque
+  //     500 on Postgres — the two adapters silently disagreeing.
+  //   - an explicit empty string is not `null`, so it survived that check
+  //     alone, but it is the same "cleared to nothing" corruption for a
+  //     notNull column in practice (see the CURRENCY CHECK doc note above for
+  //     the concrete, previously-silent consequence) — treated identically to
+  //     `null` here so neither `currency` nor `role` can ever be saved empty.
+  for (const field of REQUIRED_NEGOTIATED_RATE_FIELDS) {
+    if (body[field] === null || body[field] === '') return `${field} is required and cannot be cleared`;
+  }
+  // 1b. Required-PRESENT on POST only (see the ROUND 2 doc note above): with
+  // no existing row to inherit from, an omitted key is not "unchanged", it is
+  // simply missing. PUT keeps its fall-back-to-existing behaviour untouched —
+  // this loop runs ONLY when there is no ctx (i.e. no existing row at all).
+  if (ctx === undefined) {
+    for (const field of REQUIRED_NEGOTIATED_RATE_FIELDS) {
+      if (body[field] === undefined) return `${field} is required`;
+    }
+  }
+
+  const all = await repos.negotiatedRates.list();
+  const existing = ctx?.id === undefined ? undefined : all.find(r => r.id === ctx.id);
+
+  // 1c. THE TWO NULLABLE FKs MUST BE USABLE OR ABSENT — NOTHING IN BETWEEN.
+  // The xor below asks `typeof x === 'string' && x.length > 0`, but the object
+  // handed to create()/update() is this `body` VERBATIM: a value that FAILED
+  // that test was read as "absent" by the xor and then persisted anyway. So
+  // `{contractId: '', projectId: '2'}` used to return 200 with BOTH FK columns
+  // set in-memory — breaking the invariant that exactly one of them is ever
+  // populated (docs/architecture/03-backend-and-data.md) — while on Postgres
+  // `contract_id = ''` is a non-NULL value with no matching contracts row, so
+  // the FK raised 23503 and the error middleware mapped it to 409. Same
+  // request, two different answers: the two-adapters-disagree class the rest of
+  // this validator exists to close, left open on the only two nullable columns.
+  // `{contractId: 123}` is the same hole with a different type.
+  //
+  // An explicit `null` is deliberately NOT rejected here: it is the one signal
+  // that CLEARS a side (repository.ts drops the key in-memory, Postgres writes
+  // NULL, `nullsToUndefined` reports both as absent), which is what makes a
+  // rate movable from contract-level to project-level in one PUT. The xor
+  // already reads it as absent, which is exactly what it will become.
+  for (const field of ['contractId', 'projectId'] as const) {
+    const raw = (body as Record<string, unknown>)[field];
+    if (raw === undefined || raw === null) continue;
+    if (typeof raw !== 'string' || raw.length === 0) {
+      return `${field} must be a non-empty string referencing an existing row, or null to clear it`;
+    }
+  }
+
+  // 2. contractId XOR projectId — exactly one, never neither, never both. Safe
+  // to judge with the string test now that 1c has rejected everything that
+  // would fail it while still being written (see that note).
+  const contractId = body.contractId === undefined ? existing?.contractId : body.contractId;
+  const projectId = body.projectId === undefined ? existing?.projectId : body.projectId;
+  const hasContract = typeof contractId === 'string' && contractId.length > 0;
+  const hasProject = typeof projectId === 'string' && projectId.length > 0;
+  if (hasContract === hasProject) {
+    return 'exactly one of contractId or projectId is required';
+  }
+
+  // 3. FK existence — only the side actually carrying a value is checked.
+  if (hasContract && !(await existsRepo(repos.contracts, contractId))) {
+    return 'contractId must reference an existing contract';
+  }
+  if (hasProject && !(await existsRepo(repos.projects, projectId))) {
+    return 'projectId must reference an existing project';
+  }
+
+  // 4. Role existence — against the project-roles CATALOG (see doc comment
+  // above), via the same `validateRoleRefs` helper the rest of the app uses
+  // for role references, rather than a second, negotiated-rates-only rule.
+  const role = body.role === undefined ? existing?.role : body.role;
+  if (role !== undefined) {
+    const roleErr = await validateRoleRefs({ role });
+    if (roleErr) return roleErr;
+  }
+
+  // 5. Currency validity — must be a configured fx-rates currency code (see
+  // doc comment above), via the same `validateCurrency` helper /contracts,
+  // /orders and /rate-cards already call.
+  const currency = body.currency === undefined ? existing?.currency : body.currency;
+  const curErr = await validateCurrency({ currency });
+  if (curErr) return curErr;
+
+  // 6. Same-key uniqueness on (contractId|projectId, role, currency), self-excluded on PUT.
+  if (role !== undefined && currency !== undefined) {
+    const dupe = all.find(r =>
+      r.id !== ctx?.id
+      && r.role === role
+      && r.currency === currency
+      && (hasContract ? r.contractId === contractId : r.projectId === projectId),
+    );
+    if (dupe) return `a negotiated rate already exists for this key (existing id ${dupe.id})`;
+  }
+
+  // 7. Numeric — billRate must be a finite, non-negative number.
+  const billRate = body.billRate === undefined ? existing?.billRate : body.billRate;
+  if (billRate !== undefined && !isNonNegNumber(billRate)) {
+    return 'billRate must be a non-negative number';
+  }
+
+  return null;
+}
+
+apiRouter.get('/negotiated-rates', async (_req, res) => { res.json(await repos.negotiatedRates.list()); });
+apiRouter.post('/negotiated-rates', async (req, res) => {
+  const body = pick<NegotiatedRate>(req.body, [
+    'contractId', 'projectId', 'role', 'currency', 'billRate',
+  ]);
+  // On a CREATE there is no previous value, so an explicit null on a nullable FK
+  // means "not set" — normalise it to ABSENT before anything else sees it.
+  // Otherwise `InMemoryRepository.create` (unlike `update`, which drops a null
+  // key) stores the literal null and serves `contractId: null` forever, while
+  // Postgres inserts NULL and `nullsToUndefined` reports it absent: the same
+  // POST, two different JSON shapes. Doing it HERE, before validation, is what
+  // makes the validator judge the object that will actually be stored.
+  for (const field of ['contractId', 'projectId'] as const) {
+    if ((body as Record<string, unknown>)[field] === null) delete body[field];
+  }
+  const err = await validateNegotiatedRate(body);
+  if (err) { res.status(400).json({ error: err }); return; }
+  const item = { id: newId(), ...body } as NegotiatedRate;
+  const created = await repos.negotiatedRates.create(item);
+  res.json(created);
+});
+apiRouter.put('/negotiated-rates/:id', async (req, res) => {
+  const existing = await repos.negotiatedRates.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const body = pick<NegotiatedRate>(req.body, [
+    'contractId', 'projectId', 'role', 'currency', 'billRate',
+  ]);
+  const err = await validateNegotiatedRate(body, { id: req.params.id });
+  if (err) { res.status(400).json({ error: err }); return; }
+  const updated = await repos.negotiatedRates.update(req.params.id, body);
+  res.json(updated);
+});
+apiRouter.delete('/negotiated-rates/:id', async (req, res) => {
+  await repos.negotiatedRates.remove(req.params.id);
   res.status(204).send();
 });
 
@@ -5441,23 +5720,51 @@ apiRouter.get('/storage-status', (_req, res) => res.json({
 // RBAC: '/integrations' is gated (reads AND mutations) to
 // finance/delivery-executive/admin via READ_RULES + the mutation rules above.
 
-/** Assemble the full FinanceData snapshot from the repositories. */
+/**
+ * Assemble the full FinanceData snapshot from the repositories.
+ *
+ * `contracts` was already part of this envelope (customerProfitability /
+ * arAgingByCustomer walk project -> contract -> customer via it). Negotiated
+ * sell rates (design spec §4/§6) are new: one `repos.negotiatedRates.list()`
+ * call here, shared by every consumer of this snapshot — the as-incurred
+ * branch of recognitionSchedule then resolves per-entry via sellRateFor, never
+ * issuing its own per-row query.
+ *
+ * `hoursPerDay` travels WITH those rates and is not optional in practice: a
+ * negotiated rate is stored in EUR/DAY while every other rate in the envelope is
+ * EUR/HOUR, so this is the divisor `sellRateFor` converts with. Omitting it does
+ * not fail loudly — it silently prices at the default 8h day — which is exactly
+ * why it is fetched here, next to the rates it belongs to.
+ *
+ * KNOWN, ADJUDICATED INCONSISTENCY (recorded, deliberately NOT fixed here).
+ * `resources` below is `repos.resources.list()` — the RAW rows, whose `billRate`
+ * is the per-resource override in EUR per DAY. The client surfaces instead read
+ * `/api/resources`, which resolves it to EUR per HOUR via `withEffectiveRates`.
+ * So in THIS envelope only, the `referenceBillRate` fallback of `sellRateFor` is
+ * fed a €/day value, and the as-incurred figures in the GL/BI exports overstate
+ * un-negotiated T&M by a factor of hoursPerDay. That predates negotiated rates
+ * (the pre-feature code multiplied the same raw column by hours) and switching it
+ * to `resolveResourceRates` moves every exported artifact's numbers, so it was
+ * ruled its own change — see the 2026-08-04 user decision 2 in the SDD ledger.
+ * The NEGOTIATED path here is correct: it converts with `hoursPerDay`.
+ */
 async function loadFinanceData(): Promise<FinanceData> {
   const [
     requests, assignments, resources, orders, orderLines, financials,
     timeEntries, billingItems, contracts, customers, milestones,
-    changeRequests, projects, fxRates,
+    changeRequests, projects, fxRates, negotiatedRates, hoursPerDay,
   ] = await Promise.all([
     repos.requests.list(), repos.assignments.list(), repos.resources.list(),
     repos.orders.list(), repos.orderLines.list(), repos.projectFinancials.list(),
     repos.timeEntries.list(), repos.billingPlanItems.list(), repos.contracts.list(),
     repos.customers.list(), repos.milestones.list(), repos.changeRequests.list(),
-    repos.projects.list(), repos.fxRates.list(),
+    repos.projects.list(), repos.fxRates.list(), repos.negotiatedRates.list(),
+    getHoursPerDay(),
   ]);
   return {
     requests, assignments, resources, orders, orderLines, financials,
     timeEntries, billingItems, contracts, customers, milestones,
-    changeRequests, projects, fxRates,
+    changeRequests, projects, fxRates, negotiatedRates, hoursPerDay,
   };
 }
 

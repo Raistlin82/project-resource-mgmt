@@ -337,7 +337,7 @@ export class Orders {
     const lines = this.orderLines().filter(l => l.orderId === orderId);
     if (!lines.length) return 'No project line';
     return lines
-      .map(line => `${this.projectsById().get(line.projectId) ?? line.projectId} (${line.amount.toLocaleString()} ${this.orders().find(o => o.id === orderId)?.currency ?? ''})`)
+      .map(line => `${this.projectsById().get(line.projectId) ?? line.projectId} (${line.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${this.orders().find(o => o.id === orderId)?.currency ?? ''})`)
       .join(', ');
   }
 
