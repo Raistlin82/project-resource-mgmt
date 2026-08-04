@@ -1,5 +1,10 @@
 # Audit di implementazione — Project & Resource Management
 
+> **Historical snapshot (2026-06-07).** The application has changed
+> substantially since this document was written. For the current UI/UX and
+> application-logic defect register, remediation status and acceptance criteria,
+> use [`docs/audits/2026-08-04-ui-application-audit.md`](docs/audits/2026-08-04-ui-application-audit.md).
+
 > Analisi totale dell'applicazione per distinguere cosa è **realmente implementato** dai pulsanti/funzioni che sembrano attivi ma non producono effetti persistenti.
 > Generato il 2026-06-07.
 

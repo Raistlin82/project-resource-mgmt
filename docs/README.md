@@ -25,6 +25,7 @@ verifies JWTs and enforces role-based access control (RBAC).
 | **Developer / Architect** | [`architecture/`](#architecture) — system design, frontend, backend, security, integrations, deployment |
 | **Business / Process owner** | [`functional/`](#functional-areas) — what each functional area does and how the workflows run |
 | **Security / Ops engineer** | [`architecture/04-security-identity.md`](architecture/04-security-identity.md) · [`architecture/06-deployment-operations.md`](architecture/06-deployment-operations.md) · [`functional/keycloak-setup.md`](functional/keycloak-setup.md) |
+| **Maintainer / reviewer** | [`audits/2026-08-04-ui-application-audit.md`](audits/2026-08-04-ui-application-audit.md) — current defect register, remediation status and residual acceptance criteria |
 | **Everyone** | [`roles-and-permissions.md`](roles-and-permissions.md) · [`glossary.md`](glossary.md) |
 
 ---
@@ -78,6 +79,10 @@ What the product does, by area, for business and process owners.
 ### Glossary
 
 - [`glossary.md`](glossary.md) — alphabetized domain and technical terms
+
+### Audits
+
+- [`audits/2026-08-04-ui-application-audit.md`](audits/2026-08-04-ui-application-audit.md) — UI/UX and application-logic findings, fixes and guarded backlog
 
 ---
 
