@@ -65,6 +65,7 @@ import type {
   PartnerRole,
   Vendor,
   RateCard,
+  NegotiatedRate,
   Setting,
   Project,
   Partner,
@@ -327,6 +328,7 @@ export interface Repositories {
   partnerRoles: Repository<PartnerRole>;
   vendors: Repository<Vendor>;
   rateCards: Repository<RateCard>;
+  negotiatedRates: Repository<NegotiatedRate>;
   settings: Repository<Setting>;
   projects: Repository<Project>;
   projectPartners: Repository<Partner>;
@@ -408,6 +410,7 @@ function buildPgRepositories(database: DrizzleDb): Repositories {
     partnerRoles: pg<PartnerRole>(schema.partnerRoles),
     vendors: pg<Vendor>(schema.vendors),
     rateCards: pg<RateCard>(schema.rateCards),
+    negotiatedRates: pg<NegotiatedRate>(schema.negotiatedRates),
     settings: pg<Setting>(schema.settings),
     projects: pg<Project>(schema.projects),
     projectPartners: pg<Partner>(schema.projectPartners),
@@ -476,6 +479,7 @@ function buildInMemoryRepositories(): Repositories {
     partnerRoles: mem<PartnerRole>(seed.partnerRoles),
     vendors: mem<Vendor>(seed.vendors),
     rateCards: mem<RateCard>(seed.rateCards),
+    negotiatedRates: mem<NegotiatedRate>(seed.negotiatedRates),
     settings: mem<Setting>(seed.settings),
     projects: mem<Project>(seed.projects),
     projectPartners: mem<Partner>(seed.projectPartners),

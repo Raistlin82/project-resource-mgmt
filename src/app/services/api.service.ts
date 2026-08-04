@@ -5,8 +5,12 @@ import { API_BASE_URL } from './api-config';
 import type { CapacityCell, CapacityRow, CapacityTotals } from './capacity.util';
 import type { ResourceKind } from './resource-kind.util';
 import type { OrgLevel } from './org-scope.util';
+import type { NegotiatedRate } from './sell-rate.util';
 
 export type { CapacityCell, CapacityRow, CapacityTotals, ResourceKind };
+// Negotiated sell rate (design spec §3): the wire shape IS Task 1's pure-layer
+// interface — re-exported rather than redeclared so the two never drift.
+export type { NegotiatedRate } from './sell-rate.util';
 
 export interface Resource {
   id: string;
@@ -1135,6 +1139,14 @@ export class ApiService {
   createRateCard(r: Partial<RateCard>): Observable<RateCard> { return this.http.post<RateCard>(`${this.baseUrl}/rate-cards`, r); }
   updateRateCard(id: string, r: Partial<RateCard>): Observable<RateCard> { return this.http.put<RateCard>(`${this.baseUrl}/rate-cards/${id}`, r); }
   deleteRateCard(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/rate-cards/${id}`); }
+
+  // NEGOTIATED SELL RATES (design spec) — the price negotiated per contract,
+  // with an optional per-project override. Reads are commercial-sensitive, same
+  // gate as /contracts and /rate-cards.
+  getNegotiatedRates(): Observable<NegotiatedRate[]> { return this.http.get<NegotiatedRate[]>(`${this.baseUrl}/negotiated-rates`); }
+  createNegotiatedRate(rate: Partial<NegotiatedRate>): Observable<NegotiatedRate> { return this.http.post<NegotiatedRate>(`${this.baseUrl}/negotiated-rates`, rate); }
+  updateNegotiatedRate(id: string, rate: Partial<NegotiatedRate>): Observable<NegotiatedRate> { return this.http.put<NegotiatedRate>(`${this.baseUrl}/negotiated-rates/${id}`, rate); }
+  deleteNegotiatedRate(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/negotiated-rates/${id}`); }
 
   // Hybrid day-rate model: hours-per-day converts €/day rate cards into the €/hour
   // the margin math consumes. Read open; write gated to finance-grade roles.

@@ -460,6 +460,32 @@ export const rateCards = pgTable(
   ],
 );
 
+// NEGOTIATED SELL RATES — the sell price negotiated per CONTRACT, with an
+// optional per-PROJECT override (design spec §3). EXACTLY ONE of contractId /
+// projectId is set (spec §3, §5): the xor is a write-time invariant, not a
+// CHECK, because no portable constraint expresses it across the two adapters
+// this project runs on (Postgres and the in-memory mock). Validity is NOT a
+// column here — it comes from the referenced contract's own startDate/endDate
+// (spec §4.1); a project override with no contract of its own applies with no
+// date limit. Resolution lives in the pure `sellRateFor` layer
+// (src/app/services/sell-rate.util.ts), never here.
+export const negotiatedRates = pgTable(
+  'negotiated_rates',
+  {
+    id: text('id').primaryKey(),
+    contractId: text('contract_id').references(() => contracts.id),
+    projectId: text('project_id').references(() => projects.id),
+    role: text('role').notNull(),
+    currency: text('currency').notNull(),
+    // SELL price in EUR per DAY, same unit and type as rate_cards.
+    billRate: doublePrecision('bill_rate').notNull(),
+  },
+  (t) => [
+    index('negotiated_rates_contract_id_idx').on(t.contractId),
+    index('negotiated_rates_project_id_idx').on(t.projectId),
+  ],
+);
+
 // Time-phased allocation (B1) config catalogs. Both are settings-style
 // natural-key entities (`id` IS the key, no synthetic adapter needed) — see
 // `settings` below for the same pattern.

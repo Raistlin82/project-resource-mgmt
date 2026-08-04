@@ -181,6 +181,13 @@ export async function initPersistence(): Promise<void> {
   // Projects depend on contracts.
   await seedIfEmpty(database, schema.projects, seed.projects); // -> contracts
 
+  // Negotiated sell rates (design spec) FK to BOTH contracts and projects, so
+  // this step must run after both are seeded above. A previous feature shipped
+  // a server that could not boot on a fresh database because a new reference
+  // broke this ordering — invisible in-memory, since that adapter enforces no
+  // foreign keys, so this comment (and this position) is load-bearing.
+  await seedIfEmpty(database, schema.negotiatedRates, seed.negotiatedRates); // -> contracts, projects
+
   // Project sub-resources depend on projects (and partners).
   await seedIfEmpty(database, schema.projectPartners, seed.projectPartners); // -> projects
   await seedIfEmpty(database, schema.requests, seed.requests); // -> projects

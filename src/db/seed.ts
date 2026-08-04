@@ -43,6 +43,7 @@ import type {
   PartnerRole,
   Vendor,
   RateCard,
+  NegotiatedRate,
   Setting,
   Project,
   Partner,
@@ -633,6 +634,18 @@ export const contracts: Contract[] = [
   // MULTI-CURRENCY DEMO: CT2 (and its orders + billing items below) is denominated
   // in USD end-to-end, so portfolio rollups must convert via fx-rates before summing.
   { id: 'CT2', customerId: 'C2', name: 'Initech T&M Framework', type: 'T&M', totalValue: 300000, currency: 'USD', status: 'Active', startDate: '2026-03-01', endDate: '2027-02-28' },
+];
+
+// The sell price is negotiated per contract, and a single project inside a
+// framework can override it (design spec §3). CT2 is the seed's T&M contract —
+// the only type whose revenue is hours × rate, so the only one where a negotiated
+// rate is observable at all (spec §11). Project '2' hangs off CT2, which is what
+// makes the override demonstrable. 1000/day is BELOW the Developer card's
+// 1120/day on purpose, so the seed shows a negotiated DISCOUNT rather than a
+// figure that could be mistaken for the card's own.
+export const negotiatedRates: NegotiatedRate[] = [
+  { id: 'NR_CT2_DEV', contractId: 'CT2', role: 'Developer', currency: 'EUR', billRate: 1000 },
+  { id: 'NR_P2_DEV', projectId: '2', role: 'Developer', currency: 'EUR', billRate: 1150 },
 ];
 
 export const orders: Order[] = [
