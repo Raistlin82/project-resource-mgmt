@@ -1,10 +1,16 @@
 import type { Assignment, ResourceRequest } from '../app/services/api.service';
+import { exceedsDailyCapacity, sumHoursByDate } from '../app/services/calendar.util';
 
 export interface AssignmentDependants {
-  hasDays?: boolean;
-  hasMonths?: boolean;
+  /**
+   * The ONLY dependant that can block a retarget. Day rows, month rows and
+   * approvals are re-baselined by `PUT /assignments/:id` (and, for day rows, are
+   * re-validated against the new resource by
+   * {@link retargetDailyCapacityError} below), so they are deliberately not
+   * fields here: an optional flag that the function ignores reads as "considered
+   * and allowed", which is how the hole this file used to certify got written.
+   */
   hasTimeEntries?: boolean;
-  hasApprovals?: boolean;
 }
 
 export interface EmploymentWindow {
@@ -68,6 +74,49 @@ export function assignmentRetargetError(
 
   return 'assignment has logged time entries; retargeting it would re-attribute '
     + 'somebody else\'s actual hours';
+}
+
+/**
+ * A retarget MOVES day rows to another person, so the receiving person's daily
+ * ceiling has to hold for the combined booking.
+ *
+ * `AssignmentDay` carries only `assignmentId`, so every day row travels wholesale
+ * when the assignment's `resourceId` changes — and nothing else re-validates
+ * them. Two invariants that `PUT /assignments/:id/allocation` enforces would
+ * otherwise be bypassed by going through the retarget door instead:
+ *
+ *   1. PUT /A1/allocation {'2026-09-01': 8}  (A1 -> Alice, cap 8) -> 200
+ *   2. PUT /A2/allocation {'2026-09-01': 8}  (A2 -> Bob,   cap 8) -> 200
+ *   3. PUT /A1 {resourceId: 'bob'}                                -> 200
+ *
+ * leaving Bob with 16h on one day, double his cap, where the same hours booked
+ * through the allocation endpoint are a 400. Worse from a dummy (cap = base x
+ * MULTI_FTE_MAX) onto an internal person. And it is then INVISIBLE:
+ * `recomputeResourceUtilization` clamps through `clampUtil` to [0,100], so 200%
+ * stores as 100 — indistinguishable from fully booked, with no endpoint that
+ * repairs it. `PUT /resources/:id` refuses the identical end state when it is
+ * reached from the other direction (narrowing a kind below existing bookings),
+ * which is what makes this a defect rather than a preference.
+ *
+ * Pure so it can be tested: the caller supplies the moving rows, the rows the
+ * receiving resource already holds (its OTHER assignments), and the resolved cap.
+ */
+export function retargetDailyCapacityError(
+  movingDays: readonly { date: string; hours: number }[],
+  existingDaysOnTarget: readonly { date: string; hours: number }[],
+  dailyCap: number,
+): string | null {
+  if (movingDays.length === 0) return null;
+  const movingDates = new Set(movingDays.map(day => day.date));
+  const combined = sumHoursByDate([
+    ...movingDays,
+    // Only the affected dates matter: a pre-existing over-allocation of the
+    // target on some OTHER day must not block an unrelated retarget.
+    ...existingDaysOnTarget.filter(day => movingDates.has(day.date)),
+  ]);
+  const offender = [...movingDates].sort().find(date => exceedsDailyCapacity(combined[date] ?? 0, dailyCap));
+  if (offender === undefined) return null;
+  return `retarget would exceed the new resource's daily capacity on ${offender}`;
 }
 
 /** Optional value: null means inherit the organization setting. */

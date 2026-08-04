@@ -5004,6 +5004,99 @@ async function checkAccountableApproverRules() {
 }
 
 /**
+ * THE RETARGET DOOR AROUND THE PER-DAY CAPACITY GATE.
+ *
+ * `AssignmentDay` carries only assignmentId, so day rows travel wholesale when
+ * an assignment's resourceId changes. Narrowing `assignmentRetargetError` to
+ * `hasTimeEntries` dropped the only thing standing between that move and a
+ * resource booked over its daily cap — and `clampUtil` then stores 200% as 100,
+ * so the result is invisible in every view. The unit spec even asserted the move
+ * was allowed WITH day rows present, i.e. it certified the hole.
+ *
+ * The sequence below is the one from the review, run against the live API:
+ *   1. book 8h on one day for A1 -> Alice   (200)
+ *   2. book 8h on the SAME day for A2 -> Bob (200)
+ *   3. retarget A1 to Bob                    (must be 400, was 200)
+ * The same 16h through PUT /assignments/:id/allocation is a 400, so the retarget
+ * door must not be a 200. Check 4 proves the guard is not simply "refuse every
+ * retarget that has day rows": the same move onto a free day succeeds.
+ *
+ * Resources '1' (Julie, 8h/day) and '2' (John, 8h/day) are seeded internal
+ * one-FTE people. Uses a far-future month no other section books, and deletes
+ * both assignments afterwards.
+ */
+async function checkRetargetDailyCapacity() {
+  const CALLER_HEADERS = { 'X-User-Id': '3', 'X-User-Role': 'pm' };
+  const ALICE = '1';
+  const BOB = '2';
+  const REQUEST_ID = '2';
+  // 2026-10 is an Open planning period (seed opens 2026-04..2026-12) that NEITHER
+  // resource books in the seed, and no other section touches. Both days are
+  // Tuesdays; the only seeded holidays are 2026-12-25 and 2026-01-01.
+  const MONTH = '2026-10';
+  const DAY = `${MONTH}-06`;       // Tuesday
+  const FREE_DAY = `${MONTH}-13`;  // Tuesday, one week later
+
+  const a1 = await req('POST', '/assignments', { headers: CALLER_HEADERS, body: { requestId: REQUEST_ID, resourceId: ALICE } });
+  const a2 = await req('POST', '/assignments', { headers: CALLER_HEADERS, body: { requestId: REQUEST_ID, resourceId: BOB } });
+  const setupOk = check(
+    'retarget-capacity setup: two assignments created (one per resource) -> 200',
+    a1.status === 200 && a2.status === 200 && typeof a1.body?.id === 'string' && typeof a2.body?.id === 'string',
+    `a1=${a1.status} a2=${a2.status}`,
+  );
+  if (!setupOk) return;
+  const a1Id = a1.body.id;
+  const a2Id = a2.body.id;
+
+  const bookA1 = await req('PUT', `/assignments/${a1Id}/allocation`, { headers: CALLER_HEADERS, body: { month: MONTH, dailyHours: { [DAY]: 8 } } });
+  const bookA2 = await req('PUT', `/assignments/${a2Id}/allocation`, { headers: CALLER_HEADERS, body: { month: MONTH, dailyHours: { [DAY]: 8 } } });
+  check(
+    `retarget-capacity setup: both resources booked to their full 8h cap on ${DAY} -> 200`,
+    bookA1.status === 200 && bookA2.status === 200,
+    `a1=${bookA1.status} ${JSON.stringify(bookA1.body)} a2=${bookA2.status} ${JSON.stringify(bookA2.body)}`,
+  );
+
+  // The control: the same 16h asked for through the allocation endpoint is a 400.
+  const viaAllocation = await req('PUT', `/assignments/${a2Id}/allocation`, { headers: CALLER_HEADERS, body: { month: MONTH, dailyHours: { [DAY]: 16 } } });
+  check(
+    'control: 16h on one day through PUT .../allocation -> 400 (daily capacity)',
+    viaAllocation.status === 400,
+    `status=${viaAllocation.status} error=${viaAllocation.body?.error ?? ''}`,
+  );
+
+  // THE DOOR: the identical end state reached by retargeting instead.
+  const retarget = await req('PUT', `/assignments/${a1Id}`, { headers: CALLER_HEADERS, body: { resourceId: BOB } });
+  check(
+    'PUT /assignments/:id {resourceId} that would double the target\'s day -> 400',
+    retarget.status === 400 && String(retarget.body?.error ?? '').includes('daily capacity'),
+    `status=${retarget.status} error=${retarget.body?.error ?? ''}`,
+  );
+
+  // And the refusal wrote nothing: the assignment still belongs to Alice.
+  const afterRefusal = await req('GET', '/assignments', { headers: CALLER_HEADERS });
+  const a1After = (afterRefusal.body || []).find(a => a.id === a1Id);
+  check(
+    'the refused retarget left the assignment on the original resource',
+    a1After?.resourceId === ALICE,
+    `resourceId=${a1After?.resourceId}`,
+  );
+
+  // NOT a blanket refusal of day-bearing retargets: move A1's booking to a day
+  // Bob has free, then the same retarget must succeed.
+  const rebook = await req('PUT', `/assignments/${a1Id}/allocation`, { headers: CALLER_HEADERS, body: { month: MONTH, dailyHours: { [DAY]: 0, [FREE_DAY]: 8 } } });
+  check('retarget-capacity: A1 rebooked onto a day the target has free -> 200', rebook.status === 200, `status=${rebook.status} ${JSON.stringify(rebook.body)}`);
+  const retargetOk = await req('PUT', `/assignments/${a1Id}`, { headers: CALLER_HEADERS, body: { resourceId: BOB } });
+  check(
+    'PUT /assignments/:id {resourceId} that FITS the target\'s cap -> 200 (the guard is per-day, not per-assignment)',
+    retargetOk.status === 200 && retargetOk.body?.resourceId === BOB,
+    `status=${retargetOk.status} resourceId=${retargetOk.body?.resourceId} error=${retargetOk.body?.error ?? ''}`,
+  );
+
+  await req('DELETE', `/assignments/${a1Id}`, { headers: CALLER_HEADERS });
+  await req('DELETE', `/assignments/${a2Id}`, { headers: CALLER_HEADERS });
+}
+
+/**
  * INVOICE -> PAYMENT LIFECYCLE, both records, end to end.
  *
  * WHY THIS EXISTS. `markBillingInvoicePaid` shipped with three passing unit
@@ -5536,6 +5629,15 @@ async function main() {
     await checkNegotiatedRates();
   } catch (err) {
     console.log(`FAIL  negotiated-rates integrity flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the retarget per-day
+  // capacity guard never masks or blocks any of the prior section results.
+  try {
+    await checkRetargetDailyCapacity();
+  } catch (err) {
+    console.log(`FAIL  retarget daily-capacity guard — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

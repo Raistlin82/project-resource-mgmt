@@ -69,6 +69,7 @@ import {
   contractHoursPerDayError,
   employmentWindowError,
   resourceRequestUpdateError,
+  retargetDailyCapacityError,
 } from './server/operational-integrity.util';
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
@@ -2237,22 +2238,42 @@ apiRouter.put('/assignments/:id', async (req, res) => {
 
     const changesTarget = effectiveRequestId !== current.requestId || effectiveResourceId !== current.resourceId;
     if (changesTarget) {
-      const [days, months, timeEntries, approvals] = await Promise.all([
-        repos.assignmentDays.list(),
-        repos.assignmentMonths.list(),
-        repos.timeEntries.list(),
-        repos.approvalRequests.list(),
-      ]);
+      const timeEntries = await repos.timeEntries.list();
       const retargetErr = assignmentRetargetError(current, body, {
-        hasDays: days.some(day => day.assignmentId === current.id),
-        hasMonths: months.some(monthRow => monthRow.assignmentId === current.id),
         hasTimeEntries: timeEntries.some(entry => entry.assignmentId === current.id),
-        hasApprovals: current.approvalId !== undefined || approvals.some(approval => {
-          if (approval.refId === current.id) return true;
-          return parseMonthRowId(approval.refId)?.assignmentId === current.id;
-        }),
       });
       if (retargetErr) return { status: 409, error: retargetErr };
+    }
+
+    // PER-DAY RECHECK ON THE RECEIVING RESOURCE. Day rows carry only
+    // assignmentId, so they travel wholesale on a resourceId change and nothing
+    // else re-validates them: without this, a retarget is a door around both
+    // per-day invariants that PUT /assignments/:id/allocation enforces (daily
+    // capacity, per-day employment), and clampUtil then hides the result at 100%.
+    // See retargetDailyCapacityError's doc comment for the three-step sequence.
+    // TOCTOU is free here: the double res: lock over BOTH the old and the new
+    // resource is already held around this whole function, and allocation writes
+    // and resource-lifecycle edits take the same res: locks, so no day row can
+    // appear and no employment window can narrow between this check and the write.
+    if (effectiveResourceId !== current.resourceId) {
+      const movingDays = (await repos.assignmentDays.list()).filter(day => day.assignmentId === current.id);
+      if (movingDays.length > 0) {
+        const employmentErr = bookingOutsideEmploymentError(movingDays.map(day => day.date), targetResource);
+        if (employmentErr) {
+          return { status: 400, error: `retarget would invalidate an existing ${employmentErr}` };
+        }
+        const targetAssignmentIds = new Set((await repos.assignments.list())
+          .filter(a => a.resourceId === effectiveResourceId && a.id !== current.id)
+          .map(a => a.id));
+        const existingDaysOnTarget = (await repos.assignmentDays.list())
+          .filter(day => targetAssignmentIds.has(day.assignmentId));
+        const capacityErr = retargetDailyCapacityError(
+          movingDays,
+          existingDaysOnTarget,
+          dailyCapFor(kindOf(targetResource), await resolveBaseCap(targetResource)),
+        );
+        if (capacityErr) return { status: 400, error: capacityErr };
+      }
     }
 
     const employmentBookingErr = bookingWindowOutsideEmploymentError({

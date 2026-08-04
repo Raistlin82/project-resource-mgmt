@@ -7,6 +7,7 @@ import {
   contractHoursPerDayError,
   employmentWindowError,
   resourceRequestUpdateError,
+  retargetDailyCapacityError,
 } from './operational-integrity.util';
 
 const assignment: Assignment = {
@@ -44,27 +45,75 @@ describe('assignment write integrity', () => {
   });
 
   /**
-   * Day rows, month rows and approvals do NOT block a retarget: `PUT
-   * /assignments/:id` propagates them (withdraw the old approval, raise a new one
-   * for the new resource's manager, hand substituted hours back), which
+   * Month rows and approvals do NOT block a retarget: `PUT /assignments/:id`
+   * re-baselines them (withdraw the old approval, raise a new one for the new
+   * resource's manager, hand substituted hours back), which
    * scripts/smoke-api.mjs asserts in the B3 and C2 retarget sections. Only logged
-   * actuals are unmovable.
+   * actuals make the move itself illegal.
+   *
+   * THIS TEST USED TO CERTIFY A HOLE. It asserted `{ hasDays: true }` -> allowed,
+   * which read as "day rows were considered and are safe to move". They are not
+   * safe unconditionally: they travel wholesale to the new person and have to fit
+   * that person's daily cap and employment window. That check is
+   * retargetDailyCapacityError + bookingOutsideEmploymentError, exercised below
+   * and wired into the handler under the same double res: lock — so what this
+   * function allows is only the FK change, never the booking.
    */
-  it.each([
-    ['no dependants', {}],
-    ['day rows', { hasDays: true }],
-    ['month rows', { hasMonths: true }],
-    ['approvals', { hasApprovals: true }],
-    ['every plan-side dependant', { hasDays: true, hasMonths: true, hasApprovals: true }],
-  ])('allows a retarget with %s, which the server reconciles', (_label, links) => {
-    expect(assignmentRetargetError(assignment, { resourceId: 'RES2' }, links)).toBeNull();
-    expect(assignmentRetargetError(assignment, { requestId: 'REQ2' }, links)).toBeNull();
+  it('allows the FK change itself when no actual has been logged', () => {
+    expect(assignmentRetargetError(assignment, { resourceId: 'RES2' }, {})).toBeNull();
+    expect(assignmentRetargetError(assignment, { requestId: 'REQ2' }, {})).toBeNull();
+    expect(assignmentRetargetError(assignment, { resourceId: 'RES2' }, { hasTimeEntries: false })).toBeNull();
   });
 
   it('is a no-op when neither FK actually changes', () => {
     expect(assignmentRetargetError(assignment, { resourceId: 'RES1', requestId: 'REQ1' }, {
-      hasDays: true, hasMonths: true, hasTimeEntries: true, hasApprovals: true,
+      hasTimeEntries: true,
     })).toBeNull();
+  });
+});
+
+describe('retarget per-day capacity recheck', () => {
+  const cap = 8;
+
+  it('refuses the exact sequence that books a resource over cap through the retarget door', () => {
+    // A1 holds 8h on 2026-09-01 and moves to Bob, who already holds 8h that day
+    // via A2. The same 16h booked through PUT /assignments/:id/allocation is a
+    // 400; going through the retarget door must not be a 200. Drop the recheck
+    // and this returns null.
+    const moving = [{ date: '2026-09-01', hours: 8 }];
+    const bobsExisting = [{ date: '2026-09-01', hours: 8 }];
+    expect(retargetDailyCapacityError(moving, bobsExisting, cap))
+      .toBe("retarget would exceed the new resource's daily capacity on 2026-09-01");
+  });
+
+  it('refuses a dummy-sized booking landing on a one-FTE person', () => {
+    // A dummy's ceiling is base x MULTI_FTE_MAX (240h/day at 8h base), so 100h on
+    // one day is legal there and 12.5x cap on an internal person.
+    expect(retargetDailyCapacityError([{ date: '2026-09-01', hours: 100 }], [], cap))
+      .toContain('2026-09-01');
+  });
+
+  it('reports the EARLIEST offending day, so the message is stable', () => {
+    const moving = [{ date: '2026-09-03', hours: 9 }, { date: '2026-09-02', hours: 9 }];
+    expect(retargetDailyCapacityError(moving, [], cap)).toContain('2026-09-02');
+  });
+
+  it('allows a retarget that fits, including exactly at the cap', () => {
+    expect(retargetDailyCapacityError([{ date: '2026-09-01', hours: 4 }], [{ date: '2026-09-01', hours: 4 }], cap)).toBeNull();
+    expect(retargetDailyCapacityError([{ date: '2026-09-01', hours: 8 }], [], cap)).toBeNull();
+    // Float noise must not manufacture a breach (exceedsDailyCapacity epsilon).
+    expect(retargetDailyCapacityError([{ date: '2026-09-01', hours: 7.5 }], [{ date: '2026-09-01', hours: 0.5 }], cap)).toBeNull();
+  });
+
+  it('ignores the target\'s pre-existing over-allocation on UNAFFECTED days', () => {
+    // Otherwise an unrelated retarget is blocked by a day it does not touch.
+    const moving = [{ date: '2026-09-01', hours: 4 }];
+    const existing = [{ date: '2026-09-05', hours: 99 }];
+    expect(retargetDailyCapacityError(moving, existing, cap)).toBeNull();
+  });
+
+  it('is a no-op when the assignment carries no day rows', () => {
+    expect(retargetDailyCapacityError([], [{ date: '2026-09-01', hours: 99 }], cap)).toBeNull();
   });
 });
 
