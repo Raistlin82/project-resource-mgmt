@@ -38,9 +38,23 @@ export function assignmentServerOwnedFieldError(body: object): string | null {
 }
 
 /**
- * Direct FK retargeting is safe only before any governed dependant exists.
- * Moving a populated assignment requires a future explicit workflow capable of
- * migrating/reconciling every linked record atomically.
+ * Retargeting an assignment's requestId/resourceId is refused only when the move
+ * would orphan LOGGED ACTUALS.
+ *
+ * SCOPE NARROWED DELIBERATELY (reconciliation, 2026-08-04). This guard was
+ * written on the premise, stated in its original docstring, that moving a
+ * populated assignment "requires a future explicit workflow capable of
+ * migrating/reconciling every linked record atomically". That workflow is not in
+ * the future: `PUT /assignments/:id` already implements retarget propagation —
+ * it withdraws the old approval, raises a new one against the NEW resource's
+ * manager, and hands substituted hours back — and ~12 checks in
+ * scripts/smoke-api.mjs (B3 retarget, C2 substituted/given-back retarget) assert
+ * exactly that. Refusing on days/months/approvals therefore disabled shipped,
+ * tested behaviour rather than protecting anything.
+ *
+ * `timeEntries` IS still refused: an approved or submitted actual belongs to the
+ * person who worked it, nothing in the propagation path re-attributes one, and
+ * moving the assignment under it would silently credit somebody else's hours.
  */
 export function assignmentRetargetError(
   existing: Pick<Assignment, 'requestId' | 'resourceId'>,
@@ -50,15 +64,10 @@ export function assignmentRetargetError(
   const changesRequest = patch.requestId !== undefined && patch.requestId !== existing.requestId;
   const changesResource = patch.resourceId !== undefined && patch.resourceId !== existing.resourceId;
   if (!changesRequest && !changesResource) return null;
-  if (!dependants.hasDays && !dependants.hasMonths && !dependants.hasTimeEntries && !dependants.hasApprovals) return null;
+  if (!dependants.hasTimeEntries) return null;
 
-  const linked = [
-    dependants.hasDays ? 'assignmentDays' : undefined,
-    dependants.hasMonths ? 'assignmentMonths' : undefined,
-    dependants.hasTimeEntries ? 'timeEntries' : undefined,
-    dependants.hasApprovals ? 'approvals' : undefined,
-  ].filter((value): value is string => value !== undefined);
-  return `assignment has linked ${linked.join(', ')}; requestId/resourceId changes require an explicit retarget workflow`;
+  return 'assignment has logged time entries; retargeting it would re-attribute '
+    + 'somebody else\'s actual hours';
 }
 
 /** Optional value: null means inherit the organization setting. */

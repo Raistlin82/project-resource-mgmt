@@ -318,7 +318,7 @@ async function checkAllocationApproval() {
   {
     const forged = await req('POST', '/assignments', {
       headers: PROPOSER_HEADERS,
-      body: { requestId: TARGET_REQUEST_ID, resourceId: TARGET_RESOURCE_ID, assignedHours: 5, status: 'Draft' },
+      body: { requestId: TARGET_REQUEST_ID, resourceId: TARGET_RESOURCE_ID, status: 'Draft' },
     });
     check(
       "POST /api/assignments with a client status (even 'Draft') is rejected (400, status is derived)",
@@ -342,7 +342,7 @@ async function checkAllocationApproval() {
   // 'Draft' (no month rows exist yet).
   const created = await req('POST', '/assignments', {
     headers: PROPOSER_HEADERS,
-    body: { requestId: TARGET_REQUEST_ID, resourceId: TARGET_RESOURCE_ID, assignedHours: 0 },
+    body: { requestId: TARGET_REQUEST_ID, resourceId: TARGET_RESOURCE_ID },
   });
   const createOk = check(
     "POST /api/assignments (no status) -> 200, derived status 'Draft'",
@@ -476,7 +476,7 @@ async function checkAllocationApproval() {
   {
     const created2 = await req('POST', '/assignments', {
       headers: PROPOSER_HEADERS,
-      body: { requestId: TARGET_REQUEST_ID, resourceId: TARGET_RESOURCE_ID, assignedHours: 0 },
+      body: { requestId: TARGET_REQUEST_ID, resourceId: TARGET_RESOURCE_ID },
     });
     const created2Ok = check(
       'POST /api/assignments (throwaway, for delete-orphan check) -> 200',
@@ -530,13 +530,17 @@ async function checkAllocationApproval() {
  * Regression guard for the Utilization view's two assignment-creation call
  * sites (src/app/utilization/utilization.component.ts): `saveAssignment()`'s
  * create branch and `pasteAssignment()`. Both used to send
- * `{ requestId, resourceId, assignedHours, status: 'Draft' }` — a shape this
- * task's server change now rejects with 400 ("status is derived..."), which
+ * `{ requestId, resourceId, assignedHours, status: 'Draft' }` — a shape the
+ * server now rejects with 400 (both `status` and `assignedHours` are derived),
+ * which
  * is exactly how the Task-7 review caught two live UI flows breaking ("New
  * assignment" / "Paste assignment" in Utilization both failing with the
  * generic "Failed to create assignment." toast). Both call sites were fixed
- * to drop `status` entirely, and now build the IDENTICAL payload shape:
- * `{ requestId, resourceId, assignedHours }`. This check POSTs that exact
+ * to drop `status` entirely, and the UX remediation wave then removed
+ * `assignedHours` from the client-writable surface too (P1-20/OP-04: hours are
+ * derived from the day-level allocation rows, so the server rejects the key with
+ * 400 exactly as it rejects `status`). The identical payload both call sites now
+ * build is `{ requestId, resourceId }`. This check POSTs that exact
  * shape (not the richer PROPOSER_HEADERS-driven shape exercised above) so a
  * future regression in either call site is caught here, not by a user
  * hitting a dead-end toast in the browser.
@@ -546,7 +550,7 @@ async function checkUtilizationAssignmentPayload() {
   // override, since neither utilization.component.ts call site sends one —
   // both rely on api.service.ts's default same-origin auth. requestId/
   // resourceId '1' are seed rows that always exist.
-  const payload = { requestId: '1', resourceId: '1', assignedHours: 1 };
+  const payload = { requestId: '1', resourceId: '1' };
   const created = await req('POST', '/assignments', { body: payload });
   const ok = check(
     "POST /api/assignments with the Utilization view's exact create/paste payload (no status) -> 200, derived 'Draft'",
@@ -611,7 +615,7 @@ async function checkResourceRetargetPropagation() {
   // status; server derives 'Draft').
   const created = await req('POST', '/assignments', {
     headers: CALLER_HEADERS,
-    body: { requestId: REQUEST_ID, resourceId: OLD_RESOURCE_ID, assignedHours: 0 },
+    body: { requestId: REQUEST_ID, resourceId: OLD_RESOURCE_ID },
   });
   const createOk = check(
     'retarget-propagation setup: POST /api/assignments (no status) -> 200',
@@ -1041,7 +1045,7 @@ async function checkTimePhasedAllocation() {
   // allocation GET 404s because the assignment itself is gone).
   {
     const created = await req('POST', '/assignments', {
-      body: { requestId: '1', resourceId: '1', assignedHours: 0 },
+      body: { requestId: '1', resourceId: '1' },
     });
     const createOk = check(
       'POST /api/assignments (throwaway, for delete-cleanup) -> 200',
@@ -1303,7 +1307,7 @@ async function checkMonthlyApproval() {
   // 2026-09-23 (a Wednesday, Open period) is past the end of resource '2's only
   // seeded booking (assignment 3, whose days stop at 2026-09-15) and is used by
   // nothing else in this suite, so the daily-capacity gate never fires.
-  const selfManagedCreate = await req('POST', '/assignments', { body: { requestId: '4', resourceId: '2', assignedHours: 0 } });
+  const selfManagedCreate = await req('POST', '/assignments', { body: { requestId: '4', resourceId: '2' } });
   const selfManagedCreateOk = check('B3 self-managed setup: throwaway assignment created for a resource whose manager IS the acting principal',
     selfManagedCreate.status === 200 && typeof selfManagedCreate.body?.id === 'string', `status=${selfManagedCreate.status}`);
   if (selfManagedCreateOk) {
@@ -1619,7 +1623,7 @@ async function checkMonthlyApproval() {
   const beforeTotalsRow = (beforeTotalsFeed.body?.rows || []).find(r => r.resourceId === TOTALS_RESOURCE);
   const beforeTotal = beforeTotalsRow?.totalHours?.[TOTALS_MONTH] ?? 0;
 
-  const totalsCreate = await req('POST', '/assignments', { body: { requestId: '4', resourceId: TOTALS_RESOURCE, assignedHours: 0 } });
+  const totalsCreate = await req('POST', '/assignments', { body: { requestId: '4', resourceId: TOTALS_RESOURCE } });
   const totalsCreateOk = check('B3 totals setup: throwaway assignment created', totalsCreate.status === 200 && typeof totalsCreate.body?.id === 'string', `status=${totalsCreate.status}`);
   if (totalsCreateOk) {
     const totalsAssignmentId = totalsCreate.body.id;
@@ -1748,7 +1752,7 @@ async function checkLegacyAllocationApproval() {
   const MONTH_LIVE = '2026-12';
   const DAY_LIVE = `${MONTH_LIVE}-02`;
 
-  const created = await req('POST', '/assignments', { body: { requestId: REQUEST_ID, resourceId: RESOURCE_ID, assignedHours: 0 } });
+  const created = await req('POST', '/assignments', { body: { requestId: REQUEST_ID, resourceId: RESOURCE_ID } });
   const createOk = check('B3 legacy setup: throwaway assignment created',
     created.status === 200 && typeof created.body?.id === 'string', `status=${created.status}`);
   if (!createOk) return;
@@ -2018,8 +2022,8 @@ async function checkResourceKinds() {
     `dummyReq status=${dummyReq.status} internalReq status=${internalReq.status}`);
   if (!reqsOk) return;
 
-  const dummyAssignment = await req('POST', '/assignments', { body: { requestId: dummyReq.body.id, resourceId: dummy.body.id, assignedHours: 0 } });
-  const internalAssignment = await req('POST', '/assignments', { body: { requestId: internalReq.body.id, resourceId: plain.body.id, assignedHours: 0 } });
+  const dummyAssignment = await req('POST', '/assignments', { body: { requestId: dummyReq.body.id, resourceId: dummy.body.id } });
+  const internalAssignment = await req('POST', '/assignments', { body: { requestId: internalReq.body.id, resourceId: plain.body.id } });
   const assignmentsOk = check('C1 setup: assignments created for the dummy and the internal resource',
     dummyAssignment.status === 200 && typeof dummyAssignment.body?.id === 'string' &&
     internalAssignment.status === 200 && typeof internalAssignment.body?.id === 'string',
@@ -2119,9 +2123,9 @@ async function checkDummySubstitution() {
   // `request` — that is what lets the demoted-existing-work substitution below
   // land on the SAME target assignment the first substitution created. The
   // plain-internal fixture is deliberately on its OWN, unrelated request.
-  const dummyAssignment = await req('POST', '/assignments', { body: { requestId: request.body.id, resourceId: dummy.body.id, assignedHours: 0 } });
-  const plainAssignment = await req('POST', '/assignments', { body: { requestId: plainRequest.body.id, resourceId: plainInternal.body.id, assignedHours: 0 } });
-  const dummy2Assignment = await req('POST', '/assignments', { body: { requestId: request.body.id, resourceId: dummy2.body.id, assignedHours: 0 } });
+  const dummyAssignment = await req('POST', '/assignments', { body: { requestId: request.body.id, resourceId: dummy.body.id } });
+  const plainAssignment = await req('POST', '/assignments', { body: { requestId: plainRequest.body.id, resourceId: plainInternal.body.id } });
+  const dummy2Assignment = await req('POST', '/assignments', { body: { requestId: request.body.id, resourceId: dummy2.body.id } });
   const assignmentsOk = check('C2 setup: assignments created (dummy, plain internal, second dummy)',
     dummyAssignment.status === 200 && typeof dummyAssignment.body?.id === 'string' &&
     plainAssignment.status === 200 && typeof plainAssignment.body?.id === 'string' &&
@@ -2229,7 +2233,7 @@ async function checkDummySubstitution() {
     const selfRequest = await req('POST', '/requests', { body: { name: 'C2 self-managed request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
     const selfReqOk = check('C2 setup: self-managed request created', selfRequest.status === 200 && typeof selfRequest.body?.id === 'string', `status=${selfRequest.status}`);
     if (selfReqOk) {
-      const selfAssignment = await req('POST', '/assignments', { body: { requestId: selfRequest.body.id, resourceId: selfManagedDummy.body.id, assignedHours: 0 } });
+      const selfAssignment = await req('POST', '/assignments', { body: { requestId: selfRequest.body.id, resourceId: selfManagedDummy.body.id } });
       const selfAssignOk = check('C2 setup: self-managed dummy assignment created', selfAssignment.status === 200 && typeof selfAssignment.body?.id === 'string', `status=${selfAssignment.status}`);
       if (selfAssignOk) {
         const selfBooked = await req('PUT', `/assignments/${selfAssignment.body.id}/allocation`, { body: { month: MONTH, dailyHours: { [DAY]: 4 } } });
@@ -2264,7 +2268,7 @@ async function checkDummySubstitution() {
     const emptyRequest = await req('POST', '/requests', { body: { name: 'C2 empty-dummy request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
     const emptyReqOk = check('C2 setup: empty-dummy request created', emptyRequest.status === 200 && typeof emptyRequest.body?.id === 'string', `status=${emptyRequest.status}`);
     if (emptyReqOk) {
-      const emptyAssignment = await req('POST', '/assignments', { body: { requestId: emptyRequest.body.id, resourceId: emptyDummy.body.id, assignedHours: 0 } });
+      const emptyAssignment = await req('POST', '/assignments', { body: { requestId: emptyRequest.body.id, resourceId: emptyDummy.body.id } });
       const emptyAssignOk = check('C2 setup: empty-dummy assignment created', emptyAssignment.status === 200 && typeof emptyAssignment.body?.id === 'string', `status=${emptyAssignment.status}`);
       if (emptyAssignOk) {
         // A 0h PUT still lazily creates the month row (Draft, via ensureAssignmentMonth)
@@ -2307,7 +2311,7 @@ async function checkDummySubstitution() {
     const remRequest = await req('POST', '/requests', { body: { name: 'C2 remaining-months request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
     const remReqOk = check('C2 remaining-months setup: request created', remRequest.status === 200 && typeof remRequest.body?.id === 'string', `status=${remRequest.status}`);
     if (remReqOk) {
-      const remAssignment = await req('POST', '/assignments', { body: { requestId: remRequest.body.id, resourceId: remDummy.body.id, assignedHours: 0 } });
+      const remAssignment = await req('POST', '/assignments', { body: { requestId: remRequest.body.id, resourceId: remDummy.body.id } });
       const remAssignOk = check('C2 remaining-months setup: dummy assignment created', remAssignment.status === 200 && typeof remAssignment.body?.id === 'string', `status=${remAssignment.status}`);
       if (remAssignOk) {
         const remAssignmentId = remAssignment.body.id;
@@ -2369,7 +2373,7 @@ async function checkDummySubstitution() {
     const closedRequest = await req('POST', '/requests', { body: { name: 'C2 closed-month request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
     const closedReqOk = check('C2 closed-month setup: request created', closedRequest.status === 200 && typeof closedRequest.body?.id === 'string', `status=${closedRequest.status}`);
     if (closedReqOk) {
-      const closedAssignment = await req('POST', '/assignments', { body: { requestId: closedRequest.body.id, resourceId: closedDummy.body.id, assignedHours: 0 } });
+      const closedAssignment = await req('POST', '/assignments', { body: { requestId: closedRequest.body.id, resourceId: closedDummy.body.id } });
       const closedAssignOk = check('C2 closed-month setup: dummy assignment created', closedAssignment.status === 200 && typeof closedAssignment.body?.id === 'string', `status=${closedAssignment.status}`);
       if (closedAssignOk) {
         const closedAssignmentId = closedAssignment.body.id;
@@ -2432,7 +2436,7 @@ async function checkDummySubstitution() {
     const soloRequest = await req('POST', '/requests', { body: { name: 'C2 solo-month request', requiredRole: 'Developer', requiredEffort: 1, skills: [] } });
     const soloReqOk = check('C2 solo-month setup: request created', soloRequest.status === 200 && typeof soloRequest.body?.id === 'string', `status=${soloRequest.status}`);
     if (soloReqOk) {
-      const soloAssignment = await req('POST', '/assignments', { body: { requestId: soloRequest.body.id, resourceId: soloDummy.body.id, assignedHours: 0 } });
+      const soloAssignment = await req('POST', '/assignments', { body: { requestId: soloRequest.body.id, resourceId: soloDummy.body.id } });
       const soloAssignOk = check('C2 solo-month setup: dummy assignment created', soloAssignment.status === 200 && typeof soloAssignment.body?.id === 'string', `status=${soloAssignment.status}`);
       if (soloAssignOk) {
         const soloAssignmentId = soloAssignment.body.id;
@@ -2484,7 +2488,7 @@ async function checkDummySubstitution() {
     if (!check(`C2 ${label} setup: request created`,
       gbRequest.status === 200 && typeof gbRequest.body?.id === 'string', `status=${gbRequest.status}`)) return undefined;
 
-    const gbAssignment = await req('POST', '/assignments', { body: { requestId: gbRequest.body.id, resourceId: gbDummy.body.id, assignedHours: 0 } });
+    const gbAssignment = await req('POST', '/assignments', { body: { requestId: gbRequest.body.id, resourceId: gbDummy.body.id } });
     if (!check(`C2 ${label} setup: dummy assignment created`,
       gbAssignment.status === 200 && typeof gbAssignment.body?.id === 'string', `status=${gbAssignment.status}`)) return undefined;
 
@@ -2587,8 +2591,8 @@ async function checkDummySubstitution() {
     mixDummy.status === 201 && mixPerson.status === 201, `dummy=${mixDummy.status} person=${mixPerson.status}`);
   if (mixSetupOk) {
     const mixRequest = await req('POST', '/requests', { body: { name: 'C2 mixed-days request', requiredRole: 'Developer', requiredEffort: 2, skills: [] } });
-    const mixDummyAssig = await req('POST', '/assignments', { body: { requestId: mixRequest.body?.id, resourceId: mixDummy.body.id, assignedHours: 0 } });
-    const mixPersonAssig = await req('POST', '/assignments', { body: { requestId: mixRequest.body?.id, resourceId: mixPerson.body.id, assignedHours: 0 } });
+    const mixDummyAssig = await req('POST', '/assignments', { body: { requestId: mixRequest.body?.id, resourceId: mixDummy.body.id } });
+    const mixPersonAssig = await req('POST', '/assignments', { body: { requestId: mixRequest.body?.id, resourceId: mixPerson.body.id } });
     const mixFixtureOk = check('C2 mixed-days setup: request and both assignments created',
       mixRequest.status === 200 && mixDummyAssig.status === 200 && mixPersonAssig.status === 200,
       `request=${mixRequest.status} dummy=${mixDummyAssig.status} person=${mixPersonAssig.status}`);
@@ -2794,8 +2798,8 @@ async function checkDummySubstitution() {
     const sdRequest = await req('POST', '/requests', { body: { name: `C2 ${label} request`, requiredRole: 'Developer', requiredEffort: 2, skills: [] } });
     // BOTH assignments on the SAME request: that is what makes the transfer land
     // on the assignment she already has hours on, rather than on a new one.
-    const sdDummyAssig = await req('POST', '/assignments', { body: { requestId: sdRequest.body?.id, resourceId: sdDummy.body.id, assignedHours: 0 } });
-    const sdPersonAssig = await req('POST', '/assignments', { body: { requestId: sdRequest.body?.id, resourceId: sdPerson.body.id, assignedHours: 0 } });
+    const sdDummyAssig = await req('POST', '/assignments', { body: { requestId: sdRequest.body?.id, resourceId: sdDummy.body.id } });
+    const sdPersonAssig = await req('POST', '/assignments', { body: { requestId: sdRequest.body?.id, resourceId: sdPerson.body.id } });
     if (!check(`C2 ${label} setup: request and both assignments created`,
       sdRequest.status === 200 && sdDummyAssig.status === 200 && sdPersonAssig.status === 200,
       `request=${sdRequest.status} dummy=${sdDummyAssig.status} person=${sdPersonAssig.status}`)) return undefined;
@@ -2906,7 +2910,7 @@ async function checkDummySubstitution() {
     const winRequest = await req('POST', '/requests', {
       body: { name: 'C2 window request', requiredRole: 'Developer', requiredEffort: 1, skills: [], startDate: '2026-04-01', endDate: '2026-09-30' },
     });
-    const winAssig = await req('POST', '/assignments', { body: { requestId: winRequest.body?.id, resourceId: winDummy.body.id, assignedHours: 0 } });
+    const winAssig = await req('POST', '/assignments', { body: { requestId: winRequest.body?.id, resourceId: winDummy.body.id } });
     const winSetup2Ok = check('C2 window setup: six-month request and dummy assignment created',
       winRequest.status === 200 && winAssig.status === 200, `request=${winRequest.status} assignment=${winAssig.status}`);
     if (winSetup2Ok) {
@@ -2955,7 +2959,7 @@ async function checkDummySubstitution() {
     bandDummy.status === 201 && bandPerson.status === 201, `dummy=${bandDummy.status} person=${bandPerson.status}`);
   if (bandSetupOk) {
     const bandRequest = await req('POST', '/requests', { body: { name: 'C2 band request', requiredRole: 'Developer', requiredEffort: 2, skills: [] } });
-    const bandAssig = await req('POST', '/assignments', { body: { requestId: bandRequest.body?.id, resourceId: bandDummy.body.id, assignedHours: 0 } });
+    const bandAssig = await req('POST', '/assignments', { body: { requestId: bandRequest.body?.id, resourceId: bandDummy.body.id } });
     const bandSetup2Ok = check('C2 band setup: request and dummy assignment created',
       bandRequest.status === 200 && bandAssig.status === 200, `request=${bandRequest.status} assignment=${bandAssig.status}`);
     if (bandSetup2Ok) {
@@ -4448,7 +4452,7 @@ async function checkScopedAllocationDecision() {
   async function assignmentFor(resourceId) {
     const created = await req('POST', '/assignments', {
       headers: PROPOSER,
-      body: { requestId: request.body.id, resourceId, assignedHours: 0 },
+      body: { requestId: request.body.id, resourceId },
     });
     const ok = check(
       `D5 setup: assignment created for resource '${resourceId}'`,
@@ -4809,7 +4813,7 @@ async function checkAccountableApproverRules() {
         body: { name: 'D-R4 node-manager self-submission', requiredRole: 'Developer', requiredEffort: 1, skills: [] },
       });
       const assig = request.status === 200 && typeof request.body?.id === 'string'
-        ? await req('POST', '/assignments', { headers: JOHN, body: { requestId: request.body.id, resourceId: DUMMY_CONSULTING, assignedHours: 0 } })
+        ? await req('POST', '/assignments', { headers: JOHN, body: { requestId: request.body.id, resourceId: DUMMY_CONSULTING } })
         : { status: 0, body: undefined };
       const setupOk = check(
         "D-R4(A) setup: John creates a request + an assignment on the placeholder he is accountable for",
@@ -4877,7 +4881,7 @@ async function checkAccountableApproverRules() {
           body: { name: 'D-R4 node manager is not the only approver', requiredRole: 'Developer', requiredEffort: 1, skills: [] },
         });
         const assig = request.status === 200 && typeof request.body?.id === 'string'
-          ? await req('POST', '/assignments', { headers: JOHN, body: { requestId: request.body.id, resourceId: managed.body.id, assignedHours: 0 } })
+          ? await req('POST', '/assignments', { headers: JOHN, body: { requestId: request.body.id, resourceId: managed.body.id } })
           : { status: 0, body: undefined };
         const setupOk = check(
           'D-R4(C) setup: John creates a request + an assignment on that resource',
@@ -4968,7 +4972,7 @@ async function checkAccountableApproverRules() {
           body: { name: 'D-R4 terminated-manager fallback', requiredRole: 'Developer', requiredEffort: 1, skills: [] },
         });
         const assig = request.status === 200 && typeof request.body?.id === 'string'
-          ? await req('POST', '/assignments', { headers: PROPOSER, body: { requestId: request.body.id, resourceId: orphan.body.id, assignedHours: 0 } })
+          ? await req('POST', '/assignments', { headers: PROPOSER, body: { requestId: request.body.id, resourceId: orphan.body.id } })
           : { status: 0, body: undefined };
         const setupOk = check(
           'D-R4(B) setup: a request + assignment on that report, proposed by a pm who is nobody\'s manager',

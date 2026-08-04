@@ -225,7 +225,21 @@ export async function decideCurrentAllocationMonth(
 ): Promise<AllocationMonthDecisionResult> {
   const row = await store.assignmentMonths.get(monthId);
   if (!row) return { outcome: { status: 404, body: { error: 'Not found' } } };
-  if (row.status !== 'Requested' || row.approvalId !== approvalId) {
+
+  // WHICH REFUSAL, AND WHY THE ORDER IS WHAT IT IS. Two different situations both
+  // end with "this decision cannot be applied", and reporting one as the other
+  // misleads whoever reads the message:
+  //
+  //   * The row has ROTATED to a newer approval (`row.approvalId !== approvalId`).
+  //     An edit revised the month and withdrew this approval as superseded. The
+  //     revision token is the discriminator, so it is checked FIRST — the
+  //     withdrawn approval's own status must not be reported as "already
+  //     decided", because no approver decided it. -> 409 revision conflict.
+  //   * This approval still governs the row but is no longer Pending: a plain
+  //     replay of the same decision. -> 400 "approval request already <status>",
+  //     which names the real cause instead of blaming a revision that did not
+  //     change.
+  if (row.approvalId !== approvalId) {
     return conflict('approval no longer governs the current month revision');
   }
 
@@ -236,6 +250,9 @@ export async function decideCurrentAllocationMonth(
   }
   if (approvalBefore.status !== 'Pending') {
     return { outcome: { status: 400, body: { error: `approval request already ${approvalBefore.status}` } } };
+  }
+  if (row.status !== 'Requested') {
+    return conflict('approval no longer governs the current month revision');
   }
 
   try {

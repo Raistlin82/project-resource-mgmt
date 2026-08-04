@@ -36,18 +36,32 @@ describe('assignment write integrity', () => {
   });
 
   it.each([
-    ['day rows', { hasDays: true }],
-    ['month rows', { hasMonths: true }],
-    ['time entries', { hasTimeEntries: true }],
-    ['approvals', { hasApprovals: true }],
-  ])('blocks a resource/request retarget once %s are linked', (_label, links) => {
-    expect(assignmentRetargetError(assignment, { resourceId: 'RES2' }, links)).toContain('explicit retarget workflow');
-    expect(assignmentRetargetError(assignment, { requestId: 'REQ2' }, links)).toContain('explicit retarget workflow');
+    ['time entries alone', { hasTimeEntries: true }],
+    ['time entries alongside plan rows', { hasDays: true, hasMonths: true, hasTimeEntries: true, hasApprovals: true }],
+  ])('blocks a resource/request retarget when %s are linked', (_label, links) => {
+    expect(assignmentRetargetError(assignment, { resourceId: 'RES2' }, links)).toContain('logged time entries');
+    expect(assignmentRetargetError(assignment, { requestId: 'REQ2' }, links)).toContain('logged time entries');
   });
 
-  it('allows a retarget only while the assignment has no governed dependants', () => {
-    expect(assignmentRetargetError(assignment, { resourceId: 'RES2' }, {})).toBeNull();
-    expect(assignmentRetargetError(assignment, { requestId: 'REQ2' }, {})).toBeNull();
+  /**
+   * Day rows, month rows and approvals do NOT block a retarget: `PUT
+   * /assignments/:id` propagates them (withdraw the old approval, raise a new one
+   * for the new resource's manager, hand substituted hours back), which
+   * scripts/smoke-api.mjs asserts in the B3 and C2 retarget sections. Only logged
+   * actuals are unmovable.
+   */
+  it.each([
+    ['no dependants', {}],
+    ['day rows', { hasDays: true }],
+    ['month rows', { hasMonths: true }],
+    ['approvals', { hasApprovals: true }],
+    ['every plan-side dependant', { hasDays: true, hasMonths: true, hasApprovals: true }],
+  ])('allows a retarget with %s, which the server reconciles', (_label, links) => {
+    expect(assignmentRetargetError(assignment, { resourceId: 'RES2' }, links)).toBeNull();
+    expect(assignmentRetargetError(assignment, { requestId: 'REQ2' }, links)).toBeNull();
+  });
+
+  it('is a no-op when neither FK actually changes', () => {
     expect(assignmentRetargetError(assignment, { resourceId: 'RES1', requestId: 'REQ1' }, {
       hasDays: true, hasMonths: true, hasTimeEntries: true, hasApprovals: true,
     })).toBeNull();
