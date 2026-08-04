@@ -251,7 +251,7 @@ for the rationale.
 | **Time entry** (`PUT /time-entries/:id` → `Approved`) | any role in the time-entries mutation rule | the entry's **owner** (its `resourceId`, resolved from the actor's user→resource mapping) | `resourceId` (not reassignable on PUT); `status` forced to `Draft` on create |
 | **Change request** (`PUT /change-requests/:id` → `Approved`) | only `delivery-executive` or `admin` | the CR **creator** (`createdBy`); legacy rows fall back to `requestedBy`/`owner` | `createdBy` (pinned on POST) |
 | **Approval request** (`PUT /approval-requests/:id/decision`) | the role assigned to the **current step**, **or** (Allocation steps only) the specific resource identified by `step.approverId` (resource-id match); `admin` may decide any step; an `'unknown'` actor is rejected 401 | the **requester** (`requestedBy`) | `requestedBy` (pinned on POST); `step.approverId` (Allocation only, see below) |
-| **Allocation** (`PUT /approval-requests/:id/decision`, kind `Allocation`) | the resource's **People Manager** (`step.approverId`, matched in resource-id space via `actorResourceId`) — or any `resource-manager`-role holder as fallback when the resource has no `managerId`; `admin` may decide any step | the **proposer** (`requestedBy`, the actor who called `POST /assignments/:id/months/:month/submit` — B3's per-month submit endpoint; see below) | `requestedBy` (pinned at open); `step.approverId` = the resource's `managerId` at approval-creation time |
+| **Allocation** (`PUT /approval-requests/:id/decision`, kind `Allocation`) | the resource's **People Manager** (`step.approverId`, matched in resource-id space via `actorResourceId`) — **or** a `resource-manager` in whose **org scope** the resource falls (D, see [Allocation decisions are scoped](#d--allocation-decisions-are-scoped-to-the-competent-manager)) — **or**, only when the resource has **no manager anywhere**, any `resource-manager`; `admin` may decide any step | the **proposer** (`requestedBy`, the actor who called `POST /assignments/:id/months/:month/submit` — B3's per-month submit endpoint; see below) | `requestedBy` (pinned at open); `step.approverId` = the resource's `managerId` at approval-creation time |
 | **Allocation, batched** (`POST /allocation-approvals/decide`, B3) | identical — the batch resolves each item's month row to its `approvalId` and runs the **same** `decideOneApproval` core, so SoD and per-step enforcement are one implementation, not two | identical (the **requester** of each item's approval) | identical; the month row's `approvalId` is server-written only (never taken from the body) |
 
 **Approval routing** (`buildApprovalSteps`): an item whose `amount` exceeds the
@@ -263,7 +263,7 @@ high-value threshold (**50 000**) routes through a two-step chain
 | `TimeEntry`, `Expense` | `resource-manager` |
 | `Milestone`, `ChangeRequest` | `delivery-executive` |
 | `Invoice` | `finance` |
-| `Allocation` | the resource's manager (`managerId`, resource-id match), fallback role `resource-manager` — **always single-step, no €-threshold escalation** (routed directly by `createAllocationApproval`/`allocationApproverStep`, not `buildApprovalSteps`) |
+| `Allocation` | the resource's manager (`managerId`, resource-id match), with `role: 'resource-manager'` on the step — **always single-step, no €-threshold escalation** (routed directly by `createAllocationApproval`/`allocationApproverStep`, not `buildApprovalSteps`). Holding that role is what makes the step *reachable*; since D it is no longer sufficient on its own — see [Allocation decisions are scoped](#d--allocation-decisions-are-scoped-to-the-competent-manager) |
 
 ### Allocation approval (resource staffing)
 
@@ -294,11 +294,13 @@ see [Server endpoint RBAC](#server-endpoint-rbac)):
   `resource.managerId`, addressed in **resource-id space**
   (`step.approverId = managerId`, `step.role = 'resource-manager'`). When the
   resource has no `managerId` set, the step still carries
-  `role: 'resource-manager'` but no `approverId`, so it falls back to **any**
-  actor holding the `resource-manager` role (or `admin`). The target month
-  must be an **Open** planning period (403 otherwise), and the month row must
-  currently be `Draft`/`Rejected` — an already-`Requested`/`Allocated` month
-  is refused with **400** (submit is not idempotent).
+  `role: 'resource-manager'` but no `approverId` — who may then decide it is
+  settled by the **scope** rule at decision time, not by the role alone (D, see
+  [Allocation decisions are scoped](#d--allocation-decisions-are-scoped-to-the-competent-manager)).
+  The target month must be an **Open** planning period (403 otherwise), and the
+  month row must currently be `Draft`/`Rejected` — an
+  already-`Requested`/`Allocated` month is refused with **400** (submit is not
+  idempotent).
 - **`PUT /assignments/:id/months/:month/note`** — the **planner's** note on
   that month row (`plannerNote`), independent of the *approver's* note
   captured at decision time (`step.note`, mirrored onto `approverNote`).
@@ -318,10 +320,13 @@ see [Server endpoint RBAC](#server-endpoint-rbac)):
   /approval-requests/:id/decision` and the B3 batch `POST
   /allocation-approvals/decide`, both through the same `decideOneApproval`
   core): a step is decided by an actor who either (a) holds the step's `role`
-  (or is `admin`), **or** (b) is the specific resource identified by
-  `step.approverId`. This resource-id match is what lets the correct manager —
-  and only that manager — decide their own reports' allocations, rather than
-  letting any `resource-manager`-role holder decide anyone's.
+  (or is `admin`) **and**, for an `Allocation`, has the target resource in
+  their **org scope** (D — the sub-clause that used to be absent, see
+  [Allocation decisions are scoped](#d--allocation-decisions-are-scoped-to-the-competent-manager)),
+  **or** (b) is the specific resource identified by `step.approverId`. The
+  resource-id match in (b) is what lets the named manager decide their own
+  reports' allocations; the scope clause in (a) is what stops an unrelated
+  `resource-manager`-role holder deciding anyone's.
 - On decision, the approver's `note` (if supplied) is recorded on the
   **decided step** (`step.note`), never on the approval request's top-level
   `note` (which remains the *requester's* note captured at creation).
@@ -332,6 +337,77 @@ see [Server endpoint RBAC](#server-endpoint-rbac)):
   applied directly to the assignment's `status` so nothing already in flight
   is orphaned. Either way the resource/request staffing aggregates are
   recomputed afterwards.
+
+### D — allocation decisions are scoped to the competent manager
+
+**This replaces the gap-A rule.** Until D, holding the `resource-manager` role
+was the whole answer for an allocation step: *any* resource manager other than
+the proposer could decide *anyone's* allocation, deliberately, so that a single
+manager was not a bottleneck for their own team. That decision was **reopened
+and changed**: an actor who does not manage the resource can no longer decide
+its allocation. Whoever used to approve allocations for people they do not
+manage stops being able to.
+
+The rule lives in one place — `decideOneApproval` (`src/server.ts`) — and is
+derived by the pure layer `src/app/services/org-scope.util.ts`. An actor may
+decide an `Allocation` step when **any** of these holds:
+
+1. they are the step's **named approver** (`step.approverId`, a resource id —
+   how `allocationApproverStep` routes the step);
+2. they hold the step's **role** *and* the target resource is in their **org
+   scope**;
+3. they hold the step's role *and* the target has **no manager anywhere**
+   (`scopedApproversOf(...).roleFallback`) — the last resort;
+4. their role is **`admin`**.
+
+**Org scope** (`scopeOf`) is the union of two orthogonal axes:
+
+| Axis | Field | Meaning |
+| --- | --- | --- |
+| **Org chart** | `Resource.managerId`, **transitively** | a manager reaches their direct reports *and* their reports' reports, to any depth |
+| **Org tree** | `ResourceOrganization.managerId` over `parentId` | the manager of a node reaches every resource attached at or **below** it — a `capability` leader covers the `practice` and `competence` nodes beneath, with no org-chart link needed |
+
+A node's `managerId` **is** the manual's Capability Leader / Practice Manager /
+Competence Manager. **No new role exists** — the seven roles are unchanged; a
+node manager is data, and their reach is derived.
+
+**The fallback and its exact condition.** `roleFallback` is true **only** when
+`scopedApproversOf` finds *nobody* accountable: no manager in the org chart
+above the target **and** no `managerId` on any node above it. Then, and only
+then, any `resource-manager` may decide — which is what keeps a placeholder
+(dummy) and C2's substitutions decidable with no special case. One consequence
+worth stating: a person who manages the very node they are attached to and has
+no `managerId` of their own is removed from their own approver set (nobody may
+approve their own allocation), so they legitimately fall into `roleFallback`.
+
+**`admin` and `delivery-executive` stay global** and are never narrowed by
+scope. Note what that does *not* mean for an allocation: a `delivery-executive`
+still fails the role match on a step routed to `resource-manager`, so their
+access is unchanged by D — the named-approver path only. Being global exempts
+them from scope; it does not grant them a step their role was never routed to.
+
+**Segregation of duties is separate and binds every role**, `admin` included:
+the requester can never decide their own item. Scope is checked on top of it,
+not instead of it.
+
+**Where else the same rule applies:**
+
+- **`GET /allocation-approvals`** — the feed is scoped by the *same* rule
+  (`scopeOf`, plus the `roleFallback` rows), so a manager sees exactly the rows
+  they can act on. The two are provably dual: `scopedApproversOf` walks up the
+  edges `scopeOf` walks down, so the feed and the decision cannot disagree.
+  `admin`/`delivery-executive` see everything.
+- **Two 403s, worded apart** — an actor who holds the role but is out of scope
+  gets *"Actor does not manage this resource and cannot decide its
+  allocation"*, distinct from the role/step refusal. Neither message names the
+  resource's managers or its org node: the actor has just failed an
+  authorization check on that resource, so naming who *would* be competent
+  would leak org structure to exactly the wrong person.
+- **The UI mirrors it, as UX only** — `canDecideFor` in
+  `allocation-approvals/approval-modal.component.ts` and `scopeAllows` in
+  `approvals/approvals.ts` (the Approvals Inbox) both call `scopedApproversOf`
+  so no screen offers a decision button the server would refuse. The server
+  remains the authority.
 
 ### C2 — substituting a dummy with a real person
 
