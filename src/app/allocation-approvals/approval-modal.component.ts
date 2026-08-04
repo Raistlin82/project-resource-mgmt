@@ -28,7 +28,7 @@ import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
 import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
-import { scopedApproversOf, type ScopeResource } from '../services/org-scope.util';
+import { accountableApproversOf, isTerminatedAsOf, type ScopeResource } from '../services/org-scope.util';
 
 /** Today as ISO 'YYYY-MM-DD' — matches ResourcesComponent.isTerminated's own
  *  local helper exactly, so a candidate resource is filtered out here under
@@ -473,40 +473,55 @@ export class ApprovalModalComponent {
    *   - their role is 'admin' (global, never scoped); or
    *   - they ARE the resource's manager, i.e. the step's `approverId`, compared
    *     in resource-id space (exactly what `AuthService.userId()` returns); or
+   *   - they are an ACCOUNTABLE MANAGER of the resource — in its transitive
+   *     `managerId` chain, or the manager of an org node above it
+   *     (`accountableApproversOf`), minus anyone already terminated. This holds
+   *     REGARDLESS of the actor's global role, exactly as the server's rule 2
+   *     does: the node's manager IS the Capability Leader / Practice Manager /
+   *     Competence Manager, and that authority is relative, not global; or
    *   - they hold the role every allocation step is routed to
-   *     ('resource-manager', per `allocationApproverStep`) AND the resource is
-   *     in their ORG SCOPE — the transitive `managerId` chain union the managers
-   *     of the org nodes above it (`scopedApproversOf`); or
-   *   - that same role, when the resource has no manager ANYWHERE
-   *     (`roleFallback`) — a placeholder/dummy today, which is what keeps C2's
-   *     substitutions actionable.
+   *     ('resource-manager', per `allocationApproverStep`) AND the resource has
+   *     no accountable manager ANYWHERE (`roleFallback`) — a placeholder/dummy
+   *     today, which is what keeps C2's substitutions actionable.
    *
    * BEFORE D this returned true for ANY `resource-manager`, which now would
-   * promise the operator a button the server refuses. A `delivery-executive`
-   * still reaches this only through the named-manager line: their role matches
-   * no allocation step, exactly as before D.
+   * promise the operator a button the server refuses.
    *
-   * Falls back to PERMISSIVE when the target resource or the org tree has not
-   * loaded yet (the lists resolve async): the server is the authority, and
-   * disabling a line on a not-yet-loaded list would flicker a refusal that
+   * For the 'resource-manager' path it falls back to PERMISSIVE while the lists
+   * are still resolving (see the note in the body): the server is the authority,
+   * and disabling a line on a not-yet-loaded list would flicker a refusal that
    * isn't one.
    *
    * UX only, like the route guards — the server is the authority. It cannot
-   * predict segregation of duties (the approval's requester is not in the feed).
+   * predict segregation of duties (the approval's requester is not in the feed),
+   * which is why an accountable manager's OWN submission is auto-approved
+   * server-side rather than offered here as a button they could never press.
    */
   private canDecideFor(row: AllocationApprovalRow): boolean {
     const { role, resourceId } = this.principal();
     if (role === 'admin') return true;
     if (row.managerId !== undefined && row.managerId === resourceId) return true;
-    if (role !== 'resource-manager') return false;
     const resources = this.resources();
-    // The feed row carries no `organization`, so the scope target is the real
-    // resource when the list has it; the row's own `managerId` is the fallback
-    // shape, which exercises the org-chart axis alone.
+    // NOTE on the not-yet-loaded state, and why there is deliberately no
+    // `resources.length === 0 -> true` shortcut here: `checked` is a
+    // linkedSignal seeded from `decidable()` on FIRST render, and the catalogue
+    // resolves after it. A blanket permissive answer would therefore PRE-CHECK
+    // lines the server refuses and never un-check them (the resource list
+    // arriving does not change `lines()`, so the linkedSignal does not
+    // recompute). The empty-list case is handled where it belongs instead: the
+    // org-chart walk resolves managers THROUGH this list, so an empty list
+    // yields an empty approver set and `roleFallback` — permissive for the
+    // 'resource-manager' path (the one that would otherwise flicker a refusal),
+    // fail-closed for every other role, which is exactly what the server does.
+    //
+    // The scope target is the real resource when the catalogue has it; the row's
+    // own fields are the fallback shape. `organization` is carried on the feed
+    // row itself (Task 8), so even that fallback exercises BOTH axes.
     const target: ScopeResource = resources.find(r => r.id === row.resourceId)
-      ?? { id: row.resourceId, managerId: row.managerId };
-    const { managerIds, roleFallback } = scopedApproversOf(target, resources, this.orgNodes());
-    return roleFallback || managerIds.has(resourceId);
+      ?? { id: row.resourceId, managerId: row.managerId, organization: row.organization };
+    const { managerIds, roleFallback } = accountableApproversOf(target, resources, this.orgNodes(), todayIso());
+    if (managerIds.has(resourceId)) return true;
+    return role === 'resource-manager' && roleFallback;
   }
 
   protected decidable(line: Line): boolean {
@@ -723,7 +738,7 @@ export class ApprovalModalComponent {
     this.resources().filter(r => countsTowardInternalCapacity(kindOf(r)) && !this.isTerminated(r)));
 
   private isTerminated(r: Resource): boolean {
-    return !!r.terminationDate && r.terminationDate <= todayIso();
+    return isTerminatedAsOf(r, todayIso());
   }
 
   /** Organizations actually present among `eligibleTargets` — what the

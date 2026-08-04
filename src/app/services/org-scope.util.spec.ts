@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
-  ancestorChain, descendantOrgIds, dimensionsOf, nodeByName, reportsClosure,
-  scopeOf, scopedApproversOf, wouldCycleInOrgChart, wouldCycleInOrgTree,
+  accountableApproversOf, ancestorChain, descendantOrgIds, dimensionsOf, isTerminatedAsOf, nodeManagersAbove,
+  nodeByName, reportsClosure, scopeOf, scopedApproversOf, wouldCycleInOrgChart, wouldCycleInOrgTree,
   type OrgNode, type ScopeResource,
 } from './org-scope.util';
 
@@ -147,6 +147,126 @@ describe('scopedApproversOf', () => {
       { id: 'r100', organization: 'Delivery' }, RESOURCES, NODES);
     expect([...managerIds]).toEqual([]);
     expect(roleFallback).toBe(true);
+  });
+
+  it("ignores an empty-string node managerId instead of admitting it as a manager", () => {
+    // The clear-to-absent sentinel, persisted. Admitting it would name an
+    // approver nobody can be AND keep roleFallback false — a silent lockout.
+    const sentinel: OrgNode[] = [{ id: 'CAP3', name: 'Sentinel', level: 'capability', managerId: '' }];
+    const { managerIds, roleFallback } = scopedApproversOf(
+      { id: 'z', organization: 'Sentinel' }, [], sentinel);
+    expect([...managerIds]).toEqual([]);
+    expect(roleFallback).toBe(true);
+  });
+});
+
+describe('nodeManagersAbove', () => {
+  it('names every node manager from the attachment up to the root, and nothing else', () => {
+    expect([...nodeManagersAbove({ id: 'x', organization: 'Backend' }, NODES)].sort())
+      .toEqual(['r100', 'r200', 'r300']);
+    // The org chart contributes NOTHING here — that is the whole point of the
+    // split (autoApprovesAllocation must widen on this axis alone).
+    expect([...nodeManagersAbove({ id: 'x', managerId: 'r2' }, NODES)]).toEqual([]);
+  });
+
+  it('is empty for an unknown or absent attachment, and ignores the empty-string sentinel', () => {
+    expect([...nodeManagersAbove({ id: 'x' }, NODES)]).toEqual([]);
+    expect([...nodeManagersAbove({ id: 'x', organization: 'Nope' }, NODES)]).toEqual([]);
+    const sentinel: OrgNode[] = [{ id: 'CAP6', name: 'Blank', level: 'capability', managerId: '' }];
+    expect([...nodeManagersAbove({ id: 'x', organization: 'Blank' }, sentinel)]).toEqual([]);
+  });
+});
+
+describe('isTerminatedAsOf', () => {
+  it('is true only from the termination date onwards', () => {
+    expect(isTerminatedAsOf({ terminationDate: '2026-08-04' }, '2026-08-04')).toBe(true);
+    expect(isTerminatedAsOf({ terminationDate: '2026-08-03' }, '2026-08-04')).toBe(true);
+    expect(isTerminatedAsOf({ terminationDate: '2026-08-05' }, '2026-08-04')).toBe(false);
+  });
+
+  it('treats an absent or cleared terminationDate as active', () => {
+    expect(isTerminatedAsOf({}, '2026-08-04')).toBe(false);
+    expect(isTerminatedAsOf({ terminationDate: '' }, '2026-08-04')).toBe(false);
+  });
+});
+
+describe('accountableApproversOf', () => {
+  const TODAY = '2026-08-04';
+
+  it('is scopedApproversOf when every named approver is still active', () => {
+    const structural = scopedApproversOf(RESOURCES[0], RESOURCES, NODES);
+    const accountable = accountableApproversOf(RESOURCES[0], RESOURCES, NODES, TODAY);
+    expect([...accountable.managerIds].sort()).toEqual([...structural.managerIds].sort());
+    expect(accountable.roleFallback).toBe(false);
+  });
+
+  it('drops a terminated manager from the set', () => {
+    const resources: ScopeResource[] = [
+      { id: 'r1', managerId: 'gone', organization: 'Engineering' },
+      { id: 'gone', terminationDate: '2026-01-31' },
+    ];
+    // The org chart offers only the departed manager; 'Engineering' still has
+    // its own (active) node manager r200, so the set narrows but is not empty.
+    const { managerIds, roleFallback } = accountableApproversOf(resources[0], resources, NODES, TODAY);
+    expect([...managerIds].sort()).toEqual(['r100', 'r200']);
+    expect(roleFallback).toBe(false);
+  });
+
+  it('falls back to the role when the ONLY accountable manager is terminated', () => {
+    // THE LOCKOUT this function exists to prevent: a stale managerId keeps
+    // roleFallback false, so nobody but an admin can decide for r1.
+    const resources: ScopeResource[] = [
+      { id: 'r1', managerId: 'gone' },
+      { id: 'gone', terminationDate: '2026-01-31' },
+    ];
+    expect(scopedApproversOf(resources[0], resources, NODES).roleFallback).toBe(false);
+    const { managerIds, roleFallback } = accountableApproversOf(resources[0], resources, NODES, TODAY);
+    expect([...managerIds]).toEqual([]);
+    expect(roleFallback).toBe(true);
+  });
+
+  it('falls back when a terminated NODE manager is the only candidate', () => {
+    const nodes: OrgNode[] = [{ id: 'CAP4', name: 'Orphaned', level: 'capability', managerId: 'gone' }];
+    const resources: ScopeResource[] = [
+      { id: 'r1', organization: 'Orphaned' },
+      { id: 'gone', terminationDate: '2026-01-31' },
+    ];
+    expect(accountableApproversOf(resources[0], resources, nodes, TODAY)).toEqual({
+      managerIds: new Set<string>(), roleFallback: true,
+    });
+  });
+
+  it('keeps a manager whose termination is still in the future', () => {
+    const resources: ScopeResource[] = [
+      { id: 'r1', managerId: 'leaving' },
+      { id: 'leaving', terminationDate: '2026-12-31' },
+    ];
+    const { managerIds, roleFallback } = accountableApproversOf(resources[0], resources, NODES, TODAY);
+    expect([...managerIds]).toEqual(['leaving']);
+    expect(roleFallback).toBe(false);
+  });
+
+  it('keeps a NODE managerId that resolves to no resource at all (it fails open)', () => {
+    // The tree axis adds `node.managerId` WITHOUT resolving it (there has never
+    // been a referential check on it), so an unknown id does reach the set. It
+    // must stay: treating "unknown" as "nobody" would quietly widen who may
+    // decide for every row carrying imported/legacy data. Only a manager we can
+    // see, and can see is gone, is dropped.
+    //
+    // The CHART axis is different by construction — it walks THROUGH the
+    // resources-by-id map, so an unknown `Resource.managerId` never enters the
+    // set in the first place (asserted below, so the asymmetry is deliberate
+    // and recorded rather than discovered later).
+    const nodes: OrgNode[] = [{ id: 'CAP5', name: 'Ghosted', level: 'capability', managerId: 'ghost' }];
+    const resources: ScopeResource[] = [{ id: 'r1', organization: 'Ghosted' }];
+    const viaTree = accountableApproversOf(resources[0], resources, nodes, TODAY);
+    expect([...viaTree.managerIds]).toEqual(['ghost']);
+    expect(viaTree.roleFallback).toBe(false);
+
+    const chartOnly: ScopeResource[] = [{ id: 'r1', managerId: 'ghost' }];
+    const viaChart = accountableApproversOf(chartOnly[0], chartOnly, [], TODAY);
+    expect([...viaChart.managerIds]).toEqual([]);
+    expect(viaChart.roleFallback).toBe(true);
   });
 });
 

@@ -3707,6 +3707,72 @@ async function checkOrgTreeIntegrity() {
       check(`check 17 cleanup: DELETE /api/resource-organizations/${rootId} -> 204`, cleanupRoot.status === 204, `status=${cleanupRoot.status}`);
     }
   }
+
+  // 18) REVIEW ROUND 4 (important #3) — THE '' SENTINEL ON **CREATE**. The PUT
+  // handler translates '' -> null ("clear this field"); POST used to spread the
+  // body straight into `create()`, which strips nothing, while
+  // `validateOrgTreeNode` skips the reference check for '' — so a POST carrying
+  // `managerId: ''` persisted a LITERAL empty string. That value then entered
+  // `scopedApproversOf`'s manager set (which guarded only `!== undefined`),
+  // naming an approver nobody can be while still suppressing the role fallback:
+  // the same lockout critical #1 describes, through a second door. `parentId: ''`
+  // likewise persisted and made the node fall out of the customizing tree's main
+  // walk. The client was working around this by omitting the keys on create —
+  // the UI as sole guardian, which the Global Constraints forbid.
+  //
+  // Mirrors checks 5/6 of `checkResourceManagerCycle` (the same bug, the same
+  // fix, on `POST /resources`' own managerId) — including the literal-`null`
+  // half, which `pick()` forwards unchanged.
+  {
+    const emptySentinels = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Empty Sentinels', description: 'x', level: 'capability', parentId: '', managerId: '' },
+    });
+    check(
+      "POST /api/resource-organizations {parentId:'', managerId:''} -> 200, both normalized to ABSENT, not persisted as literal ''",
+      emptySentinels.status === 200
+      && emptySentinels.body?.parentId === undefined && emptySentinels.body?.managerId === undefined,
+      `status=${emptySentinels.status}, body=${JSON.stringify(emptySentinels.body)}`,
+    );
+    // Re-READ it, not just the create response: the in-memory adapter returns
+    // what it was handed, so only a fresh GET proves what was actually stored.
+    if (typeof emptySentinels.body?.id === 'string') {
+      const id = emptySentinels.body.id;
+      const reread = await req('GET', '/resource-organizations');
+      const stored = (Array.isArray(reread.body) ? reread.body : []).find((n) => n.id === id);
+      check(
+        'check 18: the stored row reads back with parentId/managerId genuinely absent (adapter parity)',
+        stored !== undefined && stored.parentId === undefined && stored.managerId === undefined,
+        `stored=${JSON.stringify(stored)}`,
+      );
+      const cleanup = await req('DELETE', `/resource-organizations/${id}`, { headers: RBAC_HEADERS });
+      check(`check 18 cleanup: DELETE /api/resource-organizations/${id} -> 204`, cleanup.status === 204, `status=${cleanup.status}`);
+    }
+  }
+
+  // 19) The literal-`null` half of check 18 — `pick()` forwards an explicit
+  // JSON null unchanged (it only filters `undefined`), and `create()` has no
+  // null-stripping step on either adapter, so an unnormalized null would live
+  // on in an in-memory row while Postgres stored a proper NULL: a silent
+  // adapter disagreement. Neither field is in REQUIRED_ORG_FIELDS, so a null is
+  // NOT a 400 here (unlike `name`/`level`/`description`/`costCenters`) — it is
+  // a legitimate "no parent / no manager", normalized to absent.
+  {
+    const nullSentinels = await req('POST', '/resource-organizations', {
+      headers: RBAC_HEADERS,
+      body: { name: 'D Smoke Null Sentinels', description: 'x', level: 'capability', parentId: null, managerId: null },
+    });
+    check(
+      'POST /api/resource-organizations {parentId: null, managerId: null} -> 200, both normalized to ABSENT, not persisted as literal null',
+      nullSentinels.status === 200
+      && nullSentinels.body?.parentId === undefined && nullSentinels.body?.managerId === undefined,
+      `status=${nullSentinels.status}, body=${JSON.stringify(nullSentinels.body)}`,
+    );
+    if (typeof nullSentinels.body?.id === 'string') {
+      const cleanup = await req('DELETE', `/resource-organizations/${nullSentinels.body.id}`, { headers: RBAC_HEADERS });
+      check(`check 19 cleanup: DELETE /api/resource-organizations/${nullSentinels.body.id} -> 204`, cleanup.status === 204, `status=${cleanup.status}`);
+    }
+  }
 }
 
 /**
@@ -3720,15 +3786,21 @@ async function checkOrgTreeIntegrity() {
  * §3.5 declares the breaking change: "chi oggi approva risorse che non
  * gestisce smetterà di poterlo fare".
  *
- * IDENTITIES. Header trust (AUTH_TRUST_HEADERS=true) resolves ROLE and
- * IDENTITY through two independent paths — `trustedRole` reads X-User-Role
- * while `actorResourceId` maps X-User-Id through the users directory — which
- * is what makes "a resource-manager acting AS resource '1'" expressible at
- * all: seed user '1' (Julie) carries role 'delivery-executive' in the
- * directory, and a delivery-executive is NOT admitted to a step routed to
- * 'resource-manager' (that is today's behaviour and D does not change it), so
- * asserting the SCOPE rule requires forging the role header. That is exactly
- * the demo-mode affordance this suite already relies on everywhere else.
+ * IDENTITIES — AND A FIXTURE THAT USED TO CERTIFY A FICTION (review round 4).
+ * Header trust (AUTH_TRUST_HEADERS=true) resolves ROLE and IDENTITY through two
+ * independent paths: `trustedRole` reads X-User-Role while `actorResourceId`
+ * maps X-User-Id through the users directory. This section used to exploit that
+ * by sending `X-User-Id: '1'` with a FORGED `X-User-Role: resource-manager` —
+ * but seed user '1' (Julie) is a **delivery-executive**, and the only seeded
+ * resource-manager is user '2' (John). So the green "the node manager decides"
+ * check below proved a principal that DOES NOT EXIST in the directory, and it
+ * masked the real defect: the node-manager grant was subordinated to the role
+ * match, which made it inert for every actor whose global role was not
+ * 'resource-manager' — i.e. for Julie, the actual Capability Leader of node
+ * 'Engineering'. The fixture now uses her REAL role, which is exactly what the
+ * fix makes work: being an accountable manager is an allow of its own
+ * (design spec §3.4 rule 2), because the node's manager IS that profile and D
+ * deliberately adds no new RBAC role.
  *
  * SEED FACTS this section leans on (asserted as preconditions below, so a
  * failure points at the rule and not at drifted seed data):
@@ -3750,7 +3822,10 @@ async function checkOrgTreeIntegrity() {
  */
 async function checkScopedAllocationDecision() {
   const PROPOSER = { 'X-User-Id': '3', 'X-User-Role': 'pm' };                // -> resource '3'
-  const MANAGER_1 = { 'X-User-Id': '1', 'X-User-Role': 'resource-manager' };  // -> resource '1' (Julie)
+  // Resource '1' (Julie) with her REAL directory role: a delivery-executive who
+  // is the manager of node '2' 'Engineering' and the top of the 3 -> 2 -> 1
+  // chain. NO role forging — see the IDENTITIES note above.
+  const MANAGER_1 = { 'X-User-Id': '1', 'X-User-Role': 'delivery-executive' };
   const MANAGER_2 = { 'X-User-Id': '2', 'X-User-Role': 'resource-manager' };  // -> resource '2' (John)
   // Maps to no user row, so `actorResourceId` falls back to the raw id: a
   // resource-manager who manages nobody and no node — the "stranger" of §3.5.
@@ -3890,10 +3965,11 @@ async function checkScopedAllocationDecision() {
       "D5 the resource's own manager decides in scope (Alice/'3' decided by '2') -> 200",
       await openApproval(aliceAssignment, MONTHS.a), MANAGER_2, 200,
     );
-    // §3.4 rule 2 ALONE: Julie is NOT the step's `approverId` (that is '2'), so
-    // this can only pass through the TRANSITIVE chain 3 -> 2 -> 1.
+    // §3.4 rule 2 ALONE: Julie is NOT the step's `approverId` (that is '2') and
+    // her role ('delivery-executive') matches no allocation step, so this can
+    // only pass by her being ACCOUNTABLE via the TRANSITIVE chain 3 -> 2 -> 1.
     await decideAs(
-      "D5 a transitive manager decides in scope (Alice/'3' decided by '1', not the named approver) -> 200",
+      "D5 a transitive manager decides on the strength of the chain alone (Alice/'3' decided by '1', not the named approver, role not routed here) -> 200",
       await openApproval(aliceAssignment, MONTHS.b), MANAGER_1, 200,
     );
     // ONE approval, TWO refusals — a refused decision leaves the request
@@ -3919,10 +3995,14 @@ async function checkScopedAllocationDecision() {
   // --- Dummy in Engineering ('4'): no org-chart link, node manager only -----
   const dummyEngAssignment = await assignmentFor(DUMMY_ENGINEERING);
   if (dummyEngAssignment !== undefined) {
-    // §3.4 rule 2 via the ORG TREE: '1' manages node 'Engineering' and the
-    // dummy has no `managerId` at all, so the org chart offers nothing here.
+    // §3.4 rule 2 via the ORG TREE, AND THE REAL PRINCIPAL: '1' manages node
+    // 'Engineering' and the dummy has no `managerId` at all, so the org chart
+    // offers nothing here — the grant can ONLY come from the node. Her role is
+    // her directory role ('delivery-executive'), which no allocation step is
+    // routed to, so this check is the one that fails before the fix: the whole
+    // point of rule 2 is that the Capability Leader does not need a global role.
     await decideAs(
-      "D5 the node manager decides with no org-chart link (dummy '4' in Engineering decided by '1') -> 200",
+      "D5 the node manager decides with no org-chart link and no routed role (dummy '4' in Engineering decided by Capability Leader '1') -> 200",
       await openApproval(dummyEngAssignment, MONTHS.a), MANAGER_1, 200,
     );
     // A REAL seeded resource-manager who manages neither the dummy nor any
@@ -4056,9 +4136,13 @@ async function checkScopedApprovalFeed() {
     `status=${asAdmin.status}, resourceIds=[${[...adminIds].join(',')}]`,
   );
 
-  // --- Check 3: delivery-executive's feed is unrestricted, same reason as
-  // Task 5 (D5 doc: inert for the DECISION, but a global oversight role that
-  // keeps seeing everything on the FEED — do not "fix" this into consistency).
+  // --- Check 3: delivery-executive's feed is unrestricted — a global oversight
+  // role sees every row. It does NOT follow that they can decide every row: the
+  // role is routed to no allocation step, so on the DECISION they get in only
+  // where they are actually accountable for the resource (§3.4 rule 2 — see D5's
+  // Capability-Leader check) or are the step's named approver. The feed being
+  // wider than the decision is deliberate for the two global roles; do not "fix"
+  // it into consistency.
   const asDE = await req('GET', FEED_PATH, { headers: DELIVERY_EXECUTIVE });
   const deIds = rowIds(asDE.body);
   check(
@@ -4088,6 +4172,195 @@ async function checkScopedApprovalFeed() {
     asStranger.status === 200 && !strangerIds.has(ALICE) && !strangerIds.has(DUMMY_ENGINEERING),
     `status=${asStranger.status}, resourceIds=[${[...strangerIds].join(',')}]`,
   );
+}
+
+/**
+ * D REVIEW ROUND 4 — THE ACCOUNTABLE-MANAGER RULES, the two cases the suite
+ * could not see before.
+ *
+ * (A) CRITICAL #2 — the ORG-TREE half of the AUTO-APPROVAL shortcut.
+ * `autoApprovesAllocation` exists so a manager's own submission never deadlocks:
+ * segregation of duties forbids the requester from deciding their own approval,
+ * so when the only competent approver IS the proposer, opening a real approval
+ * strands the month. D widened the APPROVER set to node managers but not that
+ * shortcut, so the mainline Practice Manager workflow — plan your practice's
+ * placeholders, then confirm them — deadlocked: John's own decision 403s on SoD,
+ * every other resource-manager 403s on scope, a delivery-executive 403s on role,
+ * and only an admin can clear it. Worse, BOTH client mirrors showed John an
+ * ENABLED Approve button, because they check the scope and cannot predict SoD.
+ * The suite deliberately never made the proposer a decider, which is exactly
+ * why this was outside its coverage.
+ *
+ * (B) CRITICAL #1, SECOND TRIGGER — a manager who has LEFT must not suppress
+ * the role fallback. Nothing revisits a stored `managerId` when a
+ * `terminationDate` is set and there is no `DELETE /resources`, so the stale id
+ * stays in the structural approver set, keeps `roleFallback` false, and turns
+ * the whole subtree beneath the departed manager admin-only — silently. The
+ * CONTRAST case (an ACTIVE manager still refusing a stranger) is D5's
+ * "a stranger resource-manager is refused with the SCOPE message" check, which
+ * must stay green: this must widen who can decide only when nobody is left.
+ *
+ * ORDERING. Runs AFTER `checkScopedApprovalFeed` — case (A) temporarily makes
+ * resource-manager '2' the manager of node '3' ('Consulting'), which would
+ * otherwise destroy that section's `roleFallback` fixture on resource '5' — and
+ * BEFORE `checkResourceManagerCycle`, which permanently rewrites resource '3'.
+ * The node's manager is restored at the end of (A) either way.
+ */
+async function checkAccountableApproverRules() {
+  const JOHN = { 'X-User-Id': '2', 'X-User-Role': 'resource-manager' };   // -> resource '2'
+  const PROPOSER = { 'X-User-Id': '3', 'X-User-Role': 'pm' };             // -> resource '3'
+  // Maps to no user row, so `actorResourceId` falls back to the raw id: a
+  // resource-manager who manages nobody and no node — the §3.5 "stranger".
+  const STRANGER = { 'X-User-Id': '99', 'X-User-Role': 'resource-manager' };
+
+  const CONSULTING_ID = '3';       // org node 'Consulting': no parent, no manager in the seed
+  const DUMMY_CONSULTING = '5';    // attached to 'Consulting', NO personal managerId
+  const MONTH = '2026-09';         // Open, and left Open by every earlier section
+  const DAY_A = '2026-09-08';      // Tuesday, not a seeded holiday
+  const DAY_B = '2026-09-15';      // Tuesday, not a seeded holiday
+
+  /** Book 1h in MONTH on `day` and submit it as `headers`; returns the month row. */
+  async function bookAndSubmit(label, assignmentId, day, headers) {
+    const booked = await req('PUT', `/assignments/${assignmentId}/allocation`, {
+      headers, body: { month: MONTH, dailyHours: { [day]: 1 } },
+    });
+    if (!check(`${label}: 1h booked on ${day}`, booked.status === 200, `status=${booked.status}, body=${JSON.stringify(booked.body)}`)) {
+      return undefined;
+    }
+    const submitted = await req('POST', `/assignments/${assignmentId}/months/${MONTH}/submit`, { headers, body: {} });
+    return submitted;
+  }
+
+  // --- (A) the node manager's OWN submission auto-approves -------------------
+  {
+    const grant = await req('PUT', `/resource-organizations/${CONSULTING_ID}`, {
+      headers: RBAC_HEADERS, body: { managerId: '2' },
+    });
+    const grantOk = check(
+      "D-R4(A) setup: resource-manager '2' (John) is made the manager of node '3' ('Consulting') -> 200",
+      grant.status === 200 && grant.body?.managerId === '2',
+      `status=${grant.status}, body=${JSON.stringify(grant.body)}`,
+    );
+    const dummy = await req('GET', `/resources/${DUMMY_CONSULTING}`);
+    const dummyOk = check(
+      "D-R4(A) setup: resource '5' sits on 'Consulting' with NO personal managerId, so John is its ONLY accountable manager",
+      dummy.status === 200 && dummy.body?.organization === 'Consulting' && dummy.body?.managerId === undefined,
+      `status=${dummy.status}, organization=${JSON.stringify(dummy.body?.organization)}, managerId=${JSON.stringify(dummy.body?.managerId)}`,
+    );
+    if (grantOk && dummyOk) {
+      const request = await req('POST', '/requests', {
+        headers: JOHN,
+        body: { name: 'D-R4 node-manager self-submission', requiredRole: 'Developer', requiredEffort: 1, skills: [] },
+      });
+      const assig = request.status === 200 && typeof request.body?.id === 'string'
+        ? await req('POST', '/assignments', { headers: JOHN, body: { requestId: request.body.id, resourceId: DUMMY_CONSULTING, assignedHours: 0 } })
+        : { status: 0, body: undefined };
+      const setupOk = check(
+        "D-R4(A) setup: John creates a request + an assignment on the placeholder he is accountable for",
+        assig.status === 200 && typeof assig.body?.id === 'string',
+        `request=${request.status}/${JSON.stringify(request.body?.id)}, assignment=${assig.status}/${JSON.stringify(assig.body)}`,
+      );
+      if (setupOk) {
+        const submitted = await bookAndSubmit('D-R4(A) setup', assig.body.id, DAY_A, JOHN);
+        check(
+          "D-R4(A) a NODE manager's own submission auto-approves, exactly as a direct manager's does (month -> 'Allocated', no approval opened) -> 200",
+          submitted !== undefined && submitted.status === 200 && submitted.body?.status === 'Allocated'
+          && submitted.body?.approvalId === undefined,
+          `status=${submitted?.status}, monthStatus=${submitted?.body?.status}, approvalId=${JSON.stringify(submitted?.body?.approvalId)}`,
+        );
+        // The DEADLOCK, asserted as data rather than inferred: if an approval
+        // had opened, it would be Pending on this very month row, requested by
+        // John, and nobody but an admin could ever decide it.
+        const rowId = `${assig.body.id}:${MONTH}`;
+        const approvals = await req('GET', '/approval-requests', { headers: RBAC_HEADERS });
+        const stranded = (Array.isArray(approvals.body) ? approvals.body : [])
+          .filter((a) => a.refId === rowId && a.status === 'Pending');
+        check(
+          'D-R4(A) no Pending approval is left on that month row — the SoD deadlock cannot form',
+          approvals.status === 200 && stranded.length === 0,
+          `status=${approvals.status}, stranded=${JSON.stringify(stranded)}`,
+        );
+      }
+    }
+    // RESTORE the seeded shape whatever happened above: resource '5' must go
+    // back to having no accountable manager anywhere.
+    const restore = await req('PUT', `/resource-organizations/${CONSULTING_ID}`, {
+      headers: RBAC_HEADERS, body: { managerId: '' },
+    });
+    check(
+      "D-R4(A) cleanup: node '3' ('Consulting') is detached from its manager again -> 200, managerId absent",
+      restore.status === 200 && restore.body?.managerId === undefined,
+      `status=${restore.status}, body=${JSON.stringify(restore.body)}`,
+    );
+  }
+
+  // --- (B) a TERMINATED manager does not suppress the role fallback ---------
+  {
+    const stamp = Date.now();
+    const departed = await req('POST', '/resources', {
+      headers: RBAC_HEADERS,
+      body: {
+        name: `D-R4 Departed Manager ${stamp}`, role: 'Developer', kind: 'internal',
+        skills: [], projectRoles: [], externalExperience: [],
+        capacity: 40, hireDate: '2020-01-01', terminationDate: '2026-01-31', contractHoursPerDay: 8,
+      },
+    });
+    const departedOk = check(
+      'D-R4(B) setup: a manager whose contract ALREADY ended is created (terminationDate in the past)',
+      departed.status === 201 && typeof departed.body?.id === 'string' && departed.body?.terminationDate === '2026-01-31',
+      `status=${departed.status}, body=${JSON.stringify(departed.body)}`,
+    );
+    if (departedOk) {
+      // NO `organization`: the org-tree axis must contribute nothing, so the
+      // departed manager is the resource's ONLY structural approver.
+      const orphan = await req('POST', '/resources', {
+        headers: RBAC_HEADERS,
+        body: {
+          name: `D-R4 Orphaned Report ${stamp}`, role: 'Developer', kind: 'internal',
+          skills: [], projectRoles: [], externalExperience: [],
+          capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8, managerId: departed.body.id,
+        },
+      });
+      const orphanOk = check(
+        'D-R4(B) setup: a report whose ONLY manager is that departed person is created (no organization, so the org tree adds nobody)',
+        orphan.status === 201 && orphan.body?.managerId === departed.body.id && orphan.body?.organization === undefined,
+        `status=${orphan.status}, body=${JSON.stringify(orphan.body)}`,
+      );
+      if (orphanOk) {
+        const request = await req('POST', '/requests', {
+          headers: PROPOSER,
+          body: { name: 'D-R4 terminated-manager fallback', requiredRole: 'Developer', requiredEffort: 1, skills: [] },
+        });
+        const assig = request.status === 200 && typeof request.body?.id === 'string'
+          ? await req('POST', '/assignments', { headers: PROPOSER, body: { requestId: request.body.id, resourceId: orphan.body.id, assignedHours: 0 } })
+          : { status: 0, body: undefined };
+        const setupOk = check(
+          'D-R4(B) setup: a request + assignment on that report, proposed by a pm who is nobody\'s manager',
+          assig.status === 200 && typeof assig.body?.id === 'string',
+          `request=${request.status}/${JSON.stringify(request.body?.id)}, assignment=${assig.status}/${JSON.stringify(assig.body)}`,
+        );
+        if (setupOk) {
+          const submitted = await bookAndSubmit('D-R4(B) setup', assig.body.id, DAY_B, PROPOSER);
+          const submitOk = check(
+            "D-R4(B) setup: submit opens a REAL approval (the proposer is not accountable, so no auto-approval) -> 'Requested' + approvalId",
+            submitted !== undefined && submitted.status === 200 && submitted.body?.status === 'Requested'
+            && typeof submitted.body?.approvalId === 'string',
+            `status=${submitted?.status}, monthStatus=${submitted?.body?.status}, approvalId=${JSON.stringify(submitted?.body?.approvalId)}`,
+          );
+          if (submitOk) {
+            const decided = await req('PUT', `/approval-requests/${submitted.body.approvalId}/decision`, {
+              headers: STRANGER, body: { decision: 'Approved', note: 'D-R4 smoke' },
+            });
+            check(
+              'D-R4(B) a departed manager does not suppress the fallback: with nobody accountable left, any competent approver may decide -> 200',
+              decided.status === 200,
+              `status=${decided.status}, body=${JSON.stringify(decided.body)}`,
+            );
+          }
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -4512,6 +4785,18 @@ async function main() {
     await checkScopedApprovalFeed();
   } catch (err) {
     console.log(`FAIL  scoped approval-feed flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the D review-round-4
+  // accountable-manager flow never masks or blocks any of the prior section
+  // results. MUST run AFTER checkScopedApprovalFeed (it temporarily gives node
+  // '3' a manager, which would destroy that section's roleFallback fixture) and
+  // BEFORE checkResourceManagerCycle.
+  try {
+    await checkAccountableApproverRules();
+  } catch (err) {
+    console.log(`FAIL  accountable-manager rules — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

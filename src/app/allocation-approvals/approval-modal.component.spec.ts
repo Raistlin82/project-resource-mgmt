@@ -231,11 +231,17 @@ describe('ApprovalModalComponent — scoped decision (D §3.4)', () => {
     { ...base, id: 's9', name: 'Node Manager Nia', organization: 'Engineering' },
     { ...base, id: 'sX', name: 'Stranger Stan', organization: 'Cloud' },
     { ...base, id: 's0', name: 'Unmanaged Uma', organization: 'Cloud' },
+    // Review round 4: a node manager who has LEFT, and the report stranded under
+    // their node. Nothing revisits a stored managerId when a terminationDate is
+    // set, so this shape is reachable in ordinary data.
+    { ...base, id: 's7', name: 'Departed Dana', organization: 'Legacy', terminationDate: '2020-01-01' },
+    { ...base, id: 's6', name: 'Stranded Sid', organization: 'Legacy' },
   ];
   const SCOPE_ORGS: ResourceOrganization[] = [
     { id: 'o1', name: 'Engineering', description: '', costCenters: [], level: 'capability', managerId: 's9' },
     { id: 'o2', name: 'Platform', description: '', costCenters: [], level: 'practice', parentId: 'o1' },
     { id: 'o3', name: 'Cloud', description: '', costCenters: [], level: 'capability' },
+    { id: 'o4', name: 'Legacy', description: '', costCenters: [], level: 'capability', managerId: 's7' },
   ];
 
   /** A feed row for `resourceId` with ONE pending, decidable-shaped item and NO
@@ -300,6 +306,45 @@ describe('ApprovalModalComponent — scoped decision (D §3.4)', () => {
 
     expect(host.querySelector<HTMLInputElement>('[aria-label="Select Apollo"]')!.disabled).toBe(false);
     expect(host.querySelector('[data-test="line-blocked"]')).toBeNull();
+  });
+
+  it("offers the line to a Capability Leader whose global role is routed to NO allocation step", async () => {
+    // REVIEW ROUND 4 (critical #1). 's9' manages the node above the target and
+    // is NOT the row's named approver (the row carries no managerId at all).
+    // Their global role is 'delivery-executive', which no allocation step is
+    // routed to — so before the fix this rendered a DISABLED checkbox reading
+    // "Only Scoped Sam's manager can decide this month" TO ITS MANAGER, and only
+    // an admin could clear the month. Being accountable is an allow of its own.
+    const { fixture } = scopeSetup('delivery-executive', 's9');
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Select Apollo"]')!.disabled).toBe(false);
+    expect(host.querySelector('[data-test="line-blocked"]')).toBeNull();
+    expect(host.querySelector<HTMLButtonElement>('[data-test="approve-month"]')!.disabled).toBe(false);
+  });
+
+  it('falls back to any resource-manager when the only accountable manager has been terminated', async () => {
+    // REVIEW ROUND 4 (critical #1, second trigger). 's6' sits under 'Legacy',
+    // whose manager 's7' left in 2020. Structurally 's7' is still an approver,
+    // which used to keep `roleFallback` false and make the whole subtree
+    // admin-only. An approver who cannot act must not suppress the fallback.
+    const { fixture } = scopeSetup('resource-manager', 'sX', 's6', 'Stranded Sid');
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Select Apollo"]')!.disabled).toBe(false);
+    expect(host.querySelector('[data-test="line-blocked"]')).toBeNull();
+  });
+
+  it('does NOT fall back while that node manager is still active', async () => {
+    // The contrast that keeps the rule honest: same shape, active manager
+    // ('Engineering'/'s9'), and the stranger stays refused.
+    const { fixture } = scopeSetup('resource-manager', 'sX');
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Select Apollo"]')!.disabled).toBe(true);
   });
 });
 

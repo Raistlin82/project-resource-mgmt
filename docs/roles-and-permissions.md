@@ -354,11 +354,19 @@ decide an `Allocation` step when **any** of these holds:
 
 1. they are the step's **named approver** (`step.approverId`, a resource id —
    how `allocationApproverStep` routes the step);
-2. they hold the step's **role** *and* the target resource is in their **org
+2. they are an **accountable manager** of the target resource — in its transitive
+   org chart, or the manager of a node above it
+   (`accountableApproversOf(...).managerIds`). **This holds on its own, whatever
+   their global role**: the node's manager *is* the Capability Leader / Practice
+   Manager / Competence Manager, and that authority comes from the structure, not
+   from a role. Safe because it is not the only gate — `roleGate` has already
+   limited `/approval-requests` mutations to the approver-grade roles, so rule 2
+   decides *which* resources, not *whether*;
+3. they hold the step's **role** *and* the target resource is in their **org
    scope**;
-3. they hold the step's role *and* the target has **no manager anywhere**
-   (`scopedApproversOf(...).roleFallback`) — the last resort;
-4. their role is **`admin`**.
+4. they hold the step's role *and* the target has **no accountable manager
+   anywhere** (`accountableApproversOf(...).roleFallback`) — the last resort;
+5. their role is **`admin`**.
 
 **Org scope** (`scopeOf`) is the union of two orthogonal axes:
 
@@ -372,42 +380,74 @@ Competence Manager. **No new role exists** — the seven roles are unchanged; a
 node manager is data, and their reach is derived.
 
 **The fallback and its exact condition.** `roleFallback` is true **only** when
-`scopedApproversOf` finds *nobody* accountable: no manager in the org chart
-above the target **and** no `managerId` on any node above it. Then, and only
-then, any `resource-manager` may decide — which is what keeps a placeholder
-(dummy) and C2's substitutions decidable with no special case. One consequence
-worth stating: a person who manages the very node they are attached to and has
-no `managerId` of their own is removed from their own approver set (nobody may
-approve their own allocation), so they legitimately fall into `roleFallback`.
+`accountableApproversOf` finds *nobody* accountable: no manager in the org chart
+above the target, no `managerId` on any node above it, **and** nobody left after
+the terminated are dropped. Then, and only then, any `resource-manager` may
+decide — which is what keeps a placeholder (dummy) and C2's substitutions
+decidable with no special case. Two consequences worth stating:
+
+- a person who manages the very node they are attached to and has no `managerId`
+  of their own is removed from their own approver set (nobody may approve their
+  own allocation), so they legitimately fall into `roleFallback`;
+- an approver who **cannot act** does not suppress the fallback. Nothing revisits
+  a stored `managerId` when a `terminationDate` is set, and there is no
+  `DELETE /resources`, so a departed manager would otherwise stay in the
+  structural set, keep `roleFallback` false, and make the whole subtree beneath
+  them admin-only — silently. `isTerminatedAsOf` (the same rule the People screen
+  shows the Terminated badge under) drops them first.
 
 **`admin` and `delivery-executive` stay global** and are never narrowed by
-scope. Note what that does *not* mean for an allocation: a `delivery-executive`
-still fails the role match on a step routed to `resource-manager`, so their
-access is unchanged by D — the named-approver path only. Being global exempts
-them from scope; it does not grant them a step their role was never routed to.
+scope. Note what that does *not* mean for an allocation: a `delivery-executive`'s
+**role** matches no allocation step, so being a delivery-executive grants them
+nothing here. They reach an allocation only as the step's named approver or
+through rule 2 — by actually being accountable for that resource. Being global
+exempts them from scope; it does not grant them a step their role was never
+routed to.
 
 **Segregation of duties is separate and binds every role**, `admin` included:
 the requester can never decide their own item. Scope is checked on top of it,
-not instead of it.
+not instead of it. That is precisely why the **auto-approval shortcut**
+(`autoApprovesAllocation`) exists: when the person proposing an allocation is the
+one competent to approve it, opening a real approval would deadlock it — they
+cannot decide it (SoD) and nobody else is competent (scope) — so the month is
+approved implicitly on submit, landing `Allocated` with no `approvalId`. The
+shortcut fires for the resource's **direct people manager** and for the **manager
+of a node above it** — the two positions that can be a single point of failure.
+It deliberately does *not* fire for a merely **transitive** org-chart manager:
+their proposal is still decidable by the direct manager, so it opens a real
+approval, exactly as it always has.
 
 **Where else the same rule applies:**
 
-- **`GET /allocation-approvals`** — the feed is scoped by the *same* rule
-  (`scopeOf`, plus the `roleFallback` rows), so a manager sees exactly the rows
-  they can act on. The two are provably dual: `scopedApproversOf` walks up the
-  edges `scopeOf` walks down, so the feed and the decision cannot disagree.
-  `admin`/`delivery-executive` see everything.
+- **`GET /allocation-approvals`** — for a **`resource-manager`** the feed is
+  scoped by the *same* rule (`scopeOf`, plus the `roleFallback` rows), so they
+  see exactly the rows they can act on. Those two are duals: `scopeOf` walks down
+  the edges `accountableApproversOf` walks up, and both use the same
+  terminated-manager filter, so for that role the feed and the decision cannot
+  disagree.
+  **For the two global roles they deliberately do disagree, and by a lot.**
+  `admin`/`delivery-executive` see **every** row. An `admin` can also decide every
+  row. A `delivery-executive` **cannot** — their role is routed to no allocation
+  step, so they can decide only the rows where they are the named approver or an
+  accountable manager (rule 2), which in a typical directory is a small fraction
+  of what their feed shows. That is intentional: a global oversight role should
+  see the whole queue without being handed authority over it. Do not "fix" it
+  into consistency in either direction.
 - **Two 403s, worded apart** — an actor who holds the role but is out of scope
   gets *"Actor does not manage this resource and cannot decide its
-  allocation"*, distinct from the role/step refusal. Neither message names the
-  resource's managers or its org node: the actor has just failed an
-  authorization check on that resource, so naming who *would* be competent
-  would leak org structure to exactly the wrong person.
+  allocation"*, distinct from the role/step refusal (which now also covers an
+  actor whose role was never routed here *and* who is not accountable for the
+  resource). Neither message names the resource's managers or its org node: the
+  actor has just failed an authorization check on that resource, so naming who
+  *would* be competent would leak org structure to exactly the wrong person.
 - **The UI mirrors it, as UX only** — `canDecideFor` in
-  `allocation-approvals/approval-modal.component.ts` and `scopeAllows` in
-  `approvals/approvals.ts` (the Approvals Inbox) both call `scopedApproversOf`
-  so no screen offers a decision button the server would refuse. The server
-  remains the authority.
+  `allocation-approvals/approval-modal.component.ts` and `scopeAllows` +
+  `isAccountableFor` in `approvals/approvals.ts` (the Approvals Inbox) all call
+  `accountableApproversOf` so no screen offers a decision button the server would
+  refuse. Neither can predict segregation of duties, which is the other reason
+  the auto-approval shortcut above matters: without it a manager's own row would
+  render an enabled Approve button the server always refuses. The server remains
+  the authority.
 
 ### C2 — substituting a dummy with a real person
 

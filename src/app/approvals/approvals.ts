@@ -19,7 +19,13 @@ import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ListStateComponent } from '../shared/list-state.component';
 import { parseMonthRowId } from '../services/allocation-month.util';
-import { scopedApproversOf } from '../services/org-scope.util';
+import { accountableApproversOf } from '../services/org-scope.util';
+
+/** Today as ISO 'YYYY-MM-DD'. The org-scope layer is pure and takes this as a
+ *  value, so the clock read lives here — same helper as the other screens. */
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
 interface ApprovalsData {
   approvals: ApprovalRequest[];
@@ -318,15 +324,17 @@ export class Approvals {
    *     through permissively, exactly as the server does: refusing there would
    *     strand a live approval nobody could decide;
    *   - otherwise the target must be in the actor's scope — the transitive
-   *     `managerId` chain union the managers of the org nodes above it — or
-   *     have no manager anywhere (`roleFallback`).
+   *     `managerId` chain union the managers of the org nodes above it, minus
+   *     anyone already terminated — or have no accountable manager anywhere
+   *     (`roleFallback`).
    *
-   * The named-approver path (`step.approverId`) is checked by the CALLER and is
-   * an OR with this, so a manager who is the pinned approver is never blocked by
-   * a scope answer. It inherits the same demo-identity caveat noted there:
-   * `auth.userId()` is a resource-id in this app's demo identity but the JWT
-   * `sub` in production, so in prod this comparison may simply not match — the
-   * server remains the authority either way.
+   * TWO paths are an OR with this and are checked by the CALLER: the
+   * named-approver path (`step.approverId`) and `isAccountableFor` (the server's
+   * rule 2 — being an accountable manager admits an actor whatever their global
+   * role, so it must NOT be gated on the role match this function assumes).
+   * Both inherit the same demo-identity caveat: `auth.userId()` is a resource-id
+   * in this app's demo identity but the JWT `sub` in production, so in prod the
+   * comparison may simply not match — the server remains the authority either way.
    *
    * NO LOADING RACE to guard: approvals, assignments and the org tree arrive in
    * ONE forkJoin, so `approvals` is non-empty only when the other two have also
@@ -337,15 +345,37 @@ export class Approvals {
    */
   private scopeAllows(request: ApprovalRequest, role: UserRole, userId: string): boolean {
     if (role === 'admin' || role === 'delivery-executive') return true;
-    if (request.kind !== 'Allocation') return true;
+    const accountable = this.accountableApprovers(request);
+    if (accountable === undefined) return true;
+    return accountable.roleFallback || accountable.managerIds.has(userId);
+  }
+
+  /**
+   * The server's RULE 2, mirrored: is this actor an ACCOUNTABLE MANAGER of the
+   * allocation's target resource? True regardless of the actor's global role —
+   * that is the whole point (D adds no new RBAC role because authority over a
+   * set of resources is relative, while every role here is global), and it is
+   * why this is separate from `scopeAllows` above rather than folded into it.
+   */
+  private isAccountableFor(request: ApprovalRequest, userId: string): boolean {
+    return this.accountableApprovers(request)?.managerIds.has(userId) ?? false;
+  }
+
+  /** The accountable-approver answer for an allocation request, or `undefined`
+   *  when the request is not scoped at all (not an Allocation, or its target
+   *  cannot be resolved — both fall through permissively, as the server does). */
+  private accountableApprovers(
+    request: ApprovalRequest,
+  ): { managerIds: Set<string>; roleFallback: boolean } | undefined {
+    if (request.kind !== 'Allocation') return undefined;
     // B3's composite `<assignmentId>:<YYYY-MM>`, or a bare (legacy) assignment id.
     const assignmentId = parseMonthRowId(request.refId)?.assignmentId ?? request.refId;
     const targetId = this.assignmentsById().get(assignmentId)?.resourceId;
-    if (targetId === undefined) return true;
+    if (targetId === undefined) return undefined;
     const target = this.resourceRecordsById().get(targetId);
-    if (target === undefined) return true;
-    const { managerIds, roleFallback } = scopedApproversOf(target, this.res.value().resources, this.res.value().orgNodes);
-    return roleFallback || managerIds.has(userId);
+    if (target === undefined) return undefined;
+    return accountableApproversOf(
+      target, this.res.value().resources, this.res.value().orgNodes, todayIso());
   }
 
   /** Every Pending request, enriched with display labels and authorization flags. */
@@ -373,10 +403,15 @@ export class Approvals {
         // accepted gap — the role-based path still surfaces the action, server allows.)
         const managerMatches = !!step?.approverId && step.approverId === userId;
         // D: holding the step's role is necessary but no longer sufficient for an
-        // Allocation — see `scopeAllows`. The named-approver path is unaffected.
+        // Allocation — see `scopeAllows`. The named-approver path is unaffected,
+        // and `isAccountableFor` is a THIRD, role-independent path (the server's
+        // rule 2): being the resource's accountable manager admits the actor even
+        // when no allocation step is routed to their global role, which is how a
+        // Capability Leader who is a `delivery-executive` reaches their own rows.
         const inScope = roleMatches && this.scopeAllows(request, role, userId);
-        const authorized = inScope || managerMatches;
-        const outOfScope = roleMatches && !inScope && !managerMatches;
+        const accountable = this.isAccountableFor(request, userId);
+        const authorized = inScope || managerMatches || accountable;
+        const outOfScope = roleMatches && !authorized;
         const approvable = !selfRequested && authorized;
         const overdue = !!request.slaDueAt && new Date(request.slaDueAt).getTime() < now;
         const projectLabel = request.projectId ? (projects.get(request.projectId) ?? request.projectId) : 'No project';

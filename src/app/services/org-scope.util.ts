@@ -29,8 +29,12 @@ export const MAX_CHAIN_DEPTH = 64;
 
 /** Minimal shape of an org-tree node this layer needs. */
 export interface OrgNode { id: string; name: string; level: OrgLevel; parentId?: string; managerId?: string }
-/** Minimal shape of a resource this layer needs. */
-export interface ScopeResource { id: string; managerId?: string; organization?: string }
+/**
+ * Minimal shape of a resource this layer needs. `terminationDate` is read ONLY
+ * by `isTerminatedAsOf`/`accountableApproversOf` (see there) — every other
+ * function in this module ignores it.
+ */
+export interface ScopeResource { id: string; managerId?: string; organization?: string; terminationDate?: string }
 
 /** The node a resource is attached to — resources reference nodes BY NAME (spec §2.4). */
 export function nodeByName(name: string | undefined, nodes: readonly OrgNode[]): OrgNode | undefined {
@@ -150,6 +154,36 @@ export function scopeOf(
 }
 
 /**
+ * The ORG-TREE axis ALONE: the `managerId` of every node from the resource's own
+ * attachment up to the root. Split out of `scopedApproversOf` (which unions it
+ * with the org chart) so the ONE caller that needs this axis on its own —
+ * `autoApprovesAllocation`'s node-manager shortcut, which must not touch the
+ * org-chart half — reads the same definition, `''` guard included, rather than
+ * a second copy of the walk.
+ *
+ * Does NOT remove the target itself; the callers that must (nobody may be their
+ * own approver) do it, because the reason is authorization, not hygiene.
+ */
+export function nodeManagersAbove(target: ScopeResource, nodes: readonly OrgNode[]): Set<string> {
+  const out = new Set<string>();
+  const node = nodeByName(target.organization, nodes);
+  if (node === undefined) return out;
+  // `''` is NOT a manager. It is the clear-to-absent sentinel the UI sends (see
+  // the `''`->null translation on both /resource-organizations write handlers),
+  // and a row that predates that translation — or arrives through an import —
+  // can carry it persisted. Guarding only `!== undefined` let it into the set,
+  // where it can never match a real decider's resource id and yet still keeps
+  // `roleFallback` false: the node's manager grant is inert and the fallback is
+  // gone, i.e. NOBODY can decide but an admin. Treat it as absent here too, so
+  // the read side survives data the write side no longer produces (same
+  // defence-in-depth split as the cycle guards).
+  for (const n of ancestorChain(node.id, nodes)) {
+    if (n.managerId !== undefined && n.managerId !== '') out.add(n.managerId);
+  }
+  return out;
+}
+
+/**
  * Spec §3.4 as data. `managerIds` are the resource ids allowed to decide for
  * `target`; `roleFallback` is true ONLY when there is no manager anywhere —
  * neither in the org chart nor on any node above the target. That is the case
@@ -175,10 +209,7 @@ export function scopedApproversOf(
     managerIds.add(current.id);
     current = current.managerId === undefined ? undefined : byId.get(current.managerId);
   }
-  const node = nodeByName(target.organization, nodes);
-  if (node !== undefined) {
-    for (const n of ancestorChain(node.id, nodes)) if (n.managerId !== undefined) managerIds.add(n.managerId);
-  }
+  for (const id of nodeManagersAbove(target, nodes)) managerIds.add(id);
   // This is an AUTHORIZATION decision, not hygiene. A target that is itself the
   // manager of the very node it sits on (e.g. a Capability Leader with no
   // personal managerId, managing their own capability) would otherwise appear
@@ -188,6 +219,64 @@ export function scopedApproversOf(
   // only candidate is the target" really does mean nobody is accountable for
   // this resource. Do not "fix" this by keeping the target in the set.
   managerIds.delete(target.id);
+  return { managerIds, roleFallback: managerIds.size === 0 };
+}
+
+/**
+ * A resource is TERMINATED when `terminationDate` is set to a date on or before
+ * `today` (both ISO 'YYYY-MM-DD', which compares correctly as a string). This is
+ * the SAME rule the People screen shows the Terminated badge under
+ * (`ResourcesComponent.isTerminated`, the canonical statement) and the resource
+ * pickers filter by — declared here so the authorization layer reuses it instead
+ * of inventing a second, subtly different one.
+ *
+ * `today` is a plain VALUE the caller supplies (the server derives it once per
+ * request; the components already have a `todayIso()`). This module still owns
+ * no clock and never reads one — that is what keeps it pure and lets the
+ * decision, the feed and the two client mirrors share one rule.
+ */
+export function isTerminatedAsOf(r: { terminationDate?: string }, today: string): boolean {
+  return r.terminationDate !== undefined && r.terminationDate !== '' && r.terminationDate <= today;
+}
+
+/**
+ * `scopedApproversOf` restricted to approvers who can ACTUALLY act: the same
+ * set, minus anyone already terminated as of `today`. When that empties the
+ * set, `roleFallback` flips true — nobody is accountable for this resource.
+ *
+ * WHY THIS EXISTS (review round 4, critical). `scopedApproversOf` answers a
+ * STRUCTURAL question ("who stands above this resource"), and a structural
+ * answer can name someone who has left the company: nothing revisits a stored
+ * `Resource.managerId` or a node's `managerId` when a `terminationDate` is set,
+ * and there is no `DELETE /resources` to clean up after. A stale id is not
+ * merely useless — it keeps `roleFallback` FALSE, so the last-resort rule that
+ * would otherwise let any competent approver step in never fires, and the whole
+ * subtree beneath the departed manager becomes admin-only, silently. An
+ * approver who cannot act must not suppress the fallback.
+ *
+ * An id that resolves to NO resource at all is deliberately KEPT: `managerId`
+ * has never had a referential check (it fails open, exactly as it did before
+ * this layer existed), so treating "unknown id" as "nobody" here would quietly
+ * widen who may decide for every row carrying imported/legacy data. Only a
+ * resource we can see, and can see is gone, is dropped. That only ever arises on
+ * the TREE axis, which adds `node.managerId` without resolving it; the CHART
+ * axis walks THROUGH the resources-by-id map, so an unknown
+ * `Resource.managerId` never enters the set at all. The asymmetry is inherited
+ * from `scopedApproversOf`, not introduced here — it is asserted in the spec so
+ * it stays deliberate.
+ */
+export function accountableApproversOf(
+  target: ScopeResource,
+  resources: readonly ScopeResource[],
+  nodes: readonly OrgNode[],
+  today: string,
+): { managerIds: Set<string>; roleFallback: boolean } {
+  const { managerIds } = scopedApproversOf(target, resources, nodes);
+  const byId = new Map(resources.map(r => [r.id, r]));
+  for (const id of managerIds) {
+    const manager = byId.get(id);
+    if (manager !== undefined && isTerminatedAsOf(manager, today)) managerIds.delete(id);
+  }
   return { managerIds, roleFallback: managerIds.size === 0 };
 }
 

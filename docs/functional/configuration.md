@@ -607,23 +607,30 @@ flowchart TD
 
 ### Manage Resource Organizations
 
-**Purpose.** Maintain the resource organizations (name + description) and the
-list of **cost-center IDs** each one owns, so people/resources can be grouped
-under an org with its budgeting context.
+**Purpose.** Maintain the **delivery organization tree** — Capability >
+Practice > Competence — with each node's **manager** and the list of
+**cost-center IDs** it owns. A node's manager *is* the manual's Capability
+Leader / Practice Manager / Competence Manager: this screen is where that
+authority is granted, because feature D deliberately adds **no new RBAC role**
+(a role is global; authority over a set of resources is relative). See
+[Roles & permissions](../roles-and-permissions.md) for what the grant unlocks.
 
 **Scope.**
-- *In:* create a resource organization with a dynamic list of cost-center IDs;
-  delete a resource organization.
-- *Out:* editing in place via this screen (create + delete are the UI actions; a
-  `PUT /resource-organizations/:id` route exists server-side but is not surfaced
-  here).
+- *In:* create a node (name, description, **level**, **parent**, **manager**,
+  service org, a dynamic list of cost-center IDs); **edit any node in place**
+  (the pencil on every row); delete a node.
+- *Out:* moving resources between nodes (that is `Resource.organization` on the
+  [Resources](resource-management.md) screen — resources bind to a node **by
+  name**); cascading a **rename** onto the resources that reference the old name
+  (refused instead, see the exceptions below).
 
 **RACI.**
 
 | Step | Responsible | Accountable | Consulted | Informed |
 |------|-------------|-------------|-----------|----------|
-| Create org | admin / delivery-executive | admin | resource-manager, finance | — |
-| Delete org | admin / delivery-executive | admin | resource-manager | finance |
+| Create node | admin / delivery-executive | admin | resource-manager, finance | — |
+| Edit node (level / parent / manager) | admin / delivery-executive | admin | resource-manager | finance |
+| Delete node | admin / delivery-executive | admin | resource-manager | finance |
 
 **Process flow.**
 
@@ -631,47 +638,81 @@ under an org with its budgeting context.
 flowchart TD
   A[Open /config/resource-orgs] --> B[GET /resource-organizations<br/>open read]
   B --> C{Action}
-  C -->|Create| D[Form: name, description,<br/>FormArray of cost-center IDs]
+  C -->|Create| D[Form: name, description, level,<br/>parent, manager, service org,<br/>FormArray of cost-center IDs]
   D --> E[POST /resource-organizations]
+  C -->|Edit| D2[Same form, pre-filled;<br/>Level locked when the node has children]
+  D2 --> E2[PUT /resource-organizations/:id]
   C -->|Delete| F[Confirmation modal]
   F --> G[DELETE /resource-organizations/:id]
-  E & G --> H[Reload list]
+  E & E2 & G --> H[Reload list]
 ```
 
 **Detailed steps.**
 
-1. **Review orgs.**
+1. **Review the tree.**
    - **Who:** any reader. **How:** `/config/resource-orgs`
      (`ManageResourceOrganizationsComponent`) → `GET /resource-organizations`.
-   - **Output:** the table (Name, Description, Cost Centers chips, Actions).
-2. **Create an org.**
+   - **Output:** the table as a **tree view** — each node rendered under its
+     parent and indented by depth — with columns Name, Level, Parent, Manager,
+     Description, Service Org, Cost Centers chips, Actions.
+2. **Create a node.**
    - **Who:** `admin` / `delivery-executive`. **How:** **Create Organization** →
-     name (required), description, and **Add Cost Center** to append cost-center
-     ID inputs (each required) → **Save** → `createResourceOrganization(...)` →
-     `POST /resource-organizations` (server defaults `costCenters: []`). Success
-     toast.
-   - **Output:** persisted org; list reloads.
-3. **Delete an org.**
+     name (required), description, **Level** (capability / practice /
+     competence), **Parent** (required for anything but a capability; the picker
+     offers only nodes of the legal parent level), **Manager** (optional; the
+     picker offers only **active, internal** resources — never a placeholder,
+     subcontractor or terminated person), service org, and **Add Cost Center**
+     to append cost-center ID inputs (each required) → **Save** →
+     `createResourceOrganization(...)` → `POST /resource-organizations` (server
+     defaults `costCenters: []` and `level: 'capability'`). Success toast.
+   - **Output:** persisted node; the tree reloads.
+3. **Edit a node.**
+   - **Who:** `admin` / `delivery-executive`. **How:** the pencil on the row
+     opens the same form pre-filled → **Save changes** →
+     `updateResourceOrganization(id, ...)` → `PUT /resource-organizations/:id`.
+     **Level** is locked while the node has children (changing it would leave
+     them with an illegal parent — the server refuses it too, see below). The
+     Manager select's empty option (**— None —**) detaches the leader.
+   - **Output:** the updated node; the tree reloads.
+4. **Delete a node.**
    - **Who:** `admin` / `delivery-executive`. **How:** the delete icon opens a
      confirmation modal; **Delete** → `deleteResourceOrganization(id)` →
      `DELETE /resource-organizations/:id`. Success toast.
-   - **Output:** `204`; list reloads.
+   - **Output:** `204`; the tree reloads.
 
 **Exceptions & edge cases.**
 
 | Situation | System response |
 |-----------|-----------------|
 | Empty name, or a blank cost-center row | **Save** disabled (validators). |
+| A practice/competence with no parent selected | **Save** disabled; the server would answer `400 — a <level> must have a parent`. |
+| A name already used anywhere in the tree | `400 — name must be unique across the whole organizational tree` (resources bind by name, so names are tree-wide unique). |
+| A capability given a parent | `400 — a capability is a root and cannot have a parent`. |
+| A parent of the wrong level | `400 — the parent of a <level> must be a <wanted>`. |
+| `parentId` naming a node that does not exist | `400 — parentId must reference an existing resource organization`. |
+| `managerId` naming a resource that does not exist | `400 — managerId must reference an existing resource`. |
+| Changing a node's level when it still has children | `400 — cannot change level to <level>: existing <child level> child "<name>" requires a <wanted> parent`. The UI locks the Level select in this state, so this is the server's belt. |
+| A parent change that would close a loop | `400 — parentId would close a cycle in the organizational tree`. |
+| Clearing Parent / Manager | The empty option sends `''`, which both write paths normalize to *absent* (never a stored empty string). |
+| Deleting a node that still has children | `409 — Cannot delete an organization that has children` (delete bottom-up). |
+| Deleting a node resources still reference by name | `409 — Cannot delete an organization that resources still reference`. |
+| **Renaming** a node resources still reference by name | `409 — Cannot rename: N resource(s) still reference the name "<old>"`. Move the people first; the rename is **not** cascaded. |
+| Required field sent as an explicit `null` (`name`, `description`, `costCenters`, `level`) | `400 — <field> is required and cannot be cleared`. |
 | Caller lacks catalog mutation role | `403 — Role <role> cannot modify /resource-organizations`. |
+| Two admins editing the tree at the same time | Every mutation is serialized server-side on one lock, so the second writer validates against the first one's committed state (it can therefore see a refusal the first write created). |
 
 **Metrics.**
 
 | Metric | How to read it |
 |--------|----------------|
 | Orgs without cost centers | Resource organizations with empty `costCenters` (incomplete budgeting linkage). |
+| Nodes without a manager | Nodes whose `managerId` is absent — nobody is accountable for allocations under them, so the decision falls back to any competent approver. |
 
 **Related.** [Manage Cost Centers](#manage-cost-centers) (the referenced IDs);
-[Service Organization Details](#service-organization-details).
+[Service Organization Details](#service-organization-details);
+[Resource Management](resource-management.md) (where people are attached to a
+node); [Roles & permissions](../roles-and-permissions.md) (what a node manager
+may decide).
 
 ---
 

@@ -595,9 +595,19 @@ attachment point.
 
 Both traversals tolerate a cycle in the data (every walk carries a `visited`
 set), and writes that would *create* one are refused with **400** — in the tree
-(`wouldCycleInOrgTree`) and in the org chart (`wouldCycleInOrgChart`, serialized
-under a single global `withLock('org-chart')` so concurrent reassignments cannot
-compose a loop through the guard).
+(`wouldCycleInOrgTree`) and in the org chart (`wouldCycleInOrgChart`).
+
+**Both axes serialize their writes, on two distinct global keys.** Every
+`Resource.managerId` mutation runs under `withLock('org-chart')` so concurrent
+reassignments cannot compose a loop through the guard; every
+`/resource-organizations` mutation (POST, PUT, DELETE) runs under
+`withLock('org-tree')` because `validateOrgTreeNode` reasons about a node against
+both its parent *and* its existing children — two writers on their own pre-write
+snapshots could each pass and leave, say, a practice parented to a practice, at
+which point `dimensionsOf` reports the wrong practice for every resource beneath.
+The two keys never nest in either direction (nothing inside an `org-chart` section
+touches the tree catalog; nothing inside an `org-tree` section takes any lock), so
+they cannot deadlock against each other.
 
 ## Entity catalogue (reference)
 
