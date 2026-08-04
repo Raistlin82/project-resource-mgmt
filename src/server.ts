@@ -4,23 +4,69 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import { desc } from 'drizzle-orm';
-import { getRepositories, type FxRateRow } from './db/repositories';
-import { db } from './db/client';
+import { getRepositories, withRepositoriesTransaction, type FxRateRow, type Repositories } from './db/repositories';
+import { db, persistenceConfig } from './db/client';
 import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
-import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter, AllocationApprovalRow, AllocationApprovalItem, SubstitutionMonthOutcome, SubstitutionResult, NegotiatedRate } from './app/services/api.service';
+import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter, AllocationApprovalRow, AllocationApprovalItem, SubstitutionMonthOutcome, SubstitutionResult, NegotiatedRate, UserRole } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, decisionToAssignmentStatus, allocationApproverStep } from './app/services/staffing.util';
 import { deriveAssignmentStatus, monthRowId, parseMonthRowId, monthlyAggregateHours, type MonthStatus } from './app/services/allocation-month.util';
 import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity, monthlyTargetHours } from './app/services/calendar.util';
 import { planSubstitution, planGiveBack, planSubstitutionBooking, type SubstitutionPlan } from './app/services/substitution.util';
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
-import { sellRateFor } from './app/services/sell-rate.util';
+import { negotiatedRateCurrencyError, sellRateFor } from './app/services/sell-rate.util';
+import { billingPlanValidationError } from './app/services/billing-validation.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { isResourceKind, RESOURCE_KINDS, kindOf, dailyCapFor } from './app/services/resource-kind.util';
 import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, scopeOf, accountableApproversOf, nodeManagersAbove, isTerminatedAsOf, type OrgLevel } from './app/services/org-scope.util';
 import { maxIdSeq } from './server/id-seq.util';
+import { newEntityId } from './server/entity-id.util';
+import {
+  applicationRoles,
+  authorizeRead,
+  hasAnyAllowedRole,
+  isPublicReadPath,
+  primaryRole,
+} from './server/authz-policy.util';
+import { resourceIdFromOidcClaims } from './app/services/access-policy.util';
+import { isOwnAssignment, pickSelfProfilePatch, selfAssignments, selfRequests, toSelfProfile } from './server/self-service.util';
+import {
+  canAccessGlobalTimeEntry,
+  deriveTimeEntryLinks,
+  hasGlobalTimeEntryCollectionAccess,
+  pinnedChangeRequestCreateFields,
+  changeRequestMutationError,
+  type GlobalTimeEntryAction,
+  type TimeEntryPolicyContext,
+} from './server/route-policy.util';
+import {
+  CommercialWriteError,
+  createOrderWithLine as createOrderWithLineWrite,
+  generateBillingInvoice as generateBillingInvoiceWrite,
+  isValidCommercialIdempotencyKey,
+  type BillingInvoiceResult,
+  type OrderWithLineRequest,
+} from './server/commercial-write.util';
+import { InvoiceNumberCoordinator, type InvoiceNumberTransactionRunner } from './server/invoice-number.util';
+import {
+  AllocationLifecycleError,
+  AllocationLifecycleExecutor,
+  decideCurrentAllocationMonth,
+  reviseAllocationMonthAfterEdit,
+  submitAllocationMonth,
+  type AllocationMonthDecisionCommit,
+} from './server/allocation-lifecycle.util';
+import {
+  assignmentRetargetError,
+  assignmentServerOwnedFieldError,
+  bookingOutsideEmploymentError,
+  bookingWindowOutsideEmploymentError,
+  contractHoursPerDayError,
+  employmentWindowError,
+  resourceRequestUpdateError,
+} from './server/operational-integrity.util';
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
 import { EInvoiceValidationError } from './server/integrations/fatturapa.adapter';
@@ -152,8 +198,8 @@ function clampUtil(v: number): number {
  * B-CONCURRENCY: serialized critical section (per-process async mutex).
  *
  * Express handlers run concurrently and every repository call is awaited, so a
- * read-modify-write over a shared aggregate (a request's `staffedEffort`, a
- * resource's `utilization`, the invoice sequence) can interleave between its
+ * read-modify-write over a shared aggregate (a request's `staffedEffort` or a
+ * resource's `utilization`) can interleave between its
  * `get()` and its `update()` — two concurrent writers both read the pre-state
  * and one increment is silently lost. There is no atomic-increment / FOR UPDATE
  * primitive on the `Repository<T>` boundary (it must serve both the in-memory
@@ -211,21 +257,47 @@ function rateLimit(maxPerWindow: number, windowMs: number, keyOf: (req: Request)
   };
 }
 
-let idSeq = 1000;
-const newId = () => `${++idSeq}`;
+// UUIDs are generated independently by every worker/host; existing numeric and
+// prefixed ids remain valid because every repository primary key is text.
+const newId = newEntityId;
 
 // Re-export the pure id-suffix scanner (imported above) so it is also reachable
 // from this module. It is defined in its own side-effect-free module so it can be
 // unit-tested without importing this SSR server (which instantiates the Angular
-// app engine at load). seedSequences uses the local binding directly.
+// app engine at load). Kept as a compatibility export for legacy-id tooling.
 export { maxIdSeq };
 
 /**
- * Process-wide repositories (Postgres when DATABASE_URL is set, else in-memory).
+ * Process-wide repositories selected by the validated persistence configuration.
  * Declared early so it is in scope for the audit middleware and the boot
  * sequence below.
  */
 const repos = getRepositories();
+
+/**
+ * Invoice numbers are allocated inside the same repository transaction that
+ * persists the consuming order. The coordinator supplies the process-local
+ * serialization needed by the in-memory adapter; PostgreSQL additionally takes
+ * a transaction-scoped advisory lock per invoice year, shared by every worker.
+ */
+const invoiceNumberTransactionRunner: InvoiceNumberTransactionRunner<Repositories> =
+  (lockKey, operation) => withRepositoriesTransaction(
+    transactionRepos => operation(transactionRepos),
+    { advisoryLockKeys: [lockKey] },
+  );
+const invoiceNumbers = new InvoiceNumberCoordinator(invoiceNumberTransactionRunner);
+
+/**
+ * One total order per assignment-month in this process, plus a PostgreSQL
+ * transaction-scoped advisory lock for deployments with multiple workers.
+ * The transaction makes approval + governed-month writes commit together.
+ */
+const allocationLifecycle = new AllocationLifecycleExecutor<Repositories>(
+  (monthId, operation) => withRepositoriesTransaction(
+    transactionRepos => operation(transactionRepos),
+    { advisoryLockKeys: [`allocation-month:${monthId}`] },
+  ),
+);
 
 /**
  * AUDIT INTEGRITY: the audit log is APPEND-ONLY — entries are created in
@@ -313,8 +385,6 @@ function diffChangedKeys(before?: Record<string, unknown>, after?: Record<string
   return changed;
 }
 
-type UserRole = 'employee' | 'pm' | 'resource-manager' | 'delivery-executive' | 'finance' | 'sales' | 'admin';
-
 /**
  * Request-scoped, SERVER-VERIFIED principal.
  *
@@ -327,33 +397,20 @@ type UserRole = 'employee' | 'pm' | 'resource-manager' | 'delivery-executive' | 
 declare module 'express-serve-static-core' {
   interface Request {
     verifiedUserId?: string;
+    verifiedResourceId?: string;
+    /** Complete filtered OIDC role set used for capability authorization. */
+    verifiedRoles?: readonly UserRole[];
+    /** Single primary role retained only for display, branching and audit labels. */
     verifiedRole?: UserRole | 'unknown';
   }
-}
-
-/**
- * Highest-privilege ordering for UserRole. When a Keycloak token carries
- * multiple realm roles we collapse them to the single most-privileged one,
- * mirroring the client. Higher index == more privilege.
- */
-const ROLE_PRIORITY: readonly UserRole[] = ['employee', 'pm', 'resource-manager', 'sales', 'finance', 'delivery-executive', 'admin'];
-const ALL_ROLES = new Set<string>(ROLE_PRIORITY);
-
-/** Collapse a list of realm roles to the single highest-privilege UserRole. */
-function highestRole(roles: readonly string[]): UserRole | 'unknown' {
-  let best: UserRole | 'unknown' = 'unknown';
-  let bestRank = -1;
-  for (const r of roles) {
-    if (!ALL_ROLES.has(r)) continue;
-    const rank = ROLE_PRIORITY.indexOf(r as UserRole);
-    if (rank > bestRank) { bestRank = rank; best = r as UserRole; }
-  }
-  return best;
 }
 
 // --- Keycloak / OIDC backend verification -----------------------------------
 
 const OIDC_ISSUER = process.env['OIDC_ISSUER'] || 'http://localhost:8081/realms/psa';
+/** Public browser-facing issuer may differ from the API container's issuer/JWKS host. */
+const OIDC_PUBLIC_ISSUER = process.env['OIDC_PUBLIC_ISSUER'] || OIDC_ISSUER;
+const OIDC_CLIENT_ID = process.env['OIDC_CLIENT_ID'] || 'psa-web';
 /**
  * Expected token audience (`aud`) for THIS API — the resource/client id Keycloak
  * stamps on access tokens minted for us. When set, `jwtVerify` both requires the
@@ -363,16 +420,18 @@ const OIDC_ISSUER = process.env['OIDC_ISSUER'] || 'http://localhost:8081/realms/
  * checked (preserves the local-dev default and existing tests).
  */
 const OIDC_AUDIENCE = process.env['OIDC_AUDIENCE'];
+const OIDC_JWKS_URI = process.env['OIDC_JWKS_URI'] || `${OIDC_ISSUER}/protocol/openid-connect/certs`;
 /**
  * Remote JWKS for the Keycloak realm. `createRemoteJWKSet` lazily fetches and
  * caches the signing keys (with cooldown + rotation handling) so each request
  * does not hit the network. Kept module-scoped so the cache is shared.
  */
-const JWKS = createRemoteJWKSet(new URL(`${OIDC_ISSUER}/protocol/openid-connect/certs`));
+const JWKS = createRemoteJWKSet(new URL(OIDC_JWKS_URI));
 
 /** Shape of the Keycloak claims we read; everything else on the token is ignored. */
 interface KeycloakClaims extends JWTPayload {
   preferred_username?: string;
+  resource_id?: string;
   realm_access?: { roles?: string[] };
 }
 
@@ -390,23 +449,34 @@ function bearerToken(req: Request): string | null {
  * token. THROWS only on an INVALID token (so the caller can answer 401);
  * absence of a token is not an error (the demo header fallback still applies).
  *
- * Role is derived from realm_access.roles via the highest-privilege mapping;
- * userId prefers preferred_username, falling back to sub.
+ * All recognised roles are retained for authorization. A separate primary role
+ * is derived only for display/audit and legacy role-specific branching; userId
+ * prefers preferred_username, falling back to sub.
  */
-async function verifyBearer(req: Request): Promise<{ userId: string; role: UserRole | 'unknown' } | null> {
+async function verifyBearer(req: Request): Promise<{
+  userId: string;
+  resourceId?: string;
+  roles: UserRole[];
+  primaryRole: UserRole | 'unknown';
+} | null> {
   const token = bearerToken(req);
   if (!token) return null;
   const { payload } = await jwtVerify(token, JWKS, { issuer: OIDC_ISSUER, audience: OIDC_AUDIENCE });
   const claims = payload as KeycloakClaims;
-  const roles = Array.isArray(claims.realm_access?.roles) ? claims.realm_access.roles : [];
+  const roles = applicationRoles(Array.isArray(claims.realm_access?.roles) ? claims.realm_access.roles : []);
   const sub = typeof claims.sub === 'string' ? claims.sub : '';
   const userId = (typeof claims.preferred_username === 'string' && claims.preferred_username) || sub || 'unknown';
-  return { userId, role: highestRole(roles) };
+  return {
+    userId,
+    resourceId: resourceIdFromOidcClaims(claims as Record<string, unknown>),
+    roles,
+    primaryRole: primaryRole(roles),
+  };
 }
 
 const actorId = (req: Request) => req.verifiedUserId || String(req.header('X-User-Id') || 'system');
 const actorRole = (req: Request): UserRole | 'unknown' =>
-  req.verifiedRole ?? (String(req.header('X-User-Role') || 'unknown') as UserRole | 'unknown');
+  req.verifiedRole ?? primaryRole(applicationRoles([String(req.header('X-User-Role') || '')]));
 
 /**
  * TRUSTED actor id for the append-only audit trail — shared by the audit
@@ -434,9 +504,10 @@ const auditActorId = (req: Request): string =>
  * already sends the mapped resourceId as X-User-Id, which also matches by id.)
  */
 async function actorResourceId(req: Request): Promise<string | undefined> {
+  if (req.verifiedResourceId) return req.verifiedResourceId;
   const id = actorId(req);
   const user = (await repos.users.list()).find(u => u.id === id || u.name === id);
-  return user?.resourceId ?? (id || undefined);
+  return user?.resourceId;
 }
 
 /**
@@ -473,7 +544,45 @@ const trustedRole = (req: Request): UserRole | 'unknown' => {
   return trustHeaders ? actorRole(req) : 'unknown';
 };
 
+/** Complete trusted role set used by route-capability checks. */
+const trustedRoles = (req: Request): readonly UserRole[] => {
+  // Presence matters: a verified token with zero recognised roles must not fall
+  // back to spoofable demo headers.
+  if (req.verifiedRoles !== undefined) return req.verifiedRoles;
+  if (req.verifiedRole !== undefined && req.verifiedRole !== 'unknown') return [req.verifiedRole];
+  return trustHeaders ? applicationRoles([String(req.header('X-User-Role') || '')]) : [];
+};
+
+/** True for a verified JWT, or for an explicitly-enabled valid demo principal. */
+const hasTrustedPrincipal = (req: Request): boolean =>
+  req.verifiedRoles !== undefined || (trustHeaders && trustedRoles(req).length > 0);
+
 const canMutate = (role: UserRole | 'unknown', allowed: UserRole[]) => allowed.includes(role as UserRole);
+
+/**
+ * Resolve a verified/trusted actor to an existing resource for /self routes.
+ * Unknown or unlinked principals fail closed; callers never supply the target id.
+ */
+async function requireSelfResourceId(req: Request, res: Response): Promise<string | undefined> {
+  if (!hasTrustedPrincipal(req)) {
+    res.status(401).json({ error: 'Authentication is required' });
+    return undefined;
+  }
+  if (trustedRoles(req).length === 0) {
+    res.status(403).json({ error: 'The signed-in identity has no application role' });
+    return undefined;
+  }
+  const resourceId = await actorResourceId(req);
+  if (!resourceId) {
+    res.status(403).json({ error: 'The signed-in identity is not linked to a resource' });
+    return undefined;
+  }
+  if (!(await repos.resources.get(resourceId))) {
+    res.status(404).json({ error: 'The linked resource no longer exists' });
+    return undefined;
+  }
+  return resourceId;
+}
 
 /**
  * AUTH + AUTHORIZATION middleware (async).
@@ -485,7 +594,9 @@ const canMutate = (role: UserRole | 'unknown', allowed: UserRole[]) => allowed.i
  *    - No token      -> fall back to the demo X-User-* headers ONLY when header
  *      trust is explicitly opted in via AUTH_TRUST_HEADERS=true; otherwise the
  *      actor is treated as 'unknown' (privileged mutations denied).
- * 2. Apply the role gating to mutating (POST/PUT/DELETE) requests.
+ * 2. For reads, allow anonymous access only to the exact public bootstrap paths;
+ *    every other path requires an application role, then any narrower READ_RULE.
+ * 3. Apply capability gating to mutating (POST/PUT/DELETE) requests.
  *
  * Async because JWT verification is async; on unexpected errors we delegate to
  * Express via next(err). Handlers still return void.
@@ -495,7 +606,9 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
     const principal = await verifyBearer(req);
     if (principal) {
       req.verifiedUserId = principal.userId;
-      req.verifiedRole = principal.role;
+      req.verifiedResourceId = principal.resourceId;
+      req.verifiedRoles = principal.roles;
+      req.verifiedRole = principal.primaryRole;
     }
   } catch {
     // A Bearer token was present but failed verification (bad signature,
@@ -506,17 +619,21 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
 
   const path = req.path;
   const role = trustedRole(req);
+  const roles = trustedRoles(req);
 
-  // READ-SIDE AUTHORIZATION: GETs were previously served to anyone, leaking
-  // sensitive data (the integrity/audit trail and the commercial/financial
-  // collections). Require a recognised principal for those collections and
-  // apply per-collection read RBAC. All other GETs stay open as before
-  // (catalogs, projects, etc. — non-sensitive reference reads).
+  // READ-SIDE AUTHORIZATION is deny-by-default. Only the exact public bootstrap
+  // paths bypass authentication; every other GET requires a trusted application
+  // principal. READ_RULES may further narrow access to one or more capabilities.
   if (!['POST', 'PUT', 'DELETE'].includes(req.method)) {
     const readRule = READ_RULES.find(r => r.test(path));
-    if (readRule && !canMutate(role, readRule.roles)) {
-      // 'unknown' means no verified JWT and no trusted header -> unauthenticated.
-      res.status(role === 'unknown' ? 401 : 403).json({ error: `Role ${role} cannot read ${path}` });
+    const decision = authorizeRead({
+      isPublic: isPublicReadPath(path),
+      authenticated: hasTrustedPrincipal(req),
+      roles,
+      allowedRoles: readRule?.roles,
+    });
+    if (!decision.allowed) {
+      res.status(decision.status).json({ error: `Role ${role} cannot read ${path}` });
       return;
     }
     next();
@@ -558,7 +675,7 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
   ];
 
   const rule = rules.find(r => r.test(path));
-  if (rule && !canMutate(role, rule.roles)) {
+  if (rule && !hasAnyAllowedRole(roles, rule.roles)) {
     res.status(403).json({ error: `Role ${role} cannot modify ${path}` });
     return;
   }
@@ -566,10 +683,9 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
 }
 
 /**
- * READ-side RBAC rules. Only the genuinely sensitive collections are gated; the
- * rest of the GET surface stays open to any caller as before. A request whose
- * `trustedRole` is 'unknown' (no verified JWT and no trusted header) fails these
- * and is rejected with 401.
+ * READ-side capability rules. The middleware already requires a trusted
+ * application principal for every non-public GET. A matching rule narrows that
+ * authenticated baseline; no match means "any application role", never public.
  *   - /audit-logs            -> the integrity/audit trail: admin/delivery-executive only.
  *   - commercial collections -> contracts/orders/billing/etc.: sales/finance/delivery-executive/admin.
  *   - financial-plan reads   -> project financials/cost centers: finance/delivery-executive/admin.
@@ -744,7 +860,11 @@ apiRouter.use((req, res, next) => {
 // are the RESOLVED effective rate (override ?? rate card). The per-resource
 // OVERRIDE is written via costRateOverride/billRateOverride, which the handlers
 // map onto the cost_rate/bill_rate columns (see applyRateOverrides).
-const RESOURCE_FIELDS = ['name', 'role', 'skills', 'projectRoles', 'externalExperience', 'profilePicture', 'resume', 'capacity', 'managerId', 'organization', 'location', 'hireDate', 'terminationDate', 'kind', 'vendorId'] as const;
+const RESOURCE_FIELDS = [
+  'name', 'role', 'skills', 'projectRoles', 'externalExperience', 'profilePicture',
+  'resume', 'capacity', 'contractHoursPerDay', 'managerId', 'organization',
+  'location', 'hireDate', 'terminationDate', 'kind', 'vendorId',
+] as const;
 
 /**
  * Repository-backed equivalent of the array `exists()` helper: a value is a
@@ -1260,9 +1380,10 @@ async function recomputeRequestStaffing(requestId: string): Promise<void> {
 // ALLOCATION APPROVAL side-effects — open / withdraw the single-step approval
 // that governs an assignment's Requested -> Allocated transition.
 //
-// CONCURRENCY: both are async reads/writes through the approvalRequests repo and
-// touch NO res:/req: aggregate, so callers invoke them OUTSIDE any res:/req:
-// lock (never nested inside a recompute critical section).
+// CONCURRENCY: month-scoped callers run these writes through
+// `allocationLifecycle`; legacy bare-assignment callers remain independent.
+// Neither helper acquires its own lock, so the caller owns the complete command
+// boundary and can include the governed day/month writes atomically.
 // ---------------------------------------------------------------------------
 
 /** Snapshot of every month row's status, keyed by composite row id. Consumed by
@@ -1279,15 +1400,14 @@ async function monthStatusByRowId(): Promise<Map<string, MonthStatus>> {
  * always has a lifecycle state to carry.
  *
  * CONCURRENCY: get-then-create is a read-modify-write over a SHARED row, so it
- * runs inside `withLock('month:<rowId>')` — Express handlers interleave freely
+ * runs through `allocationLifecycle` — Express handlers interleave freely
  * across every `await`, and two concurrent first-writes to the same new month
  * used to both miss the `get` and both `create`: an unmapped `23505`
  * (unique_violation) 500 on Postgres, and a genuine DUPLICATE row in memory
  * (the in-memory adapter's `create` just pushes, it has no key constraint), after
  * which the approval feed emitted two items with the same `assignmentMonthId`.
- * The lock key is the ROW id, so different months never serialize against each
- * other. `month:` locks are only ever taken here and are never nested inside (or
- * around) a `res:`/`req:` section, so they cannot participate in a lock cycle.
+ * other. The executor also takes the same transaction-scoped advisory lock used
+ * by submit/edit/decide, covering multi-worker PostgreSQL deployments.
  *
  * Belt-and-braces for a MULTI-PROCESS Postgres deployment (where the in-process
  * lock spans one process only): a failed `create` is re-`get` before rethrowing,
@@ -1295,13 +1415,13 @@ async function monthStatusByRowId(): Promise<Map<string, MonthStatus>> {
  */
 async function ensureAssignmentMonth(assignmentId: string, month: string): Promise<AssignmentMonth> {
   const id = monthRowId(assignmentId, month);
-  return withLock(`month:${id}`, async () => {
-    const existing = await repos.assignmentMonths.get(id);
+  return allocationLifecycle.run(id, async transactionRepos => {
+    const existing = await transactionRepos.assignmentMonths.get(id);
     if (existing) return existing;
     try {
-      return await repos.assignmentMonths.create({ id, assignmentId, month, status: 'Draft' } as AssignmentMonth);
+      return await transactionRepos.assignmentMonths.create({ id, assignmentId, month, status: 'Draft' } as AssignmentMonth);
     } catch (err) {
-      const raced = await repos.assignmentMonths.get(id);
+      const raced = await transactionRepos.assignmentMonths.get(id);
       if (raced) return raced;
       throw err;
     }
@@ -1322,26 +1442,43 @@ async function refreshDerivedAssignmentStatus(assignmentId: string): Promise<voi
 /** Open a single-step (resource-manager) approval for `assig` and return its id.
  *  `refId` defaults to the assignment id (legacy gap-A shape); B3 passes the
  *  month-row id so the decision governs ONE month. */
-async function createAllocationApproval(req: Request, assig: Assignment, refId: string = assig.id): Promise<string> {
+async function createAllocationApprovalEntry(
+  req: Request,
+  assig: Assignment,
+  refId: string = assig.id,
+  repositorySet: Repositories = repos,
+): Promise<ApprovalRequest> {
   const createdAt = new Date().toISOString();
-  const request = await repos.requests.get(assig.requestId);
-  const resource = await repos.resources.get(assig.resourceId);
+  const request = await repositorySet.requests.get(assig.requestId);
+  const resource = await repositorySet.resources.get(assig.resourceId);
   const ar: ApprovalRequestEntry = {
     id: `AR${newId()}`, kind: 'Allocation', refId, projectId: request?.projectId,
     requestedBy: actorId(req), status: 'Pending',
     steps: [allocationApproverStep(resource?.managerId)], currentStep: 0,
     createdAt, slaDueAt: slaDueFrom(createdAt),
   };
-  const created = await repos.approvalRequests.create(ar as ApprovalRequest);
-  return created.id;
+  return repositorySet.approvalRequests.create(ar as ApprovalRequest);
+}
+
+async function createAllocationApproval(
+  req: Request,
+  assig: Assignment,
+  refId: string = assig.id,
+  repositorySet: Repositories = repos,
+): Promise<string> {
+  return (await createAllocationApprovalEntry(req, assig, refId, repositorySet)).id;
 }
 
 /** Withdraw a still-Pending allocation approval (no-op when absent or already decided). */
-async function withdrawAllocationApproval(approvalId: string | undefined, reason: string): Promise<void> {
+async function withdrawAllocationApproval(
+  approvalId: string | undefined,
+  reason: string,
+  repositorySet: Repositories = repos,
+): Promise<void> {
   if (!approvalId) return;
-  const ar = await repos.approvalRequests.get(approvalId);
+  const ar = await repositorySet.approvalRequests.get(approvalId);
   if (ar && ar.status === 'Pending') {
-    await repos.approvalRequests.update(ar.id, { status: 'Rejected', note: reason } as Partial<ApprovalRequest>);
+    await repositorySet.approvalRequests.update(ar.id, { status: 'Rejected', note: reason } as Partial<ApprovalRequest>);
   }
 }
 
@@ -1450,8 +1587,8 @@ async function autoApprovesAllocation(req: Request, resourceId: string): Promise
 const RATE_BASE_CURRENCY = 'EUR';
 const DEFAULT_HOURS_PER_DAY = 8;
 /** The configured working hours/day (settings.hoursPerDay), default 8 if unset/invalid. */
-async function getHoursPerDay(): Promise<number> {
-  const row = await repos.settings.get('hoursPerDay');
+async function getHoursPerDay(repositorySet: Repositories = repos): Promise<number> {
+  const row = await repositorySet.settings.get('hoursPerDay');
   const n = row ? Number((row as { value?: unknown }).value) : NaN;
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_HOURS_PER_DAY;
 }
@@ -1462,9 +1599,14 @@ async function getHoursPerDay(): Promise<number> {
  * daily-capacity gate and the resources kind-change guard so the two
  * resolutions can never drift apart.
  */
-async function resolveBaseCap(resource: { contractHoursPerDay?: number }): Promise<number> {
+async function resolveBaseCap(
+  resource: { contractHoursPerDay?: number },
+  repositorySet: Repositories = repos,
+): Promise<number> {
   const raw = resource.contractHoursPerDay;
-  return (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) ? raw : await getHoursPerDay();
+  return (typeof raw === 'number' && Number.isFinite(raw) && raw > 0)
+    ? raw
+    : await getHoursPerDay(repositorySet);
 }
 function pickRateCard(cards: RateCard[], role: string | undefined, organization: string | undefined): RateCard | undefined {
   if (!role) return undefined;
@@ -1559,10 +1701,8 @@ apiRouter.post('/resources', async (req, res) => {
   const body = pick<Resource>(req.body, RESOURCE_FIELDS);
   // D — hoisted so the cycle guard below can check a client-supplied
   // managerId against THIS resource's own about-to-be-assigned id, before it
-  // exists anywhere else. Harmless to generate ahead of validation: newId()
-  // only advances a counter (no persistence side effect), so a rejected POST
-  // just leaves a gap in the sequence like any other validation failure
-  // already does.
+  // exists anywhere else. UUID generation has no persistence side effect, so
+  // generating before validation is harmless when a POST is rejected.
   const id = newId();
   // Phase E: map costRateOverride/billRateOverride onto the cost_rate/bill_rate
   // columns ('' / absent = inherit the role's rate card on read).
@@ -1572,20 +1712,10 @@ apiRouter.post('/resources', async (req, res) => {
     res.status(400).json({ error: 'capacity must be a positive number' });
     return;
   }
-  if (!isIsoDateString(body.hireDate)) {
-    res.status(400).json({ error: 'hireDate is required and must be an ISO date string' });
-    return;
-  }
-  if (body.terminationDate !== undefined && body.terminationDate !== null && body.terminationDate !== '') {
-    if (!isIsoDateString(body.terminationDate)) {
-      res.status(400).json({ error: 'terminationDate must be an ISO date string' });
-      return;
-    }
-    if (Date.parse(body.terminationDate) < Date.parse(body.hireDate)) {
-      res.status(400).json({ error: 'terminationDate must be on or after hireDate' });
-      return;
-    }
-  }
+  const contractDayErr = contractHoursPerDayError(body.contractHoursPerDay);
+  if (contractDayErr) { res.status(400).json({ error: contractDayErr }); return; }
+  const employmentErr = employmentWindowError(body, true);
+  if (employmentErr) { res.status(400).json({ error: employmentErr }); return; }
   // REFERENCE-DATA INTEGRITY: role / projectRoles[] must reference the catalog.
   const roleErr = await validateRoleRefs(body);
   if (roleErr) { res.status(400).json({ error: roleErr }); return; }
@@ -1621,6 +1751,7 @@ apiRouter.post('/resources', async (req, res) => {
     // `pick()` copies an explicit null straight through, so it has to be caught
     // here alongside '': this normalization IS the adapter parity.
     if (body.vendorId === '' || body.vendorId === null) body.vendorId = undefined;
+    if (body.contractHoursPerDay === null) body.contractHoursPerDay = undefined;
     // D (review round 1) — the SAME normalization for managerId, and NOT an
     // edge case: the resources form's `save()`
     // (src/app/resources/resources.component.ts ~line 709) sends
@@ -1690,21 +1821,16 @@ apiRouter.put('/resources/:id', async (req, res) => {
     res.status(400).json({ error: 'capacity must be a positive number' });
     return;
   }
-  // RESOURCE LIFECYCLE (cessazione/modifica): terminationDate is the logical-
-  // deletion marker. Clearing it (null/'') reactivates and is always allowed.
-  // When set, it must be ISO-parseable and on or after the effective hireDate
-  // (the incoming one if hireDate is also being changed, else the stored one).
-  if (body.terminationDate !== undefined && body.terminationDate !== null && body.terminationDate !== '') {
-    if (!isIsoDateString(body.terminationDate)) {
-      res.status(400).json({ error: 'terminationDate must be an ISO date string' });
-      return;
-    }
-    const effectiveHire = body.hireDate ?? preflight.hireDate;
-    if (isIsoDateString(effectiveHire) && Date.parse(body.terminationDate) < Date.parse(effectiveHire)) {
-      res.status(400).json({ error: 'terminationDate must be on or after hireDate' });
-      return;
-    }
-  }
+  const contractDayErr = contractHoursPerDayError(body.contractHoursPerDay);
+  if (contractDayErr) { res.status(400).json({ error: contractDayErr }); return; }
+  const hireWasSupplied = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'hireDate');
+  const effectiveEmployment = {
+    hireDate: body.hireDate !== undefined ? body.hireDate : preflight.hireDate,
+    terminationDate: body.terminationDate !== undefined ? body.terminationDate : preflight.terminationDate,
+  };
+  const employmentErr = employmentWindowError(effectiveEmployment, hireWasSupplied);
+  if (employmentErr) { res.status(400).json({ error: employmentErr }); return; }
+  if (body.terminationDate === '') body.terminationDate = null as unknown as undefined;
   // REFERENCE-DATA INTEGRITY: validate any supplied role / projectRoles[] against
   // the catalog. Omitted fields pass, so partial edits (e.g. a terminationDate-only
   // PUT) are never blocked.
@@ -1797,12 +1923,33 @@ apiRouter.put('/resources/:id', async (req, res) => {
     const kindErr = await validateResourceKind(mergedKind, mergedVendorId);
     if (kindErr) return { status: 400, error: kindErr };
 
-    const baseCap = await resolveBaseCap(current);
-    const currentCap = dailyCapFor(kindOf(current), baseCap);
-    const newCap = dailyCapFor(kindOf({ kind: mergedKind }), baseCap);
+    const mergedResource = { ...current, ...body } as Resource;
+    const mergedEmploymentErr = employmentWindowError(mergedResource, true);
+    if (mergedEmploymentErr) return { status: 400, error: mergedEmploymentErr };
+    const currentBaseCap = await resolveBaseCap(current);
+    const newBaseCap = await resolveBaseCap(mergedResource);
+    const currentCap = dailyCapFor(kindOf(current), currentBaseCap);
+    const newCap = dailyCapFor(kindOf({ kind: mergedKind }), newBaseCap);
+    const resourceAssignments = (await repos.assignments.list()).filter(a => a.resourceId === current.id);
+    const requestsById = new Map((await repos.requests.list()).map(request => [request.id, request]));
+    for (const assignment of resourceAssignments) {
+      const linkedRequest = requestsById.get(assignment.requestId);
+      const lifecycleWindowErr = bookingWindowOutsideEmploymentError({
+        startDate: assignment.startDate ?? linkedRequest?.startDate,
+        endDate: assignment.endDate ?? linkedRequest?.endDate,
+      }, mergedResource);
+      if (lifecycleWindowErr) {
+        return { status: 400, error: `resource lifecycle would invalidate assignment ${assignment.id}: ${lifecycleWindowErr}` };
+      }
+    }
+    const ids = new Set(resourceAssignments.map(a => a.id));
+    const resourceDays = (await repos.assignmentDays.list()).filter(d => ids.has(d.assignmentId));
+    const lifecycleBookingErr = bookingOutsideEmploymentError(resourceDays.map(day => day.date), mergedResource);
+    if (lifecycleBookingErr) {
+      return { status: 400, error: `resource lifecycle would invalidate an existing ${lifecycleBookingErr}` };
+    }
     if (newCap < currentCap) {
-      const ids = new Set((await repos.assignments.list()).filter(a => a.resourceId === current.id).map(a => a.id));
-      const byDate = sumHoursByDate((await repos.assignmentDays.list()).filter(d => ids.has(d.assignmentId)));
+      const byDate = sumHoursByDate(resourceDays);
       const offender = Object.keys(byDate).sort().find(day => exceedsDailyCapacity(byDate[day], newCap));
       if (offender !== undefined) {
         return { status: 400, error: `changing kind to ${mergedKind} would exceed the daily capacity on ${offender}` };
@@ -1867,6 +2014,92 @@ apiRouter.put('/resources/:id', async (req, res) => {
   res.json(resolved);
 });
 
+// --- Authenticated employee self-service ----------------------------------
+
+apiRouter.get('/self/profile', async (req, res) => {
+  const resourceId = await requireSelfResourceId(req, res);
+  if (!resourceId) return;
+  const resource = await repos.resources.get(resourceId);
+  if (!resource) { res.status(404).json({ error: 'Not found' }); return; }
+  res.json(toSelfProfile(resource));
+});
+
+apiRouter.put('/self/profile', async (req, res) => {
+  const resourceId = await requireSelfResourceId(req, res);
+  if (!resourceId) return;
+  const body = pickSelfProfilePatch(req.body);
+  const roleError = await validateRoleRefs(body);
+  if (roleError) { res.status(400).json({ error: roleError }); return; }
+  const skillError = await validateSkillRefs(body, 'objects');
+  if (skillError) { res.status(400).json({ error: skillError }); return; }
+  const updated = await repos.resources.update(resourceId, body);
+  if (!updated) { res.status(404).json({ error: 'Not found' }); return; }
+  res.json(toSelfProfile(updated));
+});
+
+apiRouter.get('/self/assignments', async (req, res) => {
+  const resourceId = await requireSelfResourceId(req, res);
+  if (!resourceId) return;
+  res.json(selfAssignments(await repos.assignments.list(), resourceId));
+});
+
+apiRouter.get('/self/requests', async (req, res) => {
+  const resourceId = await requireSelfResourceId(req, res);
+  if (!resourceId) return;
+  const [requests, assignments] = await Promise.all([repos.requests.list(), repos.assignments.list()]);
+  res.json(selfRequests(requests, assignments, resourceId));
+});
+
+apiRouter.get('/self/time-entries', async (req, res) => {
+  const resourceId = await requireSelfResourceId(req, res);
+  if (!resourceId) return;
+  res.json((await repos.timeEntries.list()).filter(entry => entry.resourceId === resourceId));
+});
+
+apiRouter.post('/self/time-entries', async (req, res) => {
+  const resourceId = await requireSelfResourceId(req, res);
+  if (!resourceId) return;
+  if (!canMutate(trustedRole(req), ['employee', 'pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'])) {
+    res.status(403).json({ error: `Role ${trustedRole(req)} cannot submit time` });
+    return;
+  }
+
+  const body = pick<TimeEntry>(req.body, ['assignmentId', 'date', 'hours', 'notes']);
+  if (!body.assignmentId || !body.date || !(isNonNegNumber(body.hours) && body.hours > 0)) {
+    res.status(400).json({ error: 'assignmentId, date and positive hours are required' });
+    return;
+  }
+  if (!isIsoDateString(body.date)) {
+    res.status(400).json({ error: 'date must be an ISO date string' });
+    return;
+  }
+  const assignment = await repos.assignments.get(body.assignmentId);
+  if (!assignment || !isOwnAssignment([assignment], body.assignmentId, resourceId)) {
+    res.status(403).json({ error: 'The assignment does not belong to the signed-in resource' });
+    return;
+  }
+  const request = await repos.requests.get(assignment.requestId);
+  if (!request?.projectId) {
+    res.status(400).json({ error: 'The assignment request is not linked to a project' });
+    return;
+  }
+
+  const draft = await repos.timeEntries.create({
+    id: `TE${newId()}`,
+    assignmentId: assignment.id,
+    requestId: request.id,
+    resourceId,
+    projectId: request.projectId,
+    date: body.date,
+    hours: body.hours,
+    notes: body.notes,
+    status: 'Draft',
+  } as TimeEntry);
+  const submitted = await repos.timeEntries.update(draft.id, { status: 'Submitted' });
+  if (!submitted) { res.status(500).json({ error: 'Could not submit time entry' }); return; }
+  res.status(201).json(submitted);
+});
+
 const REQUEST_FIELDS = ['name', 'requiredRole', 'requiredEffort', 'skills', 'description', 'startDate', 'endDate', 'status', 'requesterId', 'projectId'] as const;
 
 apiRouter.get('/requests', async (_req, res) => { res.json(await repos.requests.list()); });
@@ -1895,30 +2128,27 @@ apiRouter.post('/requests', async (req, res) => {
   const created = await repos.requests.create(newReq);
   res.json(created);
 });
-// B-DATA: client-settable request statuses are limited to the publish/withdraw
-// lifecycle. 'Fulfilled' is server-derived from assignment staffing and must
-// never be supplied by the client.
-const CLIENT_REQUEST_STATUSES = ['Not Published', 'Published', 'Open', 'Withdrawn'] as const;
 apiRouter.put('/requests/:id', async (req, res) => {
   const existing = await repos.requests.get(req.params.id);
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   const body = pick<ResourceRequest>(req.body, REQUEST_FIELDS);
-  if (body.requiredEffort !== undefined && !isNonNegNumber(body.requiredEffort)) {
-    { res.status(400).json({ error: 'requiredEffort must be a non-negative number' }); return; }
-  }
-  if (body.status !== undefined && !(CLIENT_REQUEST_STATUSES as readonly string[]).includes(body.status)) {
-    res.status(400).json({ error: `status must be one of: ${CLIENT_REQUEST_STATUSES.join(', ')}` });
-    return;
-  }
+  // Validate the COMPLETE post-update record, not only the supplied fragment:
+  // partial date edits, required fields and server-derived effort/status values
+  // must remain coherent together.
+  const mergedErr = resourceRequestUpdateError(existing, body);
+  if (mergedErr) { res.status(400).json({ error: mergedErr }); return; }
   // REFERENCE-DATA INTEGRITY: validate any supplied requiredRole against the catalog.
   const roleErr = await validateRoleRefs(body);
   if (roleErr) { res.status(400).json({ error: roleErr }); return; }
   // REFERENCE-DATA INTEGRITY (Phase C): validate any supplied skills[] against the catalog.
   const skillErr = await validateSkillRefs(body, 'names');
   if (skillErr) { res.status(400).json({ error: skillErr }); return; }
-  // Phase G: validate any supplied start/end date (ISO + end >= start).
-  const dateErr = validateDateFields(body as Record<string, unknown>, ['startDate', 'endDate'], { from: 'startDate', to: 'endDate' });
-  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
+  // A required-effort edit can invalidate a previously derived Fulfilled state.
+  // Re-derive when the client did not explicitly choose a publish/withdraw state.
+  if (body.requiredEffort !== undefined && body.status === undefined) {
+    const merged = { ...existing, ...body };
+    body.status = requestStatusFor(merged, merged.staffedEffort ?? 0);
+  }
   const updated = await repos.requests.update(req.params.id, body);
   res.json(updated);
 });
@@ -1930,21 +2160,24 @@ apiRouter.delete('/requests/:id', async (req, res) => {
 
 apiRouter.get('/assignments', async (_req, res) => { res.json(await repos.assignments.list()); });
 apiRouter.post('/assignments', async (req, res) => {
-  // B3: the lifecycle lives on the month rows; a client may not seed a status.
-  if ((req.body as { status?: unknown } | undefined)?.status !== undefined) {
-    res.status(400).json({ error: 'status is derived from the per-month allocation and cannot be set on an assignment' });
-    return;
-  }
-  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'startDate', 'endDate', 'allocationPct']);
-  if (!isNonNegNumber(body.assignedHours)) {
-    { res.status(400).json({ error: 'assignedHours must be a non-negative number' }); return; }
-  }
+  const ownedFieldErr = assignmentServerOwnedFieldError((req.body ?? {}) as object);
+  if (ownedFieldErr) { res.status(400).json({ error: ownedFieldErr }); return; }
+  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'startDate', 'endDate', 'allocationPct']);
   // Resource Schedule: validate the optional booking window + allocation (no-op when omitted).
   const scheduleErr = validateAssignmentSchedule(body);
   if (scheduleErr) { res.status(400).json({ error: scheduleErr }); return; }
   // B-DATA: an assignment must reference an existing request and resource.
-  if (!(await existsRepo(repos.requests, body.requestId))) { res.status(400).json({ error: 'requestId must reference an existing request' }); return; }
-  if (!(await existsRepo(repos.resources, body.resourceId))) { res.status(400).json({ error: 'resourceId must reference an existing resource' }); return; }
+  const [targetRequest, targetResource] = await Promise.all([
+    typeof body.requestId === 'string' ? repos.requests.get(body.requestId) : Promise.resolve(undefined),
+    typeof body.resourceId === 'string' ? repos.resources.get(body.resourceId) : Promise.resolve(undefined),
+  ]);
+  if (!targetRequest) { res.status(400).json({ error: 'requestId must reference an existing request' }); return; }
+  if (!targetResource) { res.status(400).json({ error: 'resourceId must reference an existing resource' }); return; }
+  const employmentBookingErr = bookingWindowOutsideEmploymentError({
+    startDate: body.startDate ?? targetRequest.startDate,
+    endDate: body.endDate ?? targetRequest.endDate,
+  }, targetResource);
+  if (employmentBookingErr) { res.status(400).json({ error: employmentBookingErr }); return; }
 
   // B3: assignment status is DERIVED from its month rows (deriveAssignmentStatus)
   // — never set directly here. A brand-new assignment has no month rows yet, so
@@ -1952,7 +2185,12 @@ apiRouter.post('/assignments', async (req, res) => {
   // lifecycle (submit for approval, self-managed auto-approve, etc.) is now
   // driven exclusively by the per-month endpoints (PUT .../allocation,
   // POST .../months/:month/submit) once hours are booked into a month.
-  const created = await repos.assignments.create({ id: newId(), ...body, status: 'Draft' } as Assignment);
+  const created = await repos.assignments.create({
+    id: newId(),
+    ...body,
+    assignedHours: 0,
+    status: 'Draft',
+  } as Assignment);
 
   // B-CONCURRENCY + B-UTILIZATION: recompute BOTH aggregates from the full set of
   // assignments (never a lossy running delta). Sequential per-key locks.
@@ -1963,38 +2201,71 @@ apiRouter.post('/assignments', async (req, res) => {
 apiRouter.put('/assignments/:id', async (req, res) => {
   const oldAssig = await repos.assignments.get(req.params.id);
   if (oldAssig === undefined) { res.status(404).json({ error: 'Not found' }); return; }
-  // B3: the lifecycle lives on the month rows; a client may not seed a status.
-  if ((req.body as { status?: unknown } | undefined)?.status !== undefined) {
-    res.status(400).json({ error: 'status is derived from the per-month allocation and cannot be set on an assignment' });
-    return;
-  }
-  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'assignedHours', 'startDate', 'endDate', 'allocationPct']);
-  if (body.assignedHours !== undefined && !isNonNegNumber(body.assignedHours)) {
-    { res.status(400).json({ error: 'assignedHours must be a non-negative number' }); return; }
-  }
-  // Resource Schedule: validate the booking window + allocation against the MERGED
-  // state, so a partial update (e.g. only endDate) is still checked end >= start.
-  const scheduleErr = validateAssignmentSchedule({
-    startDate: body.startDate ?? oldAssig.startDate,
-    endDate: body.endDate ?? oldAssig.endDate,
-    allocationPct: body.allocationPct ?? oldAssig.allocationPct,
-  });
-  if (scheduleErr) { res.status(400).json({ error: scheduleErr }); return; }
-  // B-DATA: when the FK targets change, the new targets must exist.
-  if (body.resourceId !== undefined && body.resourceId !== oldAssig.resourceId && !(await existsRepo(repos.resources, body.resourceId))) {
-    res.status(400).json({ error: 'resourceId must reference an existing resource' });
-    return;
-  }
-  if (body.requestId !== undefined && body.requestId !== oldAssig.requestId && !(await existsRepo(repos.requests, body.requestId))) {
-    res.status(400).json({ error: 'requestId must reference an existing request' });
-    return;
-  }
+  const ownedFieldErr = assignmentServerOwnedFieldError((req.body ?? {}) as object);
+  if (ownedFieldErr) { res.status(400).json({ error: ownedFieldErr }); return; }
+  const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'startDate', 'endDate', 'allocationPct']);
+  const targetResourceId = body.resourceId ?? oldAssig.resourceId;
+  // Serialize the authoritative dependency check and write against BOTH the old
+  // and prospective resources. Allocation writes and resource-lifecycle edits
+  // use the same res:* locks, so none can create a day (or narrow employment)
+  // between this check and the assignment update. Lock ids are always sorted.
+  const mutateAssignment = async (): Promise<{ status?: number; error?: string; before?: Assignment; updated?: Assignment }> => {
+    const current = await repos.assignments.get(req.params.id);
+    if (!current) return { status: 404, error: 'Not found' };
+    if (current.resourceId !== oldAssig.resourceId || current.requestId !== oldAssig.requestId) {
+      return { status: 409, error: 'assignment target changed concurrently; reload before retrying' };
+    }
 
-  // B3: status is DERIVED from the month rows — this PUT never writes `status`
-  // or `approvalId` on the assignment itself (both are now owned by the
-  // per-month endpoints and their approval side-effects). Persist the
-  // FK/hours/schedule patch first.
-  await repos.assignments.update(req.params.id, body);
+    const effectiveRequestId = body.requestId ?? current.requestId;
+    const effectiveResourceId = body.resourceId ?? current.resourceId;
+    const [targetRequest, targetResource] = await Promise.all([
+      repos.requests.get(effectiveRequestId),
+      repos.resources.get(effectiveResourceId),
+    ]);
+    if (!targetRequest) return { status: 400, error: 'requestId must reference an existing request' };
+    if (!targetResource) return { status: 400, error: 'resourceId must reference an existing resource' };
+
+    const scheduleErr = validateAssignmentSchedule({
+      startDate: body.startDate ?? current.startDate,
+      endDate: body.endDate ?? current.endDate,
+      allocationPct: body.allocationPct ?? current.allocationPct,
+    });
+    if (scheduleErr) return { status: 400, error: scheduleErr };
+
+    const changesTarget = effectiveRequestId !== current.requestId || effectiveResourceId !== current.resourceId;
+    if (changesTarget) {
+      const [days, months, timeEntries, approvals] = await Promise.all([
+        repos.assignmentDays.list(),
+        repos.assignmentMonths.list(),
+        repos.timeEntries.list(),
+        repos.approvalRequests.list(),
+      ]);
+      const retargetErr = assignmentRetargetError(current, body, {
+        hasDays: days.some(day => day.assignmentId === current.id),
+        hasMonths: months.some(monthRow => monthRow.assignmentId === current.id),
+        hasTimeEntries: timeEntries.some(entry => entry.assignmentId === current.id),
+        hasApprovals: current.approvalId !== undefined || approvals.some(approval => {
+          if (approval.refId === current.id) return true;
+          return parseMonthRowId(approval.refId)?.assignmentId === current.id;
+        }),
+      });
+      if (retargetErr) return { status: 409, error: retargetErr };
+    }
+
+    const employmentBookingErr = bookingWindowOutsideEmploymentError({
+      startDate: body.startDate ?? current.startDate ?? targetRequest.startDate,
+      endDate: body.endDate ?? current.endDate ?? targetRequest.endDate,
+    }, targetResource);
+    if (employmentBookingErr) return { status: 400, error: employmentBookingErr };
+
+    return { before: current, updated: await repos.assignments.update(req.params.id, body) };
+  };
+  const [firstResourceId, secondResourceId] = [oldAssig.resourceId, targetResourceId].sort();
+  const mutation = firstResourceId === secondResourceId
+    ? await withLock(`res:${firstResourceId}`, mutateAssignment)
+    : await withLock(`res:${firstResourceId}`, () => withLock(`res:${secondResourceId}`, mutateAssignment));
+  if (mutation.error) { res.status(mutation.status ?? 400).json({ error: mutation.error }); return; }
+  const authoritativeOld = mutation.before as Assignment;
 
   // RETARGET PROPAGATION (B3): a resource retarget invalidates the governance
   // of every month row carrying a LIVE commitment — a 'Requested' row's
@@ -2029,18 +2300,24 @@ apiRouter.put('/assignments/:id', async (req, res) => {
   // critical section (mirrors every other approval side-effect in this
   // file); the aggregate recomputes below stay LAST so they read the
   // post-retarget statuses.
-  if (body.resourceId !== undefined && body.resourceId !== oldAssig.resourceId) {
-    const mergedAssig = { ...oldAssig, ...body, id: oldAssig.id } as Assignment;
+  if (body.resourceId !== undefined && body.resourceId !== authoritativeOld.resourceId) {
+    const mergedAssig = { ...authoritativeOld, ...body, id: authoritativeOld.id } as Assignment;
     const selfManaged = await autoApprovesAllocation(req, body.resourceId);
     const monthRows = (await repos.assignmentMonths.list())
-      .filter(m => m.assignmentId === oldAssig.id && (m.status === 'Allocated' || m.status === 'Requested'));
+      .filter(m => m.assignmentId === authoritativeOld.id && (m.status === 'Allocated' || m.status === 'Requested'));
     for (const row of monthRows) {
-      await withdrawAllocationApproval(row.approvalId, 'resource retargeted');
+      const before = await allocationLifecycle.run(row.id, async transactionRepos => {
+        const current = await transactionRepos.assignmentMonths.get(row.id);
+        if (!current || (current.status !== 'Allocated' && current.status !== 'Requested')) return undefined;
+        await reviseAllocationMonthAfterEdit(transactionRepos, row.id, {
+          autoApprove: selfManaged,
+          reason: 'resource retargeted',
+          createApproval: () => createAllocationApprovalEntry(req, mergedAssig, row.id, transactionRepos),
+        });
+        return current;
+      });
+      if (!before) continue;
       if (selfManaged) {
-        // `null`, not `undefined`: clears approvalId to absent on both
-        // adapters (Task 4's seam fix) — see the submit handler above for the
-        // full rationale on this cast.
-        await repos.assignmentMonths.update(row.id, { status: 'Allocated', approvalId: null as unknown as undefined });
         // C2 — THE SELF-MANAGED BRANCH IS AN IMPLICIT APPROVAL, so it owes the
         // same give-back an explicit one does. The month lands 'Allocated' with
         // NO approval, which means no decision will ever follow to close a
@@ -2069,39 +2346,36 @@ apiRouter.put('/assignments/:id', async (req, res) => {
         // BEST-EFFORT and logged, exactly as in `applyAllocationDecision`: the
         // retarget above has already committed, so a give-back failure must never
         // turn it into a 500 — but it must never vanish silently either.
-        if (row.replacedFromAssignmentMonthId !== undefined) {
+        if (before.replacedFromAssignmentMonthId !== undefined) {
           try {
-            await returnHoursToDummy(req, row, mergedAssig, 'Approved');
+            await returnHoursToDummy(req, before, mergedAssig, 'Approved');
           } catch (err) {
-            console.error(`PUT /assignments/${oldAssig.id}: substitution give-back failed for month ${row.id} on retarget:`, err);
+            console.error(`PUT /assignments/${authoritativeOld.id}: substitution give-back failed for month ${row.id} on retarget:`, err);
           }
         }
-      } else {
-        const approvalId = await createAllocationApproval(req, mergedAssig, row.id);
-        await repos.assignmentMonths.update(row.id, { status: 'Requested', approvalId } as Partial<AssignmentMonth>);
       }
     }
   }
 
   await refreshDerivedAssignmentStatus(req.params.id);
 
-  const newResourceId = body.resourceId ?? oldAssig.resourceId;
-  const newRequestId = body.requestId ?? oldAssig.requestId;
-  const resourceChanged = newResourceId !== oldAssig.resourceId;
-  const requestChanged = newRequestId !== oldAssig.requestId;
+  const newResourceId = body.resourceId ?? authoritativeOld.resourceId;
+  const newRequestId = body.requestId ?? authoritativeOld.requestId;
+  const resourceChanged = newResourceId !== authoritativeOld.resourceId;
+  const requestChanged = newRequestId !== authoritativeOld.requestId;
 
   // B-UTILIZATION + B-STAFFING: recompute BOTH aggregates from the full set of
   // assignments (the source of truth) for every affected resource/request — no
   // lossy running delta. On an FK retarget BOTH old and new are recomputed.
   // Sequential per-key locks, never nested; res: before req: (fixed lock order).
   if (resourceChanged) {
-    await withLock(`res:${oldAssig.resourceId}`, () => recomputeResourceUtilization(oldAssig.resourceId));
+    await withLock(`res:${authoritativeOld.resourceId}`, () => recomputeResourceUtilization(authoritativeOld.resourceId));
     await withLock(`res:${newResourceId}`, () => recomputeResourceUtilization(newResourceId));
   } else {
     await withLock(`res:${newResourceId}`, () => recomputeResourceUtilization(newResourceId));
   }
   if (requestChanged) {
-    await withLock(`req:${oldAssig.requestId}`, () => recomputeRequestStaffing(oldAssig.requestId));
+    await withLock(`req:${authoritativeOld.requestId}`, () => recomputeRequestStaffing(authoritativeOld.requestId));
     await withLock(`req:${newRequestId}`, () => recomputeRequestStaffing(newRequestId));
   } else {
     await withLock(`req:${newRequestId}`, () => recomputeRequestStaffing(newRequestId));
@@ -2160,8 +2434,12 @@ apiRouter.delete('/assignments/:id', async (req, res) => {
   // so Postgres would otherwise reject the parent delete with an FK violation).
   const monthRows = (await repos.assignmentMonths.list()).filter(m => m.assignmentId === oldAssig.id);
   for (const m of monthRows) {
-    await withdrawAllocationApproval(m.approvalId, 'assignment deleted');
-    await repos.assignmentMonths.remove(m.id);
+    await allocationLifecycle.run(m.id, async transactionRepos => {
+      const current = await transactionRepos.assignmentMonths.get(m.id);
+      if (!current) return;
+      await withdrawAllocationApproval(current.approvalId, 'assignment deleted', transactionRepos);
+      await transactionRepos.assignmentMonths.remove(m.id);
+    });
   }
   await repos.assignments.remove(req.params.id);
 
@@ -2190,10 +2468,13 @@ apiRouter.delete('/assignments/:id', async (req, res) => {
  * this section) can recompute BOTH the dummy's and the target's totals through
  * the one function rather than a second hand-written sum.
  */
-async function recomputeAssignedHours(assignmentId: string): Promise<void> {
-  const remaining = (await repos.assignmentDays.list()).filter(d => d.assignmentId === assignmentId);
+async function recomputeAssignedHours(
+  assignmentId: string,
+  repositorySet: Repositories = repos,
+): Promise<void> {
+  const remaining = (await repositorySet.assignmentDays.list()).filter(d => d.assignmentId === assignmentId);
   const total = remaining.reduce((s, d) => s + (Number.isFinite(d.hours) ? d.hours : 0), 0);
-  await repos.assignments.update(assignmentId, { assignedHours: Math.round(total * 100) / 100 });
+  await repositorySet.assignments.update(assignmentId, { assignedHours: Math.round(total * 100) / 100 });
 }
 
 // READ: the assignment's per-day rows whose month is in [from,to], plus the
@@ -2235,15 +2516,11 @@ apiRouter.get('/assignments/:id/allocation', async (req, res) => {
 });
 
 // WRITE: replace ONE month's per-day hours in a single call. Gates: open-month,
-// working-day, daily-capacity. Then (ordering is load-bearing, gap-A discipline):
-//   1. withLock('res:<id>'): TOCTOU capacity re-check → replace the month's day
-//      rows → write assignedHours = Σ of ALL remaining day rows.
-//   2. OUTSIDE any res:/req: lock: forced re-approval, SCOPED TO THE EDITED MONTH
-//      (approval-repo I/O + the month row's status write) — never nested in an
-//      aggregate lock. Trigger = the edited month's OWN prior status was
-//      'Allocated' (its days changed by definition), NOT a delta; sibling months
-//      are untouched. `assignments.status` is then recomputed as a DERIVED
-//      rollup of all its months (B3) — never written directly here.
+// working-day, daily-capacity. Then:
+//   1. under the resource TOCTOU lock and the month lifecycle transaction,
+//      replace day rows, derive assignedHours and rotate the approvalId revision
+//      for Requested/Allocated months as one atomic command;
+//   2. recompute `assignments.status` as a DERIVED rollup of all its months;
 //   3. FINAL: recompute the status-aware resource/request aggregates AFTER the
 //      status change, so confirmed/planned totals reflect the new status.
 apiRouter.put('/assignments/:id/allocation', async (req, res) => {
@@ -2291,6 +2568,9 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   for (const [day, value] of Object.entries(daily)) {
     if (value > 0 && !isWorkingDay(day, holidaysSet)) { res.status(400).json({ error: `${day} is not a working day` }); return; }
   }
+  const positiveDates = Object.entries(daily).filter(([, hours]) => hours > 0).map(([day]) => day);
+  const employmentBookingErr = bookingOutsideEmploymentError(positiveDates, resource);
+  if (employmentBookingErr) { res.status(400).json({ error: employmentBookingErr }); return; }
 
   // Daily-capacity gate. assignmentDays carry assignmentId (not resourceId), so
   // gather this resource's OTHER assignment ids, sum their day-hours on the
@@ -2304,14 +2584,14 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   // C1: dummy and subco represent capacity that a single person does not cover,
   // so their daily ceiling is MULTI_FTE_MAX times the one-FTE base. Internal
   // resources keep the 1-FTE cap (manual §3.2.3).
-  const cap = dailyCapFor(kindOf(resource), baseCap);
+  let cap = dailyCapFor(kindOf(resource), baseCap);
   const requestedDates = new Set(Object.keys(daily));
   const capExceeded = (day: string): string => `daily capacity exceeded on ${day}`;
-  const capacityOffender = async (): Promise<string | undefined> => {
+  const capacityOffender = async (repositorySet: Repositories = repos): Promise<string | undefined> => {
     const otherIds = new Set(
-      (await repos.assignments.list()).filter(a => a.resourceId === resource.id && a.id !== assig.id).map(a => a.id));
+      (await repositorySet.assignments.list()).filter(a => a.resourceId === resource.id && a.id !== assig.id).map(a => a.id));
     const otherByDate = sumHoursByDate(
-      (await repos.assignmentDays.list()).filter(d => otherIds.has(d.assignmentId) && requestedDates.has(d.date)));
+      (await repositorySet.assignmentDays.list()).filter(d => otherIds.has(d.assignmentId) && requestedDates.has(d.date)));
     for (const day of requestedDates) {
       // Booking 0 hours can never over-allocate — skip it, so a pre-existing
       // over-allocation by OTHER assignments on that day doesn't 400 a no-op entry.
@@ -2323,72 +2603,64 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   const preOffender = await capacityOffender();
   if (preOffender !== undefined) { res.status(400).json({ error: capExceeded(preOffender) }); return; }
 
-  // The lifecycle state of the month being written, read BEFORE the replace.
-  const monthRow = await ensureAssignmentMonth(assig.id, month);
-  const priorMonthStatus = monthRow.status as MonthStatus;
-  // STEP 1 — inside res: lock: TOCTOU re-check, then replace the month's day rows
-  // and rewrite assignedHours from the full remaining day set (source of truth).
-  const replaced = await withLock(`res:${resource.id}`, async (): Promise<{ offender?: string }> => {
-    const offender = await capacityOffender();
-    if (offender !== undefined) return { offender };
+  const allocationMonthId = monthRowId(assig.id, month);
+  const selfManaged = await autoApprovesAllocation(req, resource.id);
 
-    const existing = (await repos.assignmentDays.list())
-      .filter(d => d.assignmentId === assig.id && monthOf(d.date) === month);
-    for (const d of existing) await repos.assignmentDays.remove(d.id);
-    // Composite id `${assignmentId}:${date}` (same scheme as the seed —
-    // assignmentDays is intentionally excluded from seedSequences, so NEVER newId()).
-    for (const day of requestedDates) {
-      const hours = daily[day];
-      if (hours > 0) {
-        await repos.assignmentDays.create({ id: `${assig.id}:${day}`, assignmentId: assig.id, date: day, hours } as AssignmentDay);
+  // The day replacement and approval revision are one month command and one DB
+  // transaction. A concurrent decision therefore lands wholly before the edit
+  // (and the edit opens a fresh revision) or wholly after it (and its old
+  // approvalId fails the CAS); it can never approve the new hours under the old
+  // request. The resource lock retains the capacity TOCTOU guard.
+  const replaced = await withLock(`res:${resource.id}`, () => allocationLifecycle.run(
+    allocationMonthId,
+    async (transactionRepos): Promise<{ offender?: string; error?: string; status?: number }> => {
+      const currentAssignment = await transactionRepos.assignments.get(assig.id);
+      if (!currentAssignment
+          || currentAssignment.resourceId !== assig.resourceId
+          || currentAssignment.requestId !== assig.requestId) {
+        return { status: 409, error: 'assignment target changed while its allocation was being edited' };
       }
-    }
-    // The per-day breakdown is now the source of truth for assignedHours (see
-    // recomputeAssignedHours above).
-    await recomputeAssignedHours(assig.id);
-    return {};
-  });
-  if (replaced.offender !== undefined) { res.status(400).json({ error: capExceeded(replaced.offender) }); return; }
+      const currentResource = await transactionRepos.resources.get(resource.id);
+      if (!currentResource) return { status: 409, error: 'assignment resource disappeared while allocating' };
+      const currentEmploymentErr = bookingOutsideEmploymentError(positiveDates, currentResource);
+      if (currentEmploymentErr) return { status: 400, error: currentEmploymentErr };
+      cap = dailyCapFor(
+        kindOf(currentResource),
+        await resolveBaseCap(currentResource, transactionRepos),
+      );
+      const offender = await capacityOffender(transactionRepos);
+      if (offender !== undefined) return { offender };
 
-  // STEP 2 — OUTSIDE any res:/req: lock: forced re-approval, scoped to THIS month.
-  // Trigger is the month's PRIOR status 'Allocated' (its days changed by
-  // definition), not an assignedHours delta. Self-managed → stays Allocated with
-  // no approval; otherwise supersede this month's approval and open a fresh one.
-  // A still-'Requested' month keeps its pending approval (the approver re-reads
-  // the days); Draft/Rejected have no approval effect. Months OTHER than the one
-  // written are untouched — that is the whole point of B3.
-  //
-  // SERIALIZED on `month:<rowId>`. read `approvalId` -> withdraw -> create ->
-  // write is a read-modify-write over one shared row, and re-reading alone only
-  // NARROWS the window: two near-simultaneous day-edits of the same Allocated
-  // month can still both read the same id, both open a fresh approval, and leave
-  // the loser's orphaned and Pending. The lock is the same `month:` namespace
-  // `ensureAssignmentMonth` uses, taken here sequentially (that call has long
-  // since returned), never nested.
-  //
-  // This does NOT break the handler's documented ordering: the rule is that
-  // STEP 2 runs outside any `res:`/`req:` lock — it must never hold an aggregate
-  // lock across approval I/O — and `month:` is a different namespace keyed on a
-  // single row. `month:` locks are taken in exactly two places (here and
-  // `ensureAssignmentMonth`), neither of which is nested inside a `res:`/`req:`/
-  // `approval:` section, so no lock cycle is reachable.
-  await withLock(`month:${monthRow.id}`, async () => {
-    if (priorMonthStatus !== 'Allocated' || await autoApprovesAllocation(req, resource.id)) return;
-    // RE-READ the row here rather than reusing the `monthRow` snapshot taken
-    // before STEP 1's lock: `approvalId` is shared mutable state, and STEP 1
-    // spans several awaits during which a CONCURRENT edit of the same month may
-    // already have superseded the approval and written a new id. Withdrawing
-    // the STALE id would cancel an approval that no longer governs anything
-    // while leaving the CURRENT one Pending and orphaned — a manager could
-    // still decide it, applying a decision to days nobody approved. `status` is
-    // deliberately NOT re-read: `priorMonthStatus` is this writer's own
-    // observation that the month WAS approved when its days changed, which is
-    // what the forced re-approval is a consequence of.
-    const currentRow = await repos.assignmentMonths.get(monthRow.id);
-    await withdrawAllocationApproval(currentRow?.approvalId, 'superseded');
-    const approvalId = await createAllocationApproval(req, assig, monthRow.id);
-    await repos.assignmentMonths.update(monthRow.id, { status: 'Requested', approvalId });
-  });
+      if (!(await transactionRepos.assignmentMonths.get(allocationMonthId))) {
+        await transactionRepos.assignmentMonths.create({
+          id: allocationMonthId,
+          assignmentId: assig.id,
+          month,
+          status: 'Draft',
+        } as AssignmentMonth);
+      }
+
+      const existing = (await transactionRepos.assignmentDays.list())
+        .filter(d => d.assignmentId === assig.id && monthOf(d.date) === month);
+      for (const d of existing) await transactionRepos.assignmentDays.remove(d.id);
+      for (const day of requestedDates) {
+        const hours = daily[day];
+        if (hours > 0) {
+          await transactionRepos.assignmentDays.create({
+            id: `${assig.id}:${day}`, assignmentId: assig.id, date: day, hours,
+          } as AssignmentDay);
+        }
+      }
+      await recomputeAssignedHours(assig.id, transactionRepos);
+      await reviseAllocationMonthAfterEdit(transactionRepos, allocationMonthId, {
+        autoApprove: selfManaged,
+        createApproval: () => createAllocationApprovalEntry(req, assig, allocationMonthId, transactionRepos),
+      });
+      return {};
+    },
+  ));
+  if (replaced.error !== undefined) { res.status(replaced.status ?? 400).json({ error: replaced.error }); return; }
+  if (replaced.offender !== undefined) { res.status(400).json({ error: capExceeded(replaced.offender) }); return; }
   // The assignment's own status is a rollup of its months — recompute it last.
   await refreshDerivedAssignmentStatus(assig.id);
 
@@ -2489,10 +2761,10 @@ async function transferDummyMonth(
 
   // The person's own ceiling: always 1 FTE — dailyCapFor is kind-aware and the
   // target is validated `internal` by the caller.
-  const cap = dailyCapFor(kindOf(target), targetBaseCap);
+  let cap = dailyCapFor(kindOf(target), targetBaseCap);
 
   const [firstId, secondId] = [dummyAssig.resourceId, target.id].sort();
-  const { plan, targetAssig: lockedTargetAssig, baseline } = await withLock(`res:${firstId}`, () => withLock(`res:${secondId}`, async (): Promise<{ plan: SubstitutionPlan; targetAssig?: Assignment; baseline: Record<string, number> }> => {
+  const { plan, targetAssig: lockedTargetAssig, baseline, blocked } = await withLock(`res:${firstId}`, () => withLock(`res:${secondId}`, async (): Promise<{ plan: SubstitutionPlan; targetAssig?: Assignment; baseline: Record<string, number>; blocked?: string }> => {
     // The target's assignment on the SAME request — resolved (never yet
     // CREATED) here, INSIDE both locks. Review finding (Task 3, Important #1):
     // reading the assignment list and finding-or-creating this row BEFORE the
@@ -2510,6 +2782,25 @@ async function transferDummyMonth(
     const allDays = await repos.assignmentDays.list();
     const dummyDays = allDays.filter(d => d.assignmentId === dummyAssig.id && monthOf(d.date) === month);
     const dummyByDate = sumHoursByDate(dummyDays);
+    const currentTarget = await repos.resources.get(target.id);
+    if (!currentTarget) {
+      return {
+        plan: planSubstitution(dummyByDate, {}, 0),
+        targetAssig: existingTargetAssig,
+        baseline: {},
+        blocked: 'the target resource no longer exists',
+      };
+    }
+    const employmentErr = bookingOutsideEmploymentError(Object.keys(dummyByDate), currentTarget);
+    if (employmentErr) {
+      return {
+        plan: planSubstitution(dummyByDate, {}, 0),
+        targetAssig: existingTargetAssig,
+        baseline: {},
+        blocked: employmentErr,
+      };
+    }
+    cap = dailyCapFor(kindOf(currentTarget), await resolveBaseCap(currentTarget));
 
     // What the target already holds on those days, across ALL their
     // assignments (a not-yet-created candidate assignment contributes no
@@ -2580,6 +2871,10 @@ async function transferDummyMonth(
     return { plan: p, targetAssig, baseline };
   }));
 
+  if (blocked !== undefined) {
+    return { month, transferredHours: 0, remainingHours: plan.remainingHours, skipped: blocked };
+  }
+
   if (plan.transferredHours === 0) {
     // Distinguish "nothing to move" from "no room to move it into": a dummy
     // month with no bookable hours (no day rows, or all zero/negative) leaves
@@ -2601,30 +2896,25 @@ async function transferDummyMonth(
   const selfManaged = await autoApprovesAllocation(req, target.id);
   const dummyName = (await repos.resources.get(dummyAssig.resourceId))?.name ?? 'a placeholder';
 
-  // SERIALIZED on `month:<rowId>`, matching the allocation PUT's STEP 2 exactly.
+  // SERIALIZED through the same allocation-lifecycle executor as edit/submit/decide.
   // read `approvalId` -> withdraw -> create -> write is a read-modify-write over one
   // SHARED row: two substitutions of two different dummy months onto the SAME person
   // (normal when one request needs several people) both read the same approvalId,
   // both withdraw it, both open a fresh approval and both write their own — leaving
   // one Pending and ORPHANED, decidable later against a month row that has moved on.
   // The same race runs against a concurrent `PUT /assignments/:id/allocation` on this
-  // month, which DOES take this lock, so without it the lock bought nothing here.
-  //
-  // NOT NESTED, and that is load-bearing: `withLock` is not re-entrant, and
-  // `ensureAssignmentMonth` above takes `month:<the same id>` — acquiring it again
-  // from inside would wedge the key forever. That call has returned, and both `res:`
-  // locks were released when the section above resolved, so this is taken
-  // sequentially, from no other critical section. `month:` is still only ever taken
-  // in these three places, none of them inside a `res:`/`req:`/`approval:` section,
-  // so no lock cycle is reachable.
-  const wasAllocated = await withLock(`month:${targetRow.id}`, async (): Promise<boolean> => {
+  // month, so the same approvalId CAS/version ordering applies here too. The
+  // resource locks and the earlier ensure command have both completed before
+  // this transaction starts; decision give-back takes resource locks only after
+  // its own lifecycle command commits, so no lock cycle is reachable.
+  const wasAllocated = await allocationLifecycle.run(targetRow.id, async (transactionRepos): Promise<boolean> => {
     // RE-READ rather than reuse the `ensureAssignmentMonth` snapshot: `approvalId`,
     // `status` and `plannerNote` are shared mutable state and several awaits have
     // passed. Withdrawing a STALE approvalId cancels an approval that no longer
     // governs anything and leaves the current one Pending and orphaned.
-    const current = await repos.assignmentMonths.get(targetRow.id) ?? targetRow;
+    const current = await transactionRepos.assignmentMonths.get(targetRow.id) ?? targetRow;
     const priorStatus = current.status;
-    await withdrawAllocationApproval(current.approvalId, 'superseded by substitution');
+    await withdrawAllocationApproval(current.approvalId, 'superseded by substitution', transactionRepos);
 
     const note = `Takes over from ${dummyName} — ${month}`;
     const plannerNote = current.plannerNote ? `${current.plannerNote}\n${note}` : note;
@@ -2632,19 +2922,19 @@ async function transferDummyMonth(
     if (selfManaged) {
       // No decision will follow, so there is nothing to give back later: close the
       // link immediately rather than leaving it dangling forever.
-      await repos.assignmentMonths.update(targetRow.id, {
+      await transactionRepos.assignmentMonths.update(targetRow.id, {
         status: 'Allocated', approvalId: null as unknown as undefined,
         replacedFromAssignmentMonthId: null as unknown as undefined,
         replacedDays: null as unknown as undefined,
         replacedBaselineDays: null as unknown as undefined, plannerNote,
       } as Partial<AssignmentMonth>);
     } else {
-      const approvalId = await createAllocationApproval(req, targetAssig, targetRow.id);
+      const approvalId = await createAllocationApproval(req, targetAssig, targetRow.id, transactionRepos);
       // `plan.transfer` — the PER-DAY map of what moved, not just its total: the
       // give-back at decision time is decided day by day (`returnHoursToDummy`).
       // `baseline` is its other half: what she ALREADY held on those dates, without
       // which a trim on a shared date cannot be told from a trim of the loan.
-      await repos.assignmentMonths.update(targetRow.id, {
+      await transactionRepos.assignmentMonths.update(targetRow.id, {
         status: 'Requested', approvalId,
         replacedFromAssignmentMonthId: dummyRow.id, replacedDays: plan.transfer,
         replacedBaselineDays: baseline, plannerNote,
@@ -2736,7 +3026,6 @@ apiRouter.post('/assignment-months/:id/substitute', async (req, res) => {
   const target = await repos.resources.get(body.targetResourceId);
   if (target === undefined) { res.status(400).json({ error: 'targetResourceId must reference an existing resource' }); return; }
   if (kindOf(target) !== 'internal') { res.status(400).json({ error: 'a dummy can only be replaced by an internal resource' }); return; }
-  if (target.terminationDate) { res.status(400).json({ error: 'the target resource is terminated' }); return; }
   if (target.id === dummyAssig.resourceId) { res.status(400).json({ error: 'a resource cannot replace itself' }); return; }
 
   const period = await repos.planningPeriods.get(dummyRow.month);
@@ -2893,9 +3182,9 @@ async function returnHoursToDummy(
   }
 
   // The DUMMY's own daily ceiling (multi-FTE: it stands for capacity a single
-  // person does not cover). Resolved before the locks — it reads the resource
-  // row and the settings, never shared mutable state.
-  const dummyCap = dailyCapFor(kindOf(dummyResource), await resolveBaseCap(dummyResource));
+  // person does not cover). Refreshed inside both locks before planning so a
+  // concurrent contract-hours/lifecycle edit cannot make the write stale.
+  let dummyCap = dailyCapFor(kindOf(dummyResource), await resolveBaseCap(dummyResource));
 
   const moveBack = async (): Promise<{ giveBackHours: number; shortfallHours: number }> => {
     // IDEMPOTENCE UNDER CONCURRENCY — re-read the month row and bail out if the
@@ -2934,6 +3223,22 @@ async function returnHoursToDummy(
     // column existed) degrades to "all of it was on loan" — the pre-fix behaviour,
     // which is only wrong on a date that mixed her own hours with the loan.
     const replacedBaselineDays = fresh.replacedBaselineDays ?? {};
+
+    const currentDummyResource = await repos.resources.get(dummyAssig.resourceId);
+    const blockedHours = round2(Object.values(replacedDays).reduce((sum, hours) => sum + hours, 0));
+    if (!currentDummyResource) {
+      console.warn(`give-back: dummy resource ${dummyAssig.resourceId} disappeared while settling month ${row.id} — returning no hours`);
+      return { giveBackHours: 0, shortfallHours: blockedHours };
+    }
+    const employmentErr = bookingOutsideEmploymentError(Object.keys(replacedDays), currentDummyResource);
+    if (employmentErr) {
+      // Fail closed: never recreate assignmentDays outside employment. The
+      // unresolved amount stays on the target side and is surfaced below as a
+      // shortfall instead of silently materialising an invalid dummy booking.
+      console.warn(`give-back: month ${row.id} cannot return to ${linkId}: ${employmentErr}`);
+      return { giveBackHours: 0, shortfallHours: blockedHours };
+    }
+    dummyCap = dailyCapFor(kindOf(currentDummyResource), await resolveBaseCap(currentDummyResource));
 
     const allDays = await repos.assignmentDays.list();
     const heldByDate = sumHoursByDate(allDays.filter(d => d.assignmentId === assig.id && monthOf(d.date) === month));
@@ -3046,13 +3351,20 @@ async function returnHoursToDummy(
   // the retarget loop and the delete handler) hold no lock here. Before the derived
   // status refresh below, which rolls the month statuses up into the assignment.
   try {
-    await withLock(`month:${dummyRow.id}`, async () => {
-      const current = await repos.assignmentMonths.get(dummyRow.id);
+    await allocationLifecycle.run(dummyRow.id, async transactionRepos => {
+      const current = await transactionRepos.assignmentMonths.get(dummyRow.id);
       if (current === undefined || current.status !== 'Rejected') return;
       // A decided approval makes this a no-op; it only bites on a stale Pending id.
-      await withdrawAllocationApproval(current.approvalId, 'superseded by returned substitution hours');
-      const approvalId = await createAllocationApproval(req, dummyAssig, dummyRow.id);
-      await repos.assignmentMonths.update(dummyRow.id, { status: 'Requested', approvalId } as Partial<AssignmentMonth>);
+      await withdrawAllocationApproval(
+        current.approvalId,
+        'superseded by returned substitution hours',
+        transactionRepos,
+      );
+      const approvalId = await createAllocationApproval(req, dummyAssig, dummyRow.id, transactionRepos);
+      await transactionRepos.assignmentMonths.update(
+        dummyRow.id,
+        { status: 'Requested', approvalId } as Partial<AssignmentMonth>,
+      );
     });
   } catch (err) {
     // Best-effort, like every other side effect here: the hours are already back on
@@ -3104,16 +3416,6 @@ apiRouter.post('/assignments/:id/months/:month/submit', async (req, res) => {
 
   const row = await repos.assignmentMonths.get(monthRowId(assig.id, month));
   if (row === undefined) { res.status(404).json({ error: 'no allocation for this month' }); return; }
-  // ONLY Draft/Rejected may be voluntarily submitted. A generic month-transition
-  // table is the wrong check here: its Allocated -> Requested edge belongs to a
-  // DIFFERENT caller (the allocation PUT's day-edit forced-reapproval path), not
-  // to an explicit planner submit — an already-Requested OR already-Allocated
-  // month must be refused. Enforced inline for exactly that reason.
-  if (row.status !== 'Draft' && row.status !== 'Rejected') {
-    res.status(400).json({ error: `illegal month transition ${row.status} -> Requested` });
-    return;
-  }
-
   const body = pick<{ plannerNote?: string }>(req.body, ['plannerNote']);
   const plannerNote = typeof body.plannerNote === 'string' ? body.plannerNote : undefined;
 
@@ -3122,29 +3424,23 @@ apiRouter.post('/assignments/:id/months/:month/submit', async (req, res) => {
   // direct people manager AND a manager of a node above the resource — the
   // Practice Manager planning their own practice's placeholders is the mainline
   // workflow, not an edge case (see `autoApprovesAllocation`).
-  await withdrawAllocationApproval(row.approvalId, 'superseded');
-  if (await autoApprovesAllocation(req, assig.resourceId)) {
-    await repos.assignmentMonths.update(row.id, {
-      status: 'Allocated',
-      // `null`, not `undefined`: both `PgRepository.update()` and (now)
-      // `InMemoryRepository.update()` treat an explicit `null` patch value as
-      // "clear this field" (Drizzle sets the column NULL; the in-memory store
-      // drops the key) — see src/db/repository.ts's documented seam. Plain
-      // `undefined` means "leave untouched" on both adapters, so it would NOT
-      // clear a stale approvalId. `AssignmentMonth.approvalId` is typed
-      // `string | undefined` (never `null` — every READ path normalizes a
-      // cleared column back to `undefined`), so `null` only ever appears
-      // transiently in this one WRITE-side value. Cast just this value (not
-      // the whole patch literal) so a typo in `status`/`plannerNote` is still
-      // caught by the type checker.
-      approvalId: null as unknown as undefined,
-      ...(plannerNote !== undefined ? { plannerNote } : {}),
-    });
-  } else {
-    const approvalId = await createAllocationApproval(req, assig, row.id);
-    await repos.assignmentMonths.update(row.id, {
-      status: 'Requested', approvalId, ...(plannerNote !== undefined ? { plannerNote } : {}),
-    } as Partial<AssignmentMonth>);
+  const selfManaged = await autoApprovesAllocation(req, assig.resourceId);
+  try {
+    await allocationLifecycle.run(row.id, transactionRepos => submitAllocationMonth(
+      transactionRepos,
+      row.id,
+      {
+        autoApprove: selfManaged,
+        plannerNote,
+        createApproval: () => createAllocationApprovalEntry(req, assig, row.id, transactionRepos),
+      },
+    ));
+  } catch (error) {
+    if (error instanceof AllocationLifecycleError) {
+      res.status(error.status).json({ error: error.message });
+      return;
+    }
+    throw error;
   }
 
   await refreshDerivedAssignmentStatus(assig.id);
@@ -3423,25 +3719,95 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
   res.json({ months, rows });
 });
 
-apiRouter.get('/time-entries', async (_req, res) => { res.json(await repos.timeEntries.list()); });
+/**
+ * Build the object-level policy context for the global time-entry boundary.
+ * Employees never reach it (their boundary is `/self/time-entries`). PM scope is
+ * project ownership; resource-manager scope reuses the canonical org chart/tree
+ * union. Organization-wide roles are still represented by the same context — the
+ * pure policy decides that they do not need either scoped set.
+ */
+async function globalTimeEntryPolicyContext(req: Request): Promise<TimeEntryPolicyContext> {
+  const role = trustedRole(req);
+  const resourceId = await actorResourceId(req);
+  const [resources, orgNodes, projects] = await Promise.all([
+    repos.resources.list(), repos.resourceOrganizations.list(), repos.projects.list(),
+  ]);
+  return {
+    role,
+    actorResourceId: resourceId,
+    managedResourceIds: resourceId ? scopeOf(resourceId, resources, orgNodes) : new Set<string>(),
+    ownedProjectIds: new Set(
+      resourceId ? projects.filter(project => project.ownerId === resourceId).map(project => project.id) : [],
+    ),
+  };
+}
+
+function sendGlobalTimeEntryDenied(
+  res: Response,
+  context: TimeEntryPolicyContext,
+  action: GlobalTimeEntryAction,
+): void {
+  res.status(403).json({ error: `Role ${context.role} cannot ${action} global time entries; use the permitted scoped workflow` });
+}
+
+apiRouter.get('/time-entries', async (req, res) => {
+  const policy = await globalTimeEntryPolicyContext(req);
+  if (!hasGlobalTimeEntryCollectionAccess(policy.role, 'read')) {
+    sendGlobalTimeEntryDenied(res, policy, 'read');
+    return;
+  }
+  if ((policy.role === 'pm' || policy.role === 'resource-manager') && !policy.actorResourceId) {
+    res.status(403).json({ error: 'The signed-in identity is not linked to a resource scope' });
+    return;
+  }
+  const entries = await repos.timeEntries.list();
+  res.json(entries.filter(entry => canAccessGlobalTimeEntry(policy, entry, 'read')));
+});
 apiRouter.post('/time-entries', async (req, res) => {
+  const policy = await globalTimeEntryPolicyContext(req);
+  if (!hasGlobalTimeEntryCollectionAccess(policy.role, 'write')) {
+    sendGlobalTimeEntryDenied(res, policy, 'write');
+    return;
+  }
   // B-TIME-ENTRY (status bypass): 'status'/'approvedBy'/'approvedAt' are NOT in
   // the create allow-list, so a client cannot seed an already-'Approved' entry
   // that would bypass the PUT transition whitelist + SoD and inflate the billing
   // cap accrual (accrued T&M sums APPROVED entries). The initial status is forced
   // to 'Draft' AFTER the spread (parity with POST /requests pinning its status),
   // so it can never be overridden by the body.
-  const body = pick<TimeEntry>(req.body, ['assignmentId', 'requestId', 'resourceId', 'projectId', 'date', 'hours', 'notes']);
+  // Ownership and every denormalized FK are derived below from assignmentId. A
+  // caller can never choose resourceId/requestId/projectId independently.
+  const body = pick<TimeEntry>(req.body, ['assignmentId', 'date', 'hours', 'notes']);
+  if (typeof body.assignmentId !== 'string' || body.assignmentId.length === 0) {
+    res.status(400).json({ error: 'assignmentId is required' });
+    return;
+  }
   if (!isNonNegNumber(body.hours)) {
     res.status(400).json({ error: 'hours must be a non-negative number' });
     return;
   }
-  const reqRef = await repos.requests.get(body.requestId ?? '');
+  if (!isIsoDateString(body.date)) {
+    res.status(400).json({ error: 'date must be an ISO date string' });
+    return;
+  }
+  const assignment = await repos.assignments.get(body.assignmentId);
+  const reqRef = assignment ? await repos.requests.get(assignment.requestId) : undefined;
+  const links = assignment && reqRef ? deriveTimeEntryLinks(assignment, reqRef) : undefined;
+  if (!links) {
+    res.status(400).json({ error: 'assignmentId must resolve to an assignment with a project-linked request' });
+    return;
+  }
+  if (!canAccessGlobalTimeEntry(policy, links, 'write')) {
+    sendGlobalTimeEntryDenied(res, policy, 'write');
+    return;
+  }
   const item = {
     id: `TE${newId()}`,
-    ...body,
+    date: body.date,
+    hours: body.hours,
+    notes: body.notes,
+    ...links,
     status: 'Draft',
-    projectId: body.projectId || reqRef?.projectId || '',
   } as TimeEntry;
   const created = await repos.timeEntries.create(item);
   res.json(created);
@@ -3449,13 +3815,32 @@ apiRouter.post('/time-entries', async (req, res) => {
 apiRouter.put('/time-entries/:id', async (req, res) => {
   const existing = await repos.timeEntries.get(req.params.id);
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
-  // B-TIME-ENTRY SoD: `resourceId` (the entry's OWNER) is NOT reassignable after
-  // creation. Allowing it on PUT let an owner re-own their entry to a dummy id in
-  // a Draft PUT and then approve it (the self-approval guard keyed on the
-  // now-stale owner), so it is deliberately excluded from the allow-list.
-  const body = pick<TimeEntry>(req.body, ['assignmentId', 'requestId', 'projectId', 'date', 'hours', 'status', 'notes', 'approvedBy', 'approvedAt']);
+  const policy = await globalTimeEntryPolicyContext(req);
+  if (!hasGlobalTimeEntryCollectionAccess(policy.role, 'write')) {
+    sendGlobalTimeEntryDenied(res, policy, 'write');
+    return;
+  }
+  if (!canAccessGlobalTimeEntry(policy, existing, 'write')) {
+    sendGlobalTimeEntryDenied(res, policy, 'write');
+    return;
+  }
+  // There is no explicit reopen/correction workflow. Treat the accounting input
+  // as immutable once approved rather than allowing a status-omitting PUT to
+  // rewrite hours/FKs while retaining the approval.
+  if (existing.status === 'Approved') {
+    res.status(409).json({ error: 'Approved time entries are immutable; an explicit correction workflow is required' });
+    return;
+  }
+  // Clients cannot rewrite ownership/FKs directly. `assignmentId` is the only
+  // accepted link; the coherent request/resource/project chain is derived below,
+  // and both the previous and resulting owner/project must pass object scope.
+  const body = pick<TimeEntry>(req.body, ['assignmentId', 'date', 'hours', 'status', 'notes']);
   if (body.hours !== undefined && !isNonNegNumber(body.hours)) {
     res.status(400).json({ error: 'hours must be a non-negative number' });
+    return;
+  }
+  if (body.date !== undefined && !isIsoDateString(body.date)) {
+    res.status(400).json({ error: 'date must be an ISO date string' });
     return;
   }
   // B-TIME-ENTRY: enforce the allowed status-transition whitelist. A status that
@@ -3466,25 +3851,54 @@ apiRouter.put('/time-entries/:id', async (req, res) => {
     res.status(400).json({ error: `Illegal time-entry transition: ${existing.status} -> ${body.status}` });
     return;
   }
-  if (body.status === 'Approved' && existing.status !== 'Approved') {
+  const deciding = (body.status === 'Approved' || body.status === 'Rejected') && body.status !== existing.status;
+  if (deciding && Object.keys(body).some(key => key !== 'status')) {
+    res.status(409).json({ error: 'A time-entry decision cannot modify hours, assignment, date, or notes in the same request' });
+    return;
+  }
+
+  const assignmentId = body.assignmentId ?? existing.assignmentId;
+  const assignment = await repos.assignments.get(assignmentId);
+  const request = assignment ? await repos.requests.get(assignment.requestId) : undefined;
+  const links = assignment && request ? deriveTimeEntryLinks(assignment, request) : undefined;
+  if (!links) {
+    res.status(400).json({ error: 'assignmentId must resolve to an assignment with a project-linked request' });
+    return;
+  }
+  const policyAction: GlobalTimeEntryAction = deciding ? 'decide' : 'write';
+  if (!canAccessGlobalTimeEntry(policy, existing, policyAction)
+      || !canAccessGlobalTimeEntry(policy, links, policyAction)) {
+    sendGlobalTimeEntryDenied(res, policy, policyAction);
+    return;
+  }
+
+  const patch: Partial<TimeEntry> = { ...body, ...links };
+  if (body.status === 'Approved') {
     // SEGREGATION OF DUTIES: the approver is the TRUSTED actor (never a
     // client-supplied approvedBy) and must differ from the entry's owner
     // (its resourceId) so a resource cannot approve their own time and inflate
     // accrued T&M. The actor is a USER identity, so resolve it to the user's
     // RESOURCE id before comparing — comparing the raw username/sub against a
     // resourceId is always false under real JWT auth and silently disables SoD.
-    const approverResourceId = await actorResourceId(req);
-    if (approverResourceId !== undefined && approverResourceId === existing.resourceId) {
-      res.status(403).json({ error: 'Segregation of duties: a resource cannot approve their own time entry' });
-      return;
-    }
-    body.approvedBy = actorId(req);
-    body.approvedAt = new Date().toISOString();
+    patch.approvedBy = actorId(req);
+    patch.approvedAt = new Date().toISOString();
   }
-  const updated = await repos.timeEntries.update(req.params.id, body);
+  const updated = await repos.timeEntries.update(req.params.id, patch);
   res.json(updated);
 });
 apiRouter.delete('/time-entries/:id', async (req, res) => {
+  const existing = await repos.timeEntries.get(req.params.id);
+  if (!existing) { res.status(404).json({ error: 'Not found' }); return; }
+  const policy = await globalTimeEntryPolicyContext(req);
+  if (!hasGlobalTimeEntryCollectionAccess(policy.role, 'write')
+      || !canAccessGlobalTimeEntry(policy, existing, 'write')) {
+    sendGlobalTimeEntryDenied(res, policy, 'write');
+    return;
+  }
+  if (existing.status === 'Approved') {
+    res.status(409).json({ error: 'Approved time entries are immutable; an explicit correction workflow is required' });
+    return;
+  }
   await repos.timeEntries.remove(req.params.id);
   res.status(204).send();
 });
@@ -4062,25 +4476,36 @@ interface ChangeRequestEntry {
   createdAt: string;
   // SERVER-PINNED creator (set once on POST from the verified actor; NOT in the
   // allow-list, so it can never be rewritten by a client). The self-approval
-  // guard keys on this instead of the editable `requestedBy`/`owner` fields.
+  // guard keys on this actor identity; display/person fields are not its basis.
   createdBy?: string;
   decidedBy?: string;
   decidedAt?: string;
 }
 // impactBudget/impactScheduleDays are intentionally allowed to be negative
 // (a CR can reduce scope/budget), so they are NOT validated as non-negative.
-const CHANGE_REQUEST_FIELDS = ['projectId', 'title', 'description', 'requestedBy', 'owner', 'status', 'impactScope', 'impactBudget', 'impactScheduleDays', 'priority', 'createdAt'] as const;
+// requestedBy/createdAt/createdBy are immutable server-owned provenance. `status`
+// is accepted only on PUT, where the state-machine below validates it.
+const CHANGE_REQUEST_MUTABLE_FIELDS = [
+  'projectId', 'title', 'description', 'owner', 'impactScope',
+  'impactBudget', 'impactScheduleDays', 'priority',
+] as const;
+const CHANGE_REQUEST_PUT_FIELDS = [...CHANGE_REQUEST_MUTABLE_FIELDS, 'status'] as const;
 apiRouter.get('/change-requests', async (_req, res) => { res.json(await repos.changeRequests.list()); });
 apiRouter.post('/change-requests', async (req, res) => {
-  const body = pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_FIELDS);
+  const body = pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_MUTABLE_FIELDS);
   // REFERENCE-DATA INTEGRITY (Phase D): the CR `owner` is a person reference to the
   // resources catalog (requestedBy/decidedBy are server-pinned actor ids, not names).
   const personErr = await validatePersonRefs(body as unknown as Record<string, unknown>, ['owner']);
   if (personErr) { res.status(400).json({ error: personErr }); return; }
-  // `createdBy` is pinned to the verified actor AFTER the spread so the body
-  // cannot supply/override it (it is also absent from CHANGE_REQUEST_FIELDS). It
-  // is the immutable SoD basis the approval guard below trusts.
-  const item = { id: newId(), createdAt: new Date().toISOString(), ...body, createdBy: actorId(req) } as ChangeRequestEntry;
+  // Provenance and initial state are pinned AFTER the untrusted body. A caller
+  // cannot create an already-Approved request or forge the SoD creator/requester.
+  const creator = actorId(req);
+  const item = {
+    id: newId(),
+    ...body,
+    ...pinnedChangeRequestCreateFields(creator),
+    createdAt: new Date().toISOString(),
+  } as ChangeRequestEntry;
   res.json(await repos.changeRequests.create(item));
 });
 apiRouter.put('/change-requests/:id', async (req, res) => {
@@ -4090,46 +4515,34 @@ apiRouter.put('/change-requests/:id', async (req, res) => {
   // `createdBy` SoD field; the persisted row carries it (schema + create pin), so
   // read it through the richer server-side `ChangeRequestEntry` view.
   const existing = stored as unknown as ChangeRequestEntry;
-  const body = pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_FIELDS);
+  const body = pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_PUT_FIELDS);
   // REFERENCE-DATA INTEGRITY (Phase D): validate any supplied `owner` against the
   // resources catalog. Omitted/empty owner passes (partial edits are not blocked).
   const personErr = await validatePersonRefs(body as unknown as Record<string, unknown>, ['owner']);
   if (personErr) { res.status(400).json({ error: personErr }); return; }
-  const merged = { ...existing, ...body } as ChangeRequestEntry;
-  // CR APPROVAL — SEGREGATION OF DUTIES + AUTHORIZATION. Approved CRs feed
-  // effectiveBudgetForProject (finance.util), so unilateral self-approval lets a
-  // requester inflate their own project budget and mask an over-budget state.
-  // Mirror the approval-engine / time-entry SoD: on the transition INTO
-  // 'Approved', (1) only delivery-executive/admin may approve, and (2) the
-  // approver may be neither the CR's requester nor its owner.
-  const approving = merged.status === 'Approved' && existing.status !== 'Approved';
-  if (approving) {
-    const role = trustedRole(req);
-    if (role !== 'delivery-executive' && role !== 'admin') {
-      res.status(403).json({ error: 'Only delivery-executive or admin may approve a change request' });
-      return;
-    }
-    // SoD basis is the SERVER-PINNED creator (`createdBy`), NOT the editable
-    // `requestedBy`/`owner` (a requester could otherwise rewrite those in a Draft
-    // PUT to a dummy id and then self-approve). Fall back to the legacy fields
-    // only for CRs created before `createdBy` existed, so legitimate flows for
-    // older rows keep their guard.
-    const decider = actorId(req);
-    const creator = existing.createdBy;
-    const selfApproving = creator !== undefined
-      ? decider === creator
-      : decider === existing.requestedBy || decider === existing.owner;
-    if (selfApproving) {
-      res.status(403).json({ error: 'Segregation of duties: the change request creator cannot approve their own change request' });
-      return;
-    }
+  const decider = actorId(req);
+  const creator = existing.createdBy ?? existing.requestedBy;
+  const changesDomainFields = CHANGE_REQUEST_MUTABLE_FIELDS.some(field => body[field] !== undefined);
+  const policyError = changeRequestMutationError({
+    currentStatus: existing.status,
+    requestedStatus: body.status,
+    role: trustedRole(req),
+    actorId: decider,
+    creatorId: creator,
+    changesDomainFields,
+  });
+  if (policyError) {
+    res.status(policyError.status).json({ error: policyError.error });
+    return;
   }
+  const merged = { ...existing, ...body } as ChangeRequestEntry;
   // CR DECISION: when a CR reaches a terminal decision, stamp who/when (server
   // side, from the verified actor) if not already recorded. decidedBy/decidedAt
   // are not client-settable fields, so they cannot be forged via the body.
-  if ((merged.status === 'Approved' || merged.status === 'Rejected') && !merged.decidedAt) {
+  const transitioned = body.status !== undefined && body.status !== existing.status;
+  if (transitioned && (merged.status === 'Approved' || merged.status === 'Rejected')) {
     merged.decidedAt = new Date().toISOString();
-    merged.decidedBy = actorId(req);
+    merged.decidedBy = decider;
   }
   const updated = await repos.changeRequests.update(req.params.id, merged);
   res.json(updated);
@@ -4159,21 +4572,34 @@ interface ContractEntry { id: string; customerId: string; name: string; type: st
 
 interface OrderEntry { id: string; contractId: string; type: string; partnerId: string; amount: number; currency: string; status: string; orderDate: string; invoiceNumber?: string; invoiceDate?: string }
 
-// INVOICE NUMBERING: sequential server-side counter for compliant invoice
-// numbers (INV-<year>-<zero-padded seq>). The seeded invoiced order O1 already
-// holds INV-2026-0001, so the next issued invoice is 0002.
-const INVOICE_YEAR = 2026;
-let invoiceSeq = 1;
-function nextInvoiceNumber(): string {
-  return `INV-${INVOICE_YEAR}-${String(++invoiceSeq).padStart(4, '0')}`;
-}
 /** SERVER-SET: assign a sequential invoice number + date when an order first
  *  becomes 'Invoiced' and none is set yet. Mutates the order in place. */
-function applyInvoiceNumbering(order: OrderEntry): void {
+function applyInvoiceNumbering(order: OrderEntry, invoiceNumber: string, invoiceDate: string): void {
   if (order.status === 'Invoiced' && !order.invoiceNumber) {
-    order.invoiceNumber = nextInvoiceNumber();
-    order.invoiceDate = new Date().toISOString().slice(0, 10);
+    order.invoiceNumber = invoiceNumber;
+    order.invoiceDate = invoiceDate.slice(0, 10);
   }
+}
+
+type CompoundOrderCreator = (order: Order) => Promise<Order>;
+
+/**
+ * Keep invoice allocation and all repository writes in one serialized operation.
+ * PostgreSQL runs the callback under a per-year transaction advisory lock; the
+ * in-memory adapter uses the coordinator's keyed queue. The next value is scanned
+ * from persisted orders inside that boundary, so a rollback/compensating delete
+ * naturally makes the same number available to an idempotent retry.
+ */
+async function withCommercialWriteTransaction<R>(
+  invoiceDate: string,
+  operation: (transactionRepos: Repositories, createOrder: CompoundOrderCreator) => Promise<R>,
+): Promise<R> {
+  return invoiceNumbers.run(invoiceDate, (transactionRepos, invoiceNumber) =>
+    operation(transactionRepos, async order => {
+      const item = { ...order } as unknown as OrderEntry;
+      applyInvoiceNumbering(item, invoiceNumber, invoiceDate);
+      return transactionRepos.orders.create(item as unknown as Order);
+    }));
 }
 
 interface OrderLineEntry { id: string; orderId: string; projectId: string; description: string; amount: number }
@@ -4248,12 +4674,10 @@ apiRouter.post('/orders', async (req, res) => {
   if (dateErr) { res.status(400).json({ error: dateErr }); return; }
   const item = { id: newId(), partnerId: '', ...body } as OrderEntry;
   // INVOICE NUMBERING: an order created directly as 'Invoiced' gets a number now.
-  // Serialize on the shared invoice-sequence so the ++invoiceSeq increment is
-  // atomic relative to concurrent order writes (no burned/duplicated sequence).
-  const created = await withLock('invoice-seq', async () => {
-    applyInvoiceNumbering(item);
-    return repos.orders.create(item as unknown as Order);
-  });
+  // Allocation and persistence share the per-year transaction boundary.
+  const invoiceDate = new Date().toISOString();
+  const created = await withCommercialWriteTransaction(invoiceDate, (_transactionRepos, createOrder) =>
+    createOrder(item as unknown as Order));
   res.json(created);
 });
 apiRouter.put('/orders/:id', async (req, res) => {
@@ -4270,16 +4694,15 @@ apiRouter.put('/orders/:id', async (req, res) => {
   // INVOICE NUMBERING: assign a sequential number/date on transition to
   // 'Invoiced'. invoiceNumber/invoiceDate are not in ORDER_FIELDS, so the
   // client can never set them; they are strictly server-assigned.
-  // B-CONCURRENCY: serialize the assign-and-persist for THIS order on the shared
-  // invoice-sequence key and re-read the order inside the lock, so two
-  // concurrent PUTs transitioning the same order to 'Invoiced' assign exactly
-  // one number (the second sees the number already set) — no gap in the
-  // strictly-sequential INV-YEAR-#### series and no double-advanced counter.
-  const updated = await withLock('invoice-seq', async () => {
-    const current = (await repos.orders.get(req.params.id)) as OrderEntry | undefined;
+  // B-CONCURRENCY: allocation, fresh read and update share the same per-year
+  // transaction. A second worker sees the first worker's committed number and
+  // therefore keeps it instead of allocating another.
+  const invoiceDate = new Date().toISOString();
+  const updated = await invoiceNumbers.run(invoiceDate, async (transactionRepos, invoiceNumber) => {
+    const current = (await transactionRepos.orders.get(req.params.id)) as OrderEntry | undefined;
     const merged = { ...(current ?? (existing as unknown as OrderEntry)), ...body };
-    applyInvoiceNumbering(merged);
-    return repos.orders.update(req.params.id, merged as Partial<Order>);
+    applyInvoiceNumbering(merged, invoiceNumber, invoiceDate);
+    return transactionRepos.orders.update(req.params.id, merged as Partial<Order>);
   });
   res.json(updated);
 });
@@ -4289,6 +4712,89 @@ apiRouter.delete('/orders/:id', async (req, res) => {
 });
 
 const ORDER_LINE_FIELDS = ['orderId', 'projectId', 'description', 'amount'] as const;
+
+/**
+ * Atomic order + project-imputation creation. The client supplies one stable
+ * idempotency key for the form submission; retries resolve the same deterministic
+ * order/line ids and therefore cannot create duplicate records.
+ */
+apiRouter.post('/orders/with-line', async (req, res, next) => {
+  const idempotencyKey = (req.body as Record<string, unknown> | undefined)?.['idempotencyKey'];
+  if (!isValidCommercialIdempotencyKey(idempotencyKey)) {
+    res.status(400).json({ error: 'idempotencyKey must be 8-128 safe ASCII characters' });
+    return;
+  }
+
+  const rawOrder = (req.body as { order?: unknown } | undefined)?.order;
+  const rawLine = (req.body as { line?: unknown } | undefined)?.line;
+  const orderBody = pick<OrderEntry>(rawOrder, ORDER_FIELDS);
+  const lineBody = pick<OrderLineEntry>(rawLine, ['projectId', 'description', 'amount']);
+  const missingOrderField = ['contractId', 'type', 'amount', 'currency', 'status', 'orderDate']
+    .find(field => orderBody[field as keyof OrderEntry] === undefined);
+  const missingLineField = ['projectId', 'description', 'amount']
+    .find(field => lineBody[field as keyof OrderLineEntry] === undefined);
+  if (missingOrderField || missingLineField) {
+    res.status(400).json({ error: `${missingOrderField ?? missingLineField} is required` });
+    return;
+  }
+  if (!['Customer', 'Purchase'].includes(orderBody.type as string)) {
+    res.status(400).json({ error: 'type must be Customer or Purchase' });
+    return;
+  }
+  if (!['Open', 'Confirmed', 'Invoiced', 'Paid'].includes(orderBody.status as string)) {
+    res.status(400).json({ error: 'status is invalid' });
+    return;
+  }
+  const badOrderField = findInvalidNumericField(orderBody, ['amount']);
+  if (badOrderField) { res.status(400).json({ error: `${badOrderField} must be a non-negative number` }); return; }
+  const badLineField = findInvalidNumericField(lineBody, ['amount']);
+  if (badLineField) { res.status(400).json({ error: `${badLineField} must be a non-negative number` }); return; }
+  const fkError = await validateOrder(orderBody);
+  if (fkError) { res.status(400).json({ error: fkError }); return; }
+  if (!(await existsRepo(repos.projects, lineBody.projectId))) {
+    res.status(400).json({ error: 'projectId must reference an existing project' });
+    return;
+  }
+  const dateErr = validateDateFields(orderBody as Record<string, unknown>, ['orderDate']);
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
+
+  const normalizedOrder = {
+    contractId: orderBody.contractId,
+    type: orderBody.type,
+    amount: orderBody.amount,
+    currency: orderBody.currency,
+    status: orderBody.status,
+    orderDate: orderBody.orderDate,
+    ...(orderBody.type === 'Purchase' ? { partnerId: orderBody.partnerId } : {}),
+  } as OrderWithLineRequest['order'];
+  const request: OrderWithLineRequest = {
+    idempotencyKey,
+    order: normalizedOrder,
+    line: {
+      projectId: lineBody.projectId,
+      description: lineBody.description,
+      amount: lineBody.amount,
+    } as OrderWithLineRequest['line'],
+  };
+
+  try {
+    const result = await withLock(`order-request:${idempotencyKey}`, () =>
+      withCommercialWriteTransaction(new Date().toISOString(), (transactionRepos, createOrder) =>
+        createOrderWithLineWrite({
+          orders: transactionRepos.orders,
+          orderLines: transactionRepos.orderLines,
+          createOrder,
+        }, request)));
+    res.json(result);
+  } catch (error) {
+    if (error instanceof CommercialWriteError) {
+      res.status(error.status).json({ error: error.message });
+      return;
+    }
+    next(error);
+  }
+});
+
 apiRouter.get('/order-lines', async (_req, res) => { res.json(await repos.orderLines.list()); });
 apiRouter.post('/order-lines', async (req, res) => {
   const body = pick<OrderLineEntry>(req.body, ORDER_LINE_FIELDS);
@@ -4352,24 +4858,29 @@ interface BillingPlanEntry {
 }
 
 const BILLING_PLAN_FIELDS = ['contractId', 'projectId', 'type', 'label', 'milestoneId', 'recurrence', 'expectedDate', 'amount', 'capAmount', 'progressPct', 'markupPct', 'retentionPct', 'taxRatePct', 'paymentTermsDays', 'currency', 'status', 'issuedDate', 'dueDate', 'paidDate', 'orderId', 'notes'] as const;
-const BILLING_PLAN_NUMERIC_FIELDS = ['amount', 'capAmount', 'progressPct', 'markupPct', 'retentionPct', 'taxRatePct', 'paymentTermsDays'] as const;
 
-/**
- * Validate billing-plan numeric fields. `amount` may be negative ONLY when the
- * item is a CreditNote (nota di credito); every other numeric field, and a
- * non-CreditNote amount, must be a finite non-negative number. Returns the
- * offending field name, or null when all present fields are valid.
- */
-function findInvalidBillingNumericField(body: Partial<BillingPlanEntry>, type: BillingType | undefined): string | null {
-  if (body.amount !== undefined) {
-    const amountOk = type === 'CreditNote'
-      ? typeof body.amount === 'number' && Number.isFinite(body.amount)
-      : isNonNegNumber(body.amount);
-    if (!amountOk) return 'amount';
+/** Referential rules shared by billing create and fully-merged update paths. */
+async function validateBillingPlanReferences(item: BillingPlanEntry): Promise<string | null> {
+  const contract = await repos.contracts.get(item.contractId);
+  if (!contract) return 'contractId must reference an existing contract';
+  if (item.projectId) {
+    const project = await repos.projects.get(item.projectId);
+    if (!project) return 'projectId must reference an existing project';
+    if (project.contractId !== item.contractId) return 'projectId must belong to the billing contract';
   }
-  for (const field of BILLING_PLAN_NUMERIC_FIELDS) {
-    if (field === 'amount') continue;
-    if (body[field] !== undefined && !isNonNegNumber(body[field])) return field;
+  if (item.type === 'Milestone' && item.milestoneId) {
+    const milestone = await repos.milestones.get(item.milestoneId);
+    if (!milestone) return 'milestoneId must reference an existing milestone';
+    if (item.projectId && milestone.projectId !== item.projectId) return 'milestoneId must belong to the billing project';
+    const milestoneProject = await repos.projects.get(milestone.projectId);
+    if (!milestoneProject || milestoneProject.contractId !== item.contractId) {
+      return 'milestoneId must belong to a project on the billing contract';
+    }
+  }
+  if (item.orderId) {
+    const order = await repos.orders.get(item.orderId);
+    if (!order) return 'orderId must reference an existing order';
+    if (order.contractId !== item.contractId) return 'orderId must belong to the billing contract';
   }
   return null;
 }
@@ -4537,21 +5048,81 @@ function progressAutoAdvance(
   return {};
 }
 
+/** One server-owned, transaction-backed invoice generation operation. */
+function generateInvoiceForBillingItem(id: string, issuedDate: string): Promise<BillingInvoiceResult> {
+  return withLock(`billing:${id}`, () =>
+    withCommercialWriteTransaction(issuedDate, (transactionRepos, createInvoicedOrder) =>
+      generateBillingInvoiceWrite({
+        billingPlanItems: transactionRepos.billingPlanItems,
+        orders: transactionRepos.orders,
+        orderLines: transactionRepos.orderLines,
+        projects: transactionRepos.projects,
+        milestones: transactionRepos.milestones,
+        createInvoicedOrder,
+      }, id, issuedDate)));
+}
+
+apiRouter.post('/billing-plan-items/:id/generate-invoice', async (req, res, next) => {
+  const issuedDate = (req.body as Record<string, unknown> | undefined)?.['issuedDate'] ?? new Date().toISOString();
+  const dateErr = validateDateFields({ issuedDate }, ['issuedDate']);
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
+  try {
+    res.json(await generateInvoiceForBillingItem(req.params.id, issuedDate as string));
+  } catch (error) {
+    if (error instanceof CommercialWriteError) {
+      res.status(error.status).json({ error: error.message });
+      return;
+    }
+    next(error);
+  }
+});
+
+/**
+ * Batch semantics are deliberately per-item: input ids are de-duplicated,
+ * processed in request order (so invoice numbers are predictable), and one
+ * failure does not roll back invoices already committed for other conditions.
+ * Retrying the same batch is safe because each individual operation is
+ * idempotent. HTTP 207 exposes partial completion without turning it into a
+ * transport error for HttpClient.
+ */
+apiRouter.post('/billing-plan-items/generate-invoices', async (req, res) => {
+  const rawIds = (req.body as Record<string, unknown> | undefined)?.['ids'];
+  const issuedDate = (req.body as Record<string, unknown> | undefined)?.['issuedDate'] ?? new Date().toISOString();
+  if (!Array.isArray(rawIds) || rawIds.length === 0 || rawIds.length > 100 || rawIds.some(id => typeof id !== 'string' || !id)) {
+    res.status(400).json({ error: 'ids must be an array of 1-100 non-empty strings' });
+    return;
+  }
+  const dateErr = validateDateFields({ issuedDate }, ['issuedDate']);
+  if (dateErr) { res.status(400).json({ error: dateErr }); return; }
+
+  const ids = [...new Set(rawIds as string[])];
+  const results: BillingInvoiceResult[] = [];
+  const failures: { id: string; status: number; error: string }[] = [];
+  for (const id of ids) {
+    try {
+      results.push(await generateInvoiceForBillingItem(id, issuedDate as string));
+    } catch (error) {
+      failures.push(error instanceof CommercialWriteError
+        ? { id, status: error.status, error: error.message }
+        : { id, status: 500, error: 'Invoice generation failed' });
+    }
+  }
+  res.status(failures.length ? 207 : 200).json({ results, failures });
+});
+
 apiRouter.get('/billing-plan-items', async (_req, res) => { res.json(await repos.billingPlanItems.list()); });
 apiRouter.post('/billing-plan-items', async (req, res) => {
   const body = pick<BillingPlanEntry>(req.body, BILLING_PLAN_FIELDS);
-  const bad = findInvalidBillingNumericField(body, body.type);
-  if (bad) {
-    const rule = bad === 'amount' ? 'amount must be a non-negative number (negative allowed only for CreditNote)' : `${bad} must be a non-negative number`;
-    res.status(400).json({ error: rule });
-    return;
-  }
   const curErr = await validateCurrency(body);
   if (curErr) { res.status(400).json({ error: curErr }); return; }
   // Phase G: every billing date (expected/issued/due/paid) must be ISO when supplied.
   const dateErr = validateDateFields(body as Record<string, unknown>, ['expectedDate', 'issuedDate', 'dueDate', 'paidDate']);
   if (dateErr) { res.status(400).json({ error: dateErr }); return; }
   const item = { id: newId(), ...body } as BillingPlanEntry;
+  const validationErr = billingPlanValidationError(item as unknown as BillingPlanItem);
+  if (validationErr) { res.status(400).json({ error: validationErr }); return; }
+  const referenceErr = await validateBillingPlanReferences(item);
+  if (referenceErr) { res.status(400).json({ error: referenceErr }); return; }
   // #14 CAPPED not-to-exceed: reject an overcap amount on create; otherwise apply
   // any cap-breach flag the accrued-T&M check produced before persisting.
   const capResult = await enforceCappedBilling(item);
@@ -4566,15 +5137,6 @@ apiRouter.put('/billing-plan-items/:id', async (req, res) => {
   const existing = await repos.billingPlanItems.get(req.params.id);
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   const body = pick<BillingPlanEntry>(req.body, BILLING_PLAN_FIELDS);
-  // Resolve the effective type for the negative-amount rule: an incoming type
-  // overrides, otherwise fall back to the stored item's type.
-  const effectiveType = body.type ?? (existing as unknown as BillingPlanEntry).type;
-  const bad = findInvalidBillingNumericField(body, effectiveType);
-  if (bad) {
-    const rule = bad === 'amount' ? 'amount must be a non-negative number (negative allowed only for CreditNote)' : `${bad} must be a non-negative number`;
-    res.status(400).json({ error: rule });
-    return;
-  }
   const curErr = await validateCurrency(body);
   if (curErr) { res.status(400).json({ error: curErr }); return; }
   // Phase G: validate any supplied billing date (expected/issued/due/paid) as ISO.
@@ -4592,13 +5154,18 @@ apiRouter.put('/billing-plan-items/:id', async (req, res) => {
     const prev = fresh as unknown as BillingPlanEntry;
     // Merge the incoming patch onto the stored item so automations see the
     // effective post-update state (effectiveType already resolved above).
-    const merged = { ...prev, ...body, type: effectiveType } as BillingPlanEntry;
+    const merged = { ...prev, ...body, type: body.type ?? prev.type } as BillingPlanEntry;
 
     // #14 PROGRESS auto-advance: when progressPct CHANGES and reaches 100%, advance
     // a still-'Planned' Progress item to 'Ready' (same trigger pattern as the
     // milestone→'Ready' flip). Idempotent — fold the status into the merged item
     // first so the cap check below also sees the advanced status.
     Object.assign(merged, progressAutoAdvance(merged, body.progressPct, prev.progressPct));
+
+    const validationErr = billingPlanValidationError(merged as unknown as BillingPlanItem);
+    if (validationErr) return { status: 400, body: { error: validationErr } };
+    const referenceErr = await validateBillingPlanReferences(merged);
+    if (referenceErr) return { status: 400, body: { error: referenceErr } };
 
     // #14 CAPPED not-to-exceed: reject an overcap amount; otherwise apply any
     // accrued-T&M cap-breach flag (or clear a stale one) onto the merged item.
@@ -4679,9 +5246,10 @@ const REQUIRED_NEGOTIATED_RATE_FIELDS = ['role', 'currency', 'billRate'] as cons
  * sales negotiate early. Only a role absent from the catalog too (a genuine
  * typo) is rejected.
  *
- * CURRENCY CHECK (this branch's closing work) — reuses the SAME
- * `validateCurrency` helper `/contracts`, `/orders` and `/rate-cards` already
- * call — no second currency rule. Before this check existed, `currency: ''`
+ * CURRENCY CHECK — first reuses the SAME `validateCurrency` helper `/contracts`,
+ * `/orders` and `/rate-cards` call, then applies the negotiated-rate contract:
+ * rates must be denominated in reporting base currency (EUR). Before this check
+ * existed, `currency: ''`
  * was accepted by every rule below untouched (the null-rejection loop only
  * ever caught an explicit `null`) and produced a row that LOOKED saved but
  * was silently never read again: `sellRateFor`
@@ -4690,7 +5258,8 @@ const REQUIRED_NEGOTIATED_RATE_FIELDS = ['role', 'currency', 'billRate'] as cons
  * in resolution. The null-rejection loop below now treats `''` the same as
  * `null` for every required column (closing the empty-string gap for `role`
  * too, not only `currency`), and this step additionally rejects a non-empty
- * but unconfigured currency code.
+ * but unconfigured currency code. A configured non-base code is now rejected
+ * coherently instead of being saved and then silently ignored by sellRateFor.
  *
  * ROUND 2 (coordinator review, critical) — OMITTED is not the same bug as
  * NULL. Every check below the null loop reads `body.field === undefined ?
@@ -4799,12 +5368,13 @@ async function validateNegotiatedRate(
     if (roleErr) return roleErr;
   }
 
-  // 5. Currency validity — must be a configured fx-rates currency code (see
-  // doc comment above), via the same `validateCurrency` helper /contracts,
-  // /orders and /rate-cards already call.
+  // 5. Currency validity + interpretation contract. It must be configured, and
+  // negotiated rates must use base currency so every accepted row is consumable.
   const currency = body.currency === undefined ? existing?.currency : body.currency;
   const curErr = await validateCurrency({ currency });
   if (curErr) return curErr;
+  const negotiatedCurrencyErr = negotiatedRateCurrencyError(currency);
+  if (negotiatedCurrencyErr) return negotiatedCurrencyErr;
 
   // 6. Same-key uniqueness on (contractId|projectId, role, currency), self-excluded on PUT.
   if (role !== undefined && currency !== undefined) {
@@ -5119,15 +5689,19 @@ interface DecisionOutcome { status: number; body: unknown; allocation?: { refId:
  * `split(':')` — that helper anchors on the LAST colon and validates the month,
  * so an id that merely contains a colon can never be mistaken for a month row.
  *
- * Reads only, so it takes NO lock: it runs inside the caller's
- * `approval:<id>` section, and acquiring the `org-chart` lock (or any other)
+ * Reads only, so it takes NO lock: it runs inside the caller's serialized
+ * approval command (generic `approval:<id>` or B3 month transaction), and
+ * acquiring the `org-chart` lock (or any other)
  * from in there would invent a lock order no other call site uses — see the
  * ordering note on the `/resources` PUT handler.
  */
-async function allocationTargetResourceId(ar: ApprovalRequestEntry): Promise<string | undefined> {
+async function allocationTargetResourceId(
+  ar: ApprovalRequestEntry,
+  repositorySet: Repositories = repos,
+): Promise<string | undefined> {
   if (ar.kind !== 'Allocation') return undefined;
   const assignmentId = parseMonthRowId(ar.refId)?.assignmentId ?? ar.refId;
-  const assignment = await repos.assignments.get(assignmentId);
+  const assignment = await repositorySet.assignments.get(assignmentId);
   return assignment?.resourceId;
 }
 
@@ -5139,19 +5713,20 @@ async function allocationTargetResourceId(ar: ApprovalRequestEntry): Promise<str
  * approval kind (TimeEntry, Invoice, ChangeRequest, ..., Allocation), not just
  * allocations: the body below was MOVED here unchanged, never rewritten.
  *
- * B-CONCURRENCY: serializes the read-decide-write under `approval:<id>`, and
- * re-reads INSIDE the lock so the decision applies to the freshest state.
+ * B-CONCURRENCY: the caller supplies the serialized boundary. Generic approvals
+ * use `approval:<id>`; B3 allocation approvals use the month lifecycle executor
+ * so this update and the governed month transition share one transaction.
  */
-async function decideOneApproval(
+async function decideOneApprovalInRepositories(
   req: Request,
   approvalId: string,
   decision: 'Approved' | 'Rejected',
   note: string | undefined,
   ctx: DeciderContext,
+  repositorySet: Repositories,
 ): Promise<DecisionOutcome> {
   const { by, decidingRole, deciderResourceId } = ctx;
-  return withLock(`approval:${approvalId}`, async (): Promise<DecisionOutcome> => {
-    const ar = await repos.approvalRequests.get(approvalId) as ApprovalRequestEntry | undefined;
+    const ar = await repositorySet.approvalRequests.get(approvalId) as ApprovalRequestEntry | undefined;
     if (ar === undefined) return { status: 404, body: { error: 'Not found' } };
     if (ar.status !== 'Pending') return { status: 400, body: { error: `approval request already ${ar.status}` } };
     // SoD: the requester may never approve/reject their own item. Meaningful now
@@ -5231,7 +5806,7 @@ async function decideOneApproval(
     // Inbox mirror this rule.
     //
     // LOCKING: the two list reads below take NO lock. They are reads, and this
-    // runs inside `withLock('approval:<id>')` — acquiring `org-chart` or
+    // runs inside the caller's approval/month command — acquiring `org-chart` or
     // `org-tree` here would create an `approval:` -> `org-*` order that no other
     // call site uses (see the lock-order notes on `PUT /resources/:id` and
     // `ORG_TREE_LOCK`) and is exactly how a deadlock gets introduced. It also
@@ -5243,14 +5818,17 @@ async function decideOneApproval(
     let scopeMatch = roleMatch;
     // Rule 2 — accountable-manager, role-independent (see above).
     let accountableMatch = false;
-    const targetResourceId = await allocationTargetResourceId(ar);
+    const targetResourceId = await allocationTargetResourceId(ar, repositorySet);
     // The scope lookup is skipped for an actor `roleMatch && globalRole` already
     // admits unconditionally (an `admin`, or a global role on a step routed to
     // it): nothing below could change the outcome, so it would be pure I/O.
     if (targetResourceId !== undefined && !(roleMatch && globalRole)) {
-      const target = await repos.resources.get(targetResourceId);
+      const target = await repositorySet.resources.get(targetResourceId);
       if (target !== undefined) {
-        const [resources, nodes] = await Promise.all([repos.resources.list(), repos.resourceOrganizations.list()]);
+        const [resources, nodes] = await Promise.all([
+          repositorySet.resources.list(),
+          repositorySet.resourceOrganizations.list(),
+        ]);
         const { managerIds, roleFallback } = accountableApproversOf(target, resources, nodes, todayIso());
         accountableMatch = deciderResourceId !== undefined && managerIds.has(deciderResourceId);
         if (roleMatch) scopeMatch = roleFallback || accountableMatch;
@@ -5294,7 +5872,7 @@ async function decideOneApproval(
       ar.currentStep = ar.currentStep + 1;
       if (ar.currentStep >= ar.steps.length) ar.status = 'Approved';
     }
-    const updated = await repos.approvalRequests.update(ar.id, ar as ApprovalRequest);
+    const updated = await repositorySet.approvalRequests.update(ar.id, ar as ApprovalRequest);
     return {
       status: 200,
       body: updated ?? ar,
@@ -5306,7 +5884,23 @@ async function decideOneApproval(
         ? { refId: ar.refId, decided: ar.status as 'Approved' | 'Rejected' }
         : undefined,
     };
-  });
+}
+
+async function decideOneApproval(
+  req: Request,
+  approvalId: string,
+  decision: 'Approved' | 'Rejected',
+  note: string | undefined,
+  ctx: DeciderContext,
+): Promise<DecisionOutcome> {
+  return withLock(`approval:${approvalId}`, () => decideOneApprovalInRepositories(
+    req,
+    approvalId,
+    decision,
+    note,
+    ctx,
+    repos,
+  ));
 }
 
 /**
@@ -5317,9 +5911,9 @@ async function decideOneApproval(
  * migrated database backfilled under it, so nothing in flight is orphaned (see
  * the branch's own comment for why the assignment write alone was a no-op).
  *
- * Called AFTER the `approval:<id>` lock has been released, under the fixed
- * res -> req lock order used by every other assignment mutation, so this can
- * never deadlock against a concurrent POST/PUT/DELETE on /assignments.
+ * Called after the governing approval/month command has committed (or, for a
+ * legacy bare ref, after `approval:<id>` is released), under the fixed res -> req
+ * lock order used by every other assignment mutation.
  *
  * `deferAggregates` lets the BATCH endpoint skip the per-item follow-up work and
  * do it once per distinct entity at the end (spec §4.4): approving twelve months
@@ -5338,6 +5932,7 @@ async function applyAllocationDecision(
   decided: 'Approved' | 'Rejected',
   note: string | undefined,
   deferAggregates = false,
+  committedMonth?: Pick<AllocationMonthDecisionCommit, 'before' | 'after'>,
 ): Promise<{ resourceId: string; requestId: string; assignmentId: string } | undefined> {
   const parsed = parseMonthRowId(refId);
   const newStatus = decisionToAssignmentStatus(decided);
@@ -5433,7 +6028,7 @@ async function applyAllocationDecision(
     return { resourceId: assig.resourceId, requestId: assig.requestId, assignmentId: assig.id };
   }
 
-  const row = await repos.assignmentMonths.get(refId);
+  const row = committedMonth?.before ?? await repos.assignmentMonths.get(refId);
   if (!row) return undefined;
   const assig = await repos.assignments.get(row.assignmentId);
   if (!assig) return undefined;
@@ -5453,7 +6048,7 @@ async function applyAllocationDecision(
   // column NULL, the in-memory store drops the key) — `undefined` would mean
   // "leave untouched". Cast just this value so a typo in `status` is still
   // type-checked; every READ path normalizes the cleared column back to absent.
-  const rowAfter = await repos.assignmentMonths.update(row.id, {
+  const rowAfter = committedMonth?.after ?? await repos.assignmentMonths.update(row.id, {
     status: newStatus, approverNote: (note ?? null) as unknown as undefined,
   } as Partial<AssignmentMonth>);
 
@@ -5502,6 +6097,52 @@ async function applyAllocationDecision(
   return { resourceId: assig.resourceId, requestId: assig.requestId, assignmentId: assig.id };
 }
 
+/**
+ * B3 decision path: approval-engine mutation + month transition share the same
+ * per-month command, PostgreSQL transaction and approvalId CAS. Auditing,
+ * substitution give-back and aggregates remain post-commit best-effort effects.
+ */
+async function decideVersionedAllocationMonth(
+  req: Request,
+  monthId: string,
+  approvalId: string,
+  decision: 'Approved' | 'Rejected',
+  note: string | undefined,
+  ctx: DeciderContext,
+  deferAggregates = false,
+): Promise<{
+  outcome: DecisionOutcome;
+  touched?: { resourceId: string; requestId: string; assignmentId: string };
+}> {
+  const atomic = await allocationLifecycle.run(monthId, transactionRepos =>
+    decideCurrentAllocationMonth(
+      transactionRepos,
+      monthId,
+      approvalId,
+      decision,
+      note,
+      () => decideOneApprovalInRepositories(
+        req,
+        approvalId,
+        decision,
+        note,
+        ctx,
+        transactionRepos,
+      ),
+    ));
+  if (!atomic.commit) return { outcome: atomic.outcome };
+
+  const touched = await applyAllocationDecision(
+    req,
+    monthId,
+    decision,
+    note,
+    deferAggregates,
+    atomic.commit,
+  );
+  return { outcome: atomic.outcome, touched };
+}
+
 apiRouter.put('/approval-requests/:id/decision', async (req, res) => {
   // Validate the decision up front (cheap, no shared state).
   const body = pick<{ decision: string; note?: string }>(req.body, ['decision', 'note']);
@@ -5531,16 +6172,29 @@ apiRouter.put('/approval-requests/:id/decision', async (req, res) => {
   // above, also computed before the lock).
   const deciderResourceId = await actorResourceId(req);
 
-  const result = await decideOneApproval(req, req.params.id, decision, body.note, { by, decidingRole, deciderResourceId });
+  const ctx: DeciderContext = { by, decidingRole, deciderResourceId };
+  const approval = await repos.approvalRequests.get(req.params.id);
+  const monthRef = approval?.kind === 'Allocation' ? parseMonthRowId(approval.refId) : undefined;
+  const result = monthRef
+    ? (await decideVersionedAllocationMonth(
+      req,
+      approval!.refId,
+      req.params.id,
+      decision,
+      body.note,
+      ctx,
+    )).outcome
+    : await decideOneApproval(req, req.params.id, decision, body.note, ctx);
 
-  // POST-DECISION EFFECT (Allocation): applied AFTER the `approval:<id>` lock
-  // has been released — never nested inside it. Executes at most once per
+  // LEGACY bare-assignment Allocation effect: applied AFTER `approval:<id>` has
+  // been released. B3 month effects were already paired atomically above.
+  // Executes at most once per
   // decision: `ar.status` starts 'Pending' and `decideOneApproval` only ever
   // sets it to 'Approved'/'Rejected' once (a retried decision 400s on the
   // `ar.status !== 'Pending'` guard, so `result.allocation` is undefined then).
   // Same note the step recorded; no deferral — a single decision has exactly
   // one resource/request to recompute.
-  if (result.status === 200 && result.allocation) {
+  if (monthRef === undefined && result.status === 200 && result.allocation) {
     await applyAllocationDecision(req, result.allocation.refId, result.allocation.decided, body.note);
   }
   res.status(result.status).json(result.body);
@@ -5613,19 +6267,25 @@ apiRouter.post('/allocation-approvals/decide', async (req, res) => {
         if (row === undefined) { results.push({ assignmentMonthId: id, status: 'Error', error: 'Not found' }); continue; }
         if (row.approvalId === undefined) { results.push({ assignmentMonthId: id, status: 'Error', error: 'month has no pending approval' }); continue; }
 
-        const outcome = await decideOneApproval(req, row.approvalId, decision, note, ctx);
-        if (outcome.status !== 200) {
-          const message = (outcome.body as { error?: string } | undefined)?.error ?? `decision failed (${outcome.status})`;
+        const versioned = await decideVersionedAllocationMonth(
+          req,
+          id,
+          row.approvalId,
+          decision,
+          note,
+          ctx,
+          true,
+        );
+        if (versioned.outcome.status !== 200) {
+          const message = (versioned.outcome.body as { error?: string } | undefined)?.error
+            ?? `decision failed (${versioned.outcome.status})`;
           results.push({ assignmentMonthId: id, status: 'Error', error: message });
           continue;
         }
-        if (outcome.allocation) {
-          const touched = await applyAllocationDecision(req, outcome.allocation.refId, outcome.allocation.decided, note, true);
-          if (touched) {
-            touchedAssignments.add(touched.assignmentId);
-            touchedResources.add(touched.resourceId);
-            touchedRequests.add(touched.requestId);
-          }
+        if (versioned.touched) {
+          touchedAssignments.add(versioned.touched.assignmentId);
+          touchedResources.add(versioned.touched.resourceId);
+          touchedRequests.add(versioned.touched.requestId);
         }
         results.push({ assignmentMonthId: id, status: decision });
       } catch (err) {
@@ -5703,13 +6363,15 @@ apiRouter.get('/audit-logs', async (req, res) => {
   res.json(sorted.slice(offset, offset + limit));
 });
 apiRouter.get('/storage-status', (_req, res) => res.json({
-  provider: process.env['DATABASE_URL'] ? 'postgresql' : 'memory',
-  persistent: Boolean(process.env['DATABASE_URL']),
+  provider: persistenceConfig.adapter,
+  persistent: persistenceConfig.adapter === 'postgresql',
   // Header-trust is on ONLY in local/dev. When true, the SPA may bootstrap a demo
   // admin identity (without a running Keycloak) so the in-memory app is fully
   // usable for testing. In production this is false → the SPA stays anonymous and
   // the server still ignores any client-set role header.
   demoMode: trustHeaders,
+  oidcIssuer: OIDC_PUBLIC_ISSUER,
+  oidcClientId: OIDC_CLIENT_ID,
 }));
 
 // --- Integrations (local-artifact adapters: implemented, NOT connected) ------
@@ -5881,9 +6543,12 @@ apiRouter.get('/integrations/einvoice/orders/:id', async (req, res) => {
     return;
   }
   const lines = (await repos.orderLines.list()).filter(l => l.orderId === order.id);
+  const customerCountryCode = customer.country
+    ? (await repos.countries.list()).find(country => country.name === customer.country || country.code === customer.country)?.code
+    : undefined;
   try {
     const artifact = getIntegrations().einvoice.buildInvoiceXml({
-      order, customer, contract, lines, supplier: supplierFromEnv(),
+      order, customer, customerCountryCode, contract, lines, supplier: supplierFromEnv(),
     });
     sendArtifact(res, artifact);
   } catch (err) {
@@ -5914,8 +6579,8 @@ apiRouter.post('/integrations/crm/outbox', async (_req, res) => {
   const entry = getIntegrations().crm.buildSyncPayload({
     customers, contracts, orders, preparedAt: new Date().toISOString(),
   });
-  // The adapter is pure and never assigns ids; the persistence layer (this
-  // ephemeral outbox) does, via the shared newId() sequence.
+  // The adapter is pure and never assigns ids; this ephemeral persistence layer
+  // assigns the same process-independent UUID form used by stored entities.
   entry.id = `OB${newId()}`;
   crmOutbox.unshift(entry);
   if (crmOutbox.length > CRM_OUTBOX_MAX) crmOutbox.length = CRM_OUTBOX_MAX;
@@ -5951,62 +6616,7 @@ apiRouter.get('/integrations/bi/feed', async (_req, res) => {
   res.send(artifact.content);
 });
 
-/**
- * Make id generation safe across restarts by advancing the in-memory sequences
- * past anything already persisted:
- *
- *  - `idSeq` is set to the largest numeric SUFFIX seen across every repository —
- *    BOTH purely-numeric ids and PREFIXED ids ('TE…', 'AL…', 'AR…', 'OB…'). The
- *    suffix is `newId()`'s output, so it must move the counter even when wrapped
- *    in a prefix: otherwise a restart re-issues an already-used suffix and the
- *    prefixed PK ('TE'+suffix, …) collides (a violation the best-effort audit
- *    insert silently swallows). See `maxIdSeq`.
- *  - `invoiceSeq` is set to the largest INV-<INVOICE_YEAR>-NNNN across orders, so
- *    a restart can never re-issue an invoice number that is already in use.
- *
- * Runs after initPersistence() so it reads the migrated/seeded state.
- */
-async function seedSequences(): Promise<void> {
-  // Read side only: every Repository<T extends Entity> exposes list(): Promise<T[]>,
-  // and T[] is assignable to Entity[], so this typed array needs no `any`.
-  const allRepos: readonly { list(): Promise<Entity[]> }[] = [
-    repos.resources, repos.users, repos.requests, repos.assignments, repos.timeEntries,
-    repos.languages, repos.skillCatalogs, repos.proficiencySets, repos.skills, repos.projectRoles,
-    repos.resourceOrganizations, repos.countries, repos.cities, repos.industries,
-    repos.costCategories, repos.partnerRoles, repos.vendors,
-    repos.projects, repos.projectPartners, repos.projectDocuments,
-    repos.workPackages, repos.milestones, repos.projectFinancials, repos.projectCostCenters,
-    repos.projectTasks, repos.projectIssues, repos.changeRequests, repos.costCenters,
-    repos.customers, repos.contracts, repos.orders, repos.orderLines, repos.billingPlanItems,
-    repos.fxRates, repos.approvalRequests, repos.auditLogs,
-  ];
-
-  // idSeq -> max numeric SUFFIX across all repositories (numeric AND prefixed ids).
-  // newId()'s output is embedded in prefixed ids (TE…/AL…/AR…/OB…), so the
-  // counter must advance past those suffixes too or a restart re-issues a used
-  // suffix and the prefixed PK collides. See maxIdSeq.
-  const lists = await Promise.all(allRepos.map(r => r.list()));
-  let maxNumericId = idSeq;
-  for (const rows of lists) {
-    const fromRows = maxIdSeq(rows.map(row => row.id));
-    if (fromRows > maxNumericId) maxNumericId = fromRows;
-  }
-  idSeq = maxNumericId;
-
-  // invoiceSeq -> max INV-<INVOICE_YEAR>-NNNN across orders.
-  const prefix = `INV-${INVOICE_YEAR}-`;
-  let maxSeq = invoiceSeq;
-  for (const order of await repos.orders.list()) {
-    if (typeof order.invoiceNumber === 'string' && order.invoiceNumber.startsWith(prefix)) {
-      const n = Number(order.invoiceNumber.slice(prefix.length));
-      if (Number.isInteger(n) && n > maxSeq) maxSeq = n;
-    }
-  }
-  invoiceSeq = maxSeq;
-}
-
 await initPersistence();
-await seedSequences();
 
 /**
  * Narrow guard for a PostgreSQL foreign-key-violation error. The `pg` driver

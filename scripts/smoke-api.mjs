@@ -5221,70 +5221,48 @@ async function checkResourceManagerCycle() {
     );
   }
 
-  // 7) REVIEW ROUND 1 ("Important") — THE PREDICTABLE-ID SELF-CYCLE, ACTUALLY
-  // EXECUTED, not just verified by inspection. `POST /resources` hoists
-  // `newId()` (src/server.ts) before validation specifically so a client-
-  // guessed `managerId` equal to THIS resource's own about-to-be-assigned id
-  // is caught — ids are a plain sequential counter (`${++idSeq}`), not
-  // client-supplied, but predictable. This smoke suite is a SINGLE sequential
-  // client against a freshly booted server (no other concurrent traffic), so
-  // `newId()` is fully deterministic here, with NO timing/sleep involved —
-  // BUT the step between two consecutive resource ids is NOT reliably +1:
-  // the append-only audit middleware (src/server.ts, `res.on('finish', ...)`)
-  // also draws an id (`AL${newId()}`) for its own log entry on every
-  // successful POST, synchronously, before this suite's next request can
-  // possibly arrive — confirmed empirically while building this check (two
-  // consecutive plain creates landed 2 apart, not 1). Rather than hard-code
-  // that constant (a second future side-effecting `newId()` call anywhere in
-  // the request lifecycle would silently break a hard-coded assumption),
-  // MEASURE the actual step from two clean, back-to-back, manager-less
-  // probes, then extrapolate it forward exactly once more for the real
-  // attempt — self-adjusting to whatever the true per-request id
-  // consumption is, still with no timing/sleep involved.
+  // 7) New entity ids are process-independent UUIDs, so two app workers cannot
+  // issue the same local counter value. The org-chart self-cycle guard remains
+  // covered through PUT, where the persisted UUID is known to the caller.
   {
+    const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
     const probe1 = await req('POST', '/resources', {
       headers: RBAC_HEADERS,
       body: {
-        name: 'D Smoke Predictable-Id Probe 1', role: 'Developer', kind: 'internal',
+        name: 'D Smoke UUID Probe 1', role: 'Developer', kind: 'internal',
         skills: [], projectRoles: [], externalExperience: [], utilization: 0,
         capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8,
       },
     });
     const probe1Ok = check(
-      'predictable-id setup: probe #1 (manager-less) is created so its id can be read back',
-      probe1.status === 201 && typeof probe1.body?.id === 'string' && /^\d+$/.test(probe1.body.id),
+      'collision-safe id: probe #1 receives a UUID v4',
+      probe1.status === 201 && typeof probe1.body?.id === 'string' && UUID_V4.test(probe1.body.id),
       `status=${probe1.status}, body=${JSON.stringify(probe1.body)}`,
     );
     if (probe1Ok) {
       const probe2 = await req('POST', '/resources', {
         headers: RBAC_HEADERS,
         body: {
-          name: 'D Smoke Predictable-Id Probe 2', role: 'Developer', kind: 'internal',
+          name: 'D Smoke UUID Probe 2', role: 'Developer', kind: 'internal',
           skills: [], projectRoles: [], externalExperience: [], utilization: 0,
           capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8,
         },
       });
       const probe2Ok = check(
-        'predictable-id setup: probe #2 (manager-less, identical shape) is created to measure the per-request id step',
-        probe2.status === 201 && typeof probe2.body?.id === 'string' && /^\d+$/.test(probe2.body.id),
+        'collision-safe id: independent probe #2 receives a distinct UUID v4',
+        probe2.status === 201 && typeof probe2.body?.id === 'string'
+          && UUID_V4.test(probe2.body.id) && probe2.body.id !== probe1.body.id,
         `status=${probe2.status}, body=${JSON.stringify(probe2.body)}`,
       );
       if (probe2Ok) {
-        const step = Number(probe2.body.id) - Number(probe1.body.id);
-        const predictedNextId = String(Number(probe2.body.id) + step);
-        const attempt = await req('POST', '/resources', {
+        const attempt = await req('PUT', `/resources/${probe2.body.id}`, {
           headers: RBAC_HEADERS,
-          body: {
-            name: 'D Smoke Predictable-Id Self-Cycle', role: 'Developer', kind: 'internal',
-            skills: [], projectRoles: [], externalExperience: [], utilization: 0,
-            capacity: 40, hireDate: '2026-01-01', contractHoursPerDay: 8,
-            managerId: predictedNextId,
-          },
+          body: { managerId: probe2.body.id },
         });
         check(
-          `POST /api/resources {managerId:'${predictedNextId}'} (predicted from the measured step=${step} between the two probes) -> 400, mentions a cycle`,
+          `PUT /api/resources/${probe2.body.id} {managerId:self} -> 400, mentions a cycle`,
           attempt.status === 400 && typeof attempt.body?.error === 'string' && /cycle/i.test(attempt.body.error),
-          `status=${attempt.status}, step=${step}, body=${JSON.stringify(attempt.body)}`,
+          `status=${attempt.status}, body=${JSON.stringify(attempt.body)}`,
         );
       }
     }
