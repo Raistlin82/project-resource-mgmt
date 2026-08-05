@@ -9,14 +9,14 @@ import { db, persistenceConfig } from './db/client';
 import { auditLogs as auditLogsTable } from './db/schema';
 import { initPersistence } from './db/bootstrap';
 import type { Entity, Repository } from './db/repository';
-import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter, AllocationApprovalRow, AllocationApprovalItem, SubstitutionMonthOutcome, SubstitutionResult, NegotiatedRate, UserRole } from './app/services/api.service';
+import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, TimeEntry, Contract, Order, OrderLine, BillingPlanItem, ApprovalRequest, SkillCatalog, ProficiencySet, Skill, ProjectRole, ResourceOrganization, Country, Project, ProjectCostCenter, AllocationApprovalRow, AllocationApprovalItem, SubstitutionMonthOutcome, SubstitutionResult, NegotiatedRate, CostBaseline, UserRole } from './app/services/api.service';
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, decisionToAssignmentStatus, allocationApproverStep } from './app/services/staffing.util';
 import { deriveAssignmentStatus, monthRowId, parseMonthRowId, monthlyAggregateHours, type MonthStatus } from './app/services/allocation-month.util';
 import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity, monthlyTargetHours } from './app/services/calendar.util';
 import { planSubstitution, planGiveBack, planSubstitutionBooking, type SubstitutionPlan } from './app/services/substitution.util';
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { benchRollup } from './app/services/bench.util';
-import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
+import { convertToBase, computeProjectFinancials, recognitionJournal, plannedCostSchedule, type FinanceData } from './app/services/finance.util';
 import { negotiatedRateCurrencyError, sellRateFor } from './app/services/sell-rate.util';
 import { pickRateCard } from './app/services/rate-card.util';
 import { billingPlanValidationError } from './app/services/billing-validation.util';
@@ -650,6 +650,10 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
   const rules: { test: (path: string) => boolean; roles: UserRole[] }[] = [
     { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items', '/negotiated-rates'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
     { test: p => ['/project-financials', '/project-cost-centers', '/cost-centers'].some(prefix => p.startsWith(prefix)), roles: ['finance', 'delivery-executive', 'admin'] },
+    // Cost baselines (design spec, block E, §5): freeze/re-freeze restricted to
+    // finance-grade roles. pm/resource-manager can read it (READ_RULES below)
+    // but must not be able to rewrite the metric they are measured against.
+    { test: p => p.startsWith('/cost-baselines'), roles: ['finance', 'delivery-executive', 'admin'] },
     // Sensitive financial rates (costRate/billRate) live on resources; restrict who may rewrite them.
     { test: p => p.startsWith('/resources'), roles: ['resource-manager', 'delivery-executive', 'admin'] },
     // Rate cards (Phase E) define the DEFAULT cost/bill rates — sensitive financial
@@ -725,6 +729,11 @@ const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   // deliberately excluding 'employee' (an org-wide idle-staff roster is
   // sensitive) and 'sales' (no staffing need-to-know) — design spec §8.
   { test: p => p.startsWith('/capacity') || p.startsWith('/bench'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
+  // Cost baselines (design spec, block E, §5): read is DISJOINT from freeze —
+  // pm/resource-manager can read the variance to act on it early, but cannot
+  // freeze or re-freeze (§3.4: whoever is measured on the variance must not be
+  // able to rewrite the metric). Mirrors the /capacity read set exactly.
+  { test: p => p.startsWith('/cost-baselines'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
   // Shared by Block F and block E: same need-to-know as '/capacity' and the
   // staffing reads above — these two collections feed exactly the same
   // pre-aggregated rollups those endpoints already serve to this audience,
@@ -5614,6 +5623,76 @@ apiRouter.put('/negotiated-rates/:id', async (req, res) => {
 apiRouter.delete('/negotiated-rates/:id', async (req, res) => {
   await repos.negotiatedRates.remove(req.params.id);
   res.status(204).send();
+});
+
+/**
+ * Freeze (or re-freeze) a project's monthly cost baseline (design spec, block
+ * E, §3.4/§3.5). The freeze horizon is the union of every month the project
+ * has at least one AssignmentDay in, expanded contiguously. Writes ONE ROW
+ * PER PERIOD, atomically, under a per-project lock — a re-freeze APPENDS a
+ * new batch, never updates or deletes an existing row (there is no unique
+ * constraint on (project_id, period) by design). No PUT/DELETE is exposed.
+ *
+ * UNITS (spec §9): this handler MUST assemble its own resolved-rate
+ * FinanceData via `resolveResourceRates(await repos.resources.list())` —
+ * never `loadFinanceData()`, whose `resources` field is a documented,
+ * deliberately-unfixed EUR/day (not EUR/hour) hazard (see the comment on
+ * `loadFinanceData`, src/server.ts:6517-6527). Reusing it here would
+ * overstate every baseline by a factor of hoursPerDay, the same defect shape
+ * `sell-rate.util.ts` once shipped.
+ */
+apiRouter.get('/cost-baselines', async (_req, res) => { res.json(await repos.costBaselines.list()); });
+apiRouter.post('/cost-baselines', async (req, res) => {
+  const body = pick<{ projectId: string }>(req.body, ['projectId']);
+  if (typeof body.projectId !== 'string' || body.projectId.length === 0) {
+    res.status(400).json({ error: 'projectId is required' });
+    return;
+  }
+  const projectId = body.projectId;
+  if (!(await existsRepo(repos.projects, projectId))) {
+    res.status(400).json({ error: 'projectId must reference an existing project' });
+    return;
+  }
+  const result = await withLock(`cost-baseline:${projectId}`, async (): Promise<{ status?: number; error?: string; created?: CostBaseline[] }> => {
+    const [requests, assignments, assignmentDays, assignmentMonths, rawResources] = await Promise.all([
+      repos.requests.list(),
+      repos.assignments.list(),
+      repos.assignmentDays.list(),
+      repos.assignmentMonths.list(),
+      repos.resources.list(),
+    ]);
+    const resources = await resolveResourceRates(rawResources); // resolved EUR/HOUR — never loadFinanceData()
+    const reqIds = new Set(requests.filter(r => r.projectId === projectId).map(r => r.id));
+    const assignmentIds = new Set(assignments.filter(a => reqIds.has(a.requestId)).map(a => a.id));
+    const bookedMonths = assignmentDays
+      .filter(d => assignmentIds.has(d.assignmentId))
+      .map(d => d.date.slice(0, 7));
+    if (bookedMonths.length === 0) {
+      return { status: 400, error: 'project has no booked hours to freeze' };
+    }
+    const from = bookedMonths.reduce((a, b) => (b < a ? b : a));
+    const to = bookedMonths.reduce((a, b) => (b > a ? b : a));
+    const data: FinanceData = {
+      requests, assignments, resources, orders: [], orderLines: [], financials: [],
+      assignmentDays, assignmentMonths,
+    };
+    const schedule = plannedCostSchedule(data, { from, to }, { projectId });
+    const at = new Date().toISOString();
+    const frozenBy = actorId(req);
+    const rows: CostBaseline[] = [];
+    for (const p of schedule) {
+      const row = await repos.costBaselines.create({
+        id: newId(), projectId, period: p.period, amount: p.plannedCost, frozenAt: at, frozenBy,
+      } as CostBaseline);
+      rows.push(row as CostBaseline);
+    }
+    return { created: rows };
+  });
+  if (result.error !== undefined) {
+    res.status(result.status ?? 400).json({ error: result.error });
+    return;
+  }
+  res.json(result.created);
 });
 
 // --- Multi-currency foundation ----------------------------------------------

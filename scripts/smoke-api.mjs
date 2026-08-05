@@ -1408,6 +1408,116 @@ async function checkAssignmentDaysAndMonthsCarryBlockESeed() {
 }
 
 /**
+ * Design spec, block E, §5/§6 — the freeze handler's integrity rules and RBAC.
+ * Seed fixtures relied on (src/db/seed.ts, Task 1): project '1' has booked
+ * hours (assignments '1'/'2'/'12', plus block F's '7'-'11', all Jan-Sep 2026);
+ * '12' alone reaches October, priced at exactly 720 EUR (8h x 90 EUR/h,
+ * resource '2' John Miller) — the hand-verified figure this check pins.
+ */
+async function checkCostBaselines() {
+  const EMPLOYEE_HEADERS = { 'X-User-Id': '9', 'X-User-Role': 'employee' };
+  const PM_HEADERS = { 'X-User-Id': '3', 'X-User-Role': 'pm' };
+
+  // 1) POST /cost-baselines { projectId: '1' } -> 200, one row per booked
+  //    period, October priced at exactly 720 EUR (Task 1's hand-verified figure).
+  const frozen = await req('POST', '/cost-baselines', { body: { projectId: '1' } });
+  check('POST /api/cost-baselines {projectId:\'1\'} -> 200', frozen.status === 200, `status=${frozen.status}`);
+  check(
+    'the frozen batch includes a 2026-10 row priced at exactly 720 EUR',
+    Array.isArray(frozen.body) && frozen.body.some(r => r.period === '2026-10' && r.amount === 720),
+    JSON.stringify(frozen.body),
+  );
+  check(
+    "every frozen row carries a server-set frozenBy/frozenAt, and projectId '1'",
+    Array.isArray(frozen.body) && frozen.body.every(r => r.projectId === '1' && typeof r.frozenBy === 'string' && typeof r.frozenAt === 'string'),
+  );
+
+  // 2) A client-supplied amount/period/frozenAt/frozenBy is silently ignored
+  //    (not a 400) — pick()'s allow-list is ['projectId'] only.
+  const forged = await req('POST', '/cost-baselines', { body: { projectId: '1', amount: 999999, frozenBy: 'nobody' } });
+  check('POST /api/cost-baselines ignores a forged amount/frozenBy rather than erroring', forged.status === 200, `status=${forged.status}`);
+  check(
+    'the forged amount never lands in a written row',
+    Array.isArray(forged.body) && forged.body.every(r => r.amount !== 999999 && r.frozenBy !== 'nobody'),
+  );
+
+  // 3) projectId missing -> 400.
+  const missing = await req('POST', '/cost-baselines', { body: {} });
+  check('POST /api/cost-baselines with no projectId -> 400', missing.status === 400, `status=${missing.status}`);
+
+  // 4) projectId referencing a non-existent project -> 400.
+  const badProject = await req('POST', '/cost-baselines', { body: { projectId: 'NOPE_PROJECT' } });
+  check('POST /api/cost-baselines with an unknown projectId -> 400', badProject.status === 400, `status=${badProject.status}`);
+
+  // 5) A second POST on the same project is a re-freeze, NOT rejected, and
+  //    writes a SECOND batch of rows (the earlier row for 2026-10 is not
+  //    replaced or deleted — GET must still list both, latest wins in the UI).
+  const before = await req('GET', '/cost-baselines');
+  const countBefore = Array.isArray(before.body) ? before.body.filter(r => r.projectId === '1' && r.period === '2026-10').length : 0;
+  const refrozen = await req('POST', '/cost-baselines', { body: { projectId: '1' } });
+  check('a second POST /api/cost-baselines for the same project -> 200 (re-freeze, not rejected)', refrozen.status === 200, `status=${refrozen.status}`);
+  const after = await req('GET', '/cost-baselines');
+  const countAfter = Array.isArray(after.body) ? after.body.filter(r => r.projectId === '1' && r.period === '2026-10').length : 0;
+  check('the re-freeze APPENDS a new 2026-10 row rather than replacing the old one', countAfter === countBefore + 1, `before=${countBefore} after=${countAfter}`);
+
+  // 6) No PUT/DELETE registered.
+  const put = await req('PUT', '/cost-baselines/CB1', { body: { amount: 1 } });
+  check('PUT /api/cost-baselines/:id -> 404 (no route registered)', put.status === 404, `status=${put.status}`);
+  const del = await req('DELETE', '/cost-baselines/CB1');
+  check('DELETE /api/cost-baselines/:id -> 404 (no route registered)', del.status === 404, `status=${del.status}`);
+
+  // 7) RBAC — mutation restricted to finance/delivery-executive/admin; a pm
+  //    (who CAN read the baseline, per §5) must NOT be able to freeze it.
+  const pmForbidden = await req('POST', '/cost-baselines', { body: { projectId: '1' } , headers: PM_HEADERS });
+  check("POST /api/cost-baselines as a 'pm' -> 403 (read access does not imply write access)", pmForbidden.status === 403, `status=${pmForbidden.status}`);
+
+  // 8) RBAC — read restricted to pm/resource-manager/finance/delivery-executive/admin,
+  //    denied to employee/sales. Full matrix exercised here — this is the
+  //    over-the-wire debt explicitly recorded when Task 1 added the client
+  //    methods/type ahead of this route: "the read rule admits
+  //    pm/resource-manager/finance/delivery-executive/admin and denies
+  //    employee/sales" — every one of those seven roles gets its own
+  //    assertion below, not just a sampled pair.
+  const SALES_HEADERS = { 'X-User-Id': '5', 'X-User-Role': 'sales' };
+  const RM_HEADERS = { 'X-User-Id': '2', 'X-User-Role': 'resource-manager' };
+  const FINANCE_HEADERS = { 'X-User-Id': '4', 'X-User-Role': 'finance' };
+  const DE_HEADERS = { 'X-User-Id': '1', 'X-User-Role': 'delivery-executive' };
+  const employeeForbidden = await req('GET', '/cost-baselines', { headers: EMPLOYEE_HEADERS });
+  check("GET /api/cost-baselines as an 'employee' -> 403 (denied)", employeeForbidden.status === 403, `status=${employeeForbidden.status}`);
+  const salesForbidden = await req('GET', '/cost-baselines', { headers: SALES_HEADERS });
+  check("GET /api/cost-baselines as 'sales' -> 403 (denied)", salesForbidden.status === 403, `status=${salesForbidden.status}`);
+  const pmAllowed = await req('GET', '/cost-baselines', { headers: PM_HEADERS });
+  check("GET /api/cost-baselines as a 'pm' -> 200 (read is disjoint from freeze — spec §5)", pmAllowed.status === 200, `status=${pmAllowed.status}`);
+  const rmAllowed = await req('GET', '/cost-baselines', { headers: RM_HEADERS });
+  check("GET /api/cost-baselines as 'resource-manager' -> 200 (admitted)", rmAllowed.status === 200, `status=${rmAllowed.status}`);
+  const financeAllowed = await req('GET', '/cost-baselines', { headers: FINANCE_HEADERS });
+  check("GET /api/cost-baselines as 'finance' -> 200 (admitted)", financeAllowed.status === 200, `status=${financeAllowed.status}`);
+  const deAllowed = await req('GET', '/cost-baselines', { headers: DE_HEADERS });
+  check("GET /api/cost-baselines as 'delivery-executive' -> 200 (admitted)", deAllowed.status === 200, `status=${deAllowed.status}`);
+  // 'admin' is exercised throughout checks 1-7 above via the default
+  // RBAC_HEADERS this script's req() sends, proving admin can both read and
+  // freeze; no separate assertion needed for that role.
+
+  // 9) Audit: the global append-only middleware records the freeze POST (no
+  //    separate wiring — src/server.ts:820-859 fires on every successful
+  //    POST/PUT/DELETE). Confirmed via the audit-logs read (admin, per the
+  //    default RBAC_HEADERS this script's req() sends). NOTE: /audit-logs
+  //    returns a bare, newest-first ARRAY (confirmed by reading the handler,
+  //    src/server.ts ~6523-6548) — NOT an { entries: [...] } envelope. Do not
+  //    write `body?.entries ?? body`: since arrays inherit a native
+  //    `.entries()` method from Array.prototype, that expression would pick
+  //    up the (truthy) FUNCTION reference instead of falling back to the
+  //    array, making Array.isArray(...) always false — a phantom failure
+  //    that would never once catch a real regression.
+  const auditLogs = await req('GET', '/audit-logs');
+  check(
+    'the freeze POST left an entry in the append-only audit trail',
+    auditLogs.status === 200 && Array.isArray(auditLogs.body)
+      && auditLogs.body.some(e => e.method === 'POST' && e.path.includes('/cost-baselines')),
+  );
+}
+
+/**
  * B3 — the per-month approval lifecycle. Editing ONE month of an approved
  * assignment must demote only that month; its siblings stay Allocated.
  */
@@ -6129,6 +6239,16 @@ async function main() {
     await checkAssignmentDaysAndMonthsCarryBlockESeed();
   } catch (err) {
     console.log(`FAIL  assignment-days/assignment-months carry block E's seed (Task 3) — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the cost-baselines
+  // freeze flow (Task 5) never masks or blocks any of the prior section
+  // results.
+  try {
+    await checkCostBaselines();
+  } catch (err) {
+    console.log(`FAIL  cost-baselines integrity flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 
