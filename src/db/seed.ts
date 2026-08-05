@@ -169,6 +169,24 @@ export const resources: Resource[] = [
     skills: [{ name: 'Java', level: 2 }], projectRoles: ['Developer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 100, utilizationPlanned: 100, capacity: 40,
     organization: 'Engineering', location: 'Remote', hireDate: '2018-01-01', terminationDate: '2026-03-15', contractHoursPerDay: 8 },
+  // Rate-card inheritance (design spec §1, §9): the seed's own tree already has
+  // Backend (competence) under Platform (practice) under Engineering
+  // (capability), and RC_DEV_ENG already sits on Engineering -- a NON-LEAF node.
+  // No seeded resource sat under it before this row, which is why the
+  // inheritance defect this block fixes was real but invisible on the
+  // committed seed. THIS resource makes it visible, and gives the impact
+  // report (scripts/rate-inheritance-impact.mjs) a real, non-zero row to
+  // print: no costRate/billRate override, so the card resolution does all the
+  // work. Expected: BEFORE this block, resolves the generic RC_DEV (600/1120
+  // EUR/day, exact-match-only); AFTER, resolves RC_DEV_ENG via the ancestor
+  // walk (640/1200 EUR/day) -- delta cost +40.00, bill +80.00 EUR/day.
+  // Id '13', not '7': ids '7'-'9' are already taken in this very array
+  // (Priya/Marco/Elena above), '7'-'11' in requests/assignmentsBase, and '12'
+  // on a concurrent branch -- verified against the live seed before picking 13.
+  { id: '13', name: 'Nora Keller', role: 'Developer', kind: 'internal',
+    skills: [{ name: 'Java', level: 2 }], projectRoles: ['Backend Engineer'],
+    externalExperience: [], profilePicture: '', resume: '', utilization: 0, utilizationPlanned: 0, capacity: 40,
+    organization: 'Backend', location: 'Remote', hireDate: '2026-02-01', contractHoursPerDay: 8 },
 ];
 
 export const users: User[] = [
