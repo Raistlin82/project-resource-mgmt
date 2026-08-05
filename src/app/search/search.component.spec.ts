@@ -1,6 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { PLATFORM_ID, provideZonelessChangeDetection } from '@angular/core';
-import { of, throwError } from 'rxjs';
+import { delay, of, throwError } from 'rxjs';
 import { HttpErrorResponse } from '@angular/common/http';
 import { SearchComponent } from './search.component';
 import { ApiService } from '../services/api.service';
@@ -176,6 +176,60 @@ describe('SearchComponent', () => {
       await flush(fixture);
 
       expect(getProjects).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- CRITICAL fix: a SECOND search must not make "still loading" and "not
+  // permitted" indistinguishable. rxResource resets .value() to defaultValue
+  // for the WHOLE duration of a fetch driven by new params -- so a section
+  // whose own resolved value used to gate its visibility (results().key
+  // truthy/undefined) vanished, mid-flight, exactly like a 403'd section,
+  // even though it is fully permitted and mid-search. ---
+
+  describe('a second search must render loading distinctly from forbidden (P1-CRITICAL)', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('while the second fetch is in flight, a permitted section keeps its header and shows a loading skeleton, while a forbidden section stays absent throughout', async () => {
+      const getResources = vi.fn()
+        .mockReturnValueOnce(of([{ id: '1', name: 'Julie Armstrong', role: 'Developer', kind: 'internal' }]))
+        .mockReturnValueOnce(of([{ id: '2', name: 'John Smith', role: 'Developer', kind: 'internal' }]).pipe(delay(50)));
+      const fixture = await setup(
+        { getResources },
+        // canReadCommercial: false -> Customers/Contracts/Orders are the
+        // FORBIDDEN sections throughout this test, never fired at all.
+        { canReadStaffing: () => true, canReadCommercial: () => false },
+      );
+      const host = fixture.nativeElement as HTMLElement;
+
+      // First search resolves immediately (no delay) -- establishes the
+      // baseline: Resources visible with content, Customers (forbidden)
+      // never rendered at all.
+      fixture.componentInstance.submitQuery('Julie');
+      await flush(fixture);
+      expect(host.querySelector('[data-test="section-resources"]')!.textContent).toContain('Julie Armstrong');
+      expect(host.querySelector('[data-test="section-customers"]')).toBeFalsy();
+
+      // Second search: the mocked call now takes 50ms. While it is in
+      // flight (before advancing fake time at all), Resources must show ITS
+      // OWN header plus a loading skeleton -- not vanish the way a forbidden
+      // section does -- and Customers must remain absent, unaffected by the
+      // transition.
+      fixture.componentInstance.submitQuery('John');
+      await flush(fixture);
+
+      const resourcesMidFlight = host.querySelector('[data-test="section-resources"]');
+      expect(resourcesMidFlight).toBeTruthy(); // header still present: NOT the omit mechanism
+      expect(resourcesMidFlight!.textContent).not.toContain('Julie Armstrong'); // stale content gone
+      expect(resourcesMidFlight!.textContent).not.toContain('John Smith'); // new content not arrived yet
+      expect(resourcesMidFlight!.querySelector('[role="status"][aria-busy="true"]')).toBeTruthy(); // the loading skeleton
+      expect(host.querySelector('[data-test="section-customers"]')).toBeFalsy(); // forbidden: still absent, never confused with loading
+
+      // Let the second fetch resolve.
+      vi.advanceTimersByTime(50);
+      await flush(fixture);
+      expect(host.querySelector('[data-test="section-resources"]')!.textContent).toContain('John Smith');
+      expect(host.querySelector('[data-test="section-customers"]')).toBeFalsy();
     });
   });
 });
