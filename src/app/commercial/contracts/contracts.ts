@@ -10,11 +10,12 @@ import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { endNotBeforeStart } from '../../services/date-range.validator';
+import { SearchFilterBarComponent } from '../../shared/search-filter-bar.component';
 
 @Component({
   selector: 'app-contracts',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CurrencyPipe, DatePipe, MatIconModule, ReactiveFormsModule, RouterLink, ModalDialogDirective],
+  imports: [CurrencyPipe, DatePipe, MatIconModule, ReactiveFormsModule, RouterLink, ModalDialogDirective, SearchFilterBarComponent],
   template: `
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -27,6 +28,13 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
           <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon> New Contract
         </button>
       </div>
+
+      <app-search-filter-bar
+        [query]="contractQuery()"
+        placeholder="Search contracts by name..."
+        (queryChange)="contractQuery.set($event)"
+        (clearAll)="contractQuery.set('')"
+      />
 
       <!-- Contracts Table -->
       <div class="command-card overflow-hidden">
@@ -43,7 +51,7 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
               </tr>
             </thead>
             <tbody>
-              @for (c of contracts(); track c.id) {
+              @for (c of filteredContracts(); track c.id) {
                 <tr>
                   <td class="font-semibold">
                     <a [routerLink]="['/contracts', c.id]" class="hover:text-accent-text transition-colors">{{ c.name }}</a>
@@ -197,6 +205,15 @@ export class Contracts {
   contracts = this.contractsRes.value;
   customers = this.customersRes.value;
   fxRates = this.fxRatesRes.value;
+
+  // First-ever filter on this screen (design spec §8) -- same shape as
+  // customers.ts's own filter, over the contract's own `name`.
+  protected contractQuery = signal('');
+  protected filteredContracts = computed(() => {
+    const q = this.contractQuery().trim().toLowerCase();
+    const all = this.contracts();
+    return q ? all.filter(c => c.name.toLowerCase().includes(q)) : all;
+  });
 
   showForm = signal(false);
 

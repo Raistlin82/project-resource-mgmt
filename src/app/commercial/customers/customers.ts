@@ -8,11 +8,12 @@ import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { ListStateComponent } from '../../shared/list-state.component';
+import { SearchFilterBarComponent } from '../../shared/search-filter-bar.component';
 
 @Component({
   selector: 'app-customers',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, ReactiveFormsModule, ModalDialogDirective, ListStateComponent],
+  imports: [MatIconModule, ReactiveFormsModule, ModalDialogDirective, ListStateComponent, SearchFilterBarComponent],
   template: `
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -25,6 +26,13 @@ import { ListStateComponent } from '../../shared/list-state.component';
           <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon> New Customer
         </button>
       </div>
+
+      <app-search-filter-bar
+        [query]="customerQuery()"
+        placeholder="Search customers by name..."
+        (queryChange)="customerQuery.set($event)"
+        (clearAll)="customerQuery.set('')"
+      />
 
       <!-- Customers Table -->
       <app-list-state [loading]="customersRes.isLoading()" [error]="customersRes.status() === 'error'" label="customers" (retry)="customersRes.reload()">
@@ -41,7 +49,7 @@ import { ListStateComponent } from '../../shared/list-state.component';
               </tr>
             </thead>
             <tbody>
-              @for (customer of customers(); track customer.id) {
+              @for (customer of filteredCustomers(); track customer.id) {
                 <tr>
                   <td class="font-semibold">{{ customer.name }}</td>
                   <td class="text-[var(--cc-muted)]">{{ customer.industry || '—' }}</td>
@@ -161,6 +169,18 @@ export class Customers {
 
   customers = this.customersRes.value;
   contracts = this.contractsRes.value;
+
+  // First-ever filter on this screen (design spec §8) -- a plain client-side
+  // text match over the already-loaded list, same sophistication as
+  // resources.component.ts's own filter (no server round-trip needed for a
+  // list this small; the server-side q/limit/offset from Block G's other
+  // tasks exists for the dedicated /search page, not this screen).
+  protected customerQuery = signal('');
+  protected filteredCustomers = computed(() => {
+    const q = this.customerQuery().trim().toLowerCase();
+    const all = this.customers();
+    return q ? all.filter(c => c.name.toLowerCase().includes(q)) : all;
+  });
 
   // Industry + Country are config FKs (Phase F2). Gated on authReady.
   private industriesRes = rxResource<Industry[], boolean>({

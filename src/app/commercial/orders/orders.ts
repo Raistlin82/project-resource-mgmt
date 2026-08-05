@@ -9,11 +9,12 @@ import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { authGatedResource } from '../../services/auth-gated-resource.util';
+import { SearchFilterBarComponent } from '../../shared/search-filter-bar.component';
 
 @Component({
   selector: 'app-orders',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, CurrencyPipe, DatePipe, ReactiveFormsModule, ModalDialogDirective],
+  imports: [MatIconModule, CurrencyPipe, DatePipe, ReactiveFormsModule, ModalDialogDirective, SearchFilterBarComponent],
   template: `
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -26,6 +27,13 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
           <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon> New Order
         </button>
       </div>
+
+      <app-search-filter-bar
+        [query]="orderQuery()"
+        placeholder="Search orders by invoice number..."
+        (queryChange)="orderQuery.set($event)"
+        (clearAll)="orderQuery.set('')"
+      />
 
       <div class="command-card overflow-hidden">
         <div class="overflow-x-auto">
@@ -42,7 +50,7 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
               </tr>
             </thead>
             <tbody>
-              @for (order of orders(); track order.id) {
+              @for (order of filteredOrders(); track order.id) {
                 <tr>
                   <td class="font-medium">{{ contractName(order.contractId) }}</td>
                   <td class="text-[var(--cc-muted)]">{{ orderProjectSummary(order.id) }}</td>
@@ -243,6 +251,18 @@ export class Orders {
   projects = this.projectsRes.value;
   orderLines = this.orderLinesRes.value;
   fxRates = this.fxRatesRes.value;
+
+  // First-ever filter on this screen (design spec §8). Orders have no `name`
+  // field (api.service.ts:660-672) -- match on `invoiceNumber` when present,
+  // falling back to `id`, the SAME field choice server.ts's own /orders?q=
+  // handler makes (Task 2 Step 7) and spec §11's field table records, so a
+  // search that matches here matches the same way through /orders?q= too.
+  protected orderQuery = signal('');
+  protected filteredOrders = computed(() => {
+    const q = this.orderQuery().trim().toLowerCase();
+    const all = this.orders();
+    return q ? all.filter(o => (o.invoiceNumber ?? o.id).toLowerCase().includes(q)) : all;
+  });
 
   showForm = signal(false);
   saving = signal(false);
