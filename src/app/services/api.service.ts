@@ -924,13 +924,24 @@ export interface BiFeedPreview {
   rows: Record<string, BiFeedCell>[];
 }
 
+/** Block G: optional query params any of the six searchable collection reads accept. */
+export interface SearchOpts { q?: string; limit?: number; offset?: number }
+
 @Injectable({ providedIn: 'root' })
 export class ApiService {
   private http = inject(HttpClient);
   private baseUrl = inject(API_BASE_URL);
 
-  getResources(): Observable<Resource[]> {
-    return this.http.get<Resource[]>(`${this.baseUrl}/resources`);
+  private searchParams(opts?: SearchOpts): HttpParams {
+    let params = new HttpParams();
+    if (opts?.q) params = params.set('q', opts.q);
+    if (opts?.limit !== undefined) params = params.set('limit', opts.limit);
+    if (opts?.offset !== undefined) params = params.set('offset', opts.offset);
+    return params;
+  }
+
+  getResources(opts?: SearchOpts): Observable<Resource[]> {
+    return this.http.get<Resource[]>(`${this.baseUrl}/resources`, { params: this.searchParams(opts) });
   }
 
   getUsers(): Observable<User[]> {
@@ -987,8 +998,8 @@ export class ApiService {
     return this.http.post<TimeEntry>(`${this.baseUrl}/self/time-entries`, entry);
   }
 
-  getRequests(): Observable<ResourceRequest[]> {
-    return this.http.get<ResourceRequest[]>(`${this.baseUrl}/requests`);
+  getRequests(opts?: SearchOpts): Observable<ResourceRequest[]> {
+    return this.http.get<ResourceRequest[]>(`${this.baseUrl}/requests`, { params: this.searchParams(opts) });
   }
 
   createRequest(request: Partial<ResourceRequest>): Observable<ResourceRequest> {
@@ -1269,8 +1280,8 @@ export class ApiService {
   getHoursPerDay(): Observable<{ value: number }> { return this.http.get<{ value: number }>(`${this.baseUrl}/settings/hours-per-day`); }
   setHoursPerDay(value: number): Observable<{ value: number }> { return this.http.put<{ value: number }>(`${this.baseUrl}/settings/hours-per-day`, { value }); }
 
-  getProjects(): Observable<Project[]> {
-    return this.http.get<Project[]>(`${this.baseUrl}/projects`);
+  getProjects(opts?: SearchOpts): Observable<Project[]> {
+    return this.http.get<Project[]>(`${this.baseUrl}/projects`, { params: this.searchParams(opts) });
   }
 
   createProject(project: Partial<Project>): Observable<Project> {
@@ -1334,17 +1345,17 @@ export class ApiService {
 
   // --- Commercial domain (ADR-0001) ---
 
-  getCustomers(): Observable<Customer[]> { return this.http.get<Customer[]>(`${this.baseUrl}/customers`); }
+  getCustomers(opts?: SearchOpts): Observable<Customer[]> { return this.http.get<Customer[]>(`${this.baseUrl}/customers`, { params: this.searchParams(opts) }); }
   createCustomer(c: Partial<Customer>): Observable<Customer> { return this.http.post<Customer>(`${this.baseUrl}/customers`, c); }
   updateCustomer(id: string, c: Partial<Customer>): Observable<Customer> { return this.http.put<Customer>(`${this.baseUrl}/customers/${id}`, c); }
   deleteCustomer(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/customers/${id}`); }
 
-  getContracts(): Observable<Contract[]> { return this.http.get<Contract[]>(`${this.baseUrl}/contracts`); }
+  getContracts(opts?: SearchOpts): Observable<Contract[]> { return this.http.get<Contract[]>(`${this.baseUrl}/contracts`, { params: this.searchParams(opts) }); }
   createContract(c: Partial<Contract>): Observable<Contract> { return this.http.post<Contract>(`${this.baseUrl}/contracts`, c); }
   updateContract(id: string, c: Partial<Contract>): Observable<Contract> { return this.http.put<Contract>(`${this.baseUrl}/contracts/${id}`, c); }
   deleteContract(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/contracts/${id}`); }
 
-  getOrders(): Observable<Order[]> { return this.http.get<Order[]>(`${this.baseUrl}/orders`); }
+  getOrders(opts?: SearchOpts): Observable<Order[]> { return this.http.get<Order[]>(`${this.baseUrl}/orders`, { params: this.searchParams(opts) }); }
   createOrder(o: Partial<Order>): Observable<Order> { return this.http.post<Order>(`${this.baseUrl}/orders`, o); }
   createOrderWithLine(request: CreateOrderWithLineRequest): Observable<OrderWithLineResult> {
     return this.http.post<OrderWithLineResult>(`${this.baseUrl}/orders/with-line`, request);
