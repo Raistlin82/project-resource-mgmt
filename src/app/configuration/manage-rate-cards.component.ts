@@ -10,6 +10,7 @@ import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 import { authGatedResource } from '../services/auth-gated-resource.util';
 import { ancestorChain, type OrgNode } from '../services/org-scope.util';
+import { conflictingCardMessage } from '../services/rate-card.util';
 
 /** Base/reporting currency — the default denomination for a rate card. */
 const BASE_CURRENCY = 'EUR';
@@ -323,7 +324,22 @@ export class ManageRateCardsComponent {
       billRate: raw.billRate == null ? undefined : Number(raw.billRate),
     };
     const id = this.editingId();
-    const done = () => { this.itemsRes.reload(); this.closeForm(); this.notifications.show('Rate card saved.', 'success'); };
+    const done = () => {
+      // Read BEFORE the reload: `this.items()` is every OTHER existing card.
+      // The card just saved is never counted as its own ancestor or
+      // descendant by conflictingCardMessage, so no id-based self-exclusion
+      // is needed, and there is no need to wait for the reload first (design
+      // spec §7b). Non-blocking: the save has already succeeded by this point.
+      const conflict = conflictingCardMessage(
+        { organization: payload.organization, role: payload.role ?? '', currency: payload.currency ?? BASE_CURRENCY },
+        this.items(),
+        this.orgOptions() as unknown as OrgNode[],
+      );
+      this.itemsRes.reload();
+      this.closeForm();
+      this.notifications.show('Rate card saved.', 'success');
+      if (conflict) this.notifications.show(conflict, 'info');
+    };
     // Surface the server's reason (e.g. the uniqueness conflict) rather than a generic message.
     const fail = (e: unknown) => this.notifications.show((e as { error?: { error?: string } })?.error?.error || 'Could not save the rate card.', 'error');
     if (id) {

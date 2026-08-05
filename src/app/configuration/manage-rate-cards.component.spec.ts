@@ -102,4 +102,62 @@ describe('ManageRateCardsComponent', () => {
       expect(leadingWs(backendOpt!.textContent)).toBeGreaterThan(leadingWs(engineeringOpt!.textContent));
     });
   });
+
+  describe('non-blocking conflict warning on save (rate-card-inheritance block, Task 6)', () => {
+    /** An existing card on Engineering (an ancestor of Platform/Backend). */
+    const CARD_ON_ENGINEERING: RateCard[] = [
+      { id: 'ENG', role: 'Developer', organization: 'Engineering', currency: 'EUR', costRate: 640, billRate: 1200 },
+    ];
+    /** An existing card on Backend (a descendant of Platform/Engineering). */
+    const CARD_ON_BACKEND: RateCard[] = [
+      { id: 'BACK', role: 'Developer', organization: 'Backend', currency: 'EUR', costRate: 700, billRate: 1300 },
+    ];
+
+    function fillAndSave(fixture: ReturnType<typeof setup>['fixture'], organization: string) {
+      const c = fixture.componentInstance;
+      c.openForm();
+      c.form.controls.role.setValue('Developer');
+      c.form.controls.organization.setValue(organization);
+      c.form.controls.currency.setValue('EUR');
+      c.form.controls.costRate.setValue(660);
+      c.form.controls.billRate.setValue(1250);
+      c.save();
+    }
+
+    it('shows an info toast when saving a card whose node has an ancestor with a card', async () => {
+      const { fixture, notifyStub } = setup(ORG_NODES, CARD_ON_ENGINEERING);
+      await flush(fixture);
+      fillAndSave(fixture, 'Platform');
+      expect(notifyStub.show).toHaveBeenCalledWith(expect.stringContaining('This role already has a card on Engineering'), 'info');
+    });
+
+    it('shows an info toast when saving a card whose node has a descendant with its own card', async () => {
+      const { fixture, notifyStub } = setup(ORG_NODES, CARD_ON_BACKEND);
+      await flush(fixture);
+      fillAndSave(fixture, 'Engineering');
+      expect(notifyStub.show).toHaveBeenCalledWith(expect.stringContaining('This role already has a card on Backend'), 'info');
+    });
+
+    it('does NOT show the conflict toast when saving a generic card', async () => {
+      const { fixture, notifyStub } = setup(ORG_NODES, CARD_ON_ENGINEERING);
+      await flush(fixture);
+      fillAndSave(fixture, ''); // generic -- no organization
+      expect(notifyStub.show).not.toHaveBeenCalledWith(expect.anything(), 'info');
+    });
+
+    it('does NOT show the conflict toast when there is no conflict at all', async () => {
+      const { fixture, notifyStub } = setup(ORG_NODES, []); // no existing cards anywhere
+      await flush(fixture);
+      fillAndSave(fixture, 'Platform');
+      expect(notifyStub.show).not.toHaveBeenCalledWith(expect.anything(), 'info');
+    });
+
+    it('never blocks the save when a conflict is detected', async () => {
+      const { fixture, createRateCard } = setup(ORG_NODES, CARD_ON_ENGINEERING);
+      await flush(fixture);
+      fillAndSave(fixture, 'Platform');
+      expect(createRateCard).toHaveBeenCalled();
+      expect(fixture.componentInstance.showForm()).toBe(false); // form closed -- save proceeded
+    });
+  });
 });
