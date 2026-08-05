@@ -406,6 +406,81 @@ describe('UtilizationComponent — bench badge', () => {
   });
 });
 
+describe('UtilizationComponent — Right Pane resilience to a reload failure', () => {
+  beforeEach(() => TestBed.resetTestingModule());
+
+  // Round-1 review CRITICAL: the Right Pane's `@if (selectedResource())` is
+  // evaluated on every CD pass and was NOT gated on loading()/hasError() —
+  // selectedResource() reads resources(), which dereferences
+  // dataResource.value() unconditionally, and .value() THROWS while
+  // dataResource.status() === 'error'. The reachable path: select a row ->
+  // approve/reject a time entry, or save/paste/delete an assignment (every
+  // one of those calls dataResource.reload() on success) -> the reload's
+  // now-five-required-leg forkJoin fails -> next CD pass hits
+  // `@if (selectedResource())` -> throw, taking the whole page down
+  // (documented in this codebase's own words at contract-details.ts:1042-1044).
+  //
+  // The existing "bench read fails" test above never calls selectResource(),
+  // so selectedResourceId stays null and selectedResource() short-circuits
+  // BEFORE ever touching resources() — it cannot catch this. This test
+  // selects a resource FIRST (so the Right Pane genuinely renders her
+  // details, proven by the 'Capacity:'/'h/week' marker), and only THEN drives
+  // dataResource into its error state via a reload — the actual reachable
+  // order of events, not the reverse.
+  it('shows the error affordance in the Right Pane, not a crash, when a reload fails after a resource is already selected', async () => {
+    const { fixture, host, component, apiStub } = setup({ assignments: ASSIGNMENTS, requests: REQUESTS });
+    await flush(fixture);
+
+    component.selectResource(RESOURCES[0]); // Direct Dana
+    fixture.detectChanges();
+    // Precondition: her details are genuinely showing (capacity 40 from
+    // `base`) before the failure — otherwise this test would not actually
+    // exercise "a live selection survives a failed reload".
+    expect(host.textContent ?? '').toContain('40h/week');
+
+    // Simulate the reachable trigger: approving/rejecting/saving mutates,
+    // then calls dataResource.reload() on success — and this time the
+    // REQUIRED benchRollup leg fails.
+    apiStub.getBenchMonthly.mockReturnValue(throwError(() => new Error('bench endpoint down')));
+    // dataResource is `protected` (the template calls it directly for the
+    // retry affordance) — reaching it here exercises the exact same reload
+    // mechanism every mutation handler (approve/reject/save/paste/delete)
+    // triggers on success, without coupling this test to any one of them.
+    (component as unknown as { dataResource: { reload: () => void } }).dataResource.reload();
+    await flush(fixture);
+
+    // Both panels share the one dataResource, so both show list-state's
+    // error affordance — never a thrown exception, never the stale resource
+    // header still showing.
+    const alerts = host.querySelectorAll('[role="alert"]');
+    expect(alerts.length).toBeGreaterThan(0);
+    expect(host.textContent ?? '').not.toContain('Direct Dana');
+    expect(host.textContent ?? '').not.toContain('40h/week');
+  });
+
+  // Twin of the test above: the Right Pane's OWN empty state ("Select a
+  // Resource") must not be confused with its error state either — pairs a
+  // presence assertion (error alert) with an absence assertion (the empty
+  // state's own copy), on the exact same failure.
+  it('does NOT fall back to the "Select a Resource" empty copy when the reload fails with a live selection', async () => {
+    const { fixture, host, component, apiStub } = setup({ assignments: ASSIGNMENTS, requests: REQUESTS });
+    await flush(fixture);
+    component.selectResource(RESOURCES[0]);
+    fixture.detectChanges();
+
+    apiStub.getBenchMonthly.mockReturnValue(throwError(() => new Error('bench endpoint down')));
+    // dataResource is `protected` (the template calls it directly for the
+    // retry affordance) — reaching it here exercises the exact same reload
+    // mechanism every mutation handler (approve/reject/save/paste/delete)
+    // triggers on success, without coupling this test to any one of them.
+    (component as unknown as { dataResource: { reload: () => void } }).dataResource.reload();
+    await flush(fixture);
+
+    expect(host.textContent ?? '').not.toContain('Select a Resource');
+    expect(host.querySelectorAll('[role="alert"]').length).toBeGreaterThan(0);
+  });
+});
+
 describe('UtilizationComponent — assignment write integrity', () => {
   beforeEach(() => TestBed.resetTestingModule());
 

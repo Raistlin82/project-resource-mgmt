@@ -171,143 +171,160 @@ interface UtilizationData {
 
         <!-- Right Pane: Resource Details & Assignments -->
         <div class="lg:col-span-2 flex flex-col gap-6 sm:gap-8">
-          @if (selectedResource()) {
-            <!-- Resource Header -->
-            <div class="command-card p-6 sm:p-8 flex flex-col sm:flex-row sm:items-center justify-between gap-6">
-              <div>
-                <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">{{ selectedResource()?.name }}</h2>
-                <p class="text-[var(--cc-muted)] font-medium mt-2">{{ selectedResource()?.role }} <span class="mx-2 text-ink-muted">•</span> Capacity: <span class="font-bold text-[var(--cc-ink)] font-mono tabular-nums">{{ selectedResource()?.capacity | number:'1.0-2' }}h/week</span></p>
-              </div>
-              <div class="text-left sm:text-right command-card-muted p-4">
-                <div class="text-4xl font-black tracking-tighter font-mono tabular-nums" [class]="getUtilizationColorText(selectedResource()?.utilization || 0)">
-                  {{ selectedResource()?.utilization | number:'1.0-0' }}%
-                </div>
-                <div class="text-sm font-bold tracking-wide uppercase mt-1" [class]="getStatusColorText(selectedResource()?.utilization || 0)">
-                  {{ getStatusText(selectedResource()?.utilization || 0) }}
-                </div>
-              </div>
-            </div>
-
-            <!-- Assignments -->
-            <div class="command-card overflow-hidden flex-1 flex flex-col">
-              <div class="p-6 border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <h3 class="font-display text-xl font-bold text-[var(--cc-ink)]">Assignments</h3>
-                <div class="flex flex-wrap gap-3">
-                  @if (copiedAssignment()) {
-                    <button (click)="pasteAssignment()" class="command-button secondary flex-1 sm:flex-none">
-                      <mat-icon class="text-[18px] w-[18px] h-[18px]">content_paste</mat-icon> Paste
-                    </button>
-                  }
-                  <button (click)="openCreateForm()" class="command-button flex-1 sm:flex-none">
-                    <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create
-                  </button>
-                </div>
-              </div>
-
-              @if (showForm()) {
-                <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)]">
-                  <h4 class="font-display font-bold text-[var(--cc-ink)] text-lg mb-6">{{ editingAssignmentId() ? 'Edit Assignment' : 'New Assignment' }}</h4>
-                  <form [formGroup]="assignmentForm" (ngSubmit)="saveAssignment()" class="space-y-6">
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-                      <div class="md:col-span-2">
-                        <label for="requestId" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Project / Request *</label>
-                        <select id="requestId" formControlName="requestId" class="command-select">
-                          <option value="">Select a project...</option>
-                          @for (req of allRequests(); track req.id) {
-                            <option [value]="req.id">{{ req.name }} ({{ req.requiredRole }})</option>
-                          }
-                        </select>
-                      </div>
-                      <div class="command-card-muted p-4 text-sm text-[var(--cc-muted)]">
-                        <span class="font-bold text-[var(--cc-ink)]">Hours come from daily bookings.</span>
-                        Use the Allocation Calendar on the resource request to add or change them.
-                      </div>
+          <!-- Round-1 fix (Task 8 CRITICAL): this pane is evaluated on every CD
+               pass regardless of which team-list row is showing. selectedResource()
+               (below) reads resources(), which dereferences dataResource.value() —
+               and once benchRollup became a 5th REQUIRED forkJoin leg, a bench-read
+               failure on ANY reload (e.g. after approving a time entry, which
+               calls dataResource.reload() on success) flips status() to 'error'
+               and .value() throws. Wrapping in app-list-state defers evaluating
+               this pane's own @if/@else (and everything selectedResource()-derived
+               inside it) until neither loading() nor hasError() — the same
+               contentTemplate-deferral list-state.component.ts already documents —
+               so a reload failure shows the shared error affordance here too,
+               never an uncaught exception that takes the whole page down
+               (contract-details.ts:1042-1044 names exactly this failure mode). -->
+          <app-list-state [loading]="loading()" [error]="hasError()" skeleton="block" [rows]="3" label="resource details" (retry)="dataResource.reload()">
+            <ng-template>
+              @if (selectedResource()) {
+                <!-- Resource Header -->
+                <div class="command-card p-6 sm:p-8 flex flex-col sm:flex-row sm:items-center justify-between gap-6">
+                  <div>
+                    <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">{{ selectedResource()?.name }}</h2>
+                    <p class="text-[var(--cc-muted)] font-medium mt-2">{{ selectedResource()?.role }} <span class="mx-2 text-ink-muted">•</span> Capacity: <span class="font-bold text-[var(--cc-ink)] font-mono tabular-nums">{{ selectedResource()?.capacity | number:'1.0-2' }}h/week</span></p>
+                  </div>
+                  <div class="text-left sm:text-right command-card-muted p-4">
+                    <div class="text-4xl font-black tracking-tighter font-mono tabular-nums" [class]="getUtilizationColorText(selectedResource()?.utilization || 0)">
+                      {{ selectedResource()?.utilization | number:'1.0-0' }}%
                     </div>
-                    <div class="flex justify-end gap-3 pt-2">
-                      <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
-                      <button type="submit" [disabled]="!assignmentForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save</button>
-                    </div>
-                  </form>
-                </div>
-              }
-
-              <div class="divide-y divide-[var(--cc-line)] overflow-y-auto">
-                @for (assignment of resourceAssignments(); track assignment.id) {
-                  <div class="p-6 sm:p-8 hover:bg-surface-muted transition-colors flex flex-col sm:flex-row sm:items-center justify-between group gap-4">
-                    <div>
-                      <h4 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ getRequestName(assignment.requestId) }}</h4>
-                      <div class="flex items-center gap-3 mt-2">
-                        <span class="text-sm font-bold text-ink-secondary bg-surface-muted px-2.5 py-1 rounded-md font-mono tabular-nums">{{ assignment.assignedHours }} hours</span>
-                        <span class="command-status uppercase">
-                          {{ assignment.status }}
-                        </span>
-                      </div>
-                    </div>
-                    <div class="flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-                      <button (click)="copyAssignment(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Copy assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Copy assignment for ' + getRequestName(assignment.requestId)">
-                        <mat-icon class="text-[20px] w-[20px] h-[20px]">content_copy</mat-icon>
-                      </button>
-                      <button (click)="openEditForm(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Edit assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Edit assignment for ' + getRequestName(assignment.requestId)">
-                        <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
-                      </button>
-                      <button (click)="deleteAssignment(assignment.id)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Delete assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Delete assignment for ' + getRequestName(assignment.requestId)">
-                        <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
-                      </button>
+                    <div class="text-sm font-bold tracking-wide uppercase mt-1" [class]="getStatusColorText(selectedResource()?.utilization || 0)">
+                      {{ getStatusText(selectedResource()?.utilization || 0) }}
                     </div>
                   </div>
-                }
-                @if (resourceAssignments().length === 0) {
-                  <div class="p-12 text-center text-sm text-[var(--cc-muted)]">No assignments found for this resource.</div>
-                }
-              </div>
-            </div>
-
-            <div class="command-card overflow-hidden">
-              <div class="command-card-header">
-                <div>
-                  <h3 class="font-display text-xl font-bold text-[var(--cc-ink)]">Actual Time Approval</h3>
-                  <p class="mt-1 text-sm text-[var(--cc-muted)]">Approve submitted hours so they become actual delivery cost.</p>
                 </div>
-              </div>
-              <div class="divide-y divide-[var(--cc-line)]">
-                @for (entry of resourceTimeEntries(); track entry.id) {
-                  <div class="p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div>
-                      <div class="font-bold text-[var(--cc-ink)]">{{ getRequestName(entry.requestId) }}</div>
-                      <div class="text-sm text-[var(--cc-muted)] mt-1 font-mono tabular-nums">{{ entry.date }} · {{ entry.hours | number:'1.0-2' }}h · {{ entry.notes || 'No notes' }}</div>
-                    </div>
-                    <div class="flex items-center gap-2">
-                      <span class="command-status"
-                            [class.amber]="entry.status === 'Submitted'"
-                            [class.green]="entry.status === 'Approved'"
-                            [class.red]="entry.status === 'Rejected'">
-                        {{ entry.status }}
-                      </span>
-                      @if (entry.status === 'Submitted') {
-                        <button (click)="approveTimeEntry(entry)" class="p-2 rounded-md text-positive-text hover:bg-positive-tint" [attr.aria-label]="'Approve ' + entry.hours + ' hours for ' + getRequestName(entry.requestId) + ' on ' + entry.date" [attr.title]="'Approve ' + entry.hours + 'h time entry'">
-                          <mat-icon>check_circle</mat-icon>
-                        </button>
-                        <button (click)="rejectTimeEntry(entry)" class="p-2 rounded-md text-critical-text hover:bg-critical-tint" [attr.aria-label]="'Reject ' + entry.hours + ' hours for ' + getRequestName(entry.requestId) + ' on ' + entry.date" [attr.title]="'Reject ' + entry.hours + 'h time entry'">
-                          <mat-icon>cancel</mat-icon>
+
+                <!-- Assignments -->
+                <div class="command-card overflow-hidden flex-1 flex flex-col">
+                  <div class="p-6 border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <h3 class="font-display text-xl font-bold text-[var(--cc-ink)]">Assignments</h3>
+                    <div class="flex flex-wrap gap-3">
+                      @if (copiedAssignment()) {
+                        <button (click)="pasteAssignment()" class="command-button secondary flex-1 sm:flex-none">
+                          <mat-icon class="text-[18px] w-[18px] h-[18px]">content_paste</mat-icon> Paste
                         </button>
                       }
+                      <button (click)="openCreateForm()" class="command-button flex-1 sm:flex-none">
+                        <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create
+                      </button>
                     </div>
                   </div>
-                }
-                @if (!resourceTimeEntries().length) {
-                  <div class="p-8 text-center text-sm text-[var(--cc-muted)]">No actual time entries for this resource.</div>
-                }
-              </div>
-            </div>
-          } @else {
-            <div class="command-card h-full flex flex-col items-center justify-center p-12 text-center">
-              <div class="w-20 h-20 rounded-full border border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex items-center justify-center text-[var(--cc-primary)] mb-6">
-                <mat-icon class="text-4xl">people</mat-icon>
-              </div>
-              <h2 class="command-empty-title">Select a Resource</h2>
-              <p class="text-[var(--cc-muted)] mt-3 max-w-sm text-sm leading-relaxed">Choose a resource from your team on the left to view and manage their utilization and assignments.</p>
-            </div>
-          }
+
+                  @if (showForm()) {
+                    <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)]">
+                      <h4 class="font-display font-bold text-[var(--cc-ink)] text-lg mb-6">{{ editingAssignmentId() ? 'Edit Assignment' : 'New Assignment' }}</h4>
+                      <form [formGroup]="assignmentForm" (ngSubmit)="saveAssignment()" class="space-y-6">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                          <div class="md:col-span-2">
+                            <label for="requestId" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Project / Request *</label>
+                            <select id="requestId" formControlName="requestId" class="command-select">
+                              <option value="">Select a project...</option>
+                              @for (req of allRequests(); track req.id) {
+                                <option [value]="req.id">{{ req.name }} ({{ req.requiredRole }})</option>
+                              }
+                            </select>
+                          </div>
+                          <div class="command-card-muted p-4 text-sm text-[var(--cc-muted)]">
+                            <span class="font-bold text-[var(--cc-ink)]">Hours come from daily bookings.</span>
+                            Use the Allocation Calendar on the resource request to add or change them.
+                          </div>
+                        </div>
+                        <div class="flex justify-end gap-3 pt-2">
+                          <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
+                          <button type="submit" [disabled]="!assignmentForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save</button>
+                        </div>
+                      </form>
+                    </div>
+                  }
+
+                  <div class="divide-y divide-[var(--cc-line)] overflow-y-auto">
+                    @for (assignment of resourceAssignments(); track assignment.id) {
+                      <div class="p-6 sm:p-8 hover:bg-surface-muted transition-colors flex flex-col sm:flex-row sm:items-center justify-between group gap-4">
+                        <div>
+                          <h4 class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ getRequestName(assignment.requestId) }}</h4>
+                          <div class="flex items-center gap-3 mt-2">
+                            <span class="text-sm font-bold text-ink-secondary bg-surface-muted px-2.5 py-1 rounded-md font-mono tabular-nums">{{ assignment.assignedHours }} hours</span>
+                            <span class="command-status uppercase">
+                              {{ assignment.status }}
+                            </span>
+                          </div>
+                        </div>
+                        <div class="flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                          <button (click)="copyAssignment(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Copy assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Copy assignment for ' + getRequestName(assignment.requestId)">
+                            <mat-icon class="text-[20px] w-[20px] h-[20px]">content_copy</mat-icon>
+                          </button>
+                          <button (click)="openEditForm(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Edit assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Edit assignment for ' + getRequestName(assignment.requestId)">
+                            <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
+                          </button>
+                          <button (click)="deleteAssignment(assignment.id)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Delete assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Delete assignment for ' + getRequestName(assignment.requestId)">
+                            <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
+                          </button>
+                        </div>
+                      </div>
+                    }
+                    @if (resourceAssignments().length === 0) {
+                      <div class="p-12 text-center text-sm text-[var(--cc-muted)]">No assignments found for this resource.</div>
+                    }
+                  </div>
+                </div>
+
+                <div class="command-card overflow-hidden">
+                  <div class="command-card-header">
+                    <div>
+                      <h3 class="font-display text-xl font-bold text-[var(--cc-ink)]">Actual Time Approval</h3>
+                      <p class="mt-1 text-sm text-[var(--cc-muted)]">Approve submitted hours so they become actual delivery cost.</p>
+                    </div>
+                  </div>
+                  <div class="divide-y divide-[var(--cc-line)]">
+                    @for (entry of resourceTimeEntries(); track entry.id) {
+                      <div class="p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                        <div>
+                          <div class="font-bold text-[var(--cc-ink)]">{{ getRequestName(entry.requestId) }}</div>
+                          <div class="text-sm text-[var(--cc-muted)] mt-1 font-mono tabular-nums">{{ entry.date }} · {{ entry.hours | number:'1.0-2' }}h · {{ entry.notes || 'No notes' }}</div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                          <span class="command-status"
+                                [class.amber]="entry.status === 'Submitted'"
+                                [class.green]="entry.status === 'Approved'"
+                                [class.red]="entry.status === 'Rejected'">
+                            {{ entry.status }}
+                          </span>
+                          @if (entry.status === 'Submitted') {
+                            <button (click)="approveTimeEntry(entry)" class="p-2 rounded-md text-positive-text hover:bg-positive-tint" [attr.aria-label]="'Approve ' + entry.hours + ' hours for ' + getRequestName(entry.requestId) + ' on ' + entry.date" [attr.title]="'Approve ' + entry.hours + 'h time entry'">
+                              <mat-icon>check_circle</mat-icon>
+                            </button>
+                            <button (click)="rejectTimeEntry(entry)" class="p-2 rounded-md text-critical-text hover:bg-critical-tint" [attr.aria-label]="'Reject ' + entry.hours + ' hours for ' + getRequestName(entry.requestId) + ' on ' + entry.date" [attr.title]="'Reject ' + entry.hours + 'h time entry'">
+                              <mat-icon>cancel</mat-icon>
+                            </button>
+                          }
+                        </div>
+                      </div>
+                    }
+                    @if (!resourceTimeEntries().length) {
+                      <div class="p-8 text-center text-sm text-[var(--cc-muted)]">No actual time entries for this resource.</div>
+                    }
+                  </div>
+                </div>
+              } @else {
+                <div class="command-card h-full flex flex-col items-center justify-center p-12 text-center">
+                  <div class="w-20 h-20 rounded-full border border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex items-center justify-center text-[var(--cc-primary)] mb-6">
+                    <mat-icon class="text-4xl">people</mat-icon>
+                  </div>
+                  <h2 class="command-empty-title">Select a Resource</h2>
+                  <p class="text-[var(--cc-muted)] mt-3 max-w-sm text-sm leading-relaxed">Choose a resource from your team on the left to view and manage their utilization and assignments.</p>
+                </div>
+              }
+            </ng-template>
+          </app-list-state>
         </div>
       </div>
     </div>
