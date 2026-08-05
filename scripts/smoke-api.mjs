@@ -1290,6 +1290,25 @@ async function checkBenchMonthly() {
 
   const { status: empStatus } = await req('GET', '/bench/monthly', { headers: EMPLOYEE_HEADERS });
   check('GET /api/bench/monthly (employee) -> 403', empStatus === 403, `status=${empStatus}`);
+
+  // VALIDATION — malformed 'from' -> 400 (mirrors checkCapacityMonthly's own validation step).
+  {
+    const { status: badStatus } = await req('GET', '/bench/monthly?from=2026-13');
+    check('GET /api/bench/monthly?from=2026-13 -> 400', badStatus === 400, `status=${badStatus}`);
+  }
+
+  // DEFAULT RANGE — no 'from' -> 200, defaulting to the first Open planning
+  // period (2026-04 in this seed, same as the explicit happy path above — so
+  // this genuinely exercises the default-resolution branch, not just "some
+  // month").
+  {
+    const { status: defStatus, body: defBody } = await req('GET', '/bench/monthly');
+    check(
+      'GET /api/bench/monthly (no params, admin) -> 200, defaults from to the first Open planning period (2026-04)',
+      defStatus === 200 && Array.isArray(defBody.months) && defBody.months[0] === '2026-04',
+      `status=${defStatus}, months=${JSON.stringify(defBody && defBody.months)}`,
+    );
+  }
 }
 
 /**
