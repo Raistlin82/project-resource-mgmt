@@ -163,6 +163,10 @@ const GATED_PATHS = [
   '/negotiated-rates', '/project-financials', '/cost-centers',
   '/project-cost-centers', '/approval-requests', '/audit-logs',
   '/self/profile', '/self/assignments', '/self/time-entries',
+  // Block F/E shared raw reads (Task 4) — same READ_RULE roles as
+  // '/assignments'/'/capacity', gated the same way: 401 with no principal and
+  // with forged headers alike.
+  '/assignment-days', '/assignment-months',
 ];
 
 /** Forged demo headers. Trusted only under AUTH_TRUST_HEADERS=true (dev only). */

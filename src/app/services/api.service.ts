@@ -992,6 +992,19 @@ export class ApiService {
     return this.http.get<Assignment[]>(`${this.baseUrl}/assignments`);
   }
 
+  /**
+   * Raw per-day/per-month assignment rows (Block F/E shared plumbing) —
+   * unaggregated, unlike `/capacity`. Needed by the What-If sandbox, which
+   * mutates resources/requests only in memory and can never round-trip a
+   * scenario through the server, so `benchRollup` must run client-side there.
+   */
+  getAssignmentDays(): Observable<AssignmentDay[]> {
+    return this.http.get<AssignmentDay[]>(`${this.baseUrl}/assignment-days`);
+  }
+  getAssignmentMonths(): Observable<AssignmentMonth[]> {
+    return this.http.get<AssignmentMonth[]>(`${this.baseUrl}/assignment-months`);
+  }
+
   createAssignment(assignment: Partial<Assignment>): Observable<Assignment> {
     return this.http.post<Assignment>(`${this.baseUrl}/assignments`, assignment);
   }

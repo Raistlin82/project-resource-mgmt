@@ -1204,6 +1204,47 @@ async function checkCapacityMonthly() {
 }
 
 /**
+ * Block F/E shared plumbing — raw `/assignment-days` and `/assignment-months`
+ * reads (Task 4). No server-side rollup: these exist so the What-If sandbox
+ * (which mutates resources/requests only in memory and can never round-trip
+ * through the server) can compose `benchRollup` client-side. Same READ_RULE
+ * roles as `/capacity` and `/assignments` — 'employee' must be refused.
+ */
+async function checkAssignmentRawReads() {
+  const EMPLOYEE_HEADERS = { 'X-User-Id': '2', 'X-User-Role': 'employee' };
+
+  // 1) HAPPY PATH — /assignment-days: seeded rows, each shaped {assignmentId, date, hours}.
+  {
+    const { status, body } = await req('GET', '/assignment-days');
+    check('GET /api/assignment-days (admin) -> 200', status === 200, `status=${status}`);
+    check('response is an array with at least the seeded rows', Array.isArray(body) && body.length > 0, `length=${Array.isArray(body) ? body.length : 'n/a'}`);
+    const row = Array.isArray(body) ? body[0] : undefined;
+    check(
+      'a row has assignmentId/date/hours',
+      Boolean(row) && typeof row.assignmentId === 'string' && typeof row.date === 'string' && typeof row.hours === 'number',
+      JSON.stringify(row),
+    );
+  }
+
+  // 2) HAPPY PATH — /assignment-months: seeded rows.
+  {
+    const { status, body } = await req('GET', '/assignment-months');
+    check('GET /api/assignment-months (admin) -> 200', status === 200, `status=${status}`);
+    check('response is an array with at least the seeded rows', Array.isArray(body) && body.length > 0, `length=${Array.isArray(body) ? body.length : 'n/a'}`);
+  }
+
+  // 3) RBAC — 'employee' is not in the shared READ_RULE roles -> 403, on EACH path separately.
+  {
+    const { status } = await req('GET', '/assignment-days', { headers: EMPLOYEE_HEADERS });
+    check('GET /api/assignment-days (employee) -> 403', status === 403, `status=${status}`);
+  }
+  {
+    const { status } = await req('GET', '/assignment-months', { headers: EMPLOYEE_HEADERS });
+    check('GET /api/assignment-months (employee) -> 403', status === 403, `status=${status}`);
+  }
+}
+
+/**
  * B3 — the per-month approval lifecycle. Editing ONE month of an approved
  * assignment must demote only that month; its siblings stay Allocated.
  */
@@ -5730,6 +5771,16 @@ async function main() {
     await checkCapacityMonthly();
   } catch (err) {
     console.log(`FAIL  capacity-monthly flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the assignment raw-reads
+  // check (Block F/E shared plumbing) never masks or blocks any of the prior
+  // section results.
+  try {
+    await checkAssignmentRawReads();
+  } catch (err) {
+    console.log(`FAIL  assignment raw-reads (Block F/E plumbing) — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

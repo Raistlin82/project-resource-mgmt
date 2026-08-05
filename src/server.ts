@@ -719,6 +719,11 @@ const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   // Monthly FTE capacity/demand rollup (B2): a read-only computed view derived
   // from assignments/resources — same need-to-know as the staffing reads above.
   { test: p => p.startsWith('/capacity'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
+  // Shared by Block F and block E: same need-to-know as '/capacity' and the
+  // staffing reads above — these two collections feed exactly the same
+  // pre-aggregated rollups those endpoints already serve to this audience,
+  // just unaggregated for client-side (What-If sandbox) composition.
+  { test: p => p.startsWith('/assignment-days') || p.startsWith('/assignment-months'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
   // B3 approval feed: the People Manager's month-by-month queue — approver-grade
   // roles only (stricter than /capacity, which is a read-only rollup).
   { test: p => p.startsWith('/allocation-approvals'), roles: ['resource-manager', 'delivery-executive', 'admin'] },
@@ -2198,6 +2203,18 @@ apiRouter.delete('/requests/:id', async (req, res) => {
   if (!removed) { res.status(404).json({ error: 'Not found' }); return; }
   res.status(204).send();
 });
+
+// Shared by Block F (bench.util's client-side composition, since the What-If
+// sandbox mutates resources/requests only in memory and can never round-trip
+// through the server) and block E (same underlying data, independently
+// required by its own spec). Root-level, hyphenated, matching this file's own
+// convention for a compound-concept collection (order-lines, billing-plan-items,
+// change-requests, approval-requests, time-entries) — NOT nested under
+// '/assignments', which has no precedent anywhere in this file for a second
+// collection's list. `/assignment-months` itself is already a root path here
+// (the C2 substitute action, POST /assignment-months/:id/substitute below).
+apiRouter.get('/assignment-days', async (_req, res) => { res.json(await repos.assignmentDays.list()); });
+apiRouter.get('/assignment-months', async (_req, res) => { res.json(await repos.assignmentMonths.list()); });
 
 apiRouter.get('/assignments', async (_req, res) => { res.json(await repos.assignments.list()); });
 apiRouter.post('/assignments', async (req, res) => {
