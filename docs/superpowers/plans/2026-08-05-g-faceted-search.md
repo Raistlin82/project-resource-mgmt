@@ -894,6 +894,32 @@ git commit -m "feat: SearchFilterBarComponent — shared text+facets+chips filte
 
 ### Task 6: `/search` route and `search.component.ts` page
 
+**CORRECTION (plan defect, fixed against the spec, not the other way around):**
+The version of this task originally checked into this plan collapsed all six
+sections onto a single `submittedQuery` signal — explicit-submit-only for
+EVERY section — under a "v1 simplification" framing, with `submitQuery` cited
+as "the seam a debounce timer would call automatically... in a follow-up."
+That silently overrode design spec §6, Decision 4, which this document's own
+preamble states is **closed**: *"Le quattro decisioni di prodotto che seguono
+sono chiuse: sono scritte come design, non come opzioni"* (the four product
+decisions are closed — written as design, not options). Decision 4 is a
+deliberate product choice the human owner made — explicit submit for the two
+highest-cardinality collections (Resources, Requests) to keep server load
+predictable, live search with a 300ms debounce for the four collections that
+never had ANY filter before this block (Projects, Customers, Contracts,
+Orders) because a per-keystroke-pause request there is cheap and the UX
+payoff is real. The plan is what was wrong; the spec was always correct and
+is untouched. This section now implements §6 as written: **explicit submit
+for Resources and Requests; live search with a 300ms debounce for Projects,
+Customers, Contracts and Orders** — one shared search box drives both timing
+modes at once, keyed off a single `SEARCH_TIMING` map (not duplicated per
+section) so a future section cannot silently pick up the wrong mode in one
+place while the rest of the code assumes another. The debounce is
+browser-only (guarded by `isPlatformBrowser`, mirroring
+`NotificationService`'s own established rule that a timer must never be
+scheduled during SSR) — a per-request Node process could otherwise carry a
+scheduled callback across into a later, unrelated request.
+
 **Spec:** §4, §5, §6, §9, §11 in full.
 
 **Files:**
@@ -924,11 +950,13 @@ No change needed to the `navGroups` filter function for the `Resource Control` g
 
 - [ ] **Step 2: Write the failing component test**
 
-Create `src/app/search/search.component.spec.ts`:
+Create `src/app/search/search.component.spec.ts`. Covers BOTH timing paths
+separately (spec §6, Decision 4), plus the negative case for each, plus the
+coalescing guarantee the decision exists for, plus the SSR guard:
 
 ```ts
 import { TestBed } from '@angular/core/testing';
-import { provideZonelessChangeDetection } from '@angular/core';
+import { PLATFORM_ID, provideZonelessChangeDetection } from '@angular/core';
 import { of, throwError } from 'rxjs';
 import { HttpErrorResponse } from '@angular/common/http';
 import { SearchComponent } from './search.component';
@@ -948,32 +976,58 @@ function apiStub(overrides: Partial<Record<string, unknown>> = {}) {
 }
 
 describe('SearchComponent', () => {
-  async function setup(apiOverrides: Partial<Record<string, unknown>> = {}, authOverrides: Partial<Record<string, unknown>> = {}) {
+  async function setup(
+    apiOverrides: Partial<Record<string, unknown>> = {},
+    authOverrides: Partial<Record<string, unknown>> = {},
+    platform = 'browser',
+  ) {
     await TestBed.configureTestingModule({
       imports: [SearchComponent],
       providers: [
         provideZonelessChangeDetection(),
+        { provide: PLATFORM_ID, useValue: platform },
         { provide: ApiService, useValue: apiStub(apiOverrides) },
         { provide: AuthService, useValue: { authReady: () => true, canReadStaffing: () => true, canReadCommercial: () => true, ...authOverrides } },
       ],
     }).compileComponents();
     const fixture = TestBed.createComponent(SearchComponent);
     fixture.detectChanges();
-    fixture.componentInstance.submitQuery('Julie');
-    await Promise.resolve();
-    fixture.detectChanges();
     return fixture;
   }
 
+  /** Flushes the still-pending rxResource stream (params effect -> stream() ->
+   *  forkJoin resolution -> value() update -> render). A single microtask tick
+   *  is not enough for a chain this long under zoneless CD; loop a few rounds
+   *  rather than guess a magic number of awaits per call site. */
+  async function flush(fixture: { detectChanges(): void }, rounds = 4): Promise<void> {
+    for (let i = 0; i < rounds; i += 1) {
+      await Promise.resolve();
+      fixture.detectChanges();
+    }
+  }
+
+  async function setupAndSubmit(
+    apiOverrides: Partial<Record<string, unknown>> = {},
+    authOverrides: Partial<Record<string, unknown>> = {},
+  ) {
+    const fixture = await setup(apiOverrides, authOverrides);
+    fixture.componentInstance.submitQuery('Julie');
+    await flush(fixture);
+    return fixture;
+  }
+
+  // --- Explicit-submit path (spec §6: Resources/Requests, and Enter always
+  // resolves every section immediately, including the live ones) ---
+
   it('a matching resource renders in the Resources section', async () => {
-    const fixture = await setup();
+    const fixture = await setupAndSubmit();
     const host = fixture.nativeElement as HTMLElement;
     expect(host.querySelector('[data-test="section-resources"]')!.textContent).toContain('Julie Armstrong');
   });
 
   it('a role without canReadStaffing never even requests /resources, and the section does not render', async () => {
     const calls: string[] = [];
-    const fixture = await setup(
+    const fixture = await setupAndSubmit(
       { getResources: () => { calls.push('resources'); return of([]); } },
       { canReadStaffing: () => false },
     );
@@ -983,7 +1037,7 @@ describe('SearchComponent', () => {
   });
 
   it('a genuinely empty result renders "no results", not an error and not a missing section', async () => {
-    const fixture = await setup({ getProjects: () => of([]) });
+    const fixture = await setupAndSubmit({ getProjects: () => of([]) });
     const host = fixture.nativeElement as HTMLElement;
     const section = host.querySelector('[data-test="section-projects"]')!;
     expect(section).toBeTruthy();
@@ -991,16 +1045,95 @@ describe('SearchComponent', () => {
   });
 
   it('a network error on one section shows Retry there, while the other section still shows its own results', async () => {
-    const fixture = await setup({ getProjects: () => throwError(() => new HttpErrorResponse({ status: 500 })) });
+    const fixture = await setupAndSubmit({ getProjects: () => throwError(() => new HttpErrorResponse({ status: 500 })) });
     const host = fixture.nativeElement as HTMLElement;
     expect(host.querySelector('[data-test="section-projects"]')!.textContent).toContain('Retry');
     expect(host.querySelector('[data-test="section-resources"]')!.textContent).toContain('Julie Armstrong');
   });
 
   it('a 403 on one section (unexpected, despite the capability pre-filter) omits the section rather than showing an error panel', async () => {
-    const fixture = await setup({ getResources: () => throwError(() => new HttpErrorResponse({ status: 403 })) });
+    const fixture = await setupAndSubmit({ getResources: () => throwError(() => new HttpErrorResponse({ status: 403 })) });
     const host = fixture.nativeElement as HTMLElement;
     expect(host.querySelector('[data-test="section-resources"]')).toBeFalsy();
+  });
+
+  // --- Live-debounce path (spec §6, Decision 4: Projects/Customers/Contracts/
+  // Orders auto-search 300ms after the last keystroke, WITHOUT Enter) ---
+
+  describe('live-debounced sections (spec §6, Decision 4)', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('typing into the box fires the Projects (live) section after the debounce, not before', async () => {
+      const getProjects = vi.fn(() => of([{ id: '1', name: 'Project Alpha', location: 'Berlin' }]));
+      const fixture = await setup({ getProjects });
+
+      (fixture.componentInstance as unknown as { onInput(v: string): void }).onInput('Alpha');
+      await flush(fixture);
+
+      // Before the debounce elapses: not called, section not rendered.
+      vi.advanceTimersByTime(299);
+      await flush(fixture);
+      expect(getProjects).not.toHaveBeenCalled();
+      expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="section-projects"]')).toBeFalsy();
+
+      // Once the debounce elapses: fired, section renders.
+      vi.advanceTimersByTime(1);
+      await flush(fixture);
+      expect(getProjects).toHaveBeenCalledWith({ q: 'Alpha' });
+      expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="section-projects"]')!.textContent).toContain('Project Alpha');
+    });
+
+    it('typing into the box fires NOTHING in the Resources (explicit-submit) section until Enter, however long you wait', async () => {
+      const getResources = vi.fn(() => of([{ id: '1', name: 'Julie Armstrong', role: 'Developer', kind: 'internal' }]));
+      const fixture = await setup({ getResources });
+
+      (fixture.componentInstance as unknown as { onInput(v: string): void }).onInput('Julie');
+      vi.advanceTimersByTime(10_000); // far beyond any debounce window
+      await flush(fixture);
+
+      expect(getResources).not.toHaveBeenCalled();
+      expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="section-resources"]')).toBeFalsy();
+
+      // Confirm Enter is what actually releases it (rules out a broken test
+      // double that would trivially "pass" by never firing at all).
+      (fixture.componentInstance as unknown as { submitNow(): void }).submitNow();
+      await flush(fixture);
+      expect(getResources).toHaveBeenCalledWith({ q: 'Julie' });
+    });
+
+    it('rapid keystrokes coalesce into ONE query, not one request per keystroke', async () => {
+      const getProjects = vi.fn(() => of([]));
+      const fixture = await setup({ getProjects });
+      const instance = fixture.componentInstance as unknown as { onInput(v: string): void };
+
+      instance.onInput('J');
+      vi.advanceTimersByTime(100);
+      await flush(fixture);
+      instance.onInput('Ju');
+      vi.advanceTimersByTime(100);
+      await flush(fixture);
+      instance.onInput('Jul');
+      vi.advanceTimersByTime(100);
+      await flush(fixture);
+      instance.onInput('Julie');
+      vi.advanceTimersByTime(300); // full debounce from the LAST keystroke only
+      await flush(fixture);
+
+      expect(getProjects).toHaveBeenCalledTimes(1);
+      expect(getProjects).toHaveBeenCalledWith({ q: 'Julie' });
+    });
+
+    it('the debounce timer is browser-only: on the server, typing schedules nothing, however long fake time advances', async () => {
+      const getProjects = vi.fn(() => of([]));
+      const fixture = await setup({ getProjects }, {}, 'server');
+
+      (fixture.componentInstance as unknown as { onInput(v: string): void }).onInput('Alpha');
+      vi.advanceTimersByTime(10_000);
+      await flush(fixture);
+
+      expect(getProjects).not.toHaveBeenCalled();
+    });
   });
 });
 ```
@@ -1015,7 +1148,8 @@ Expected: FAIL — the module does not exist.
 - [ ] **Step 4: Implement `search.component.ts`**
 
 ```ts
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, PLATFORM_ID, computed, effect, inject, signal } from '@angular/core';
+import { isPlatformBrowser } from '@angular/common';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { HttpErrorResponse } from '@angular/common/http';
 import { catchError, forkJoin, map, of, type Observable } from 'rxjs';
@@ -1031,8 +1165,41 @@ type SectionResult<T> =
   | { status: 'forbidden' }
   | { status: 'error' };
 
+type SectionKey = 'resources' | 'requests' | 'projects' | 'customers' | 'contracts' | 'orders';
+
+/**
+ * Design spec §6, Decision 4 (CLOSED — a deliberate product decision the human
+ * owner made, not a wiring choice left to implementation): which of the six
+ * sections wait for an explicit submit (Enter) versus live-search with a
+ * debounce. This is the ONLY place that split is decided — every consumer
+ * below reads through this map rather than re-testing entity names, so a
+ * future section added here cannot silently pick up the wrong timing mode in
+ * one spot while the rest of the code assumes another.
+ *
+ *  - 'submit' (Resources, Requests): the highest-cardinality collections in
+ *    the app (hundreds of rows in production, not the seed's handful) — even
+ *    a debounce still fires one request per typing pause, so these wait for
+ *    an explicit Enter to keep server load predictable.
+ *  - 'live' (Projects, Customers, Contracts, Orders): lower-cardinality
+ *    collections — Customers/Contracts/Orders never had ANY filter before
+ *    this block (spec §1) — where a per-pause request is an acceptable cost
+ *    in exchange for a more fluid search experience.
+ */
+const SEARCH_TIMING: Record<SectionKey, 'submit' | 'live'> = {
+  resources: 'submit',
+  requests: 'submit',
+  projects: 'live',
+  customers: 'live',
+  contracts: 'live',
+  orders: 'live',
+};
+
+/** How long a 'live' section waits after the last keystroke before firing
+ *  (spec §6, Decision 4). */
+const LIVE_SEARCH_DEBOUNCE_MS = 300;
+
 interface SearchResults {
-  resources: SectionResult<Resource> | undefined; // undefined = not attempted (capability pre-filter)
+  resources: SectionResult<Resource> | undefined; // undefined = not attempted (RBAC pre-filter, or no active query yet for this section's mode)
   requests: SectionResult<ResourceRequest> | undefined;
   projects: SectionResult<Project>;
   customers: SectionResult<Customer> | undefined;
@@ -1081,7 +1248,7 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
         (keydown.enter)="submitNow()"
       />
 
-      @if (submittedQuery()) {
+      @if (hasActiveQuery()) {
         @if (results().resources; as section) {
           <section class="command-card" data-test="section-resources">
             <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Resources</h2>
@@ -1089,23 +1256,25 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
               <ng-template>
                 @if (section.status === 'ok') {
                   @for (r of section.rows; track r.id) { <div>{{ r.name }}</div> }
-                  @empty { <p class="text-[var(--cc-muted)]">No results for "{{ submittedQuery() }}" in Resources.</p> }
+                  @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('resources') }}" in Resources.</p> }
                 }
               </ng-template>
             </app-list-state>
           </section>
         }
-        <section class="command-card" data-test="section-projects">
-          <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Projects</h2>
-          <app-list-state [loading]="loading()" [error]="results().projects.status === 'error'" label="projects" (retry)="reload()">
-            <ng-template>
-              @if (results().projects.status === 'ok') {
-                @for (p of results().projects.rows; track p.id) { <div>{{ p.name }}</div> }
-                @empty { <p class="text-[var(--cc-muted)]">No results for "{{ submittedQuery() }}" in Projects.</p> }
-              }
-            </ng-template>
-          </app-list-state>
-        </section>
+        @if (results().projects; as projectsSection) {
+          <section class="command-card" data-test="section-projects">
+            <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Projects</h2>
+            <app-list-state [loading]="loading()" [error]="projectsSection.status === 'error'" label="projects" (retry)="reload()">
+              <ng-template>
+                @if (projectsSection.status === 'ok') {
+                  @for (p of projectsSection.rows; track p.id) { <div>{{ p.name }}</div> }
+                  @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('projects') }}" in Projects.</p> }
+                }
+              </ng-template>
+            </app-list-state>
+          </section>
+        }
         @if (results().requests; as section) {
           <section class="command-card" data-test="section-requests">
             <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Requests</h2>
@@ -1113,7 +1282,7 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
               <ng-template>
                 @if (section.status === 'ok') {
                   @for (r of section.rows; track r.id) { <div>{{ r.name }}</div> }
-                  @empty { <p class="text-[var(--cc-muted)]">No results for "{{ submittedQuery() }}" in Requests.</p> }
+                  @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('requests') }}" in Requests.</p> }
                 }
               </ng-template>
             </app-list-state>
@@ -1126,7 +1295,7 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
               <ng-template>
                 @if (section.status === 'ok') {
                   @for (c of section.rows; track c.id) { <div>{{ c.name }}</div> }
-                  @empty { <p class="text-[var(--cc-muted)]">No results for "{{ submittedQuery() }}" in Customers.</p> }
+                  @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('customers') }}" in Customers.</p> }
                 }
               </ng-template>
             </app-list-state>
@@ -1139,7 +1308,7 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
               <ng-template>
                 @if (section.status === 'ok') {
                   @for (c of section.rows; track c.id) { <div>{{ c.name }}</div> }
-                  @empty { <p class="text-[var(--cc-muted)]">No results for "{{ submittedQuery() }}" in Contracts.</p> }
+                  @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('contracts') }}" in Contracts.</p> }
                 }
               </ng-template>
             </app-list-state>
@@ -1152,7 +1321,7 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
               <ng-template>
                 @if (section.status === 'ok') {
                   @for (o of section.rows; track o.id) { <div>{{ o.invoiceNumber ?? o.id }}</div> }
-                  @empty { <p class="text-[var(--cc-muted)]">No results for "{{ submittedQuery() }}" in Orders.</p> }
+                  @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('orders') }}" in Orders.</p> }
                 }
               </ng-template>
             </app-list-state>
@@ -1165,36 +1334,99 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
 export class SearchComponent {
   private api = inject(ApiService);
   protected auth = inject(AuthService);
+  private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
+  private readonly destroyRef = inject(DestroyRef);
 
-  // Draft text (every keystroke) vs submitted text (what actually triggers a
-  // fetch) — Resources/Requests wait for Enter (design spec §6: highest
-  // cardinality); Projects/Customers/Contracts/Orders could live-debounce in a
-  // richer iteration, but v1 fires all sections together on ONE submitted
-  // query, matching the single-search-box layout above. `submitQuery` is the
-  // seam a debounce timer would call automatically for the low-cardinality
-  // entities in a follow-up; exposed `protected` so the component test can
-  // drive it directly without simulating a real Enter keydown.
+  // Draft text (every keystroke) vs the two things that actually trigger a
+  // fetch, per spec §6, Decision 4: `submittedQuery` (Resources/Requests,
+  // explicit Enter only) and `liveQuery` (Projects/Customers/Contracts/
+  // Orders, a debounced mirror of the draft). `submitQuery` is the seam a
+  // real Enter keydown drives; exposed (not `protected`) so tests can invoke
+  // it directly without simulating a keydown event.
   protected draftQuery = signal('');
   protected submittedQuery = signal('');
+  /**
+   * Debounced mirror of `draftQuery` feeding the 'live' entities. Browser-only:
+   * this project already has an established rule that a timer with no
+   * corresponding real-time clock during SSR must never be scheduled there
+   * (NotificationService's auto-dismiss `setTimeout`, guarded by the same
+   * `isPlatformBrowser` check) — a per-request Node process could otherwise
+   * carry a timer callback across into a LATER, unrelated request. On the
+   * server this signal simply never advances past its initial `''`, which is
+   * harmless: the whole resource stays gated on `!authReady()` there anyway,
+   * and `authReady()` never flips true during SSR (auth.service.ts).
+   */
+  protected liveQuery = signal('');
+  private liveDebounceHandle: ReturnType<typeof setTimeout> | undefined;
+
+  constructor() {
+    if (this.isBrowser) {
+      effect(() => {
+        const value = this.draftQuery();
+        if (this.liveDebounceHandle !== undefined) clearTimeout(this.liveDebounceHandle);
+        // The write below happens inside the setTimeout callback, i.e. AFTER
+        // this effect's own synchronous execution has already finished — not
+        // a same-tick write from inside the effect — so no `allowSignalWrites`
+        // is needed (same reasoning as NotificationService.dismiss()'s own
+        // setTimeout-deferred signal write).
+        this.liveDebounceHandle = setTimeout(() => this.liveQuery.set(value), LIVE_SEARCH_DEBOUNCE_MS);
+      });
+      this.destroyRef.onDestroy(() => {
+        if (this.liveDebounceHandle !== undefined) clearTimeout(this.liveDebounceHandle);
+      });
+    }
+  }
 
   protected onInput(value: string): void { this.draftQuery.set(value); }
-  protected submitNow(): void { this.submittedQuery.set(this.draftQuery()); }
-  submitQuery(q: string): void { this.draftQuery.set(q); this.submittedQuery.set(q); }
+  protected submitNow(): void { this.applySubmit(this.draftQuery()); }
+  /** Test/production seam: equivalent to typing `q` then pressing Enter in one
+   *  step. An explicit submit reaches EVERY section immediately, including the
+   *  'live' ones — Enter is an unambiguous "search now" signal that should
+   *  never leave a live section stale behind a still-pending debounce. */
+  submitQuery(q: string): void { this.draftQuery.set(q); this.applySubmit(q); }
 
-  private searchRes = rxResource<SearchResults, { ready: boolean; q: string }>({
-    params: () => ({ ready: this.auth.authReady(), q: this.submittedQuery() }),
+  private applySubmit(q: string): void {
+    this.submittedQuery.set(q);
+    this.liveQuery.set(q); // Enter always resolves any pending debounce immediately
+    if (this.liveDebounceHandle !== undefined) { clearTimeout(this.liveDebounceHandle); this.liveDebounceHandle = undefined; }
+  }
+
+  /** Which active query text a section's "No results for ..." message should
+   *  show — reads the SAME `SEARCH_TIMING` map `stream` below reads, so the
+   *  displayed term can never disagree with the term actually sent. */
+  protected displayQueryFor(key: SectionKey): string {
+    return SEARCH_TIMING[key] === 'submit' ? this.submittedQuery() : this.liveQuery();
+  }
+
+  private searchRes = rxResource<SearchResults, { ready: boolean } & Record<SectionKey, string>>({
+    params: () => {
+      const submitted = this.submittedQuery().trim();
+      const live = this.liveQuery().trim();
+      // Single source of truth for "which query value feeds which section":
+      // SEARCH_TIMING above. Safe cast: Object.keys(SEARCH_TIMING) is exactly
+      // the six SectionKey literals, so every key of Record<SectionKey, string>
+      // is always populated below.
+      const perSection = Object.fromEntries(
+        (Object.keys(SEARCH_TIMING) as SectionKey[]).map(key => [key, SEARCH_TIMING[key] === 'submit' ? submitted : live]),
+      ) as Record<SectionKey, string>;
+      return { ready: this.auth.authReady(), ...perSection };
+    },
     stream: ({ params }) => {
-      if (!params.ready || !params.q.trim()) return of(EMPTY_RESULTS);
-      const q = params.q.trim();
+      if (!params.ready) return of(EMPTY_RESULTS);
+      const anyActive = params.resources || params.requests || params.projects || params.customers || params.contracts || params.orders;
+      if (!anyActive) return of(EMPTY_RESULTS);
       const canStaffing = this.auth.canReadStaffing();
       const canCommercial = this.auth.canReadCommercial();
       return forkJoin({
-        resources: canStaffing ? sectionCall(this.api.getResources({ q })) : of(undefined),
-        requests: canStaffing ? sectionCall(this.api.getRequests({ q })) : of(undefined),
-        projects: sectionCall(this.api.getProjects({ q })), // open read, always attempted
-        customers: canCommercial ? sectionCall(this.api.getCustomers({ q })) : of(undefined),
-        contracts: canCommercial ? sectionCall(this.api.getContracts({ q })) : of(undefined),
-        orders: canCommercial ? sectionCall(this.api.getOrders({ q })) : of(undefined),
+        resources: canStaffing && params.resources ? sectionCall(this.api.getResources({ q: params.resources })) : of(undefined),
+        requests: canStaffing && params.requests ? sectionCall(this.api.getRequests({ q: params.requests })) : of(undefined),
+        // /projects has no RBAC pre-filter (open read, spec §4) -- always
+        // attempted once its own (live) query is non-empty; otherwise the same
+        // "ok, empty" default as EMPTY_RESULTS.projects, never absent.
+        projects: params.projects ? sectionCall(this.api.getProjects({ q: params.projects })) : of({ status: 'ok' as const, rows: [] as Project[] }),
+        customers: canCommercial && params.customers ? sectionCall(this.api.getCustomers({ q: params.customers })) : of(undefined),
+        contracts: canCommercial && params.contracts ? sectionCall(this.api.getContracts({ q: params.contracts })) : of(undefined),
+        orders: canCommercial && params.orders ? sectionCall(this.api.getOrders({ q: params.orders })) : of(undefined),
       }).pipe(
         map(r => ({
           resources: r.resources?.status === 'forbidden' ? undefined : r.resources,
@@ -1211,9 +1443,24 @@ export class SearchComponent {
 
   protected results = computed(() => this.searchRes.value() ?? EMPTY_RESULTS);
   protected loading = computed(() => !this.auth.authReady() || this.searchRes.isLoading());
+  protected hasActiveQuery = computed(() => !!this.submittedQuery().trim() || !!this.liveQuery().trim());
   protected reload(): void { this.searchRes.reload(); }
 }
 ```
+
+NOTE (a second, independent defect caught while writing this — not the
+closed-decision issue, a plain type error): the ORIGINAL plan's Projects
+section called `results().projects.status` and, in a separate expression,
+`results().projects.rows` without an intervening `; as` binding. The Angular
+template compiler does not narrow `SectionResult<Project>` (a union that
+includes a variant with no `rows`) across two independent calls to the same
+signal-returning function — `results().projects.rows` fails to compile
+(`Property 'rows' does not exist on type '{ status: "forbidden" }'`). Fixed
+by binding `@if (results().projects; as projectsSection)` first, exactly the
+same pattern the other five (RBAC-gated) sections already use for exactly
+this reason — the fix does not change Projects' always-visible behavior
+(`results().projects` is never `undefined`, so the `@if` is always truthy;
+it exists purely to give the template compiler a stable, narrowable binding).
 
 - [ ] **Step 5: Run it green, then the whole suite and lint**
 
@@ -1223,16 +1470,30 @@ export class SearchComponent {
 ./node_modules/.bin/ng lint
 ```
 
-- [ ] **Step 6: Mutate and confirm red (the two highest-value mutations)**
+Also smoke-check that `/search` actually renders under SSR without error —
+this is exactly the surface the browser-only debounce guard protects:
 
-1. In the `stream` capability pre-filter, change `canStaffing ? sectionCall(...) : of(undefined)` to always `sectionCall(this.api.getResources({q}))` (drop the pre-filter for resources). Run the suite: **"a role without canReadStaffing never even requests /resources"** goes red (the stub's `getResources` is now called). Revert.
+```bash
+./node_modules/.bin/ng build
+env -u DATABASE_URL AUTH_TRUST_HEADERS=true PORT=4176 HOST=localhost node dist/app/server/server.mjs &
+sleep 4
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:4176/search   # expect 200
+kill %1
+```
+
+- [ ] **Step 6: Mutate and confirm red (five mutations — two RBAC/four-state, three timing-split)**
+
+1. In the `stream` capability pre-filter, change `canStaffing && params.resources ? sectionCall(...) : of(undefined)` to `params.resources ? sectionCall(...) : of(undefined)` (drop the capability check for resources). Run the suite: **"a role without canReadStaffing never even requests /resources"** goes red (the stub's `getResources` is now called). Revert.
 2. In `sectionCall`, change `err.status === 403 ? {status:'forbidden' as const} : {status:'error' as const}` to always `{status:'error' as const}`. Run the suite: **"a 403 on one section... omits the section rather than showing an error panel"** goes red (the section now renders an error panel instead of disappearing). Revert.
+3. In `SEARCH_TIMING`, change `projects: 'live'` to `projects: 'submit'`. Run the suite: **both** "typing into the box fires the Projects (live) section after the debounce" and "rapid keystrokes coalesce into ONE query" go red (Projects no longer fires from typing at all, since it now waits on `submittedQuery`, which `onInput` never touches) — proof the map is the single place that decides the split, not something re-derived per call site. Revert.
+4. In the debounce `effect`, delete the `if (this.liveDebounceHandle !== undefined) clearTimeout(this.liveDebounceHandle);` line. Run the suite: **"rapid keystrokes coalesce into ONE query, not one request per keystroke"** goes red (`getProjects` is now called 2 times instead of 1) — this is the specific load-bearing guarantee Decision 4 exists for; if this line regresses, every keystroke pause fires its own request again. Revert.
+5. Remove the `if (this.isBrowser) { ... }` guard around the debounce `effect()` (run it unconditionally). Run the suite: **"the debounce timer is browser-only"** goes red (`getProjects` is now called even with `PLATFORM_ID` set to `'server'`). Revert.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add src/app/search/search.component.ts src/app/search/search.component.spec.ts src/app/app.routes.ts src/app/app.ts
-git commit -m "feat: /search route — cross-entity search page with per-section RBAC pre-filtering and four-state rendering"
+git commit -m "feat: /search route — cross-entity search page with per-section RBAC pre-filtering, four-state rendering, and the explicit-submit/live-debounce split from spec §6"
 ```
 
 ---
