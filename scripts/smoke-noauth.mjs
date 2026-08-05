@@ -167,6 +167,10 @@ const GATED_PATHS = [
   // '/assignments'/'/capacity', gated the same way: 401 with no principal and
   // with forged headers alike.
   '/assignment-days', '/assignment-months',
+  // Block F (Task 6) — pre-aggregated bench/availability rollup. Extends the
+  // '/capacity' READ_RULE rather than a new one; gated the same way: 401 with
+  // no principal and with forged headers alike.
+  '/bench/monthly',
 ];
 
 /** Forged demo headers. Trusted only under AUTH_TRUST_HEADERS=true (dev only). */

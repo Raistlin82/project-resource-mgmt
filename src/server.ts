@@ -15,6 +15,7 @@ import { deriveAssignmentStatus, monthRowId, parseMonthRowId, monthlyAggregateHo
 import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity, monthlyTargetHours } from './app/services/calendar.util';
 import { planSubstitution, planGiveBack, planSubstitutionBooking, type SubstitutionPlan } from './app/services/substitution.util';
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
+import { benchRollup } from './app/services/bench.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import { negotiatedRateCurrencyError, sellRateFor } from './app/services/sell-rate.util';
 import { billingPlanValidationError } from './app/services/billing-validation.util';
@@ -718,7 +719,10 @@ const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   { test: p => ['/assignments', '/requests'].some(prefix => p === prefix || p.startsWith(prefix + '/')), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
   // Monthly FTE capacity/demand rollup (B2): a read-only computed view derived
   // from assignments/resources — same need-to-know as the staffing reads above.
-  { test: p => p.startsWith('/capacity'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
+  // Extended (not duplicated) for Block F's '/bench/monthly': same audience,
+  // deliberately excluding 'employee' (an org-wide idle-staff roster is
+  // sensitive) and 'sales' (no staffing need-to-know) — design spec §8.
+  { test: p => p.startsWith('/capacity') || p.startsWith('/bench'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
   // Shared by Block F and block E: same need-to-know as '/capacity' and the
   // staffing reads above — these two collections feed exactly the same
   // pre-aggregated rollups those endpoints already serve to this audience,
@@ -3595,6 +3599,52 @@ apiRouter.get('/capacity/monthly', async (req, res) => {
   const assignmentMonths = assignmentMonthRows.map(m => ({ assignmentId: m.assignmentId, month: m.month, status: m.status }));
 
   res.json(rollupMonthly({ resources, assignments, assignmentDays, assignmentMonths, months, hoursPerDay, holidays: holSet }));
+});
+
+// ---------------------------------------------------------------------------
+// COMPUTED READ (Block F): monthly BENCH/PARTIAL/ALLOCATED rollup + hiring
+// demand across internal/subco resources. Gated by the '/capacity' READ_RULE,
+// extended below to also match '/bench' (design spec §8) — roleGate is GLOBAL
+// middleware, so this handler is already authorized; do NOT re-gate per-handler.
+// Read-only: no mutation, no audit entry, no withLock.
+// ---------------------------------------------------------------------------
+apiRouter.get('/bench/monthly', async (req, res) => {
+  const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+  const qParam = (name: string): string | undefined => {
+    const v = req.query[name];
+    return typeof v === 'string' ? v : undefined;
+  };
+  const monthToIdx = (mo: string): number => { const [y, m] = mo.split('-').map(Number); return y * 12 + (m - 1); };
+  const idxToMonth = (i: number): string => `${Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, '0')}`;
+
+  const fromRaw = qParam('from');
+  if (fromRaw !== undefined && !MONTH_RE.test(fromRaw)) { res.status(400).json({ error: 'from must be a YYYY-MM month' }); return; }
+
+  let from = fromRaw;
+  if (from === undefined) {
+    const openIds = (await repos.planningPeriods.list()).filter(p => p.status === 'Open').map(p => p.id).sort();
+    from = openIds[0] ?? new Date().toISOString().slice(0, 7);
+  }
+  // Fixed 6-month display window — NOT configurable by the caller (design spec §8).
+  const to = idxToMonth(monthToIdx(from) + 5);
+  const fetchFrom = idxToMonth(monthToIdx(from) - 2);
+  const fetchTo = idxToMonth(monthToIdx(to) + 1);
+  const months = monthsInRange(fetchFrom, fetchTo);   // 9 months: 2 look-back + 6 shown + 1 look-ahead
+  const displayMonths = monthsInRange(from, to);        // the 6 shown months
+
+  const [resources, assignments, assignmentDays, assignmentMonthRows, holidays, hoursPerDay] = await Promise.all([
+    repos.resources.list(),
+    repos.assignments.list(),
+    repos.assignmentDays.list(),
+    repos.assignmentMonths.list(),
+    repos.holidays.list(),
+    getHoursPerDay(),
+  ]);
+  const holSet = new Set(holidays.map(h => h.id));
+  const assignmentMonths = assignmentMonthRows.map(m => ({ assignmentId: m.assignmentId, month: m.month, status: m.status }));
+  const today = new Date().toISOString().slice(0, 10);
+
+  res.json(benchRollup({ resources, assignments, assignmentDays, assignmentMonths, months, displayMonths, hoursPerDay, holidays: holSet }, today));
 });
 
 /**

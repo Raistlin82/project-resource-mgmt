@@ -6,11 +6,15 @@ import type { CapacityCell, CapacityRow, CapacityTotals } from './capacity.util'
 import type { ResourceKind } from './resource-kind.util';
 import type { OrgLevel } from './org-scope.util';
 import type { NegotiatedRate } from './sell-rate.util';
+import type { BenchRollup } from './bench.util';
 
 export type { CapacityCell, CapacityRow, CapacityTotals, ResourceKind };
 // Negotiated sell rate (design spec §3): the wire shape IS Task 1's pure-layer
 // interface — re-exported rather than redeclared so the two never drift.
 export type { NegotiatedRate } from './sell-rate.util';
+// Block F bench/availability rollup (design spec §8): re-exported rather than
+// redeclared so the wire shape and the pure layer never drift.
+export type { BenchRollup, BenchRow, BenchCell, BenchState, HiringDemandRow, AvailabilityDate, UnallocatedAgingBucket } from './bench.util';
 
 export interface Resource {
   id: string;
@@ -1093,6 +1097,21 @@ export class ApiService {
     if (from) params = params.set('from', from);
     if (to) params = params.set('to', to);
     return this.http.get<CapacityMonthly>(`${this.baseUrl}/capacity/monthly`, { params });
+  }
+
+  // --- Bench / Unchargeable and availability (Block F) ---
+
+  /**
+   * Monthly BENCH/PARTIAL/ALLOCATED rollup + hiring demand, pre-aggregated
+   * server-side over a fixed 6-month display window. `from` ('YYYY-MM') bounds
+   * the window's start; omit it to let the server pick its default (first Open
+   * planning period, else the current month). There is no `to` — the window is
+   * fixed at `from + 5` and not configurable by the caller (design spec §8).
+   */
+  getBenchMonthly(from?: string): Observable<BenchRollup> {
+    let params = new HttpParams();
+    if (from) params = params.set('from', from);
+    return this.http.get<BenchRollup>(`${this.baseUrl}/bench/monthly`, { params });
   }
 
   // --- Configuration APIs ---

@@ -1204,6 +1204,42 @@ async function checkCapacityMonthly() {
 }
 
 /**
+ * Block F — `/bench/monthly`: the pre-aggregated 6-month BENCH/PARTIAL/
+ * ALLOCATED rollup + hiring demand. Same READ_RULE roles as `/capacity`
+ * (extended, not duplicated — design spec §8); 'employee' must be refused.
+ */
+async function checkBenchMonthly() {
+  const EMPLOYEE_HEADERS = { 'X-User-Id': '2', 'X-User-Role': 'employee' };
+  const HAPPY_PATH = '/bench/monthly?from=2026-04';
+
+  const { status, body } = await req('GET', HAPPY_PATH);
+  const okStatus = check(`GET /api${HAPPY_PATH} (admin) -> 200`, status === 200, `status=${status}`);
+  if (!okStatus) return;
+
+  check(
+    "response 'months' is exactly the 6 shown months 2026-04..2026-09",
+    Array.isArray(body.months) && body.months.length === 6 && body.months[0] === '2026-04' && body.months[5] === '2026-09',
+    `months=${JSON.stringify(body.months)}`,
+  );
+
+  const subco6 = (body.subcoRows || []).find((r) => r.resourceId === '6');
+  check("subcoRows includes resource '6' (subco) with April PARTIAL", Boolean(subco6) && subco6.monthly['2026-04']?.state === 'PARTIAL', JSON.stringify(subco6?.monthly?.['2026-04']));
+  check("resource '6' is NEVER in internalRows", !(body.internalRows || []).some((r) => r.resourceId === '6'), 'found in internalRows');
+
+  check(
+    'no dummy resource id (4 or 5) appears in internalRows or subcoRows',
+    !['4', '5'].some((id) => (body.internalRows || []).some((r) => r.resourceId === id) || (body.subcoRows || []).some((r) => r.resourceId === id)),
+    'a dummy id leaked into a bench row list',
+  );
+
+  const hiring4 = (body.hiringDemand || []).filter((h) => h.role === 'Developer' && h.hours > 0);
+  check('hiringDemand has 6 Developer rows (one per shown month) with hours > 0', hiring4.length >= 6, `count=${hiring4.length}`);
+
+  const { status: empStatus } = await req('GET', '/bench/monthly', { headers: EMPLOYEE_HEADERS });
+  check('GET /api/bench/monthly (employee) -> 403', empStatus === 403, `status=${empStatus}`);
+}
+
+/**
  * Block F/E shared plumbing — raw `/assignment-days` and `/assignment-months`
  * reads (Task 4). No server-side rollup: these exist so the What-If sandbox
  * (which mutates resources/requests only in memory and can never round-trip
@@ -5781,6 +5817,15 @@ async function main() {
     await checkAssignmentRawReads();
   } catch (err) {
     console.log(`FAIL  assignment raw-reads (Block F/E plumbing) — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the bench-monthly flow
+  // never masks or blocks any of the prior section results.
+  try {
+    await checkBenchMonthly();
+  } catch (err) {
+    console.log(`FAIL  bench-monthly flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 
