@@ -776,12 +776,14 @@ export const negotiatedRates: NegotiatedRate[] = [
 ];
 
 // COST BASELINES (design spec, block E) — frozen monthly PCP snapshot.
-// 'CB1' undercounts October: the live plan (720, see assignment '7' above)
+// 'CB1' undercounts October: the live plan (720, see assignment '12' above)
 // exceeds it -> delta +120 EUR / +20.00%, the "spending more than planned"
 // case this block exists to surface.
 // 'CB2' has NO assignmentDay in project '1' for November in this seed ->
 // planned = 0, delta = 0 - 500 = -500 EUR, deltaPct: null (rendered '—') —
-// the descoped-month case (design spec §4).
+// the descoped-month case (design spec §4). This holds across block F's
+// assignments '7'-'11' too (all on project '1', all Jan-Sep 2026) — none of
+// them reaches November either.
 // Free, from existing seed data: assignments '1'/'2' of project '1' (May-Aug
 // 2026) carry no cost_baselines row at all, exercising
 // outOfBaselineHorizon: true for those four months with no new fixture.
