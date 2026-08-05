@@ -508,6 +508,9 @@ describe('ResourcesComponent', () => {
       expect(fixture.componentInstance.billability()).toBeNull();
       const host = fixture.nativeElement as HTMLElement;
       expect(host.querySelector('[data-test="resource-billability"]')).toBeNull();
+    });
+  });
+
   // Block G, Task 9: the migration to SearchFilterBarComponent silently changed
   // FOUR of these five facets' "All X" wording (nothing was asserting it) before
   // this block was added -- only the manager facet had a pre-existing test, which
