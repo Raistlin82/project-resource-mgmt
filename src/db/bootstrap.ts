@@ -207,6 +207,12 @@ async function seedDemoDatabase(database: DrizzleDb): Promise<void> {
   await seedIfEmpty(database, schema.assignments, seed.assignments); // -> requests, resources
   await seedIfEmpty(database, schema.assignmentDays, seed.assignmentDays); // -> assignments
   await seedIfEmpty(database, schema.assignmentMonths, seed.assignmentMonths); // -> assignments
+  // Cost baselines (design spec, block E) FK only to projects, but are seeded
+  // here — after assignments/assignmentDays/assignmentMonths — purely for
+  // narrative grouping: the demo rows (CB1/CB2) document specific booked
+  // hours on assignment '7' above. The only LOAD-BEARING order requirement is
+  // "after projects", already satisfied far earlier in this function.
+  await seedIfEmpty(database, schema.costBaselines, seed.costBaselines); // -> projects
   // Commercial chain.
   await seedIfEmpty(database, schema.orders, seed.orders); // -> contracts, projectPartners
   await seedIfEmpty(database, schema.timeEntries, seed.timeEntries); // -> assignments, requests, resources, projects

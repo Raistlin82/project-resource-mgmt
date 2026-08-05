@@ -487,6 +487,31 @@ export const negotiatedRates = pgTable(
   ],
 );
 
+// COST BASELINES — a frozen monthly PCP/budget snapshot per project (design
+// spec, block E). WRITE-ONCE: `amount` is written at freeze time and never
+// recomputed (spec §3.1). NO unique constraint on (project_id, period): a
+// re-freeze (spec §3.4) writes a NEW row rather than updating the old one, so
+// more than one row can share a (project_id, period) pair — the CURRENT
+// baseline for a period is, by definition, the row with the latest
+// frozen_at for that pair (resolved in `costBaselineComparison`, never here).
+// `frozen_at` is `text()` (ISO string), matching this schema's stated
+// date/time convention (see the file header) rather than a native timestamp.
+export const costBaselines = pgTable(
+  'cost_baselines',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id').notNull().references(() => projects.id),
+    period: text('period').notNull(), // 'YYYY-MM'
+    amount: doublePrecision('amount').notNull(), // EUR, frozen — never recomputed
+    frozenAt: text('frozen_at').notNull(),
+    frozenBy: text('frozen_by').notNull(),
+  },
+  (t) => [
+    index('cost_baselines_project_id_idx').on(t.projectId),
+    index('cost_baselines_project_period_idx').on(t.projectId, t.period),
+  ],
+);
+
 // Time-phased allocation (B1) config catalogs. Both are settings-style
 // natural-key entities (`id` IS the key, no synthetic adapter needed) — see
 // `settings` below for the same pattern.

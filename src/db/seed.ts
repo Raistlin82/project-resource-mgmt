@@ -44,6 +44,7 @@ import type {
   Vendor,
   RateCard,
   NegotiatedRate,
+  CostBaseline,
   Setting,
   Project,
   Partner,
@@ -236,6 +237,8 @@ export const requests: ResourceRequest[] = [
   { id: '9', name: 'Dummy Senior Developer - Alpha backfill', requiredRole: 'Developer', requiredEffort: 1048, staffedEffort: 1048, staffedEffortPlanned: 1048, status: 'Fulfilled', skills: [], description: 'Placeholder booking pending a real hire', startDate: '2026-04-01', endDate: '2026-09-30', requesterId: '1', projectId: '1' },
   { id: '10', name: 'Project Alpha - Priya full allocation', requiredRole: 'Developer', requiredEffort: 1048, staffedEffort: 1048, staffedEffortPlanned: 1048, status: 'Fulfilled', skills: ['Java'], description: 'Full-time booking through the displayed window', startDate: '2026-04-01', endDate: '2026-09-30', requesterId: '1', projectId: '1' },
   { id: '11', name: 'Project Alpha - Elena (pre-termination)', requiredRole: 'Developer', requiredEffort: 408, staffedEffort: 408, staffedEffortPlanned: 408, status: 'Fulfilled', skills: ['Java'], description: 'Work booked before her termination date', startDate: '2026-01-01', endDate: '2026-03-15', requesterId: '1', projectId: '1' },
+  // COST BASELINE (block E) — the request that staffs the assignment below.
+  { id: '12', name: 'Project Alpha - PCP Baseline Demo', requiredRole: 'Consultant', requiredEffort: 8, staffedEffort: 8, staffedEffortPlanned: 8, status: 'Fulfilled', skills: ['Project Management'], description: 'Demonstrates the frozen monthly cost baseline vs the live plan (design spec, block E)', startDate: '2026-10-05', endDate: '2026-10-05', requesterId: '1', projectId: '1' },
 ];
 
 // Resource Schedule (Approach B): every assignment carries an explicit booking
@@ -299,6 +302,15 @@ const assignmentsBase: readonly Omit<Assignment, 'status'>[] = [
   // (Feb-Mar15). 408 = 51 working days (Jan2..Mar13, skipping the 2026-01-01
   // holiday) × 8h.
   { id: '11', requestId: '11', resourceId: '9', assignedHours: 408, startDate: '2026-01-01', endDate: '2026-03-15', allocationPct: 100 },
+  // COST BASELINE (block E): John Miller (resource '2', Consultant, costRate
+  // override 720 EUR/DAY -> resolved 90 EUR/HOUR at hoursPerDay=8) booked for
+  // ONE working day on project '1' (Fixed Price CT1 — the baseline prices
+  // COST, not T&M revenue, so the contract type is irrelevant here),
+  // 2026-10-05 (a Monday, no holiday, no other October booking for John).
+  // Planned cost for period '2026-10' = 8h x 90 EUR/h = 720 EUR exactly —
+  // hand-verifiable against cost_baselines 'CB1' below (600 -> delta +120 /
+  // +20.00%).
+  { id: '12', requestId: '12', resourceId: '2', assignedHours: 8, startDate: '2026-10-05', endDate: '2026-10-05', allocationPct: 20 },
 ];
 
 // --- Time-phased allocation (B1) config --------------------------------------
@@ -761,6 +773,21 @@ export const contracts: Contract[] = [
 export const negotiatedRates: NegotiatedRate[] = [
   { id: 'NR_CT2_DEV', contractId: 'CT2', role: 'Developer', currency: 'EUR', billRate: 1000 },
   { id: 'NR_P2_DEV', projectId: '2', role: 'Developer', currency: 'EUR', billRate: 1150 },
+];
+
+// COST BASELINES (design spec, block E) — frozen monthly PCP snapshot.
+// 'CB1' undercounts October: the live plan (720, see assignment '7' above)
+// exceeds it -> delta +120 EUR / +20.00%, the "spending more than planned"
+// case this block exists to surface.
+// 'CB2' has NO assignmentDay in project '1' for November in this seed ->
+// planned = 0, delta = 0 - 500 = -500 EUR, deltaPct: null (rendered '—') —
+// the descoped-month case (design spec §4).
+// Free, from existing seed data: assignments '1'/'2' of project '1' (May-Aug
+// 2026) carry no cost_baselines row at all, exercising
+// outOfBaselineHorizon: true for those four months with no new fixture.
+export const costBaselines: CostBaseline[] = [
+  { id: 'CB1', projectId: '1', period: '2026-10', amount: 600, frozenAt: '2026-09-15T09:00:00.000Z', frozenBy: '4' },
+  { id: 'CB2', projectId: '1', period: '2026-11', amount: 500, frozenAt: '2026-09-15T09:00:00.000Z', frozenBy: '4' },
 ];
 
 export const orders: Order[] = [

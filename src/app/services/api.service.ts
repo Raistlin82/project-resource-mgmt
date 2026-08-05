@@ -505,6 +505,17 @@ export interface RateCard {
   billRate: number;
 }
 
+/** A frozen monthly PCP/budget snapshot (design spec, block E). Write-once per
+ *  row: a re-freeze appends a NEW row, never updates an existing one. */
+export interface CostBaseline {
+  id: string;
+  projectId: string;
+  period: string;
+  amount: number;
+  frozenAt: string;
+  frozenBy: string;
+}
+
 /** A global key-value setting (id IS the key, e.g. 'hoursPerDay'). */
 export interface Setting {
   id: string;
@@ -1246,6 +1257,12 @@ export class ApiService {
   createNegotiatedRate(rate: Partial<NegotiatedRate>): Observable<NegotiatedRate> { return this.http.post<NegotiatedRate>(`${this.baseUrl}/negotiated-rates`, rate); }
   updateNegotiatedRate(id: string, rate: Partial<NegotiatedRate>): Observable<NegotiatedRate> { return this.http.put<NegotiatedRate>(`${this.baseUrl}/negotiated-rates/${id}`, rate); }
   deleteNegotiatedRate(id: string): Observable<void> { return this.http.delete<void>(`${this.baseUrl}/negotiated-rates/${id}`); }
+
+  // COST BASELINES (design spec, block E) — a frozen monthly PCP snapshot.
+  // No PUT/DELETE: a re-freeze (POST again) writes a NEW batch of rows rather
+  // than mutating existing ones (design spec §3.4/§3.5).
+  getCostBaselines(): Observable<CostBaseline[]> { return this.http.get<CostBaseline[]>(`${this.baseUrl}/cost-baselines`); }
+  freezeCostBaseline(projectId: string): Observable<CostBaseline[]> { return this.http.post<CostBaseline[]>(`${this.baseUrl}/cost-baselines`, { projectId }); }
 
   // Hybrid day-rate model: hours-per-day converts €/day rate cards into the €/hour
   // the margin math consumes. Read open; write gated to finance-grade roles.
