@@ -6156,6 +6156,63 @@ async function checkFkViolationMapping() {
   );
 }
 
+/**
+ * Block G (faceted search) — q/limit/offset on the five bespoke GET handlers
+ * this task extends (/resources, /projects, /requests, /contracts, /orders).
+ * /customers is added in Task 3 alongside crud()'s own q/limit/offset support.
+ */
+async function checkSearchableReads() {
+  const EMPLOYEE_HEADERS = { 'X-User-Id': '2', 'X-User-Role': 'employee' };
+
+  // Backward compatibility: no `q` -> the full, unfiltered array, same as today.
+  {
+    const noQ = await req('GET', '/resources');
+    const withEmptyParams = await req('GET', '/resources?limit=5'); // limit alone, no q, still must NOT filter
+    check('GET /api/resources with no q returns the full array', Array.isArray(noQ.body) && noQ.body.length > 0, `length=${noQ.body?.length}`);
+    check('GET /api/resources?limit=5 with no q STILL returns the full array (q is what gates pagination)', Array.isArray(withEmptyParams.body) && withEmptyParams.body.length === noQ.body.length, `withLimit=${withEmptyParams.body?.length} full=${noQ.body?.length}`);
+  }
+
+  // Positive: an exact seed row, and only that row.
+  {
+    const { status, body } = await req('GET', '/resources?q=Julie');
+    check('GET /api/resources?q=Julie -> 200', status === 200, `status=${status}`);
+    check('resources?q=Julie returns EXACTLY resource id 1, no other', Array.isArray(body) && body.length === 1 && body[0].id === '1', JSON.stringify(body?.map((r) => r.id)));
+  }
+
+  // Negative twin: a nonsense term resolves successfully to zero rows, not an error.
+  {
+    const { status, body } = await req('GET', '/resources?q=zzznonsense123');
+    check('resources?q=zzznonsense123 -> 200 (resolved, not errored)', status === 200, `status=${status}`);
+    check('resources?q=zzznonsense123 -> zero rows', Array.isArray(body) && body.length === 0, `length=${body?.length}`);
+  }
+
+  // Projects: open read, any authenticated role, exact seed row.
+  {
+    const { status, body } = await req('GET', '/projects?q=Alpha', { headers: EMPLOYEE_HEADERS });
+    check('GET /api/projects?q=Alpha (employee) -> 200 (open read)', status === 200, `status=${status}`);
+    check('projects?q=Alpha returns EXACTLY project id 1', Array.isArray(body) && body.length === 1 && body[0].id === '1', JSON.stringify(body?.map((p) => p.id)));
+  }
+
+  // Requests: same RBAC as /resources -- employee is 403'd, same as today.
+  {
+    const { status } = await req('GET', '/requests?q=Alpha', { headers: EMPLOYEE_HEADERS });
+    check('GET /api/requests?q=Alpha (employee) -> 403 (unchanged RBAC)', status === 403, `status=${status}`);
+  }
+
+  // Contracts/Orders: commercial RBAC, unchanged; orders match on invoiceNumber only.
+  {
+    const { status, body } = await req('GET', '/contracts?q=Globex');
+    check('GET /api/contracts?q=Globex -> 200', status === 200, `status=${status}`);
+    check('contracts?q=Globex returns EXACTLY contract CT1', Array.isArray(body) && body.length === 1 && body[0].id === 'CT1', JSON.stringify(body?.map((c) => c.id)));
+  }
+  {
+    const byName = await req('GET', '/orders?q=Globex');
+    check('orders?q=Globex (a customer name, not an invoiceNumber) matches NOTHING -- orders do not join to their parent contract/customer name (spec §11)', Array.isArray(byName.body) && byName.body.length === 0, JSON.stringify(byName.body));
+    const byInvoice = await req('GET', '/orders?q=INV-2026-0001');
+    check('orders?q=INV-2026-0001 matches EXACTLY order O1', Array.isArray(byInvoice.body) && byInvoice.body.length === 1 && byInvoice.body[0].id === 'O1', JSON.stringify(byInvoice.body?.map((o) => o.id)));
+  }
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -6258,6 +6315,15 @@ async function main() {
     await checkBenchMonthly();
   } catch (err) {
     console.log(`FAIL  bench-monthly flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the searchable-reads flow
+  // never masks or blocks any of the prior section results.
+  try {
+    await checkSearchableReads();
+  } catch (err) {
+    console.log(`FAIL  searchable reads (Block G) — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

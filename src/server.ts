@@ -16,6 +16,7 @@ import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity, monthlyTar
 import { planSubstitution, planGiveBack, planSubstitutionBooking, type SubstitutionPlan } from './app/services/substitution.util';
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { benchRollup } from './app/services/bench.util';
+import { searchPage, clampSearchPage } from './app/services/search.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, plannedCostSchedule, type FinanceData } from './app/services/finance.util';
 import { negotiatedRateCurrencyError, sellRateFor } from './app/services/sell-rate.util';
 import { pickRateCard } from './app/services/rate-card.util';
@@ -1706,7 +1707,12 @@ async function validateResourceKind(kind: unknown, vendorId: unknown): Promise<s
   return null;
 }
 
-apiRouter.get('/resources', async (_req, res) => { res.json(await resolveResourceRates(await repos.resources.list())); });
+apiRouter.get('/resources', async (req, res) => {
+  const all = await repos.resources.list();
+  const q = typeof req.query['q'] === 'string' ? req.query['q'] : undefined;
+  const page = q === undefined ? all : searchPage(all, ['name', 'role', 'organization', 'location'], q, clampSearchPage(req.query));
+  res.json(await resolveResourceRates(page));
+});
 apiRouter.get('/users', async (_req, res) => { res.json(await repos.users.list()); });
 apiRouter.get('/resources/:id', async (req, res) => {
   const resource = await repos.resources.get(req.params.id);
@@ -2161,7 +2167,11 @@ apiRouter.post('/self/time-entries', async (req, res) => {
 
 const REQUEST_FIELDS = ['name', 'requiredRole', 'requiredEffort', 'skills', 'description', 'startDate', 'endDate', 'status', 'requesterId', 'projectId'] as const;
 
-apiRouter.get('/requests', async (_req, res) => { res.json(await repos.requests.list()); });
+apiRouter.get('/requests', async (req, res) => {
+  const all = await repos.requests.list();
+  const q = typeof req.query['q'] === 'string' ? req.query['q'] : undefined;
+  res.json(q === undefined ? all : searchPage(all, ['name', 'description'], q, clampSearchPage(req.query)));
+});
 apiRouter.post('/requests', async (req, res) => {
   const body = pick<ResourceRequest>(req.body, REQUEST_FIELDS);
   // B-STAFFING: requiredEffort is REQUIRED and must be positive. The Fulfilled
@@ -4441,7 +4451,11 @@ apiRouter.put('/planning-periods/:id', async (req, res) => {
 });
 
 const PROJECT_FIELDS = ['name', 'location', 'startDate', 'endDate', 'status', 'description', 'ownerId', 'contractId'] as const;
-apiRouter.get('/projects', async (_req, res) => { res.json(await repos.projects.list()); });
+apiRouter.get('/projects', async (req, res) => {
+  const all = await repos.projects.list();
+  const q = typeof req.query['q'] === 'string' ? req.query['q'] : undefined;
+  res.json(q === undefined ? all : searchPage(all, ['name', 'location'], q, clampSearchPage(req.query)));
+});
 apiRouter.post('/projects', async (req, res) => {
   const body = pick<Project>(req.body, PROJECT_FIELDS);
   // REFERENCE-DATA INTEGRITY (Phase D): `ownerId` is a person reference to the
@@ -4744,7 +4758,11 @@ interface OrderLineEntry { id: string; orderId: string; projectId: string; descr
 
 const CONTRACT_FIELDS = ['customerId', 'name', 'type', 'totalValue', 'currency', 'status', 'startDate', 'endDate'] as const;
 
-apiRouter.get('/contracts', async (_req, res) => { res.json(await repos.contracts.list()); });
+apiRouter.get('/contracts', async (req, res) => {
+  const all = await repos.contracts.list();
+  const q = typeof req.query['q'] === 'string' ? req.query['q'] : undefined;
+  res.json(q === undefined ? all : searchPage(all, ['name'], q, clampSearchPage(req.query)));
+});
 apiRouter.post('/contracts', async (req, res) => {
   const body = pick<ContractEntry>(req.body, CONTRACT_FIELDS);
   if (!(await existsRepo(repos.customers, body.customerId))) { res.status(400).json({ error: 'customerId must reference an existing customer' }); return; }
@@ -4798,7 +4816,15 @@ async function validateOrder(body: Partial<OrderEntry>, current?: OrderEntry): P
   return null;
 }
 
-apiRouter.get('/orders', async (_req, res) => { res.json(await repos.orders.list()); });
+apiRouter.get('/orders', async (req, res) => {
+  const all = await repos.orders.list();
+  const q = typeof req.query['q'] === 'string' ? req.query['q'] : undefined;
+  // Orders have no name/title field (api.service.ts:660-672) -- match ONLY
+  // invoiceNumber, never the parent contract/customer's name (design spec §11:
+  // no join, to stay in the same "one filter per collection" shape as every
+  // other handler in this task).
+  res.json(q === undefined ? all : searchPage(all, ['invoiceNumber'], q, clampSearchPage(req.query)));
+});
 apiRouter.post('/orders', async (req, res) => {
   const body = pick<OrderEntry>(req.body, ORDER_FIELDS);
   const bad = findInvalidNumericField(body, ['amount']);
