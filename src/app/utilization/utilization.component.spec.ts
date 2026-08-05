@@ -403,6 +403,14 @@ describe('UtilizationComponent — bench badge', () => {
     expect(alert).toBeTruthy();
     expect(host.querySelector('[data-test="team-empty"]')).toBeNull();
     expect(host.querySelector('[data-test="team-member"]')).toBeNull();
+    // The KPI tile itself, not just the list. The crash this guard replaced is
+    // caught incidentally by the assertions above (countedForAverage() throws on
+    // an errored resource), but a REGRESSION to a non-crashing wrong fallback is
+    // not: reverting to the pre-existing "—" would render silently, and a dash
+    // means "no value", never "we could not load it". Assert both directions.
+    const avg = host.querySelector('[data-test="team-average"]');
+    expect(avg?.textContent).toContain('Unavailable');
+    expect(avg?.textContent).not.toContain('—');
   });
 });
 
