@@ -275,6 +275,47 @@ step) are serialized through a per-key async mutex (`withLock`) because Express
 handlers run concurrently and there is no atomic-increment primitive on the
 `Repository<T>` boundary.
 
+## Computed views: `/capacity` and `/bench` (no schema)
+
+> No pre-existing subsection described `/capacity/monthly` this way before Block
+> F — this section documents both endpoints together because they now share one
+> `READ_RULE` predicate (see [`roles-and-permissions.md`](../roles-and-permissions.md#server-endpoint-rbac)),
+> and Block F's own design spec (§2) is explicit that it adds no schema at all.
+
+Two `GET`-only endpoints compute a rollup entirely from existing rows — neither
+one is backed by its own table, migration, or seed data:
+
+- **`GET /capacity/monthly`** (B2) — monthly FTE capacity-vs-demand, via
+  `rollupMonthly` (`src/app/services/capacity.util.ts`).
+- **`GET /bench/monthly`** (Block F) — monthly BENCH/PARTIAL/ALLOCATED
+  classification, aging, forward-looking signal, availability date, and
+  dummy-driven hiring demand, via `benchRollup`
+  (`src/app/services/bench.util.ts`).
+
+Both read the **same four inputs** — `resources`, `assignments`,
+`assignmentDays`, `assignmentMonths` — plus `holidays` and the hours-per-day
+setting, and both are pure functions over those inputs: no `drizzle-kit
+generate` step exists anywhere in Block F, and `src/db/schema.ts` gained no
+column or table for it. This is why the parity guarantee ([above](#what-the-parity-guarantee-buys-and-its-gotchas))
+extends to `/bench/monthly` for free — it reads through the same
+`Repository<T>` adapters `/capacity/monthly` already does, so whichever
+backend is active (in-memory or Postgres) answers identically.
+
+`GET /bench/monthly` fetches a **9-month window** (2 months look-back + 6
+months shown + 1 month look-ahead) but returns only the **6 shown** months,
+split by `countsTowardDeliveryCapacity` (`resource-kind.util.ts`) rather than
+`countsTowardInternalCapacity`: a subcontractor lands in `subcoRows` next to
+`internalRows` (both count as biddable delivery capacity), while a `dummy`
+resource never appears in either — it drives `hiringDemand` instead. The
+look-back two months feed the retrospective aging buckets (a resource idle
+since before the shown window still needs its correct B/C/D bucket on month 1);
+the look-ahead month feeds the forward-looking `upcomingUnallocated` signal for
+the last shown month, without ever being displayed itself. Both endpoints are
+gated by the **same** `READ_RULES` predicate
+(`p.startsWith('/capacity') || p.startsWith('/bench')`,
+`src/server.ts`) — extended, not duplicated, when Block F was added — and both
+run under `roleGate`'s GLOBAL middleware, so neither handler re-gates itself.
+
 ## Domain ER diagrams (reference)
 
 The 43 tables (`src/db/schema.ts`) are split into four domain groups below.

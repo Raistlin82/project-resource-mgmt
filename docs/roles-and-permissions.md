@@ -83,7 +83,7 @@ server, re-evaluate in the browser after `authReady`).
 | `approvals` | `roleGuard(a => a.hasAnyRole(['pm','resource-manager','delivery-executive','finance','admin']))` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `schedule` | `roleGuard(a => a.hasAnyRole(['pm','resource-manager','delivery-executive','admin']))` | `pm`, `resource-manager`, `delivery-executive`, `admin` |
 | `resources` | `roleGuard(a => a.hasAnyRole(['resource-manager','delivery-executive','admin']))` | `resource-manager`, `delivery-executive`, `admin` |
-| `capacity` (B2) | `capacityGuard` → `hasAnyRole(CAPACITY_ROLES)` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `capacity` (B2), `bench` (Block F) | `capacityGuard` → `hasAnyRole(CAPACITY_ROLES)` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `allocation-approvals` (B3, the People Manager per-month approval page) | `allocationApprovalsGuard` → `hasAnyRole(ALLOCATION_APPROVAL_ROLES)` | `resource-manager`, `delivery-executive`, `admin` |
 | Everything else (dashboard, profile, assignments, requests, staffing, utilization, forecast, what-if, remaining `projects/*`, `reporting`, remaining `config/*`) | _none_ | open to any signed-in user (UX layer; API still enforces RBAC) |
 
@@ -118,6 +118,13 @@ server, re-evaluate in the browser after `authReady`).
 > [Server endpoint RBAC](#server-endpoint-rbac)); neither route introduces a
 > mutation of its own — `allocation-approvals` writes through
 > `POST /allocation-approvals/decide` and the `/assignments` per-month endpoints.
+>
+> The **`bench`** route (Block F's bench/availability page) reuses **the same**
+> `capacityGuard` — not a copy, the identical `canMatch` reference — rather than
+> a route-specific guard of its own, because it shares `CAPACITY_ROLES` and the
+> server extends the `/capacity` `READ_RULE` to also match `/bench` instead of
+> adding a second rule (see the `/capacity`, `/bench` row below). One guard, one
+> role set, one server predicate: none of the three can drift from the other two.
 
 ---
 
@@ -139,7 +146,7 @@ and **403** otherwise. Path tests use `startsWith`.
 | `/project-financials`, `/project-cost-centers`, `/cost-centers` | `finance`, `delivery-executive`, `admin` |
 | `/resources` (incl. `/resources/:id`), `/users` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/assignments`, `/requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
-| `/capacity` (read-only computed rollup, e.g. `GET /capacity/monthly`) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/capacity`, `/bench` (ONE predicate — `p.startsWith('/capacity') \|\| p.startsWith('/bench')`, not two rules — read-only computed rollups, e.g. `GET /capacity/monthly` (B2) and `GET /bench/monthly` (Block F, design spec §8); the latter extends this rule rather than duplicating the role array) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/assignment-days`, `/assignment-months` (raw per-day/per-month assignment rows, e.g. `GET /assignment-days` — shared plumbing for Block F's client-side What-If bench composition and block E's own spec; same need-to-know as `/capacity` and `/assignments` above, just unaggregated) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/time-entries` | `employee`, `pm`, `resource-manager`, `delivery-executive`, `finance`, `sales`, `admin` |
 | `/approval-requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
@@ -182,10 +189,13 @@ verified actor, e.g. `/service-organizations` (read-only in practice). Note
 **inline** in the handler: only `admin` may `PUT /fx-rates/:currency` (and the
 base currency `EUR` is fixed at rate 1).
 
-> Four collections appear in the *read* rules but have **no mutation rule**:
+> Five collections appear in the *read* rules but have **no mutation rule**:
 > `/audit-logs` (append-only; written only by the audit middleware, never via a
 > client mutation), `/users` (read-only directory), `/capacity` (a GET-only
-> computed rollup — `GET /capacity/monthly` — with no write endpoint at all), and
+> computed rollup — `GET /capacity/monthly` — with no write endpoint at all),
+> `/bench` (Task 6, Block F: same shape as `/capacity` — `GET /bench/monthly` is
+> GET-only, sharing `/capacity`'s `READ_RULE` predicate rather than adding a
+> second one, and has no write endpoint of its own either), and
 > `/assignment-days` (Task 4: a GET-only raw feed shared by Block F's
 > client-side What-If bench composition and block E's own spec — no write
 > endpoint of its own; assignment-day rows are written only as a side effect of

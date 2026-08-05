@@ -379,7 +379,18 @@ financial data into spreadsheet apps.
 | **Resource Control** | `/`, `/profile`, `/assignments`, `/requests`, `/staffing`, `/approvals`, `/utilization` | staffing, utilization, approvals |
 | **Project Control** | `/projects`, `/projects/:id`, `/project-plans`, `/project-tasks`, `/project-issues`, `/change-requests`, `/project-documents`, `/project-partners`, `/financial-plans`, `/project-cost-centers` | project execution |
 | **Commercial** *(gated)* | `/customers`, `/contracts`, `/contracts/:id`, `/orders`, `/billing` | `commercialGuard` (+ `financeGuard` for billing) |
-| **Analytics** | `/forecast`, `/what-if`, `/utilization`, `/reporting` | `Reporting` is the reference example of the `authReady` data pattern |
+| **Analytics** | `/forecast`, `/what-if`, `/utilization`, `/reporting`, `/bench` | `Reporting` is the reference example of the `authReady` data pattern; `/bench` (Block F) shares `capacityGuard` with `/capacity` (see [`../roles-and-permissions.md`](../roles-and-permissions.md#route-access-client-guards)) |
 | **Configuration** | `/config/*` | catalogs, roles, orgs; `/config/integrations` gated on `financeGuard` |
 
 For what each of these *does* functionally, see the [`../functional/`](../functional) area docs.
+
+`/forecast`'s and `/what-if`'s bench panel ("available for reallocation") calls
+`bench.util.ts`'s pure `benchRollup`/`notFullyAllocatedAt` directly, client-side,
+over the raw `GET /assignment-days`/`GET /assignment-months` reads (shared with
+block E) — **not** the retired `benchList()`/`BenchEntry` (`forecast.util.ts`),
+which classified on the whole-of-lifetime `Resource.utilization` scalar rather
+than a specific month. `/bench` and `/utilization`'s bench badge instead call the
+server-aggregated `GET /bench/monthly` (`ApiService.getBenchMonthly()`) — the
+client-only What-If sandbox is the one consumer that cannot round-trip through
+the server, so it is the only one composing `bench.util.ts` itself rather than
+reading its server-side rollup.
