@@ -1962,6 +1962,25 @@ it('shows separate internal and subco bench counts, never a combined total', asy
 });
 ```
 
+> **Correction (Task 10, added after implementation and verification against the
+> real seed — do not re-derive this):** the "2 internal / 1 subco" numbers above
+> are a **unit-test mock**, purpose-built for this one test, and are correct as
+> written — a unit fixture need not match `src/db/seed.ts`. But if read as a
+> prediction of what the *real*, seed-backed `/dashboard` tile shows today, it is
+> wrong. Running the real `benchRollup()` (`src/app/services/bench.util.ts`) over
+> `src/db/seed.ts`, replicating `GET /bench/monthly`'s default-`from` logic
+> (first `Open` planning period, sorted → `2026-04`) gives, at that anchor month:
+> internal BENCH count = **4** (resources `1` Julie Armstrong, `2` John Miller,
+> `3` Alice Smith, `8` Marco Belli — resource `7` Priya Kapoor is internal but
+> ALLOCATED, not BENCH), subco BENCH count = **0** (subcontractor resource `6` is
+> **PARTIAL**, not BENCH, in April — its 0.4h day rounds to "0.00%" on screen but
+> is a real, non-zero booking, so `benchStateFor` classifies it PARTIAL; it only
+> reaches BENCH from May, per the design spec's own §11 fixture table). So the
+> real `/dashboard` tile reads **"4 int. / 0 subco"**, not "2 int. / 1 subco".
+> See `.superpowers/sdd/2026-08-05-f-bench-availability/task-9-report.md`
+> ("Seed-derivation correction, restated for the durable record") for the full
+> derivation and its history.
+
 - [ ] **Step 2: Run it to verify it fails**
 
 ```bash

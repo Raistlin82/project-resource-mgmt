@@ -697,7 +697,7 @@ flowchart TD
 |--------|------------|
 | Average utilization | Mean utilization across **internal** resources in the active team-scope view (Direct reports or All my org); dummy/subco rows are listed but never counted. |
 | Overbooked count | Resources > 110%. |
-| Bench count | Resources < 80% (see forecast `benchList`). |
+| Bench count | Resources < 80% whole-of-lifetime utilization — a coarser, different signal from the per-month BENCH/PARTIAL/ALLOCATED classification (see [Capacity Forecast](#capacity-forecast) and `bench.util.ts`'s `benchStateFor`), which this page also surfaces as a per-resource badge. |
 
 **Related.** [Capacity Forecast](#capacity-forecast),
 [Match & rank candidates](#match--rank-candidates--assign-a-resource).
@@ -827,10 +827,14 @@ skill-shortage lists, so the resource manager / delivery executive can plan ahea
 
 **Scope.**
 - *In:* the read-only forecast at `/forecast`, driven by `forecast.util`
-  (`capacityForecast`, `benchList`, `overAllocated`, `skillGap`); CSV export.
+  (`capacityForecast`, `overAllocated`, `skillGap`) plus, since Block F, the
+  bench panel driven directly by `bench.util.ts`'s `notFullyAllocatedAt`
+  (client-side, over the raw `GET /assignment-days`/`GET /assignment-months`
+  reads); CSV export.
 - *Out:* mutating data — the forecast only reads.
 
-**The model (`src/app/services/forecast.util.ts`).**
+**The model (`src/app/services/forecast.util.ts`, plus `bench.util.ts` for the
+bench panel).**
 
 - **Supply** per period = Σ `resource.capacity` (weekly hours; scaled by ≈4.33 for
   a monthly horizon).
@@ -840,9 +844,17 @@ skill-shortage lists, so the resource manager / delivery executive can plan ahea
   *open* requests (not closed/fulfilled/cancelled/staffed), spread over their window.
 - **Demand** = committed + pipeline; **utilization%** = demand/supply×100
   (0 when supply is 0); **gap** = supply − demand.
-- **`benchList`** = resources with utilization < threshold (default 80%), with
-  spare hours. **`overAllocated`** = utilization ≥ threshold (default 110%), with
-  hours over capacity. **`skillGap`** = per-skill open demand vs covering
+- **Bench panel** = internal + subcontractor resources not fully allocated
+  *this month* (`notFullyAllocatedAt`, `bench.util.ts`: BENCH or PARTIAL,
+  computed on real monthly booked hours vs. a standard monthly target — the
+  same tricotomy `/bench` and the `/utilization` badge use), linking through to
+  the full 6-month `/bench` view. This **replaced** the retired
+  `benchList`/`BenchEntry` (`forecast.util.ts`), which classified on the
+  whole-of-lifetime `Resource.utilization` scalar with a fixed `< 80%`
+  threshold — a coarser, point-in-time-blind signal. **`overAllocated`** =
+  utilization ≥ threshold (default 110%), with hours over capacity — a
+  *different* concept from bench (over-allocation, not idleness) and
+  untouched by Block F. **`skillGap`** = per-skill open demand vs covering
   resources, shortage when demand exists but zero coverage.
 
 **RACI.**
@@ -860,7 +872,7 @@ flowchart TD
   A[RM/Delivery Exec opens /forecast] --> B[Load resources + requests + assignments]
   B --> C[Pick horizon 8w / 12w]
   C --> D[capacityForecast → per-period supply/demand/gap]
-  D --> E[benchList + overAllocated + skillGap]
+  D --> E[Bench panel + overAllocated + skillGap]
   E --> F[Read bands; export CSV]
   F --> G{Capacity decision}
   G -->|shortfall| H[Hire / subcontract / slip → model in What-If]
@@ -875,7 +887,8 @@ flowchart TD
    - **Output:** per-period supply/committed/pipeline/demand/utilization/gap rows.
 2. **Read the supporting lists.**
    - **How:** the page renders bench, over-allocation, and skill-gap tables from
-     `benchList`/`overAllocated`/`skillGap`.
+     `notFullyAllocatedAt`/`overAllocated`/`skillGap`, and links through to the
+     full `/bench` page.
    - **Output:** who is free, who is over, which skills are short.
 3. **Export.**
    - **How:** the CSV export (`export.util`) downloads the period rows.
@@ -933,7 +946,7 @@ flowchart TD
   D -->|Win deal| E[Append synthetic open request]
   D -->|Hire| F[Append N synthetic resources]
   D -->|Slip project| G[Shift project requests ±W weeks]
-  E & F & G --> H[Recompute capacityForecast + skillGap + benchList<br/>on BASE and SCENARIO]
+  E & F & G --> H[Recompute capacityForecast + skillGap + bench panel<br/>on BASE and SCENARIO]
   H --> I[Delta KPIs + timeline + skill table]
   I --> J{Keep exploring?}
   J -->|reset| C
