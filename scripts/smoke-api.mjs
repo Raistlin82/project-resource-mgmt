@@ -1242,7 +1242,11 @@ async function checkBenchMonthly() {
   );
 
   const hiring4 = (body.hiringDemand || []).filter((h) => h.role === 'Developer' && h.hours > 0);
-  check('hiringDemand has 6 Developer rows (one per shown month) with hours > 0', hiring4.length >= 6, `count=${hiring4.length}`);
+  // Exactly 6 (one per shown month), not '>=' — '>=' would not catch a
+  // duplicate hiring-demand row for the same (month, role) pair (latent
+  // today: hiringDemandByMonth's Map-based aggregation cannot produce one,
+  // but the assertion shouldn't rely on that being true forever).
+  check('hiringDemand has EXACTLY 6 Developer rows (one per shown month) with hours > 0', hiring4.length === 6, `count=${hiring4.length}`);
 
   // FETCH-WINDOW LOOK-AHEAD (+1 on fetchTo) — resource '7' (Priya Kapoor):
   // ALLOCATED every shown month (never BENCH in the display window), so its
