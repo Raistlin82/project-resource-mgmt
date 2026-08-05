@@ -654,8 +654,8 @@ export class DashboardComponent {
             // Since dataRes already gates the entire tile grid behind
             // hasError()/isLoading() (computed over this SAME forkJoin), no
             // separate gating is needed for this one tile: the page was
-            // already all-or-nothing across its other 13 legs, and this is
-            // leg 14, not a new failure surface.
+            // already all-or-nothing across its other 14 legs, and this is
+            // leg 15, not a new failure surface.
             benchRollup: this.api.getBenchMonthly(),
           })
         : of(DashboardComponent.EMPTY_DATA),
