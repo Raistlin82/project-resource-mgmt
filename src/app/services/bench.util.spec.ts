@@ -194,6 +194,12 @@ describe('benchRollup — seed integration (design spec §11 fixture table)', ()
     expect(row.monthly['2026-04'].state).toBe('PARTIAL');
     expect(row.monthly['2026-04'].agingBucket).toBeUndefined();
     expect(row.monthly['2026-04'].upcomingUnallocated).toBe(true); // May is BENCH
+    // Paired absence: April's `upcomingUnallocated` is asserted true above;
+    // May itself is ALREADY BENCH, so `freeingUpNextMonth` must read false
+    // here (mutually exclusive with an aging bucket by construction, spec
+    // §5.1/§5.2) — without this, a hard-coded `true` at the call site would
+    // leave every assertion in this test green.
+    expect(row.monthly['2026-05'].upcomingUnallocated).toBe(false);
     expect(row.monthly['2026-05']).toMatchObject({ state: 'BENCH', agingBucket: 'B' });
     expect(row.monthly['2026-06']).toMatchObject({ state: 'BENCH', agingBucket: 'C' });
     expect(row.monthly['2026-07']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
@@ -253,6 +259,11 @@ describe('benchRollup — seed integration (design spec §11 fixture table)', ()
     for (const m of DISPLAY_MONTHS) expect(row.monthly[m].state).toBe('ALLOCATED');
     expect(row.availabilityDate).toEqual({ kind: 'beyond-horizon', horizonEndMonth: '2026-09' });
     expect(row.monthly['2026-09'].upcomingUnallocated).toBe(true);
+    // Paired absence: September's flag above is true ONLY because of the
+    // look-ahead month (October). August's next month (September) is still
+    // ALLOCATED, so the signal must read false here — without this, a
+    // hard-coded `true` at the call site would leave the test above green too.
+    expect(row.monthly['2026-08'].upcomingUnallocated).toBe(false);
   });
 
   it('resource 8 (hired exactly on the anchor month): April is bucket B, not D — the look-back truncation', () => {
