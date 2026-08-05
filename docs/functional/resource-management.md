@@ -108,11 +108,27 @@ flowchart TD
      capacity\* (h/wk, positive), costRate, billRate, **hireDate\*** (data di
      assunzione, required) → `createResource()` → `POST /resources`. The server
      defaults `utilization: 0`, assigns the `id`, and returns `201` + the record.
+   - **Cost rate / Bill rate (€/day) are per-resource OVERRIDES, not the rate
+     itself.** Leaving them empty means the person inherits the matching
+     [rate card](configuration.md#manage-rate-cards) for their role — resolved
+     node-then-ancestors-then-generic along the org tree, the most specific
+     match winning. The hint under the fields names **where** the inherited
+     rate came from: the resource's own node's card, an ancestor's ("Inherited
+     from Engineering"), or the generic card — never just a number with no
+     provenance. Entering a value here always overrides whatever card would
+     otherwise apply.
    - **Output:** the new resource appears in the list (Active).
 3. **Edit resource master data (modifica).**
    - **Who:** `resource-manager`. **How:** the row "Edit" action opens the same
      form prefilled → `updateResource(id, {...})` → `PUT /resources/:id`.
      `utilization` is not editable here (derived server-side).
+   - **For an existing resource, the form also shows a billability figure** —
+     cost vs. billable value from that resource's own assignments to date,
+     next to the rate-card provenance hint. It is not shown while creating a
+     new employee (there is no history yet to summarize), and if the
+     underlying read fails it shows an explicit error state rather than a
+     zero, since a zero there would misread as "this person brings no value"
+     when the real answer is "unknown".
    - **Output:** persisted changes; the list reloads.
 4. **Terminate a contract (cessazione logica).**
    - **Who:** `resource-manager` (accountable: `delivery-executive`). **When:** an
@@ -150,7 +166,9 @@ flowchart TD
 
 **Related.** [View / maintain My Profile](#view--maintain-my-profile),
 [Match & rank candidates](#match--rank-candidates--assign-a-resource),
-[Monitor Utilization & rebalance](#monitor-utilization--rebalance).
+[Monitor Utilization & rebalance](#monitor-utilization--rebalance),
+[Manage Rate Cards](configuration.md#manage-rate-cards) (where the inherited
+default cost/bill rate is configured).
 
 ---
 

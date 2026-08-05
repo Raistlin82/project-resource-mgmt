@@ -716,6 +716,133 @@ may decide).
 
 ---
 
+### Manage Rate Cards
+
+**Purpose.** Maintain the **default cost/bill rate per role**, in €/day, that a
+resource inherits unless it carries its own override. A card can be **generic**
+(applies to every organization) or scoped to one **organization node** — and
+since the delivery tree (feature D) is a hierarchy, a card on a node now applies
+to every practice or competence beneath it that has no more specific card of its
+own: the resolution walks the node itself, then each ancestor nearest first,
+then the generic card, and stops at the first match. Building the tree therefore
+never silently *loses* a rate for whoever gets attached under a capability that
+already had one — the defect this screen's ancestor-walk fixes. See
+[Resource Management](resource-management.md) for where the resolved rate and
+its provenance (which card it came from) are shown on a person's own record.
+
+**Scope.**
+- *In:* create a card (role, optional organization, currency, cost rate €/day,
+  bill rate €/day); edit a card in place; delete a card; set the **working
+  hours/day** used to convert every card's daily rate into the hourly figure
+  margin math consumes.
+- *Out:* per-resource overrides (that is the Cost rate / Bill rate fields on the
+  [Resources](resource-management.md) screen — an override always wins over any
+  card, own-node or inherited); moving a resource between organizations (that is
+  `Resource.organization`, also on the Resources screen).
+
+**RACI.**
+
+| Step | Responsible | Accountable | Consulted | Informed |
+|------|-------------|-------------|-----------|----------|
+| Create card | admin / delivery-executive / finance | finance | resource-manager | — |
+| Edit card | admin / delivery-executive / finance | finance | resource-manager | — |
+| Delete card | admin / delivery-executive / finance | finance | resource-manager | — |
+| Set working hours/day | admin / delivery-executive / finance | finance | — | resource-manager |
+
+**Process flow.**
+
+```mermaid
+flowchart TD
+  A[Open /config/rate-cards] --> B[GET /rate-cards<br/>role-gated read]
+  B --> C{Action}
+  C -->|Create| D[Form: role, organization<br/>hierarchy-indented select,<br/>currency, cost/bill rate]
+  D --> E[POST /rate-cards]
+  E --> F{Conflicts with an<br/>ancestor or descendant card?}
+  F -->|Yes| G[Non-blocking info toast<br/>naming the other card's node]
+  F -->|No| H[Success toast only]
+  C -->|Edit| D2[Same form, pre-filled]
+  D2 --> E2[PUT /rate-cards/:id]
+  E2 --> F
+  C -->|Delete| I[Confirmation modal]
+  I --> J[DELETE /rate-cards/:id]
+  G & H & J --> K[Reload list]
+```
+
+**Detailed steps.**
+
+1. **Review the cards.**
+   - **Who:** `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin`
+     (read is wider than mutation, since staffing and PM roles need to see the
+     default a resource would inherit). **How:** `/config/rate-cards`
+     (`ManageRateCardsComponent`) → `GET /rate-cards`.
+   - **Output:** the table (Role, Organization — or "All organizations" for a
+     generic card, Currency, Cost rate €/day, Bill rate €/day, Actions).
+2. **Create a card.**
+   - **Who:** `admin` / `delivery-executive` / `finance` — **not**
+     `resource-manager`: that role edits a resource's own override on the
+     Resources screen, never the rate-card catalog itself. **How:** **Add Rate
+     Card** → Role (required, the project-roles catalog), Organization (optional
+     — the select is **indented by tree depth**, capability flush-left, practice
+     one level in, competence two, so an admin can see where in the hierarchy a
+     new card will apply before saving), Currency (base currency + every
+     configured FX currency), Cost rate and Bill rate (€/day, both required,
+     non-negative) → **Save Rate Card** → `createRateCard(...)` →
+     `POST /rate-cards`.
+   - **If the new card's node has an ancestor or descendant that also carries a
+     card for the same role/currency:** the save still succeeds — a
+     **non-blocking informational toast** names the other card's node and
+     explains that the new card covers only its own node and the descendants
+     that have no card of their own (the ancestor/descendant relationship is
+     informational, not a write-time error, because a "reserve" card on an
+     ancestor covering nodes not yet created is a legitimate pattern).
+   - **Output:** persisted card; the list reloads.
+3. **Edit a card.**
+   - **Who:** `admin` / `delivery-executive` / `finance`. **How:** the pencil on
+     the row opens the same form pre-filled → **Save Rate Card** →
+     `updateRateCard(id, ...)` → `PUT /rate-cards/:id`. The same conflict toast
+     can appear here too, since editing can just as easily create a new
+     ancestor/descendant overlap as creating a card can.
+   - **Output:** the updated card; the list reloads.
+4. **Delete a card.**
+   - **Who:** `admin` / `delivery-executive` / `finance`. **How:** the delete
+     icon opens a confirmation modal warning that resources inheriting this
+     card will fall back to a more generic card (an ancestor's, or the generic
+     one) or to a manual override → **Delete** → `deleteRateCard(id)` →
+     `DELETE /rate-cards/:id`.
+   - **Output:** `204`; the list reloads.
+5. **Set the working hours/day.**
+   - **Who:** `admin` / `delivery-executive` / `finance`. **How:** the input at
+     the top of the screen → **Save**. This is the single divisor that turns
+     every card's €/day rate into the €/hour figure margin math actually
+     consumes; it is not itself a rate card and has no organization or role.
+
+**Exceptions & edge cases.**
+
+| Situation | System response |
+|-----------|-----------------|
+| Missing role, currency, cost rate, or bill rate | **Save** disabled (validators); the server would answer `400` naming the missing field. |
+| A negative cost or bill rate | **Save** disabled; server: `400 — costRate and billRate are required numbers`. |
+| A duplicate `(role, organization, currency)` triple | **Save** disabled client-side (proactive duplicate guard mirrors the server rule); server: `400` naming the id of the existing card. A generic card and an org-specific card for the same role/currency are **not** duplicates of each other. |
+| A role or organization no longer in its catalog (orphaned by a later rename/removal) | Shown disabled in its select, labelled "(not in catalog)", so an existing card stays visible and editable without silently losing its value. |
+| Two different nodes in the same ancestor chain both carrying a card for the same role/currency | Both writes succeed (uniqueness is on the literal `(role, organization, currency)` triple, not on tree position) — but only the **nearer** one is ever reached by a resource in that branch; the save-time toast is the mechanism that surfaces this, not a write-time block. |
+| Caller lacks the mutation role (e.g. `resource-manager`, `pm`) | `403`. |
+| Working hours/day left blank or out of the 1–24 range | **Save** (for hours/day) disabled. |
+
+**Metrics.**
+
+| Metric | How to read it |
+|--------|----------------|
+| Cards on a non-leaf node | Any card whose organization has at least one child in the tree — the exact condition under which the ancestor walk can change a resource's resolved rate; a before/after impact report (`scripts/rate-inheritance-impact.mjs`, run manually before a merge that touches rate cards or the org tree — see [`06-deployment-operations.md`](../architecture/06-deployment-operations.md#11-pre-merge-impact-reports-manual-gate)) is how the actual affected resources and amounts are found. |
+| Resources with no matching card at all | A `role` with neither its own card, an ancestor's, nor a generic fallback — shown on the [Resources](resource-management.md) form as "No rate card for this role", never a silent zero. |
+
+**Related.** [Resource Management](resource-management.md) (where the resolved
+rate, its provenance, and a resource's billability are shown); [Manage Resource
+Organizations](#manage-resource-organizations) (the tree the ancestor walk
+climbs); [Roles & permissions](../roles-and-permissions.md) (the `/rate-cards`
+read and mutation rules).
+
+---
+
 ### Maintain Availability Data
 
 **Purpose.** Maintain the workforce-person **availability** data consumed by

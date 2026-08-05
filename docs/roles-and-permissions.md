@@ -145,6 +145,7 @@ and **403** otherwise. Path tests use `startsWith`.
 | `/customers`, `/contracts`, `/orders`, `/order-lines`, `/billing-plan-items`, `/negotiated-rates` | `sales`, `finance`, `delivery-executive`, `admin` |
 | `/project-financials`, `/project-cost-centers`, `/cost-centers` | `finance`, `delivery-executive`, `admin` |
 | `/resources` (incl. `/resources/:id`), `/users` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/rate-cards` (role/organization default cost-bill rates, resolved onto every `/resources` read — the ancestor-walk resolution, rate-card inheritance block, design spec §2) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/assignments`, `/requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/capacity`, `/bench` (ONE predicate — `p.startsWith('/capacity') \|\| p.startsWith('/bench')`, not two rules — read-only computed rollups, e.g. `GET /capacity/monthly` (B2) and `GET /bench/monthly` (Block F, design spec §8); the latter extends this rule rather than duplicating the role array) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/assignment-days`, `/assignment-months` (raw per-day/per-month assignment rows, e.g. `GET /assignment-days` — shared plumbing for Block F's client-side What-If bench composition and block E's own spec; same need-to-know as `/capacity` and `/assignments` above, just unaggregated) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
@@ -172,6 +173,7 @@ A role not in the matched rule's list gets **403**. Path tests use `startsWith`
 | `/customers`, `/contracts`, `/orders`, `/order-lines`, `/billing-plan-items`, `/negotiated-rates` | `sales`, `finance`, `delivery-executive`, `admin` |
 | `/project-financials`, `/project-cost-centers`, `/cost-centers` | `finance`, `delivery-executive`, `admin` |
 | `/resources` | `resource-manager`, `delivery-executive`, `admin` |
+| `/rate-cards` | `admin`, `delivery-executive`, `finance` — deliberately **not** `resource-manager`: that role edits a resource's own override (the `/resources` row above), never the catalog cards themselves |
 | `/time-entries` | `employee`, `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/assignments`, `/requests` (incl. the B3 per-month endpoints `POST /assignments/:id/months/:month/submit` and `PUT /assignments/:id/months/:month/note`, matched by the same `/assignments` prefix test — no separate rule) | `pm`, `resource-manager`, `delivery-executive`, `admin` |
 | `/projects`, `/project-partners`, `/project-documents`, `/work-packages`, `/milestones`, `/project-tasks`, `/project-issues`, `/change-requests` | `pm`, `delivery-executive`, `admin` |

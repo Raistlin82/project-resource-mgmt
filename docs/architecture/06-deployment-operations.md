@@ -419,3 +419,20 @@ docker compose -f docker-compose.yml -f docker-compose.app.yml down -v
 
 Step-by-step Keycloak realm / client / user setup lives in
 [`../functional/keycloak-setup.md`](../functional/keycloak-setup.md).
+
+## 11. Pre-merge impact reports (manual gate)
+
+Some features carry a dependency-free Node script that recomputes a
+before/after revenue or rate figure against a running server, because there is
+no CI job in this project that starts one to run it automatically. Run these
+manually before merging any branch that touches the data they cover, and paste
+the output into the PR:
+
+| Script | Run when | Gate |
+| --- | --- | --- |
+| `scripts/negotiated-rate-impact.mjs` | `negotiated_rates`, `contracts`, or `rate_cards` change | Empty `negotiated_rates` table -> zero rows (true by construction, not proof on its own — see the script's own header); with data, the printed delta must match what you expect by hand before merging. |
+| `scripts/rate-inheritance-impact.mjs` | `rate_cards` or `resource_organizations` change | No card sits on a node with children -> zero rows for any resource placement (proven as a property in `rate-card.util.spec.ts`, not just observed here); on this repository's own seed, exactly one row (resource `'13'`, cost +40.00/bill +80.00 EUR/day). |
+
+**Why both scripts are documented here, not just the newer one.** `negotiated-rate-impact.mjs` shipped with the negotiated-sell-rates block and its manual-gate step was never written into any deploy checklist before now — it existed only inside that feature's own spec/plan documents, which is exactly the "report nobody re-reads" failure mode this section exists to close. Creating this section for the first time and documenting only the new script would have left the section itself incomplete by omission — the same shape of gap this whole block keeps finding elsewhere. Both scripts are the same kind of artifact (a dependency-free before/after report requiring a running server) and belong in the same table.
+
+**Run `rate-inheritance-impact.mjs` against a freshly booted server, before `smoke-api.mjs`.** `scripts/smoke-api.mjs`'s own rate-card-inheritance checks create a scoped resource on the `Backend` node and never delete it (resources have no `DELETE` endpoint) — on a server that already had the smoke suite run against it, the impact script prints that leftover resource as a **second** row alongside seed resource `'13'`, both showing the identical delta. This is not a defect — it is exactly what a resource on `Backend` should report — but it is not the single-row reading this checklist commits to, and a two-row surprise on what should be a clean gate is worth avoiding. Boot the server, run the impact script first, and only then run the smoke suite (or use a separate server process for each).

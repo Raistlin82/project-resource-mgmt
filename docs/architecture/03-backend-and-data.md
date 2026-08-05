@@ -686,6 +686,22 @@ resource beneath it with no backfill. A resource may attach at **any** level, so
 a dimension key is simply absent when that level does not exist above the
 attachment point.
 
+**Rate-card inheritance (rate-card-inheritance block) walks the same tree
+`dimensionsOf` does.** `pickRateCard` now lives in
+`src/app/services/rate-card.util.ts` (moved out of `server.ts`, which used to
+declare it privately) and resolves a role's effective card by walking
+`ancestorChain` — the resource's own node, then each ancestor nearest-first,
+then the generic (no-organization) card — instead of by exact-name match
+alone. A card configured on a capability therefore reaches every practice or
+competence beneath it that has no more specific card of its own; with no
+card on any ancestor, the result is byte-identical to the exact-match
+resolution that shipped before this block. `resolveResourceRates`
+(`src/server.ts`) fetches `resourceOrganizations` alongside `rateCards` for
+exactly this reason. This block introduces **no schema change** — `rateCards`
+and `resourceOrganizations` are read exactly as they are today, no column is
+added, and therefore no column is newly nullable either (nothing here changes
+what an explicit `null` means anywhere in this schema).
+
 Both traversals tolerate a cycle in the data (every walk carries a `visited`
 set), and writes that would *create* one are refused with **400** — in the tree
 (`wouldCycleInOrgTree`) and in the org chart (`wouldCycleInOrgChart`).
