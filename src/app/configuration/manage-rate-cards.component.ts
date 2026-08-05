@@ -9,6 +9,7 @@ import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 import { authGatedResource } from '../services/auth-gated-resource.util';
+import { ancestorChain, type OrgNode } from '../services/org-scope.util';
 
 /** Base/reporting currency — the default denomination for a rate card. */
 const BASE_CURRENCY = 'EUR';
@@ -119,8 +120,8 @@ const BASE_CURRENCY = 'EUR';
                 <!-- Optional: empty = applies to ALL organizations. An org-specific card wins. -->
                 <select id="rc-org" formControlName="organization" class="command-select">
                   <option value="">All organizations</option>
-                  @for (o of orgOptions(); track o.id) {
-                    <option [value]="o.name">{{ o.name }}</option>
+                  @for (o of indentedOrgOptions(); track o.node.id) {
+                    <option [value]="o.node.name">{{ '\u2007'.repeat(o.depth) }}{{ o.node.name }}</option>
                   }
                   @if (orphanOrg(); as orphan) {
                     <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
@@ -196,6 +197,19 @@ export class ManageRateCardsComponent {
   roleOptions = this.rolesRes.value;
   private orgsRes = authGatedResource(() => this.api.getResourceOrganizations(), [] as ResourceOrganization[]);
   orgOptions = this.orgsRes.value;
+
+  /** Every org node, ordered so a node always sits after its own ancestors and
+   *  before its own descendants, each carrying its depth (design spec §9):
+   *  capability = 0, practice = 1, competence = 2. Purely client-side over
+   *  data already loaded for this screen's <select> -- no new fetch, no new
+   *  endpoint. With inheritance active, an admin choosing an organization
+   *  benefits from seeing the hierarchy, not just a flat, undifferentiated list. */
+  indentedOrgOptions = computed<{ node: ResourceOrganization; depth: number }[]>(() => {
+    const nodes = this.orgOptions() as unknown as OrgNode[];
+    const pathOf = (n: ResourceOrganization) => ancestorChain(n.id, nodes).reverse().map(x => x.name).join('/');
+    const sorted = [...this.orgOptions()].sort((a, b) => pathOf(a).localeCompare(pathOf(b)));
+    return sorted.map(node => ({ node, depth: ancestorChain(node.id, nodes).length - 1 }));
+  });
   private fxRes = authGatedResource(() => this.api.getFxRates(), [] as FxRate[]);
   // Currency list = base currency + every configured fx-rate currency (deduped).
   currencyOptions = computed<string[]>(() => {
