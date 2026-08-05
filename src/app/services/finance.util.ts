@@ -1,6 +1,8 @@
-import { Assignment, Resource, ResourceRequest, Order, OrderLine, FinancialItem, TimeEntry, BillingPlanItem, Contract, Customer, Milestone, ChangeRequest, Project, FxRate, NegotiatedRate, BASE_CURRENCY } from './api.service';
+import { Assignment, Resource, ResourceRequest, Order, OrderLine, FinancialItem, TimeEntry, BillingPlanItem, Contract, Customer, Milestone, ChangeRequest, Project, FxRate, NegotiatedRate, BASE_CURRENCY, AssignmentDay, AssignmentMonth } from './api.service';
 import { customerFacingBillingAmount } from './billing-validation.util';
 import { sellRateFor, hoursPerDayOrDefault } from './sell-rate.util';
+import { monthRowId } from './allocation-month.util';
+import { monthOf } from './calendar.util';
 
 /** All raw data needed to compute financial rollups. */
 export interface FinanceData {
@@ -19,6 +21,16 @@ export interface FinanceData {
   changeRequests?: ChangeRequest[];
   /** Optional project master data; used only to label portfolio-level alert rows. */
   projects?: Project[];
+  /**
+   * Optional per-day booked hours and per-month lifecycle state (design spec,
+   * block E, §2). Consumed ONLY by `plannedCostSchedule`, which buckets a day's
+   * hours by month and gates it on its OWNING month's status — 'Allocated' or
+   * 'Requested' count (the same `planned` bucket `monthlyAggregateHours`
+   * already uses in `allocation-month.util.ts`), 'Draft'/'Rejected'/absent do
+   * not. Absent or empty behaves exactly like a project with no plan yet.
+   */
+  assignmentDays?: AssignmentDay[];
+  assignmentMonths?: AssignmentMonth[];
   /**
    * Optional negotiated sell rates (design spec §4/§6). Consumed ONLY by the
    * as-incurred (TimeAndMaterials/Capped/Expense) branch of recognitionSchedule,
@@ -128,6 +140,68 @@ export function plannedLaborCostForProject(projectId: string, d: FinanceData): n
       .filter(a => reqIds.has(a.requestId))
       .map(a => a.assignedHours * (d.resources.find(r => r.id === a.resourceId)?.costRate ?? 0)),
   );
+}
+
+export interface PlannedCostPeriod {
+  period: string;      // YYYY-MM
+  plannedCost: number;  // EUR — this month's planned cost
+  cumulative: number;   // EUR — Σ plannedCost from the start of the requested periods
+}
+
+/**
+ * The monthly cost side of the plan (design spec §2) — the sibling
+ * `recognitionSchedule` never had, because cost has no monthly bucketing
+ * today. For every AssignmentDay belonging to the project (same request-set
+ * join as `plannedLaborCostForProject`), looks up its OWNING AssignmentMonth
+ * (`monthRowId(assignmentId, monthOf(date))`, reusing the B3 helper
+ * verbatim): a day whose month is 'Allocated' or 'Requested' counts (the
+ * `planned` bucket `monthlyAggregateHours` already uses elsewhere), a day
+ * whose month is 'Draft'/'Rejected'/absent counts 0. A counted day is priced
+ * at its resource's `costRate` — see the CRITICAL unit note below — and
+ * bucketed by `periodOf(date)`, clamped exactly like `recognitionSchedule`.
+ *
+ * UNITS — READ BEFORE CALLING: `data.resources[].costRate` must be the
+ * RESOLVED EUR/HOUR value (override ?? rate card, already divided by
+ * hoursPerDay), never the raw EUR/DAY column. This function is unit-agnostic
+ * by design (it only multiplies hours x whatever costRate it is given) —
+ * the CALLER is responsible for resolution. See `finance.util.spec.ts`'s
+ * "is fed resolved... rates" test for the exact failure mode of getting this
+ * wrong.
+ */
+export function plannedCostSchedule(
+  data: FinanceData,
+  periods: readonly string[] | { from: string; to: string },
+  opts: { projectId: string },
+): PlannedCostPeriod[] {
+  const periodList = Array.isArray(periods)
+    ? [...periods]
+    : periodRange((periods as { from: string; to: string }).from, (periods as { from: string; to: string }).to);
+  if (periodList.length === 0) return [];
+
+  const reqIds = new Set(data.requests.filter(r => r.projectId === opts.projectId).map(r => r.id));
+  const assignmentIds = new Set(data.assignments.filter(a => reqIds.has(a.requestId)).map(a => a.id));
+  const resourceByAssignment = new Map(data.assignments.map(a => [a.id, a.resourceId]));
+  const costRateByResource = new Map(data.resources.map(r => [r.id, r.costRate ?? 0]));
+  const monthStatus = new Map((data.assignmentMonths ?? []).map(m => [m.id, m.status]));
+
+  const index = new Map(periodList.map((p, i) => [p, i]));
+  const costByPeriod = new Array<number>(periodList.length).fill(0);
+
+  for (const d of (data.assignmentDays ?? [])) {
+    if (!assignmentIds.has(d.assignmentId)) continue;
+    const status = monthStatus.get(monthRowId(d.assignmentId, monthOf(d.date)));
+    if (status !== 'Allocated' && status !== 'Requested') continue;
+    const resourceId = resourceByAssignment.get(d.assignmentId);
+    const costRate = resourceId !== undefined ? (costRateByResource.get(resourceId) ?? 0) : 0;
+    const i = index.get(clampPeriod(periodOf(d.date), periodList));
+    if (i !== undefined) costByPeriod[i] += finite(d.hours) * costRate;
+  }
+
+  let cumulative = 0;
+  return periodList.map((period, i) => {
+    cumulative += finite(costByPeriod[i]);
+    return { period, plannedCost: finite(costByPeriod[i]), cumulative };
+  });
 }
 
 export function actualLaborCostForProject(projectId: string, d: FinanceData): number {

@@ -41,8 +41,10 @@ import {
   recognizedRevenueTrend,
   JournalEntry,
   FinanceData,
+  plannedCostSchedule,
+  PlannedCostPeriod,
 } from './finance.util';
-import { Resource, ResourceRequest, Assignment, Order, OrderLine, FinancialItem, TimeEntry, BillingPlanItem, Contract, Customer, Milestone, ChangeRequest, Project, FxRate } from './api.service';
+import { Resource, ResourceRequest, Assignment, Order, OrderLine, FinancialItem, TimeEntry, BillingPlanItem, Contract, Customer, Milestone, ChangeRequest, Project, FxRate, AssignmentDay, AssignmentMonth } from './api.service';
 
 function res(id: string, costRate: number, billRate: number): Resource {
   return { id, name: `R${id}`, role: 'Dev', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, costRate, billRate };
@@ -52,6 +54,12 @@ function req(id: string, projectId: string): ResourceRequest {
 }
 function assign(id: string, requestId: string, resourceId: string, hours: number): Assignment {
   return { id, requestId, resourceId, assignedHours: hours, status: 'Allocated' };
+}
+function day(id: string, assignmentId: string, date: string, hours: number): AssignmentDay {
+  return { id, assignmentId, date, hours };
+}
+function month(assignmentId: string, month: string, status: AssignmentMonth['status']): AssignmentMonth {
+  return { id: `${assignmentId}:${month}`, assignmentId, month, status };
 }
 function order(id: string, type: Order['type'], status: Order['status']): Order {
   return { id, contractId: 'CT', type, amount: 0, currency: 'EUR', status, orderDate: '2026-01-01' };
@@ -792,6 +800,129 @@ describe('finance.util recognitionSchedule', () => {
     const withoutField: FinanceData = { ...d };
     delete (withoutField as { negotiatedRates?: unknown }).negotiatedRates;
     expect(recognitionSchedule(withoutField, periods, { projectId: 'P' })).toEqual(rows);
+  });
+});
+
+describe('finance.util plannedCostSchedule', () => {
+  const base: FinanceData = {
+    resources: [res('1', 100, 200)],
+    requests: [req('r1', 'P')],
+    assignments: [assign('a1', 'r1', '1', 0)],
+    orders: [], orderLines: [], financials: [],
+  };
+
+  it('prices an Allocated day at hours x the resource\'s costRate, bucketed by month', () => {
+    const d: FinanceData = {
+      ...base,
+      assignmentDays: [day('ad1', 'a1', '2026-01-10', 8), day('ad2', 'a1', '2026-02-05', 4)],
+      assignmentMonths: [month('a1', '2026-01', 'Allocated'), month('a1', '2026-02', 'Allocated')],
+    };
+    const rows: PlannedCostPeriod[] = plannedCostSchedule(d, ['2026-01', '2026-02'], { projectId: 'P' });
+    expect(rows).toEqual([
+      { period: '2026-01', plannedCost: 800, cumulative: 800 },
+      { period: '2026-02', plannedCost: 400, cumulative: 1200 },
+    ]);
+  });
+
+  it('counts a Requested month exactly like an Allocated one', () => {
+    const d: FinanceData = {
+      ...base,
+      assignmentDays: [day('ad1', 'a1', '2026-01-10', 8)],
+      assignmentMonths: [month('a1', '2026-01', 'Requested')],
+    };
+    expect(plannedCostSchedule(d, ['2026-01'], { projectId: 'P' })[0].plannedCost).toBe(800);
+  });
+
+  it('zeroes a day whose month is Draft', () => {
+    const d: FinanceData = {
+      ...base,
+      assignmentDays: [day('ad1', 'a1', '2026-01-10', 8)],
+      assignmentMonths: [month('a1', '2026-01', 'Draft')],
+    };
+    expect(plannedCostSchedule(d, ['2026-01'], { projectId: 'P' })[0].plannedCost).toBe(0);
+  });
+
+  it('zeroes a day whose month is Rejected', () => {
+    const d: FinanceData = {
+      ...base,
+      assignmentDays: [day('ad1', 'a1', '2026-01-10', 8)],
+      assignmentMonths: [month('a1', '2026-01', 'Rejected')],
+    };
+    expect(plannedCostSchedule(d, ['2026-01'], { projectId: 'P' })[0].plannedCost).toBe(0);
+  });
+
+  it('zeroes a day with NO month row at all', () => {
+    const d: FinanceData = {
+      ...base,
+      assignmentDays: [day('ad1', 'a1', '2026-01-10', 8)],
+      assignmentMonths: [],
+    };
+    expect(plannedCostSchedule(d, ['2026-01'], { projectId: 'P' })[0].plannedCost).toBe(0);
+  });
+
+  it('treats a day whose assignment references a missing resource as costRate 0', () => {
+    const d: FinanceData = {
+      ...base,
+      assignments: [assign('a1', 'r1', 'ghost-resource', 0)],
+      assignmentDays: [day('ad1', 'a1', '2026-01-10', 8)],
+      assignmentMonths: [month('a1', '2026-01', 'Allocated')],
+    };
+    expect(plannedCostSchedule(d, ['2026-01'], { projectId: 'P' })[0].plannedCost).toBe(0);
+  });
+
+  it('ignores a day whose assignment belongs to another project\'s request', () => {
+    const d: FinanceData = {
+      ...base,
+      requests: [req('r1', 'P'), req('r2', 'OTHER')],
+      assignments: [assign('a1', 'r1', '1', 0), assign('a2', 'r2', '1', 0)],
+      assignmentDays: [day('ad1', 'a1', '2026-01-10', 8), day('ad2', 'a2', '2026-01-11', 100)],
+      assignmentMonths: [month('a1', '2026-01', 'Allocated'), month('a2', '2026-01', 'Allocated')],
+    };
+    // Only a1's 8h counts toward project 'P'; a2's 100h (project 'OTHER') must not leak in.
+    expect(plannedCostSchedule(d, ['2026-01'], { projectId: 'P' })[0].plannedCost).toBe(800);
+  });
+
+  it('clamps a day dated before the requested window into the first period', () => {
+    const d: FinanceData = {
+      ...base,
+      assignmentDays: [day('ad1', 'a1', '2025-11-20', 8)],
+      assignmentMonths: [month('a1', '2025-11', 'Allocated')],
+    };
+    expect(plannedCostSchedule(d, ['2026-01', '2026-02'], { projectId: 'P' })[0].plannedCost).toBe(800);
+  });
+
+  it('expands a {from,to} range the same way an explicit period array would', () => {
+    const d: FinanceData = {
+      ...base,
+      assignmentDays: [day('ad1', 'a1', '2026-01-10', 8), day('ad2', 'a1', '2026-02-05', 4)],
+      assignmentMonths: [month('a1', '2026-01', 'Allocated'), month('a1', '2026-02', 'Allocated')],
+    };
+    expect(plannedCostSchedule(d, { from: '2026-01', to: '2026-02' }, { projectId: 'P' }))
+      .toEqual(plannedCostSchedule(d, ['2026-01', '2026-02'], { projectId: 'P' }));
+  });
+
+  it('returns an empty array for an empty period list', () => {
+    expect(plannedCostSchedule(base, [], { projectId: 'P' })).toEqual([]);
+  });
+
+  // UNIT-PINNING TEST (spec §9) — the exact defect class this project already
+  // shipped once (~8x revenue via sell-rate.util.ts). costRate 720 mirrors the
+  // RAW resources.cost_rate column (EUR/DAY) that loadFinanceData() carries;
+  // costRate 90 mirrors the RESOLVED value resolveResourceRates()/GET
+  // /api/resources produce (EUR/HOUR = 720 / hoursPerDay 8). Feeding the raw
+  // figure MUST NOT be how either the freeze handler or the client comparison
+  // computes cost. If a future change swaps resolved for raw resources on
+  // either path, this ratio silently becomes hoursPerDay (8), not 1, and this
+  // test fails.
+  it('is fed resolved (EUR/HOUR) rates, never raw (EUR/DAY) ones — the ratio must be exactly hoursPerDay (8), never 1', () => {
+    const days = [day('ad1', 'a1', '2026-10-05', 8)];
+    const months = [month('a1', '2026-10', 'Allocated')];
+    const resolved: FinanceData = { ...base, resources: [res('1', 90, 180)], assignmentDays: days, assignmentMonths: months };
+    const raw: FinanceData = { ...base, resources: [res('1', 720, 1440)], assignmentDays: days, assignmentMonths: months };
+    const resolvedCost = plannedCostSchedule(resolved, ['2026-10'], { projectId: 'P' })[0].plannedCost;
+    const rawCost = plannedCostSchedule(raw, ['2026-10'], { projectId: 'P' })[0].plannedCost;
+    expect(resolvedCost).toBe(720); // 8h x 90 EUR/h — the seeded John Miller figure (Task 1)
+    expect(rawCost / resolvedCost).toBe(8); // hoursPerDay — proves the trap, does not silently pass at ratio 1
   });
 });
 
