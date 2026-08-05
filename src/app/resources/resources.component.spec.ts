@@ -1,8 +1,8 @@
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { of, Subject } from 'rxjs';
+import { of, Subject, throwError, type Observable } from 'rxjs';
 import { ResourcesComponent } from './resources.component';
-import { ApiService, Resource, ResourceOrganization, RateCard, Vendor } from '../services/api.service';
+import { ApiService, Resource, ResourceOrganization, RateCard, Assignment, Vendor } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 
@@ -27,7 +27,12 @@ const ORG_NODES: ResourceOrganization[] = [
   { id: '6', name: 'Backend', description: '', costCenters: [], level: 'competence', parentId: '5' },
 ];
 
-function setup(resources: Resource[] = RESOURCES, orgNodes: ResourceOrganization[] = [], rateCards: RateCard[] = []) {
+function setup(
+  resources: Resource[] = RESOURCES,
+  orgNodes: ResourceOrganization[] = [],
+  rateCards: RateCard[] = [],
+  assignments$: Observable<Assignment[]> = of([]),
+) {
   const getResources = vi.fn(() => of(resources));
   const getProjectRoles = vi.fn(() => of([]));
   const getResourceOrganizations = vi.fn(() => of(orgNodes));
@@ -35,11 +40,12 @@ function setup(resources: Resource[] = RESOURCES, orgNodes: ResourceOrganization
   const getCities = vi.fn(() => of([]));
   const getRateCards = vi.fn(() => of(rateCards));
   const getVendors = vi.fn(() => of(VENDORS));
+  const getAssignments = vi.fn(() => assignments$);
   const createResource = vi.fn(() => of({} as Resource));
   const updateResource = vi.fn(() => of({} as Resource));
   const apiStub = {
     getResources, getProjectRoles, getResourceOrganizations, getCountries, getCities,
-    getRateCards, getVendors, createResource, updateResource,
+    getRateCards, getVendors, getAssignments, createResource, updateResource,
   } as unknown as ApiService;
   const notifyStub = { show: vi.fn() } as unknown as NotificationService;
   const authStub = { authReady: signal(true), isAuthenticated: signal(true) } as unknown as AuthService;
@@ -419,6 +425,66 @@ describe('ResourcesComponent', () => {
       fixture.componentInstance.form.controls.organization.setValue('Backend');
       fixture.detectChanges();
       expect(fixture.componentInstance.rateCardProvenance()).toBeNull();
+    });
+  });
+
+  describe('resourceBillability wiring (rate-card-inheritance block, Task 4)', () => {
+    /** Alice, already effective-rated (as if resolved server-side): 75 EUR/h
+     *  cost, 140 EUR/h bill -- same per-hour figures finance.util.spec.ts's own
+     *  pinned resourceBillability test uses, so the expected numbers below
+     *  (100h -> cost 7500, billable 14000) are independently cross-checked
+     *  against that existing pure-function test, not invented fresh here. */
+    const BILLABILITY_RESOURCES: Resource[] = [
+      { id: '1', name: 'Alice', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal', costRate: 75, billRate: 140 },
+    ];
+    const BILLABILITY_ASSIGNMENTS: Assignment[] = [
+      { id: 'a1', requestId: 'r1', resourceId: '1', assignedHours: 100, status: 'Allocated' },
+    ];
+
+    it('shows cost/billable/hours once resources, org tree and assignments are all ready', async () => {
+      const { fixture } = setup(BILLABILITY_RESOURCES, [], [], of(BILLABILITY_ASSIGNMENTS));
+      await flush(fixture);
+      fixture.componentInstance.editingId.set('1');
+      fixture.componentInstance.showForm.set(true);
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.billability()).toEqual({ hours: 100, cost: 7500, billable: 14000 });
+      const host = fixture.nativeElement as HTMLElement;
+      const billabilityEl = host.querySelector('[data-test="resource-billability"]');
+      // digitsInfo '1.0-2' (this codebase's established convention for money,
+      // e.g. contract-details.ts:271) shows AT MOST 2 decimals, not exactly 2 --
+      // a whole number renders with none. 7500/14000 are both whole, so the
+      // correct expectation is '7,500'/'14,000', not '7,500.00'/'14,000.00'.
+      expect(billabilityEl?.textContent).toContain('7,500');
+      expect(billabilityEl?.textContent).toContain('14,000');
+    });
+
+    it('shows the error panel, not a zero, when assignments fails to load', async () => {
+      const { fixture } = setup(BILLABILITY_RESOURCES, [], [], throwError(() => new Error('401 Unauthorized')));
+      await flush(fixture);
+      fixture.componentInstance.editingId.set('1');
+      fixture.componentInstance.showForm.set(true);
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.rateFiguresState()).toBe('error');
+      expect(fixture.componentInstance.billability()).toBeNull();
+      const host = fixture.nativeElement as HTMLElement;
+      // No presence assertion alone: also assert the number that would have
+      // rendered on a silent-zero regression is genuinely absent from the DOM.
+      expect(host.querySelector('[data-test="resource-billability"]')).toBeNull();
+      expect(host.textContent).not.toContain('0.00');
+    });
+
+    it('shows nothing (not null-as-zero) while creating a new resource', async () => {
+      const { fixture } = setup(BILLABILITY_RESOURCES, [], [], of(BILLABILITY_ASSIGNMENTS));
+      await flush(fixture);
+      fixture.componentInstance.editingId.set(null);
+      fixture.componentInstance.showForm.set(true);
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.billability()).toBeNull();
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.querySelector('[data-test="resource-billability"]')).toBeNull();
     });
   });
 });

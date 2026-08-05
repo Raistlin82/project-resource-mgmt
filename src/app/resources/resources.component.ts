@@ -11,7 +11,7 @@ import { of } from 'rxjs';
 import { DecimalPipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Resource, ProjectRole, Country, City, ResourceOrganization, RateCard, Vendor } from '../services/api.service';
+import { ApiService, Resource, ProjectRole, Country, City, ResourceOrganization, RateCard, Assignment, Vendor } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
@@ -20,6 +20,7 @@ import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.compon
 import { RESOURCE_KINDS, RESOURCE_KIND_LABELS, countsTowardInternalCapacity, kindOf, type ResourceKind } from '../services/resource-kind.util';
 import { dimensionsOf } from '../services/org-scope.util';
 import { pickRateCard } from '../services/rate-card.util';
+import { resourceBillability, type FinanceData } from '../services/finance.util';
 import { todayLocalIso } from '../services/local-date.util';
 
 /** Today as an ISO 'YYYY-MM-DD' string, used for status derivation + the terminate default. */
@@ -374,6 +375,23 @@ const REMOTE_LOCATION = 'Remote';
                 <p class="-mt-2 text-xs text-[var(--cc-muted)]">No rate card for this role — enter cost/bill rates manually, or define one under Configuration → Rate Cards.</p>
               }
 
+              <!-- BILLABILITY (rate-card-inheritance block, Task 4): only for an
+                   existing resource — a new one has no id to filter assignments
+                   by. Three-state gated (never a zero standing in for a failed
+                   or still-loading read, design spec §8). -->
+              @if (editingId()) {
+                <app-list-state [loading]="rateFiguresState() === 'loading'" [error]="rateFiguresState() === 'error'"
+                                skeleton="block" label="billability" (retry)="assignmentsRes.reload()">
+                  <ng-template>
+                    @if (billability(); as b) {
+                      <p data-test="resource-billability" class="-mt-2 text-xs text-[var(--cc-muted)]">
+                        Billability to date: cost {{ b.cost | number:'1.0-2' }} · billable {{ b.billable | number:'1.0-2' }} ({{ b.hours | number:'1.0-2' }} h)
+                      </p>
+                    }
+                  </ng-template>
+                </app-list-state>
+              }
+
               <div class="pt-4 flex justify-end gap-3">
                 <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
                 <button type="submit" [disabled]="form.invalid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
@@ -478,6 +496,46 @@ export class ResourcesComponent {
     defaultValue: [] as RateCard[],
   });
   rateCards = this.rateCardsRes.value;
+
+  // BILLABILITY (rate-card-inheritance block, Task 4): resourceBillability's one
+  // extra dependency beyond resources/org tree/rate cards. Same idiom as
+  // orgsRes/rateCardsRes above (NOT authGatedResource — this file does not use
+  // that helper elsewhere, and matching the file's own convention matters more
+  // than a shorter form mid-file).
+  protected readonly assignmentsRes = rxResource<Assignment[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getAssignments() : of<Assignment[]>([])),
+    defaultValue: [] as Assignment[],
+  });
+
+  /** Every read a billability figure on this form derives from — one shared
+   *  list, so the gate below cannot drift from what actually feeds the number. */
+  private billabilityInputs() {
+    return [this.resourcesRes, this.orgsRes, this.rateCardsRes, this.assignmentsRes];
+  }
+
+  /** `status()==='error' ? [] : value()` is banned on this project: it turns
+   *  "we don't know" into "there is none". `!authReady()` counts as loading,
+   *  not ready-and-empty, so a pre-auth read never renders a confident zero. */
+  rateFiguresState = computed<'error' | 'loading' | 'ready'>(() => {
+    const inputs = this.billabilityInputs();
+    if (inputs.some(r => r.status() === 'error')) return 'error';
+    if (!this.auth.authReady() || inputs.some(r => r.isLoading())) return 'loading';
+    return 'ready';
+  });
+
+  /** Cost/billable/hours for the resource being edited (design spec §8) — null
+   *  while creating (no id to filter assignments by) or whenever the inputs
+   *  above are not all ready, never a zero standing in for either case. */
+  billability = computed<{ cost: number; billable: number; hours: number } | null>(() => {
+    const id = this.editingId();
+    if (!id || this.rateFiguresState() !== 'ready') return null;
+    const data: FinanceData = {
+      requests: [], orders: [], orderLines: [], financials: [],
+      resources: this.resources(), assignments: this.assignmentsRes.value(),
+    };
+    return resourceBillability(id, data);
+  });
 
   // VENDOR (C1): the catalog a 'subco' resource's vendorId references.
   // gated on authReady like the other config catalogs above.
