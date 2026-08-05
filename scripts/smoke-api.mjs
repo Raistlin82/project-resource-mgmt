@@ -6211,6 +6211,17 @@ async function checkSearchableReads() {
     const byInvoice = await req('GET', '/orders?q=INV-2026-0001');
     check('orders?q=INV-2026-0001 matches EXACTLY order O1', Array.isArray(byInvoice.body) && byInvoice.body.length === 1 && byInvoice.body[0].id === 'O1', JSON.stringify(byInvoice.body?.map((o) => o.id)));
   }
+
+  // Customers: wired via crud()'s new opt-in searchable-fields parameter (Task 3).
+  {
+    const { status, body } = await req('GET', '/customers?q=Globex');
+    check('GET /api/customers?q=Globex -> 200', status === 200, `status=${status}`);
+    check('customers?q=Globex returns EXACTLY customer C1', Array.isArray(body) && body.length === 1 && body[0].id === 'C1', JSON.stringify(body?.map((c) => c.id)));
+  }
+  {
+    const noQ = await req('GET', '/vendors'); // an UNRELATED crud()-mounted collection -- must be completely unaffected by this task
+    check('GET /api/vendors (untouched crud() caller) still returns the full array with no searchable param passed', Array.isArray(noQ.body) && noQ.body.length > 0, `length=${noQ.body?.length}`);
+  }
 }
 
 async function main() {

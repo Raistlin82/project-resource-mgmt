@@ -793,8 +793,20 @@ function crud<T extends { id: string }>(
   // `ctx.id` is the record's own id on PUT (undefined on POST) — lets a validator
   // exclude the record being edited from a uniqueness check (Phase E rate cards).
   validate?: (data: Record<string, unknown>, ctx?: { id?: string }) => Promise<string | null>,
+  // Block G: optional fields this collection's GET should text-match on.
+  // Default [] -- every OTHER crud() caller (cities, industries,
+  // cost-categories, partner-roles, vendors, rate-cards, project-partners,
+  // project-documents, work-packages, project-financials, project-tasks,
+  // project-issues, cost-centers) passes nothing here and is byte-for-byte
+  // unaffected: `q` is simply never read for their GET route.
+  searchable: readonly (keyof T)[] = [],
 ) {
-  router.get(`/${path}`, async (_req, res) => { res.json(await repo.list()); });
+  router.get(`/${path}`, async (req, res) => {
+    const all = await repo.list();
+    if (searchable.length === 0) { res.json(all); return; } // unchanged for every non-searchable caller
+    const q = typeof req.query['q'] === 'string' ? req.query['q'] : undefined;
+    res.json(q === undefined ? all : searchPage(all, searchable, q, clampSearchPage(req.query)));
+  });
   router.post(`/${path}`, async (req, res) => {
     const data = pick(req.body, allowed);
     const bad = findInvalidNumericField(data, numericFields);
@@ -4716,7 +4728,7 @@ crud(apiRouter, 'customers', repos.customers, ['name', 'industry', 'country'], [
   const indErr = await validateCatalogValue(data['industry'], 'industry', industryNames, 'industry (catalog name)');
   if (indErr) return indErr;
   return validateCatalogValue(data['country'], 'country', countryNames, 'country (catalog name)');
-});
+}, ['name']);
 
 interface ContractEntry { id: string; customerId: string; name: string; type: string; totalValue: number; currency: string; status: string; startDate: string; endDate: string }
 
