@@ -63,8 +63,9 @@ respect them when touching persistence:
   patch to a plain `get(id)`, because Drizzle's `.set()` throws "No values to set".
 
 Other deliberate seam behaviors: Postgres FK violations (SQLSTATE `23503`) are mapped
-to a clean **409** by the API error middleware; id sequences are re-seeded past the
-max existing suffix at boot (`seedSequences()`) so restarts never re-issue ids.
+to a clean **409** by the API error middleware; entity ids are **UUID v4**
+(`newEntityId()` in `src/server/entity-id.util.ts`), collision-safe across workers
+and hosts, keeping the established `TE`/`AL`/`AR`/`OB` prefix conventions.
 `Language` (key `code`) and `FxRate` (key `currency`) have no `id` and flow through
 **natural-key adapters** that synthesize `id === key`. Full detail:
 `docs/architecture/03-backend-and-data.md`.
