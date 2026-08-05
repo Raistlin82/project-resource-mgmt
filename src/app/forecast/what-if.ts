@@ -108,7 +108,24 @@ interface TimelineRow {
         <div class="flex flex-col items-stretch gap-2 sm:items-end">
           <span class="command-section-label">Scenario</span>
           <div class="flex items-center gap-2">
-            @if (dirty()) {
+            <!--
+              CRITICAL FIX (round 1 review): this badge/button sit OUTSIDE the
+              body's loading/error gate below, so they used to render even when
+              dataRes had errored — and with baseData() falling back to an empty
+              stand-in, dirty() read false/false and showed a green "Matches
+              baseline" (parity affirmed) when no baseline had actually loaded
+              (parity unknown). Gated on the SAME dataState() the body uses
+              (mirrors contract-details.ts's moneyFiguresState() /
+              billing.ts's financialDataError()/financialDataLoading()): dirty()
+              and changeCount() are only read once dataState() is 'ready', so
+              they never compute over the synthetic empty baseline in the
+              first place.
+            -->
+            @if (dataState() === 'error') {
+              <span class="command-status" role="status">Unavailable</span>
+            } @else if (dataState() === 'loading') {
+              <span class="command-status" aria-busy="true">Loading&hellip;</span>
+            } @else if (dirty()) {
               <span class="command-status amber">{{ changeCount() }} change{{ changeCount() === 1 ? '' : 's' }}</span>
             } @else {
               <span class="command-status green">Matches baseline</span>
@@ -116,7 +133,7 @@ interface TimelineRow {
             <button
               type="button"
               class="command-button secondary"
-              [disabled]="!dirty()"
+              [disabled]="dataState() !== 'ready' || !dirty()"
               (click)="resetScenario()">
               Reset scenario
             </button>
@@ -124,13 +141,13 @@ interface TimelineRow {
         </div>
       </header>
 
-      @if (dataRes.status() === 'error') {
+      @if (dataState() === 'error') {
         <div class="command-card border-critical! p-10 text-center flex flex-col items-center gap-4">
           <h3 class="font-display text-lg font-bold text-[var(--cc-ink)]">Couldn't load the forecast</h3>
           <p class="text-[var(--cc-muted)] text-sm">Something went wrong while fetching the data.</p>
-          <button type="button" (click)="dataRes.reload()" class="command-button">Retry</button>
+          <button type="button" (click)="reloadData()" class="command-button">Retry</button>
         </div>
-      } @else if (loading()) {
+      } @else if (dataState() === 'loading') {
         <div class="command-card p-6">
           <div class="command-skeleton h-24"></div>
         </div>
@@ -441,17 +458,52 @@ export class WhatIf {
 
   private readonly projectsRes = authGatedResource<Project[]>(() => this.api.getProjects(), []);
 
-  readonly loading = computed<boolean>(() => this.dataRes.isLoading() || this.projectsRes.isLoading());
+  /**
+   * The ONE gate every scenario-derived figure — the header's dirty()/
+   * changeCount() badge and Reset button, AND the body — must check before
+   * rendering, mirroring `contract-details.ts`'s `moneyFiguresState()` /
+   * `billing.ts`'s `financialDataError()`+`financialDataLoading()` shape.
+   * `!authReady()` counts as 'loading', NOT as ready-and-empty: pre-authReady
+   * `dataRes`/`projectsRes` resolve SUCCESSFULLY with their empty defaults
+   * (that's how the auth-gated `forkJoin`/`authGatedResource` pattern avoids
+   * an unauthenticated request), so treating that as 'ready' would render a
+   * confident "no data"/"matches baseline" for a baseline that was never
+   * actually loaded yet — the same P1-10-shaped defect this repo has shipped
+   * (and fixed) twice this week, just for a different trigger (auth timing
+   * instead of a failed read).
+   *
+   * ROUND-1 FIX: previously only `baseData()` guarded against the error state
+   * (falling back to an empty stand-in so `.value()` wouldn't throw), and the
+   * header's `dirty()`/`changeCount()` read that empty stand-in UNGATED —
+   * "0 resources vs 0 resources" computed to `dirty() === false`, so an
+   * errored read rendered a green "Matches baseline" badge next to the "Couldn't
+   * load" retry card: parity affirmed as fact when parity is actually unknown.
+   * The fix is not a better fallback value — it is never COMPUTING dirty()/
+   * changeCount() at all outside the 'ready' state (see the template's header
+   * block and `resetScenario`'s disabled binding).
+   */
+  protected readonly dataState = computed<'error' | 'loading' | 'ready'>(() => {
+    if (this.dataRes.status() === 'error' || this.projectsRes.status() === 'error') return 'error';
+    if (!this.auth.authReady() || this.dataRes.isLoading() || this.projectsRes.isLoading()) return 'loading';
+    return 'ready';
+  });
+
+  /** Reloads every input `dataState()` depends on — the header/body Retry target. */
+  protected reloadData(): void {
+    this.dataRes.reload();
+    this.projectsRes.reload();
+  }
 
   /**
    * Immutable baseline forecast inputs. Falls back to `EMPTY_DATA` on a failed
-   * read (`status() === 'error'`), NOT because an error should read as "no
-   * data" — the error card is what the template actually shows for that case
-   * (see the top-level `@if`) — but because `dataRes.value()` THROWS while
-   * errored, and `dirty()`/`changeCount()` in the persistent header (rendered
-   * unconditionally, outside that `@if`) read `baseData()`/`scenario()`
-   * regardless of which branch is showing. Without this guard, an errored
-   * read crashes the whole component instead of rendering the retry card.
+   * read purely as defense-in-depth against `dataRes.value()` THROWING while
+   * errored (same non-throwing-accessor shape as `billing.ts`'s `items`/
+   * `contracts` getters) — NOT as the mechanism that keeps the header honest.
+   * That job belongs to `dataState()`: every consumer of `baseData()` (this
+   * file's `hasData`, `dirty`, `changeCount`, `basePeriods`, `baseSkills`,
+   * `baseBenchCount`, `slippableProjects`, `resetScenario`) is reached only
+   * from a template region gated on `dataState() === 'ready'`, so this
+   * fallback's empty value is never actually read as a "settled" figure.
    */
   private readonly baseData = computed<ForecastData>(() =>
     this.dataRes.status() === 'error' ? WhatIf.EMPTY_DATA : this.dataRes.value(),

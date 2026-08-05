@@ -172,3 +172,53 @@ describe('WhatIf — authReady gating', () => {
     expect(getResources).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * CRITICAL (round 1 review): the header's scenario badge/Reset button sit
+ * OUTSIDE the body's loading/error gate, so they used to render unconditionally.
+ * With `baseData()` falling back to an empty stand-in on a failed read,
+ * `dirty()` compared 0-vs-0 and read false, showing a green "Matches baseline"
+ * badge directly above the "Couldn't load" retry card — parity AFFIRMED as fact
+ * when parity is actually UNKNOWN (no baseline ever loaded). Fixed by gating the
+ * header on `dataState()`, the same tri-state the body uses.
+ */
+describe('WhatIf — the header badge/Reset must never claim parity it cannot know (CRITICAL fix)', () => {
+  function headerText(fixture: ComponentFixture<WhatIf>): string {
+    return (fixture.nativeElement as HTMLElement).querySelector('header')?.textContent ?? '';
+  }
+  function resetButton(fixture: ComponentFixture<WhatIf>): HTMLButtonElement {
+    return Array.from((fixture.nativeElement as HTMLElement).querySelectorAll('header button'))
+      .find(b => b.textContent?.includes('Reset scenario')) as HTMLButtonElement;
+  }
+
+  it('on a failed read, shows "Unavailable" — NOT the green "Matches baseline" badge — and disables Reset', async () => {
+    const fixture = await setup({ getResources: () => throwError(() => new Error('boom')) as unknown as Observable<Resource[]> });
+    await flush(fixture);
+
+    const text = headerText(fixture);
+    // Presence: the honest "we don't know" signal.
+    expect(text).toContain('Unavailable');
+    // Absence: the exact false claim the CRITICAL finding named — this is the
+    // assertion a regression of the bug would flip.
+    expect(text).not.toContain('Matches baseline');
+    expect(resetButton(fixture).disabled).toBe(true);
+  });
+
+  it('before authReady settles, the header does not claim "Matches baseline" either — !authReady() must count as loading, not ready-and-empty', async () => {
+    const fixture = await setup({}, false);
+    await flush(fixture);
+
+    const text = headerText(fixture);
+    expect(text).not.toContain('Matches baseline');
+    expect(resetButton(fixture).disabled).toBe(true);
+  });
+
+  it('once data resolves normally, the header DOES show "Matches baseline" — the paired positive proving the gate does not just hide the badge forever', async () => {
+    const fixture = await setup();
+    await flush(fixture);
+
+    const text = headerText(fixture);
+    expect(text).toContain('Matches baseline');
+    expect(text).not.toContain('Unavailable');
+  });
+});
