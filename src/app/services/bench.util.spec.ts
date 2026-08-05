@@ -256,6 +256,7 @@ describe('benchRollup — seed integration (design spec §11 fixture table)', ()
   it('resource 7 (new internal): ALLOCATED every shown month, beyond-horizon availability, upcomingUnallocated ONLY via the look-ahead month', () => {
     const row = out.internalRows.find(r => r.resourceId === '7')!;
     expect(row).toBeDefined();
+    expect(row.resourceName).toBe('Priya Kapoor'); // guards against a swapped field (e.g. id used where name belongs)
     for (const m of DISPLAY_MONTHS) expect(row.monthly[m].state).toBe('ALLOCATED');
     expect(row.availabilityDate).toEqual({ kind: 'beyond-horizon', horizonEndMonth: '2026-09' });
     expect(row.monthly['2026-09'].upcomingUnallocated).toBe(true);
