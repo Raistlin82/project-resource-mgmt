@@ -159,6 +159,30 @@ describe('hiringDemandByMonth (design spec §6 — dummy-only, raw hours summed 
     const rows = hiringDemandByMonth(fixtureResources, fixtureHours, ['2026-06']); // fixtureHours only has 2026-05
     expect(rows).toEqual([]);
   });
+  // The `/project-roles` catalog restricts `code`'s characters
+  // (manage-project-roles.component.ts:93) but NOT `name`'s — only
+  // `Validators.required` applies to the role name, both client-side and on
+  // POST/PUT /project-roles (a bare `pick()`, server.ts:4025-4033). A role
+  // named e.g. "Senior: Developer" is legal today. A `${month}:${role}`
+  // joined-then-split key would misparse it: splitting on every colon turns
+  // "2026-05:Senior: Developer" into three parts, so destructuring `[month,
+  // role]` silently truncates the role to "Senior" and merges its hours with
+  // an unrelated "Senior" role. This fixture pins that the aggregation keeps
+  // the two roles distinct regardless of what characters either contains.
+  it('a role name containing a colon is never truncated or merged with an unrelated role (would fail under a joined "${month}:${role}" key split on ":")', () => {
+    const colonResources = [
+      { id: 'd1', role: 'Senior: Developer', kind: 'dummy' },
+      { id: 'd2', role: 'Senior', kind: 'dummy' },
+    ];
+    const colonHours = new Map([
+      ['d1', new Map([['2026-05', { confirmed: 0, planned: 40 }]])],
+      ['d2', new Map([['2026-05', { confirmed: 0, planned: 10 }]])],
+    ]);
+    const rows = hiringDemandByMonth(colonResources, colonHours, ['2026-05']);
+    expect(rows.length).toBe(2);
+    expect(rows.find(r => r.role === 'Senior: Developer')?.hours).toBe(40);
+    expect(rows.find(r => r.role === 'Senior')?.hours).toBe(10);
+  });
 });
 
 describe('benchRollup — seed integration (design spec §11 fixture table)', () => {

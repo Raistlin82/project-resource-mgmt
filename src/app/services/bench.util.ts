@@ -96,13 +96,21 @@ export interface HiringDemandRow { month: string; role: string; hours: number; }
  * Hiring demand from DUMMY placeholders only (spec §6) — subco rows go to
  * bench (§4), never here. `hours` is RAW, unrounded; the FTE conversion is a
  * rendering-only step (§6/§10), never computed here.
+ *
+ * Aggregates through a nested `Map<month, Map<role, hours>>` rather than a
+ * joined `${month}:${role}` string key: a role name is free text from the
+ * `/project-roles` catalog (only `code`, not `name`, is character-restricted —
+ * see `manage-project-roles.component.ts`), so it can legally contain a colon
+ * or any other character. A joined-then-split key would silently merge or
+ * mis-parse such a role; keeping month and role as separate map levels avoids
+ * the parse entirely, so no role content can corrupt the aggregation.
  */
 export function hiringDemandByMonth(
   resources: readonly { id: string; role: string; kind?: string }[],
   hoursByResMonth: ReturnType<typeof hoursByResourceMonth>,
   months: readonly string[],
 ): HiringDemandRow[] {
-  const totals = new Map<string, number>(); // key: `${month}:${role}`
+  const totalsByMonth = new Map<string, Map<string, number>>();
   for (const r of resources) {
     if (kindOf(r) !== 'dummy') continue;
     const byMonth = hoursByResMonth.get(r.id);
@@ -110,16 +118,15 @@ export function hiringDemandByMonth(
     for (const m of months) {
       const cell = byMonth.get(m);
       if (!cell || cell.planned <= 0) continue;
-      const key = `${m}:${r.role}`;
-      totals.set(key, (totals.get(key) ?? 0) + cell.planned);
+      let byRole = totalsByMonth.get(m); if (!byRole) { byRole = new Map(); totalsByMonth.set(m, byRole); }
+      byRole.set(r.role, (byRole.get(r.role) ?? 0) + cell.planned);
     }
   }
-  return [...totals.entries()]
-    .map(([key, hours]) => {
-      const [month, role] = key.split(':');
-      return { month, role, hours };
-    })
-    .sort((a, b) => (a.month === b.month ? a.role.localeCompare(b.role) : a.month.localeCompare(b.month)));
+  const rows: HiringDemandRow[] = [];
+  for (const [month, byRole] of totalsByMonth) {
+    for (const [role, hours] of byRole) rows.push({ month, role, hours });
+  }
+  return rows.sort((a, b) => (a.month === b.month ? a.role.localeCompare(b.role) : a.month.localeCompare(b.month)));
 }
 
 export interface BenchCell {
