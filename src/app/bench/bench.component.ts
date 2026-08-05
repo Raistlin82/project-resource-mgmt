@@ -138,7 +138,7 @@ interface BenchPageData {
                     <tr>
                       <td>{{ d.month }}</td>
                       <td class="text-[var(--cc-muted)]">{{ d.role }}</td>
-                      <td class="num font-mono tabular-nums">{{ fteFor(d.month, d.hours) | number:'1.2-2' }}</td>
+                      <td class="num font-mono tabular-nums">{{ fteFor(d.month, d.hours) | number:'1.0-2' }}</td>
                     </tr>
                   } @empty {
                     <tr><td colspan="3" class="text-center text-[var(--cc-muted)]">No hiring demand in the shown window.</td></tr>
