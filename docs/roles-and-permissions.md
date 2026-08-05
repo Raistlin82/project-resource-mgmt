@@ -140,6 +140,7 @@ and **403** otherwise. Path tests use `startsWith`.
 | `/resources` (incl. `/resources/:id`), `/users` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/assignments`, `/requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/capacity` (read-only computed rollup, e.g. `GET /capacity/monthly`) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/assignment-days`, `/assignment-months` (raw per-day/per-month assignment rows, e.g. `GET /assignment-days` — shared plumbing for Block F's client-side What-If bench composition and block E's own spec; same need-to-know as `/capacity` and `/assignments` above, just unaggregated) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/time-entries` | `employee`, `pm`, `resource-manager`, `delivery-executive`, `finance`, `sales`, `admin` |
 | `/approval-requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/allocation-approvals` (B3 People Manager feed, e.g. `GET /allocation-approvals?from&to&status`) | `resource-manager`, `delivery-executive`, `admin` |
@@ -181,20 +182,30 @@ verified actor, e.g. `/service-organizations` (read-only in practice). Note
 **inline** in the handler: only `admin` may `PUT /fx-rates/:currency` (and the
 base currency `EUR` is fixed at rate 1).
 
-> Three collections appear in the *read* rules but have **no mutation rule**:
+> Four collections appear in the *read* rules but have **no mutation rule**:
 > `/audit-logs` (append-only; written only by the audit middleware, never via a
-> client mutation), `/users` (read-only directory), and `/capacity` (a GET-only
-> computed rollup — `GET /capacity/monthly` — with no write endpoint at all). The
-> mutation `/resources` rule is *narrower* than its read rule — `pm`/`finance` may
-> *read* resources (margin/staffing need-to-know) but not rewrite cost/bill rates.
+> client mutation), `/users` (read-only directory), `/capacity` (a GET-only
+> computed rollup — `GET /capacity/monthly` — with no write endpoint at all), and
+> `/assignment-days` (Task 4: a GET-only raw feed shared by Block F's
+> client-side What-If bench composition and block E's own spec — no write
+> endpoint of its own; assignment-day rows are written only as a side effect of
+> the `/assignments`/allocation mutation handlers). The mutation `/resources`
+> rule is *narrower* than its read rule — `pm`/`finance` may *read* resources
+> (margin/staffing need-to-know) but not rewrite cost/bill rates.
 >
-> `/assignment-months` is the **inverse** case: a mutation rule with **no** read
-> rule, because the prefix mounts exactly one route and it is a POST
-> (`POST /assignment-months/:id/substitute`, C2). Month rows are never *read*
-> through this prefix — they are served inside
-> `GET /assignments/:id/allocation` and `GET /allocation-approvals`, each gated by
-> its own rule. Its rule is also deliberately **narrower** than `/assignments`:
-> `pm` may book a dummy's hours but may not hand them to a person (see
+> `/assignment-months` shares that same narrowing shape, but split across two
+> **independent** rules on the same prefix rather than one rule narrowed against
+> another collection's. Its *read* rule (Task 4, `GET /assignment-months`) is
+> the same shared rule as `/assignment-days` above —
+> `pm`/`resource-manager`/`delivery-executive`/`finance`/`admin` — so month rows
+> are now readable raw through this prefix, in addition to the pre-existing
+> aggregated views inside `GET /assignments/:id/allocation` and
+> `GET /allocation-approvals`. Its *mutation* rule is its own, separate, and
+> deliberately **narrower**: only `POST /assignment-months/:id/substitute` (C2)
+> is gated by it, to `resource-manager`/`delivery-executive`/`admin`.
+> Substituting is an *approver* action, so `pm` may book a dummy's hours (via
+> `/assignments`) and *read* the raw month rows, but may not hand them to a
+> person (see
 > [C2 substitution](#c2-substituting-a-dummy-with-a-real-person) below).
 
 ---
