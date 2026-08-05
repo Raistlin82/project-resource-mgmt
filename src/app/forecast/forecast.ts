@@ -1,22 +1,23 @@
 import { ChangeDetectionStrategy, Component, PLATFORM_ID, computed, inject, signal } from '@angular/core';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { DecimalPipe, isPlatformBrowser } from '@angular/common';
-import { forkJoin, of } from 'rxjs';
+import { RouterLink } from '@angular/router';
+import { forkJoin, of, map } from 'rxjs';
 import { ApiService } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import {
   ForecastData,
   CapacityPeriod,
-  BenchEntry,
   OverAllocationEntry,
   SkillGapEntry,
   capacityForecast,
-  benchList,
   overAllocated,
   skillGap,
 } from '../services/forecast.util';
+import { notFullyAllocatedAt, type BenchRow } from '../services/bench.util';
 import { toCsv, downloadCsv, CsvColumn } from '../services/export.util';
 import { todayLocalIso } from '../services/local-date.util';
+import { DEFAULT_HOURS_PER_DAY } from '../services/sell-rate.util';
 import {
   CommandBarChartComponent,
   CommandTrendChartComponent,
@@ -41,7 +42,7 @@ interface PeriodRow extends CapacityPeriod {
 @Component({
   selector: 'app-forecast',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [DecimalPipe, CommandBarChartComponent, CommandTrendChartComponent],
+  imports: [DecimalPipe, RouterLink, CommandBarChartComponent, CommandTrendChartComponent],
   template: `
     <div class="command-page space-y-6">
       <header class="command-header">
@@ -70,7 +71,13 @@ interface PeriodRow extends CapacityPeriod {
         </div>
       </header>
 
-      @if (hasData()) {
+      @if (dataRes.status() === 'error') {
+        <div class="command-card border-critical! p-10 text-center flex flex-col items-center gap-4">
+          <h3 class="font-display text-lg font-bold text-[var(--cc-ink)]">Couldn't load the forecast</h3>
+          <p class="text-[var(--cc-muted)] text-sm">Something went wrong while fetching the data.</p>
+          <button type="button" (click)="dataRes.reload()" class="command-button">Retry</button>
+        </div>
+      } @else if (hasData()) {
         <!-- KPI strip -->
         <section class="grid grid-cols-2 gap-4 sm:gap-6 lg:grid-cols-5" aria-label="Capacity key metrics">
           <div class="command-kpi" [class.warning]="avgBand() === 'tight'" [class.danger]="avgBand() === 'over'" [class.green]="avgBand() === 'under'">
@@ -91,7 +98,7 @@ interface PeriodRow extends CapacityPeriod {
           <div class="command-kpi green">
             <p class="command-kpi-label">On Bench</p>
             <p class="command-kpi-value">{{ benchCount() }}</p>
-            <p class="command-kpi-note">{{ benchAvailableHours() | number: '1.0-0' }}h available</p>
+            <p class="command-kpi-note">{{ benchIdleCount() }} idle &middot; {{ benchPartialCount() }} partial</p>
           </div>
           <div class="command-kpi" [class.danger]="overCount() > 0" [class.green]="overCount() === 0">
             <p class="command-kpi-label">Over-Allocated</p>
@@ -178,7 +185,7 @@ interface PeriodRow extends CapacityPeriod {
             <div class="command-card-header">
               <div>
                 <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Bench</h2>
-                <p class="mt-1 text-sm text-[var(--cc-muted)]">Under-allocated resources with spare hours.</p>
+                <p class="mt-1 text-sm text-[var(--cc-muted)]">Not fully allocated this month (BENCH or PARTIAL) — see the full 6-month view on <a routerLink="/bench" class="font-semibold text-[var(--cc-primary-text)]">Bench</a>.</p>
               </div>
               <span class="command-status green">{{ benchCount() }}</span>
             </div>
@@ -187,22 +194,24 @@ interface PeriodRow extends CapacityPeriod {
                 <thead>
                   <tr>
                     <th scope="col">Resource</th>
-                    <th scope="col">Role</th>
-                    <th scope="col" class="num">Util %</th>
-                    <th scope="col" class="num">Available</th>
+                    <th scope="col">Kind</th>
+                    <th scope="col">Status</th>
                   </tr>
                 </thead>
                 <tbody>
                   @for (b of bench(); track b.resourceId) {
                     <tr>
-                      <td class="font-semibold text-[var(--cc-ink)]">{{ b.name }}</td>
-                      <td class="text-[var(--cc-muted)]">{{ b.role }}</td>
-                      <td class="num">{{ b.utilization | number: '1.0-0' }}%</td>
-                      <td class="num font-semibold" style="color: var(--cc-green-text)">{{ b.availableHours | number: '1.0-0' }}h</td>
+                      <td class="font-semibold text-[var(--cc-ink)]">{{ b.resourceName }}</td>
+                      <td class="text-[var(--cc-muted)] capitalize">{{ b.kind }}</td>
+                      <td>
+                        <span class="command-status" [class.red]="b.monthly[currentMonth()]?.state === 'BENCH'" [class.amber]="b.monthly[currentMonth()]?.state === 'PARTIAL'">
+                          {{ b.monthly[currentMonth()]?.state }}
+                        </span>
+                      </td>
                     </tr>
                   } @empty {
                     <tr>
-                      <td colspan="4" class="text-center text-[var(--cc-muted)]">No bench — every resource is fully allocated.</td>
+                      <td colspan="3" class="text-center text-[var(--cc-muted)]">No bench — every resource is fully allocated.</td>
                     </tr>
                   }
                 </tbody>
@@ -330,11 +339,18 @@ export class Forecast {
   /** Selected rolling horizon (weeks). */
   readonly horizon = signal<Horizon>(8);
 
+  private static readonly EMPTY_DATA: ForecastData = {
+    resources: [], requests: [], assignments: [], assignmentDays: [], assignmentMonths: [], holidays: [], hoursPerDay: DEFAULT_HOURS_PER_DAY,
+  };
+
   // resources is principal-gated server-side: key the forkJoin on auth readiness
   // so it fires only AFTER the OAuth bootstrap has settled and the bearer token is
   // attached; firing earlier (e.g. on a reload/deep-link) sent an unauthenticated
   // request that 401'd and forkJoin's fail-fast collapsed the forecast to empty.
-  private readonly dataRes = rxResource<ForecastData, boolean>({
+  // `protected` (not `private`): the template reads `dataRes.status()`/`.reload()`
+  // directly for the error-state branch, per this repo's established pattern
+  // (see e.g. `my-assignments.component.ts`, `customers.ts`).
+  protected readonly dataRes = rxResource<ForecastData, boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) =>
       ready
@@ -342,19 +358,20 @@ export class Forecast {
             resources: this.api.getResources(),
             requests: this.api.getRequests(),
             assignments: this.api.getAssignments(),
+            assignmentDays: this.api.getAssignmentDays(),
+            assignmentMonths: this.api.getAssignmentMonths(),
+            holidays: this.api.getHolidays(),
+            hoursPerDay: this.api.getHoursPerDay().pipe(map(r => r.value)),
           })
-        : of<ForecastData>({ resources: [], requests: [], assignments: [] }),
-    defaultValue: { resources: [], requests: [], assignments: [] },
+        : of<ForecastData>(Forecast.EMPTY_DATA),
+    defaultValue: Forecast.EMPTY_DATA,
   });
 
   /** True while the initial load is in flight. */
   readonly loading = computed(() => this.dataRes.isLoading());
 
   /** Strongly-typed forecast inputs derived from the loaded resource. */
-  private readonly forecastData = computed<ForecastData>(() => {
-    const d = this.dataRes.value();
-    return { resources: d.resources, requests: d.requests, assignments: d.assignments };
-  });
+  private readonly forecastData = computed<ForecastData>(() => this.dataRes.value());
 
   readonly hasData = computed<boolean>(() => {
     const d = this.forecastData();
@@ -429,11 +446,26 @@ export class Forecast {
 
   // --- Bench / over-allocation / skills ---
 
-  readonly bench = computed<BenchEntry[]>(() => benchList(this.forecastData()));
+  // Both `currentMonth` and `bench` are read directly by the template (the
+  // Bench table's status cell and `@for` loop) — kept public/readonly rather
+  // than `private`, matching this file's existing convention for every other
+  // template-bound computed (`hasData`, `periodRows`, `skills`, etc.).
+  readonly currentMonth = computed<string>(() => this.horizonStartIso().slice(0, 7));
+
+  readonly bench = computed<BenchRow[]>(() => {
+    const d = this.forecastData();
+    const input = {
+      resources: d.resources, assignments: d.assignments, assignmentDays: d.assignmentDays,
+      assignmentMonths: d.assignmentMonths, hoursPerDay: d.hoursPerDay,
+      holidays: new Set(d.holidays.map(h => h.id)),
+    };
+    return notFullyAllocatedAt(input, this.currentMonth(), todayLocalIso());
+  });
   readonly benchCount = computed<number>(() => this.bench().length);
-  readonly benchAvailableHours = computed<number>(() =>
-    this.bench().reduce((acc, b) => acc + b.availableHours, 0),
+  readonly benchIdleCount = computed<number>(() =>
+    this.bench().filter(r => r.monthly[this.currentMonth()]?.state === 'BENCH').length,
   );
+  readonly benchPartialCount = computed<number>(() => this.benchCount() - this.benchIdleCount());
 
   readonly overAllocations = computed<OverAllocationEntry[]>(() => overAllocated(this.forecastData()));
   readonly overCount = computed<number>(() => this.overAllocations().length);

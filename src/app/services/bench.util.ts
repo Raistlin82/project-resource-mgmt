@@ -227,3 +227,35 @@ export function benchRollup(input: BenchRollupInput, today: string): BenchRollup
 
   return { months: displayMonths, internalRows, subcoRows, hiringDemand: hiringDemandByMonth(resources, hoursByResMonth, displayMonths) };
 }
+
+/**
+ * Single-month "not fully allocated" snapshot for `/forecast`'s rolling weekly
+ * horizon and `/what-if`'s in-memory sandbox — DECOUPLED from `/bench`'s own
+ * 6-month display window (spec §9's `/forecast` row: "ripuntato su
+ * bench.util.ts... filtrato su monthly[from].state !== 'ALLOCATED'"). Builds
+ * the minimal 4-month fetch window (2 look-back + `month` itself + 1
+ * look-ahead) `benchRollup` needs for a correct aging bucket / forward signal
+ * on that one month, and returns every internal+subco row that is BENCH or
+ * PARTIAL there.
+ *
+ * Typed on `BenchRollupInput` (role required), NOT the plain `RollupInput` —
+ * this function delegates to `benchRollup`, which genuinely needs `role` on
+ * every resource (it feeds `hiringDemandByMonth`). A synthetic placeholder
+ * role would be inert only by accident of what THIS function currently reads
+ * (`internalRows`/`subcoRows`, never `hiringDemand`); the moment it or a
+ * caller touches hiring demand, a fake role becomes silently wrong data with
+ * nothing red to catch it. The honest type says the input requires role,
+ * because the delegate does.
+ */
+export function notFullyAllocatedAt(
+  input: Omit<BenchRollupInput, 'months' | 'displayMonths'>,
+  month: string,
+  today: string,
+): BenchRow[] {
+  const idx = (m: string) => { const [y, mm] = m.split('-').map(Number); return y * 12 + (mm - 1); };
+  const toMonth = (i: number) => `${Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, '0')}`;
+  const c = idx(month);
+  const months = [c - 2, c - 1, c, c + 1].map(toMonth);
+  const roll = benchRollup({ ...input, months, displayMonths: [month] }, today);
+  return [...roll.internalRows, ...roll.subcoRows].filter(r => r.monthly[month]?.state !== 'ALLOCATED');
+}

@@ -1,4 +1,4 @@
-import { Resource, ResourceRequest, Assignment } from './api.service';
+import { Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, Holiday } from './api.service';
 import { countsTowardDeliveryCapacity, kindOf } from './resource-kind.util';
 
 /**
@@ -34,6 +34,10 @@ export interface ForecastData {
   resources: Resource[];
   requests: ResourceRequest[];
   assignments: Assignment[];
+  assignmentDays: AssignmentDay[];
+  assignmentMonths: AssignmentMonth[];
+  holidays: Holiday[];
+  hoursPerDay: number;
 }
 
 export type ForecastGranularity = 'weekly' | 'monthly';
@@ -54,17 +58,6 @@ export interface CapacityPeriod {
   utilizationPct: number;
   /** supply − demand (negative ⇒ over capacity). */
   gap: number;
-}
-
-/** A resource that is under-allocated, with its spare hours. */
-export interface BenchEntry {
-  resourceId: string;
-  name: string;
-  role: string;
-  utilization: number;
-  capacity: number;
-  /** Spare hours this period = max(0, capacity − booked hours). */
-  availableHours: number;
 }
 
 /** A resource booked beyond a utilization threshold. */
@@ -297,39 +290,9 @@ function bookedHoursByResource(data: ForecastData): Map<string, number> {
   return booked;
 }
 
-/**
- * Under-allocated ("bench") resources: utilization strictly below `thresholdPct`
- * (default 80%). Reports spare hours = max(0, capacity − booked hours), sorted by
- * most available first. Zero-capacity resources are excluded (no real capacity).
- *
- * C1: a dummy never appears here — it is a placeholder hole, not idle deliverable
- * capacity — while a subco does, since it IS deliverable capacity that can sit
- * under-allocated just like an internal resource (`countsTowardDeliveryCapacity`).
- */
-export function benchList(data: ForecastData, thresholdPct = 80): BenchEntry[] {
-  const threshold = finite(thresholdPct);
-  const booked = bookedHoursByResource(data);
-  return data.resources
-    .filter(
-      r =>
-        countsTowardDeliveryCapacity(kindOf(r)) &&
-        finite(r.capacity) > 0 &&
-        finite(r.utilization) < threshold,
-    )
-    .map(r => {
-      const capacity = finite(r.capacity);
-      const availableHours = Math.max(0, capacity - finite(booked.get(r.id)));
-      return {
-        resourceId: r.id,
-        name: r.name,
-        role: r.role,
-        utilization: finite(r.utilization),
-        capacity,
-        availableHours,
-      };
-    })
-    .sort((a, b) => b.availableHours - a.availableHours);
-}
+// `benchList`/`BenchEntry` (utilization-scalar heuristic) retired here — Block F
+// design spec §9 decision 2. See `notFullyAllocatedAt` (bench.util.ts) and
+// this file's consumers (forecast.ts, what-if.ts) for the replacement.
 
 /**
  * Over-allocated resources: utilization at or above `thresholdPct` (default 110%,

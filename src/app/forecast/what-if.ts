@@ -8,7 +8,7 @@ import {
 import { rxResource } from '@angular/core/rxjs-interop';
 import { DecimalPipe } from '@angular/common';
 import { AbstractControl, FormControl, FormGroup, ReactiveFormsModule, ValidationErrors, Validators } from '@angular/forms';
-import { forkJoin, of } from 'rxjs';
+import { forkJoin, of, map } from 'rxjs';
 import { ApiService, Resource, ResourceRequest, Project } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
@@ -18,11 +18,12 @@ import {
   CapacityPeriod,
   SkillGapEntry,
   capacityForecast,
-  benchList,
   skillGap,
   isCompleteForecastWindow,
   utilizationChangeTone,
 } from '../services/forecast.util';
+import { notFullyAllocatedAt } from '../services/bench.util';
+import { DEFAULT_HOURS_PER_DAY } from '../services/sell-rate.util';
 import {
   CommandBarChartComponent,
   CommandTrendChartComponent,
@@ -77,9 +78,16 @@ interface TimelineRow {
  *   • Hire         — append N synthetic Resources with capacity + one skill (new supply).
  *   • Slip project — shift a project's requests' start/end by W weeks (re-timed demand).
  *
- * `capacityForecast`, `skillGap` and `benchList` are recomputed on BOTH the base and
- * the scenario and shown as side-by-side delta KPIs plus a scenario capacity timeline.
- * "Reset scenario" re-seeds the scenario from the base, discarding all changes.
+ * `capacityForecast`, `skillGap` and `notFullyAllocatedAt` (bench.util.ts — the
+ * pure Block F layer, NOT the retired `Resource.utilization` heuristic) are
+ * recomputed on BOTH the base and the scenario and shown as side-by-side delta
+ * KPIs plus a scenario capacity timeline. Recomputing bench on the scenario is
+ * exactly what makes a lever's effect on bench figures VISIBLE here — the base
+ * loads once from the server, but every lever (`hire`, `winDeal`, `slipProject`)
+ * mutates only `scenario`, and `scenarioBenchCount` reads `this.scenario()`, so a
+ * hire with no bookings shows up as bench in the scenario figure immediately,
+ * without a round trip. "Reset scenario" re-seeds the scenario from the base,
+ * discarding all changes.
  */
 @Component({
   selector: 'app-what-if',
@@ -116,7 +124,13 @@ interface TimelineRow {
         </div>
       </header>
 
-      @if (loading()) {
+      @if (dataRes.status() === 'error') {
+        <div class="command-card border-critical! p-10 text-center flex flex-col items-center gap-4">
+          <h3 class="font-display text-lg font-bold text-[var(--cc-ink)]">Couldn't load the forecast</h3>
+          <p class="text-[var(--cc-muted)] text-sm">Something went wrong while fetching the data.</p>
+          <button type="button" (click)="dataRes.reload()" class="command-button">Retry</button>
+        </div>
+      } @else if (loading()) {
         <div class="command-card p-6">
           <div class="command-skeleton h-24"></div>
         </div>
@@ -398,11 +412,17 @@ export class WhatIf {
 
   // --- BASE: loaded once, treated as immutable -------------------------------
 
+  private static readonly EMPTY_DATA: ForecastData = {
+    resources: [], requests: [], assignments: [], assignmentDays: [], assignmentMonths: [], holidays: [], hoursPerDay: DEFAULT_HOURS_PER_DAY,
+  };
+
   // resources is principal-gated server-side: key the forkJoin on auth readiness
   // so it fires only AFTER the OAuth bootstrap has settled and the bearer token is
   // attached; firing earlier (e.g. on a reload/deep-link) sent an unauthenticated
   // request that 401'd and forkJoin's fail-fast collapsed the baseline to empty.
-  private readonly dataRes = rxResource<ForecastData, boolean>({
+  // `protected` (not `private`): the template reads `dataRes.status()`/`.reload()`
+  // directly for the error-state branch, per this repo's established pattern.
+  protected readonly dataRes = rxResource<ForecastData, boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) =>
       ready
@@ -410,20 +430,32 @@ export class WhatIf {
             resources: this.api.getResources(),
             requests: this.api.getRequests(),
             assignments: this.api.getAssignments(),
+            assignmentDays: this.api.getAssignmentDays(),
+            assignmentMonths: this.api.getAssignmentMonths(),
+            holidays: this.api.getHolidays(),
+            hoursPerDay: this.api.getHoursPerDay().pipe(map(r => r.value)),
           })
-        : of<ForecastData>({ resources: [], requests: [], assignments: [] }),
-    defaultValue: { resources: [], requests: [], assignments: [] },
+        : of<ForecastData>(WhatIf.EMPTY_DATA),
+    defaultValue: WhatIf.EMPTY_DATA,
   });
 
   private readonly projectsRes = authGatedResource<Project[]>(() => this.api.getProjects(), []);
 
   readonly loading = computed<boolean>(() => this.dataRes.isLoading() || this.projectsRes.isLoading());
 
-  /** Immutable baseline forecast inputs. */
-  private readonly baseData = computed<ForecastData>(() => {
-    const d = this.dataRes.value();
-    return { resources: d.resources, requests: d.requests, assignments: d.assignments };
-  });
+  /**
+   * Immutable baseline forecast inputs. Falls back to `EMPTY_DATA` on a failed
+   * read (`status() === 'error'`), NOT because an error should read as "no
+   * data" — the error card is what the template actually shows for that case
+   * (see the top-level `@if`) — but because `dataRes.value()` THROWS while
+   * errored, and `dirty()`/`changeCount()` in the persistent header (rendered
+   * unconditionally, outside that `@if`) read `baseData()`/`scenario()`
+   * regardless of which branch is showing. Without this guard, an errored
+   * read crashes the whole component instead of rendering the retry card.
+   */
+  private readonly baseData = computed<ForecastData>(() =>
+    this.dataRes.status() === 'error' ? WhatIf.EMPTY_DATA : this.dataRes.value(),
+  );
 
   readonly hasData = computed<boolean>(() => {
     const d = this.baseData();
@@ -477,8 +509,30 @@ export class WhatIf {
   private readonly baseSkills = computed<SkillGapEntry[]>(() => skillGap(this.baseData()));
   private readonly scenarioSkills = computed<SkillGapEntry[]>(() => skillGap(this.scenario()));
 
-  private readonly baseBenchCount = computed<number>(() => benchList(this.baseData()).length);
-  private readonly scenarioBenchCount = computed<number>(() => benchList(this.scenario()).length);
+  /** The current calendar month — `notFullyAllocatedAt`'s single-month snapshot,
+   * NOT `/bench`'s own 6-month display window (this sandbox only ever needs
+   * "right now" for its base-vs-scenario comparison). */
+  private readonly currentMonth = computed<string>(() => todayLocalIso().slice(0, 7));
+
+  private toRollupInput(d: ForecastData) {
+    return {
+      resources: d.resources, assignments: d.assignments, assignmentDays: d.assignmentDays,
+      assignmentMonths: d.assignmentMonths, hoursPerDay: d.hoursPerDay,
+      holidays: new Set(d.holidays.map(h => h.id)),
+    };
+  }
+  // Recomputed straight from `this.scenario()` (mutated in-memory by every
+  // lever) — NOT memoized off a snapshot taken at load time — so a `hire()`
+  // with no bookings, a `winDeal()`, or a `slipProject()` immediately changes
+  // this figure on the next read. This IS the "What-If must actually
+  // simulate" guarantee: see the "hire adds a bench resource to the scenario
+  // only" test in what-if.spec.ts, which fails if this reads a stale snapshot.
+  private readonly baseBenchCount = computed<number>(() =>
+    notFullyAllocatedAt(this.toRollupInput(this.baseData()), this.currentMonth(), todayLocalIso()).length,
+  );
+  private readonly scenarioBenchCount = computed<number>(() =>
+    notFullyAllocatedAt(this.toRollupInput(this.scenario()), this.currentMonth(), todayLocalIso()).length,
+  );
 
   readonly baseShortages = computed<number>(() => this.baseSkills().filter(s => s.shortage).length);
   readonly scenarioShortages = computed<number>(() => this.scenarioSkills().filter(s => s.shortage).length);
@@ -771,6 +825,10 @@ export class WhatIf {
       resources: data.resources.map(r => ({ ...r, skills: r.skills.map(s => ({ ...s })) })),
       requests: data.requests.map(r => ({ ...r, skills: [...r.skills] })),
       assignments: data.assignments.map(a => ({ ...a })),
+      assignmentDays: data.assignmentDays.map(d => ({ ...d })),
+      assignmentMonths: data.assignmentMonths.map(m => ({ ...m })),
+      holidays: data.holidays.map(h => ({ ...h })),
+      hoursPerDay: data.hoursPerDay,
     };
   }
 

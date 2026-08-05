@@ -102,7 +102,7 @@ describe('availabilityDateFor (design spec §7 — three branches, in order)', (
 });
 
 import { resources, assignments, assignmentDays, assignmentMonths, holidays } from '../../db/seed';
-import { benchRollup, hiringDemandByMonth, EMPTY_BENCH_ROLLUP, type BenchRollupInput } from './bench.util';
+import { benchRollup, hiringDemandByMonth, EMPTY_BENCH_ROLLUP, notFullyAllocatedAt, type BenchRollupInput } from './bench.util';
 import { hoursByResourceMonth } from './capacity.util';
 
 const HOURS_PER_DAY = 8;
@@ -324,5 +324,24 @@ describe('benchRollup — resource active for only part of the display window (h
     expect(row.monthly['2026-07']).toMatchObject({ state: 'BENCH', agingBucket: 'B' });
     expect(row.monthly['2026-08']).toMatchObject({ state: 'BENCH', agingBucket: 'C' });
     expect(row.monthly['2026-09']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
+  });
+});
+
+describe('notFullyAllocatedAt (the /forecast + /what-if single-month wrapper around benchRollup)', () => {
+  it('excludes an ALLOCATED resource and includes a BENCH one, at the given month', () => {
+    const input = {
+      resources: [
+        { id: 'full', name: 'Full', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
+        { id: 'idle', name: 'Idle', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
+      ],
+      assignments: [{ id: 'a1', resourceId: 'full' }],
+      assignmentDays: [{ assignmentId: 'a1', date: '2026-05-04', hours: 168 }],
+      assignmentMonths: [{ assignmentId: 'a1', month: '2026-05', status: 'Allocated' }],
+      hoursPerDay: 8,
+      holidays: new Set<string>(),
+    };
+    const out = notFullyAllocatedAt(input, '2026-05', '2026-05-10');
+    expect(out.some(r => r.resourceId === 'full')).toBe(false);
+    expect(out.some(r => r.resourceId === 'idle')).toBe(true);
   });
 });
