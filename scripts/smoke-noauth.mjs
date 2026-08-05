@@ -163,6 +163,13 @@ const GATED_PATHS = [
   '/negotiated-rates', '/project-financials', '/cost-centers',
   '/project-cost-centers', '/approval-requests', '/audit-logs',
   '/self/profile', '/self/assignments', '/self/time-entries',
+  // Pre-existing gap, not introduced by Block F: '/capacity' (B2's read-only
+  // computed rollup) was never added here even though it has carried a
+  // READ_RULE since before this block. Added now (Task 10) because Block F's
+  // '/bench' extends this SAME predicate rather than adding its own — the rule
+  // protecting both path families was only half-observed by this gate until
+  // both sides of it were checked.
+  '/capacity',
   // Block F/E shared raw reads (Task 4) — same READ_RULE roles as
   // '/assignments'/'/capacity', gated the same way: 401 with no principal and
   // with forged headers alike.
