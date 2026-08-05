@@ -1973,8 +1973,14 @@ Where a consumer needs a product call rather than a guess, report it instead of 
 ./node_modules/.bin/ng build
 env -u DATABASE_URL AUTH_TRUST_HEADERS=true PORT=4173 HOST=localhost node dist/app/server/server.mjs &
 sleep 4
-SMOKE_BASE=http://localhost:4173 node scripts/smoke-api.mjs
+# cost-baseline-impact.mjs MUST run before smoke-api.mjs: on a fresh boot it
+# checks the server's frozen amount against hardcoded, hand-verified spec
+# numbers (a fully independent gate); once smoke-api.mjs has booked/approved
+# hours onto pre-existing assignments, the script falls back to recomputing
+# its own expectation from live data, and a bug shared by both the server and
+# the script's recompute would then pass unnoticed.
 node scripts/cost-baseline-impact.mjs
+SMOKE_BASE=http://localhost:4173 node scripts/smoke-api.mjs
 kill %1
 ```
 
@@ -1982,7 +1988,7 @@ Then confirm `scripts/smoke-noauth.mjs` stays green with `AUTH_TRUST_HEADERS` **
 
 - [ ] **Step 5: Fresh-Postgres run — mandatory**
 
-There is a migration with a FK to `projects` and a new seed step. Create a genuinely fresh database, boot the built server against it with `DATABASE_URL` set, confirm every migration applied (report the count) and `CB1`/`CB2` and assignment `'7'` round-trip, run the full smoke suite plus `cost-baseline-impact.mjs` against it, then drop the database. If Docker is unavailable, say so prominently rather than skipping silently.
+There is a migration with a FK to `projects` and a new seed step. Create a genuinely fresh database, boot the built server against it with `DATABASE_URL` set, confirm every migration applied (report the count) and `CB1`/`CB2` and assignment `'7'` round-trip, run `cost-baseline-impact.mjs` BEFORE the full smoke suite against it (same reason as Step 4: only a still-pristine server exercises the script's fully independent hardcoded-fixture check rather than its live-data recompute fallback), then drop the database. If Docker is unavailable, say so prominently rather than skipping silently.
 
 - [ ] **Step 6: Commit**
 
@@ -2007,7 +2013,7 @@ git commit -m "docs: block E in the entity catalogue, RBAC, and the Project 360 
 - [x] The Baseline card is ABSENT (not empty, not zeroed) for `employee`/`sales` on the Project 360; shows a skeleton while loading; shows "Couldn't load cost baseline" + Retry on a dependency error; shows "No baseline frozen for this project yet." only when `costBaselines` is genuinely empty for that project. (Task 6, with the `hasComparisonRows` fix: "genuinely empty" means neither a baseline nor any booked hours — the plan's own original `hasAnyBaseline` draft would have shown the empty message even for a booked-but-unfrozen month, hiding the "not frozen" case this block exists to surface.)
 - [x] "Freeze baseline" is visible only for `finance`/`delivery-executive`/`admin`. (Task 6 test.)
 - [x] Every EUR figure renders with ≤ 2 decimals; every `deltaPct` renders `—` (em dash) when `null` (baseline = 0 only, per Rule A), a real signed percentage otherwise, never a fabricated one. (`1.2-2` digitsInfo on the card, tile, and report/CSV — deliberately not the `1.0-2` this plan's own snippets used, since that drops trailing zeros on a whole-number percentage; see the progress ledger for the one-liner distinguishing this from block F's opposite ruling on an FTE field.)
-- [x] Unit, lint, build, live smoke (with and without `AUTH_TRUST_HEADERS`), the impact script, and the fresh-Postgres run are all green. (68 files / 986 tests, lint clean, build clean; smoke-api.mjs 606/0/1-skipped and 608/0 on Postgres; smoke-noauth.mjs 147/0; impact script 14/14 on a fresh boot, in-memory and Postgres alike.)
+- [x] Unit, lint, build, the impact script, live smoke (with and without `AUTH_TRUST_HEADERS`), and the fresh-Postgres run are all green — **the impact script runs BEFORE `smoke-api.mjs` in this order and in Step 4/5 above**, because only a still-pristine server exercises its fully independent hardcoded-fixture check; once `smoke-api.mjs` has booked/approved hours onto pre-existing assignments, the script falls back to recomputing its own expectation from live data, which can no longer catch a bug shared by both the server and the recompute. (68 files / 986 tests, lint clean, build clean; smoke-api.mjs 606/0/1-skipped and 608/0 on Postgres; smoke-noauth.mjs 147/0; impact script 14/14 on a fresh boot, in-memory and Postgres alike.)
 - [x] **Not in the original checklist, added post-Task-8 review:** every AGGREGATE Baseline/Planned/Delta total (the Project 360 card's KPI strip, the dashboard portfolio tile, and Reporting's per-project PCP columns) is restricted to periods that actually carry a current baseline row — never summed across every period in `costBaselineComparison`'s full union, which also includes out-of-horizon months with baseline 0. The per-period table rows were always correct; only these three aggregates were not, and all three shared the identical defect independently (see the progress ledger's "Portfolio-tile scope check" entry for the full arithmetic).
 
 ---

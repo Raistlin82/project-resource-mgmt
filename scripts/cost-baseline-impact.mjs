@@ -28,8 +28,8 @@
  * ORDERING ROBUSTNESS — WHY THE CHECKS RECOMPUTE RATHER THAN HARDCODE:
  * this script was first written with the design spec's own fixture numbers
  * hardcoded (October = 720 EUR exactly, no November row). Running it after
- * the full scripts/smoke-api.mjs suite (exactly the order Task 9's own gate
- * sequence documents) turned up a REAL ordering hazard, empirically
+ * the full scripts/smoke-api.mjs suite (the order Task 9's gate sequence
+ * documented AT THE TIME) turned up a REAL ordering hazard, empirically
  * confirmed by querying live /assignment-days after a smoke run: pre-existing,
  * unrelated smoke-api.mjs sections (the B3 batch-decide flow and a D5
  * give-back scenario, neither part of block E) book and approve real hours
@@ -49,6 +49,15 @@
  * onto this project's pre-existing assignments, past or future — while the
  * fixture's pristine numbers are still printed, informationally, for a human
  * to hand-verify on a freshly booted server.
+ *
+ * GATE ORDER, CORRECTED (post-review): the hazard above is exactly why this
+ * script must run BEFORE scripts/smoke-api.mjs, not after — see the plan's
+ * Verification Checklist and the progress ledger, both fixed alongside this
+ * comment. Run first against a still-pristine server, this script exercises
+ * the fully independent, hand-verified-fixture path described above rather
+ * than the degraded recompute-against-itself fallback the paragraph above
+ * explains; that fallback is correct and stays in place regardless, as a
+ * safety net for whoever runs the gates out of order anyway.
  *
  * Usage:
  *   AUTH_TRUST_HEADERS=true node dist/app/server/server.mjs
