@@ -1,7 +1,7 @@
 import { ChangeDetectionStrategy, Component, inject, signal, computed } from '@angular/core';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
-import { ApiService, Resource, Assignment, ResourceRequest, TimeEntry, ResourceOrganization } from '../services/api.service';
+import { ApiService, Resource, Assignment, ResourceRequest, TimeEntry, ResourceOrganization, type BenchRollup } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { DecimalPipe } from '@angular/common';
@@ -10,6 +10,8 @@ import { forkJoin, of } from 'rxjs';
 import { catchError } from 'rxjs/operators';
 import { scopeOf } from '../services/org-scope.util';
 import { kindOf, countsTowardInternalCapacity } from '../services/resource-kind.util';
+import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
+import { ListStateComponent } from '../shared/list-state.component';
 
 interface UtilizationData {
   resources: Resource[];
@@ -17,43 +19,65 @@ interface UtilizationData {
   requests: ResourceRequest[];
   timeEntries: TimeEntry[];
   orgs: ResourceOrganization[];
+  benchRollup: BenchRollup;
 }
 
 @Component({
   selector: 'app-utilization',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DecimalPipe, ReactiveFormsModule],
+  imports: [MatIconModule, DecimalPipe, ReactiveFormsModule, ListStateComponent],
   template: `
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Manage Resource Utilization</h1>
         <div class="command-card flex items-center gap-3 px-5 py-3">
           <span class="command-kpi-label">Team Average:</span>
-          <!-- countedForAverage() empty is NOT "0% utilization" — averageUtilization()
-               returns 0 on an empty denominator (spec §4 last row: the value 0 is
-               correct and matches /reporting), but colour-banding that 0 through
-               getUtilizationColorText falls through to the critical/red band, which
-               reads as "my team is completely idle" for what is really "nothing here
-               is measurable" (e.g. a subtree of only pre-staffed dummy/subco rows).
-               /utilization is the only surface that colour-bands this KPI at all
-               (/reporting's equivalent tile uses a fixed colorClass) — show a neutral
-               dash instead of a red 0% when there is nothing to divide by. -->
-          <span data-test="team-average" class="text-xl font-black tracking-tight font-mono tabular-nums"
-                [class]="countedForAverage().length ? getUtilizationColorText(averageUtilization()) : 'text-ink-muted'">
-            @if (countedForAverage().length) {
-              {{ averageUtilization() | number:'1.0-0' }}%
-            } @else {
-              —
+          @if (hasError()) {
+            <!-- Task 8: benchRollup joined dataResource's forkJoin as a REQUIRED
+                 leg (no catchError — Global Constraint: a failed bench read must
+                 surface as an error, never a confident zero). forkJoin is
+                 fail-fast, so ANY required leg failing (this one, or the
+                 pre-existing resources/assignments/requests/timeEntries legs)
+                 now puts dataResource().status()==='error', and every computed
+                 below reads dataResource.value() unconditionally — a value that
+                 throws while erroring. This branch is the guard: it is never
+                 entered together with the @else below, so countedForAverage()/
+                 averageUtilization() are never evaluated during an error, the
+                 same short-circuiting principle list-state.component.ts's own
+                 contentTemplate uses. Deliberately its OWN wording ("Unavailable"),
+                 never the "—" dash below: that dash means "legitimately nothing
+                 to measure" (spec §4) and must not be reused for "the read
+                 failed" — the two are a different fact and collapsing them is
+                 exactly the confident-zero-on-failure defect this codebase has
+                 hit before. -->
+            <span data-test="team-average" class="text-sm font-bold text-critical-text">Unavailable</span>
+          } @else {
+            <!-- countedForAverage() empty is NOT "0% utilization" — averageUtilization()
+                 returns 0 on an empty denominator (spec §4 last row: the value 0 is
+                 correct and matches /reporting), but colour-banding that 0 through
+                 getUtilizationColorText falls through to the critical/red band, which
+                 reads as "my team is completely idle" for what is really "nothing here
+                 is measurable" (e.g. a subtree of only pre-staffed dummy/subco rows).
+                 /utilization is the only surface that colour-bands this KPI at all
+                 (/reporting's equivalent tile uses a fixed colorClass) — show a neutral
+                 dash instead of a red 0% when there is nothing to divide by. -->
+            <span data-test="team-average" class="text-xl font-black tracking-tight font-mono tabular-nums"
+                  [class]="countedForAverage().length ? getUtilizationColorText(averageUtilization()) : 'text-ink-muted'">
+              @if (countedForAverage().length) {
+                {{ averageUtilization() | number:'1.0-0' }}%
+              } @else {
+                —
+              }
+            </span>
+            @if (hasUncountedRows()) {
+              <!-- command-kpi-note (src/styles.css) carries margin-top: 0.55rem for its
+                   usual home stacked under a KPI value in a .command-kpi card. Here it
+                   is a flex sibling of the percentage instead, so that top margin would
+                   offset it out of vertical alignment; the mt-0! Tailwind v4 important
+                   modifier (same pattern as border-critical! on list-state.component.ts)
+                   zeroes it for this one usage without a new command-* rule. -->
+              <span data-test="kpi-internal-note" class="command-kpi-note mt-0!">internal only</span>
             }
-          </span>
-          @if (hasUncountedRows()) {
-            <!-- command-kpi-note (src/styles.css) carries margin-top: 0.55rem for its
-                 usual home stacked under a KPI value in a .command-kpi card. Here it
-                 is a flex sibling of the percentage instead, so that top margin would
-                 offset it out of vertical alignment; the mt-0! Tailwind v4 important
-                 modifier (same pattern as border-critical! on list-state.component.ts)
-                 zeroes it for this one usage without a new command-* rule. -->
-            <span data-test="kpi-internal-note" class="command-kpi-note mt-0!">internal only</span>
           }
         </div>
       </div>
@@ -87,52 +111,61 @@ interface UtilizationData {
             </div>
           </div>
           <div class="overflow-y-auto flex-1 divide-y divide-[var(--cc-line)]">
-            @for (res of managedResources(); track res.id) {
-              <div class="p-6 hover:bg-surface-muted transition-all cursor-pointer group relative"
-                   [class.bg-accent-tint]="selectedResource()?.id === res.id"
-                   role="button"
-                   tabindex="0"
-                   [attr.aria-label]="'Select ' + res.name + ' utilization details'"
-                   [attr.aria-pressed]="selectedResource()?.id === res.id"
-                   (keydown.enter)="selectResource(res)"
-                   (keydown.space)="selectResource(res); $event.preventDefault()"
-                   (click)="selectResource(res)">
-                @if (selectedResource()?.id === res.id) {
-                  <div class="absolute left-0 top-0 bottom-0 w-1.5 bg-[var(--cc-primary)] rounded-r-full"></div>
-                }
-                <div class="flex items-center justify-between mb-4">
-                  <div class="flex items-center gap-4">
-                    <div class="w-12 h-12 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex items-center justify-center font-display font-bold text-lg text-[var(--cc-ink)] group-hover:scale-105 transition-transform">
-                      {{ res.name.charAt(0) }}
+            <app-list-state [loading]="loading()" [error]="hasError()" skeleton="cards" [rows]="4" label="team utilization" (retry)="dataResource.reload()">
+              <ng-template>
+                @for (res of managedResources(); track res.id) {
+                  <div class="p-6 hover:bg-surface-muted transition-all cursor-pointer group relative"
+                       [class.bg-accent-tint]="selectedResource()?.id === res.id"
+                       role="button"
+                       tabindex="0"
+                       [attr.aria-label]="'Select ' + res.name + ' utilization details'"
+                       [attr.aria-pressed]="selectedResource()?.id === res.id"
+                       (keydown.enter)="selectResource(res)"
+                       (keydown.space)="selectResource(res); $event.preventDefault()"
+                       (click)="selectResource(res)">
+                    @if (selectedResource()?.id === res.id) {
+                      <div class="absolute left-0 top-0 bottom-0 w-1.5 bg-[var(--cc-primary)] rounded-r-full"></div>
+                    }
+                    <div class="flex items-center justify-between mb-4">
+                      <div class="flex items-center gap-4">
+                        <div class="w-12 h-12 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex items-center justify-center font-display font-bold text-lg text-[var(--cc-ink)] group-hover:scale-105 transition-transform">
+                          {{ res.name.charAt(0) }}
+                        </div>
+                        <div>
+                          <h3 data-test="team-member" class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ res.name }}</h3>
+                          <p class="text-xs font-semibold tracking-wide text-[var(--cc-muted)] uppercase mt-0.5">{{ res.role }}</p>
+                        </div>
+                      </div>
+                      <span class="command-status" data-test="bench-badge"
+                            [class.neutral]="benchBadge(res) === 'Not applicable'"
+                            [class.red]="benchBadge(res) === 'BENCH'"
+                            [class.amber]="benchBadge(res) === 'PARTIAL'"
+                            [class.green]="benchBadge(res) === 'ALLOCATED'">{{ benchBadge(res) }}</span>
                     </div>
-                    <div>
-                      <h3 data-test="team-member" class="font-bold text-[var(--cc-ink)] text-lg group-hover:text-[var(--cc-primary-text)] transition-colors">{{ res.name }}</h3>
-                      <p class="text-xs font-semibold tracking-wide text-[var(--cc-muted)] uppercase mt-0.5">{{ res.role }}</p>
+                    <div class="mt-4">
+                      <div class="flex items-center justify-between text-xs mb-2">
+                        <span class="command-kpi-label">Utilization</span>
+                        <span class="font-black text-sm font-mono tabular-nums" [class]="getUtilizationColorText(res.utilization)">{{ res.utilization | number:'1.0-0' }}%</span>
+                      </div>
+                      <div class="w-full bg-surface-muted rounded-full h-2 overflow-hidden">
+                        <div class="h-full rounded-full transition-all duration-500 ease-out"
+                             [class]="getUtilizationColorClass(res.utilization)"
+                             [style.width.%]="res.utilization > 100 ? 100 : res.utilization"></div>
+                      </div>
                     </div>
                   </div>
-                </div>
-                <div class="mt-4">
-                  <div class="flex items-center justify-between text-xs mb-2">
-                    <span class="command-kpi-label">Utilization</span>
-                    <span class="font-black text-sm font-mono tabular-nums" [class]="getUtilizationColorText(res.utilization)">{{ res.utilization | number:'1.0-0' }}%</span>
-                  </div>
-                  <div class="w-full bg-surface-muted rounded-full h-2 overflow-hidden">
-                    <div class="h-full rounded-full transition-all duration-500 ease-out"
-                         [class]="getUtilizationColorClass(res.utilization)"
-                         [style.width.%]="res.utilization > 100 ? 100 : res.utilization"></div>
-                  </div>
-                </div>
-              </div>
-            }
-            @if (managedResources().length === 0) {
-              <div data-test="team-empty" class="p-12 text-center text-sm text-[var(--cc-muted)]">
-                @if (teamScope() === 'direct') {
-                  Nobody is set up to report directly to you.
-                } @else {
-                  You do not manage any organization, and nobody reports to you.
                 }
-              </div>
-            }
+                @if (managedResources().length === 0) {
+                  <div data-test="team-empty" class="p-12 text-center text-sm text-[var(--cc-muted)]">
+                    @if (teamScope() === 'direct') {
+                      Nobody is set up to report directly to you.
+                    } @else {
+                      You do not manage any organization, and nobody reports to you.
+                    }
+                  </div>
+                }
+              </ng-template>
+            </app-list-state>
           </div>
         </div>
 
@@ -295,7 +328,10 @@ export class UtilizationComponent {
   // the bearer token is attached; firing earlier (e.g. on a reload/deep-link) sent
   // unauthenticated requests that 401'd and forkJoin's fail-fast collapsed the
   // whole view to empty (and never recovered).
-  private dataResource = rxResource<UtilizationData, boolean>({
+  // protected (not private): the template calls `dataResource.reload()`
+  // directly for the retry affordance, matching the same-file convention
+  // used by resourcesRes/dataRes elsewhere in this codebase.
+  protected dataResource = rxResource<UtilizationData, boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) =>
       ready
@@ -315,10 +351,15 @@ export class UtilizationComponent {
             // loaded" in the design's error table). Confine the catch to this
             // leg — the other four are genuinely required and must still
             // fail fast.
-            orgs: this.api.getResourceOrganizations().pipe(catchError(() => of<ResourceOrganization[]>([])))
+            orgs: this.api.getResourceOrganizations().pipe(catchError(() => of<ResourceOrganization[]>([]))),
+            // REQUIRED leg, deliberately no catchError: unlike the 'orgs' leg
+            // above, a failed bench read must surface as an error, never
+            // silently degrade to "nobody is on bench" (Global Constraint —
+            // a failed/forbidden read must never render as a confident zero).
+            benchRollup: this.api.getBenchMonthly(),
           })
-        : of<UtilizationData>({ resources: [], assignments: [], requests: [], timeEntries: [], orgs: [] }),
-    defaultValue: { resources: [], assignments: [], requests: [], timeEntries: [], orgs: [] }
+        : of<UtilizationData>({ resources: [], assignments: [], requests: [], timeEntries: [], orgs: [], benchRollup: EMPTY_BENCH_ROLLUP }),
+    defaultValue: { resources: [], assignments: [], requests: [], timeEntries: [], orgs: [], benchRollup: EMPTY_BENCH_ROLLUP }
   });
 
   resources = computed(() => this.dataResource.value().resources);
@@ -326,6 +367,45 @@ export class UtilizationComponent {
   allRequests = computed(() => this.dataResource.value().requests);
   timeEntries = computed(() => this.dataResource.value().timeEntries);
   orgNodes = computed(() => this.dataResource.value().orgs);
+
+  /**
+   * Explicitly folds in !authReady() rather than trusting dataResource.isLoading()
+   * alone — same shape as bench.component.ts's `loading` (the Task 7 reference):
+   * the pre-authReady stream branch resolves synchronously to the empty
+   * default, which would otherwise let isLoading() go false while the page is
+   * still showing the pre-auth empty rollup/resources as if they were fact.
+   */
+  protected readonly loading = computed(() => !this.auth.authReady() || this.dataResource.isLoading());
+  protected readonly hasError = computed(() => this.dataResource.status() === 'error');
+
+  // --- Bench badge (Task 8) ---
+  // BenchRollup's rows are keyed to the SAME dataResource as `resources`/etc.,
+  // so the badge can never desynchronise from the rows it decorates: there is
+  // no second independent read, hence no way for this page to be "half
+  // loaded" with rows present but bench state still in flight.
+  private readonly currentBenchMonth = computed(() => this.dataResource.value().benchRollup.months[0] ?? '');
+  private readonly benchByResourceId = computed(() => {
+    const roll = this.dataResource.value().benchRollup;
+    return new Map([...roll.internalRows, ...roll.subcoRows].map(r => [r.resourceId, r]));
+  });
+
+  /**
+   * Three distinct outcomes per row (design spec §9), never collapsed:
+   *  - a dummy is NEVER a bench candidate (§4) — 'Not applicable', regardless
+   *    of whatever `benchRollup` happens to contain for that id;
+   *  - a real internal/subco resource with a row this month shows its actual
+   *    BENCH/PARTIAL/ALLOCATED state;
+   *  - a real internal/subco resource with NO row this month (not active in
+   *    the display window) renders '' — a genuine "no bench state here", not
+   *    an error and not "Not applicable". A failed/forbidden read never
+   *    reaches this method at all: `hasError()` gates the whole list via
+   *    `app-list-state` before any row (and its badge) is rendered.
+   */
+  benchBadge(res: Resource): string {
+    if (kindOf(res) === 'dummy') return 'Not applicable';
+    const row = this.benchByResourceId().get(res.id);
+    return row?.monthly[this.currentBenchMonth()]?.state ?? '';
+  }
 
   private selectedResourceId = signal<string | null>(null);
   // Derived from the loaded resources so it always reflects the latest data after a reload.

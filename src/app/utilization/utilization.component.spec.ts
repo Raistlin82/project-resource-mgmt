@@ -6,6 +6,7 @@ import { UtilizationComponent } from './utilization.component';
 import {
   ApiService,
   type Assignment,
+  type BenchRollup,
   type Resource,
   type ResourceOrganization,
   type ResourceRequest,
@@ -13,6 +14,7 @@ import {
 } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
+import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
 
 // Tree: CAP 'Engineering' (managed by m1) > PRA 'Platform' > COM 'Backend'
 const ORGS: ResourceOrganization[] = [
@@ -51,6 +53,8 @@ interface SetupOptions {
   userId?: string;
   role?: UserRole;
   orgsFail?: boolean;
+  benchRollup?: BenchRollup;
+  benchFails?: boolean;
 }
 
 function setup({
@@ -61,6 +65,8 @@ function setup({
   userId = 'm1',
   role = 'resource-manager',
   orgsFail = false,
+  benchRollup = EMPTY_BENCH_ROLLUP,
+  benchFails = false,
 }: SetupOptions = {}) {
   const apiStub = {
     getResources: vi.fn(() => of(resources)),
@@ -68,6 +74,10 @@ function setup({
     getRequests: vi.fn(() => of(requests)),
     getTimeEntries: vi.fn(() => of([])),
     getResourceOrganizations: vi.fn(() => orgsFail ? throwError(() => new Error('tree endpoint down')) : of(orgs)),
+    // Required forkJoin leg (no catchError in the component) — unlike
+    // `orgsFail`, a bench-read failure must collapse the WHOLE dataResource
+    // to its error state, never degrade to an empty/zero bench rollup.
+    getBenchMonthly: vi.fn(() => benchFails ? throwError(() => new Error('bench endpoint down')) : of(benchRollup)),
     createAssignment: vi.fn((data: Partial<Assignment>) => of({
       id: 'created', assignedHours: 0, status: 'Draft', ...data,
     } as Assignment)),
@@ -97,6 +107,27 @@ function setup({
 
 const names = (host: HTMLElement): string[] =>
   [...host.querySelectorAll('[data-test="team-member"]')].map(e => e.textContent?.trim() ?? '');
+
+/**
+ * Scopes a query to the ONE "My Team" row for `name` — never the whole host.
+ * The Assignments and Actual Time Approval panes on the right ALSO render
+ * `.command-status` elements (assignment/time-entry status), so an unscoped
+ * `host.querySelector('.command-status')` could silently match one of those
+ * instead of the bench badge under test — exactly the class of defect this
+ * block's reviews have caught before (an unscoped query matching a different
+ * table's identical markup).
+ */
+function rowFor(host: HTMLElement, name: string): HTMLElement {
+  const nameEl = [...host.querySelectorAll('[data-test="team-member"]')].find(e => e.textContent?.trim() === name);
+  if (!nameEl) throw new Error(`no "My Team" row found for "${name}"`);
+  const row = nameEl.closest('[role="button"]');
+  if (!row) throw new Error(`"${name}"'s row container was not found`);
+  return row as HTMLElement;
+}
+
+function benchBadgeText(host: HTMLElement, name: string): string {
+  return rowFor(host, name).querySelector('[data-test="bench-badge"]')!.textContent?.trim() ?? '';
+}
 
 /** `getResources()`/`getResourceOrganizations()` (an rxResource, like every
  *  other principal-gated feed in this codebase) resolve asynchronously even
@@ -262,6 +293,116 @@ describe('UtilizationComponent — team scope', () => {
     expect(avgEl.textContent).not.toContain('0%');
     expect(avgEl.className).not.toContain('text-critical-text');
     expect(host.querySelector('[data-test="kpi-internal-note"]')).not.toBeNull();
+  });
+});
+
+describe('UtilizationComponent — bench badge', () => {
+  beforeEach(() => TestBed.resetTestingModule());
+
+  it('shows a BENCH badge for an internal/subco team member on bench this month', async () => {
+    const rollup: BenchRollup = {
+      months: ['2026-04'],
+      internalRows: [{
+        resourceId: 'd1', resourceName: 'Direct Dana', kind: 'internal',
+        monthly: { '2026-04': { state: 'BENCH', upcomingUnallocated: false } },
+        availabilityDate: { kind: 'date', date: '2026-04-01' },
+      }],
+      subcoRows: [],
+      hiringDemand: [],
+    };
+    const { fixture, host } = setup({ benchRollup: rollup });
+    await flush(fixture);
+    expect(benchBadgeText(host, 'Direct Dana')).toBe('BENCH');
+  });
+
+  it('shows "Not applicable" for a dummy resource that has a manager (never BENCH, never omitted)', async () => {
+    const resources = [
+      ...RESOURCES,
+      { ...base, id: 'p2', name: 'Direct Dummy', role: 'Developer', utilization: 0, kind: 'dummy', managerId: 'm1' },
+    ] as Resource[];
+    // Adversarial: the mocked rollup gives the DUMMY's own resourceId a real
+    // BENCH row — something the server's benchRollup() would never actually
+    // produce, since dummy is excluded by kind (design spec §4). Doing this
+    // in the test proves the COMPONENT gates on kindOf(res) itself, not
+    // merely on the (incidental, in real data) absence of a row for that id.
+    const rollup: BenchRollup = {
+      months: ['2026-04'],
+      internalRows: [{
+        resourceId: 'd1', resourceName: 'Direct Dana', kind: 'internal',
+        monthly: { '2026-04': { state: 'BENCH', upcomingUnallocated: false } },
+        availabilityDate: { kind: 'date', date: '2026-04-01' },
+      }],
+      subcoRows: [{
+        resourceId: 'p2', resourceName: 'Direct Dummy', kind: 'subco',
+        monthly: { '2026-04': { state: 'BENCH', upcomingUnallocated: false } },
+        availabilityDate: { kind: 'date', date: '2026-04-01' },
+      }],
+      hiringDemand: [],
+    };
+    const { fixture, host } = setup({ resources, benchRollup: rollup });
+    await flush(fixture);
+    expect(benchBadgeText(host, 'Direct Dummy')).toBe('Not applicable');
+  });
+
+  it('does NOT show "Not applicable" on a real internal/subco row (the twin absence check)', async () => {
+    // Same fixture as the previous test — the dummy's 'Not applicable' is
+    // paired with an assertion on the SAME rollup's real internal row, so a
+    // broken kind-gate that marked everything (or nothing) 'Not applicable'
+    // cannot pass both tests at once.
+    const resources = [
+      ...RESOURCES,
+      { ...base, id: 'p2', name: 'Direct Dummy', role: 'Developer', utilization: 0, kind: 'dummy', managerId: 'm1' },
+    ] as Resource[];
+    const rollup: BenchRollup = {
+      months: ['2026-04'],
+      internalRows: [{
+        resourceId: 'd1', resourceName: 'Direct Dana', kind: 'internal',
+        monthly: { '2026-04': { state: 'BENCH', upcomingUnallocated: false } },
+        availabilityDate: { kind: 'date', date: '2026-04-01' },
+      }],
+      subcoRows: [{
+        resourceId: 'p2', resourceName: 'Direct Dummy', kind: 'subco',
+        monthly: { '2026-04': { state: 'BENCH', upcomingUnallocated: false } },
+        availabilityDate: { kind: 'date', date: '2026-04-01' },
+      }],
+      hiringDemand: [],
+    };
+    const { fixture, host } = setup({ resources, benchRollup: rollup });
+    await flush(fixture);
+    const danaBadge = benchBadgeText(host, 'Direct Dana');
+    expect(danaBadge).toBe('BENCH');
+    expect(danaBadge).not.toBe('Not applicable');
+  });
+
+  // Global Constraint's three-way distinction (a missing bench row can mean
+  // "dummy", "read failed", or "genuinely no bench state this month") needs
+  // three SEPARATE tests, not one collapsed check. The two tests above cover
+  // dummy vs. real-with-a-row; this one covers the third meaning: a real
+  // resource that the (successfully loaded) rollup simply has no row for.
+  // EMPTY_BENCH_ROLLUP (the default) has no rows at all — Dana must render
+  // blank, NEVER 'Not applicable' (that would misreport her as a dummy) and
+  // never a stale/failed-looking value.
+  it('renders no bench state at all — never "Not applicable" — for a real resource absent from this month\'s rollup', async () => {
+    const { fixture, host } = setup();
+    await flush(fixture);
+    const badge = benchBadgeText(host, 'Direct Dana');
+    expect(badge).toBe('');
+    expect(badge).not.toBe('Not applicable');
+  });
+
+  // Third leg of the three-way distinction: the bench read itself fails.
+  // forkJoin is fail-fast and `benchRollup` is a REQUIRED leg (no catchError,
+  // unlike `orgs`) — a failure here must collapse the WHOLE "My Team" list to
+  // list-state's error affordance, never render the pre-existing "team-empty"
+  // copy ("Nobody is set up to report directly to you"), which would assert a
+  // fact (zero direct reports) the failed fetch never established.
+  it('shows the error affordance, not a confident empty team list, when the bench read fails', async () => {
+    const { fixture, host } = setup({ benchFails: true });
+    await flush(fixture);
+    const alert = host.querySelector('[role="alert"]');
+    expect(alert).toBeTruthy();
+    expect(host.querySelector('[data-test="team-empty"]')).toBeNull();
+    expect(host.querySelector('[data-test="team-member"]')).toBeNull();
   });
 });
 
