@@ -82,6 +82,10 @@ interface Line {
  * approval's requester is not in the feed), which is why the batch error
  * summary still has to be honest.
  *
+ * Scope truthfulness (P2-22): the header, the footer summary and both action
+ * labels describe what is CHECKED, never the whole month by default — see
+ * `title`, `scopeSummary`, `approveLabel`, `rejectLabel`.
+ *
  * Single-mode-only UX: when a decision leaves nothing further to act on for
  * the resource(s) currently loaded (no rows at all, or no row has a
  * remaining 'Requested' item) the modal closes itself instead of sitting on
@@ -166,13 +170,20 @@ interface Line {
 
       <ng-template #lineRow let-line>
         <div class="rounded-lg border border-line p-3 flex flex-col gap-2" data-test="project-line">
-          <div class="flex items-center gap-3">
+          <!-- P2-23: the row WRAPS. Six controls (checkbox, project name, hours,
+               status chip, calendar, notes — seven on a dummy line) do not fit
+               390px on one line, and without flex-wrap the trailing action
+               buttons were pushed outside the card. min-w-0 on the name is the
+               other half: a flex-1 item's default min-width:auto refuses to
+               shrink below its content, which keeps the row wider than the card
+               no matter how it wraps. -->
+          <div class="flex flex-wrap items-center gap-3" data-test="line-row">
             <input type="checkbox" class="command-checkbox"
                    [checked]="checked().has(line.item.assignmentMonthId)"
                    [disabled]="!decidable(line)"
                    (change)="toggleChecked(line.item.assignmentMonthId)"
                    [attr.aria-label]="'Select ' + projectLabel(line.item)">
-            <span class="font-semibold text-ink flex-1">{{ projectLabel(line.item) }}</span>
+            <span class="font-semibold text-ink flex-1 min-w-0 break-words" data-test="line-project">{{ projectLabel(line.item) }}</span>
             <span class="font-mono tabular-nums text-sm text-ink-secondary">{{ line.item.hours | number:'1.0-1' }}h</span>
             <span class="command-status uppercase" [class]="statusClass(line.item.status)">{{ line.item.status }}</span>
             <!-- "Correct the hours": the approver's third power alongside
@@ -339,21 +350,31 @@ interface Line {
         </div>
       </ng-template>
 
-      <div class="p-6 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
+      <!-- P2-23: the footer wraps too — four controls, the widest of which now
+           carries a count, overflowed 390px as a single nowrap row. -->
+      <div class="p-6 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex flex-wrap items-center justify-end gap-3" data-test="modal-footer">
+        <!-- P2-22: the scope, stated once and read off the SAME signal the
+             actions send (the checked set), never off the row/line count. -->
+        @if (lines().length > 0) {
+          <p class="mr-auto text-xs font-medium text-[var(--cc-muted)]" data-test="scope-summary">{{ scopeSummary() }}</p>
+        }
         <button type="button" (click)="closed.emit()" class="command-button secondary">Close</button>
         <button type="button" data-test="reject-month" (click)="reject()" [disabled]="checked().size === 0"
                 class="command-button secondary disabled:opacity-50 disabled:cursor-not-allowed">
-          <mat-icon class="text-[18px] w-[18px] h-[18px]">close</mat-icon> Reject month
+          <mat-icon class="text-[18px] w-[18px] h-[18px]">close</mat-icon>
+          <span data-test="reject-label">{{ rejectLabel() }}</span>
         </button>
         @if (multi()) {
           <button type="button" data-test="approve-continue" (click)="approve()" [disabled]="checked().size === 0"
                   class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
-            <mat-icon class="text-[18px] w-[18px] h-[18px]">check</mat-icon> Approve & Continue
+            <mat-icon class="text-[18px] w-[18px] h-[18px]">check</mat-icon>
+            <span data-test="approve-label">{{ approveLabel() }}</span>
           </button>
         } @else {
           <button type="button" data-test="approve-month" (click)="approve()" [disabled]="checked().size === 0"
                   class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
-            <mat-icon class="text-[18px] w-[18px] h-[18px]">check</mat-icon> Approve month
+            <mat-icon class="text-[18px] w-[18px] h-[18px]">check</mat-icon>
+            <span data-test="approve-label">{{ approveLabel() }}</span>
           </button>
         }
       </div>
@@ -446,20 +467,71 @@ export class ApprovalModalComponent {
   /** Which lines currently have their notes panel expanded. */
   private expandedNoteIds = signal<ReadonlySet<string>>(new Set());
 
-  /** Modal header. Falls back to a plain "Approve month" (no dangling dash)
-   *  once the target resource has dropped out of `rows` entirely — e.g. after
-   *  deciding its only pending item while the page's status filter is still
-   *  'Requested' ("Pending"), which removes the resource from that filtered
-   *  feed. The empty `lines()` state below already explains why nothing shows.
-   *  In multi mode the resource name is per-section (see `resourceGroups`),
-   *  so the header names the selection instead of a single resource. */
+  /**
+   * Modal header — P2-22. It names WHAT is under review, never what a button
+   * will do: it used to read "Approve month — Ada", which promised the whole
+   * month in the most prominent position on the panel while the operator may
+   * have narrowed the batch to one project (and while Reject is an equally
+   * available action from here). The scope of the pending action lives in
+   * `scopeSummary`/`approveLabel`/`rejectLabel`, all read off `checked()`, and
+   * is stated once instead of restated by a heading that mutates on every tick.
+   *
+   * Falls back to a plain "Month approval" (no dangling dash) once the target
+   * resource has dropped out of `rows` entirely — e.g. after deciding its only
+   * pending item while the page's status filter is still 'Requested'
+   * ("Pending"), which removes the resource from that filtered feed. The empty
+   * `lines()` state below already explains why nothing shows. In multi mode the
+   * resource name is per-section (see `resourceGroups`), so the header counts
+   * the selection instead of naming a single resource.
+   */
   protected title = computed(() => {
     if (this.multi()) {
       const n = this.rows().length;
-      return n > 0 ? `Approve ${n} resource${n === 1 ? '' : 's'}` : 'Approve selected resources';
+      return n > 0 ? `Month approval — ${n} resource${n === 1 ? '' : 's'}` : 'Month approval — selected resources';
     }
     const name = this.rows()[0]?.resourceName;
-    return name ? `Approve month — ${name}` : 'Approve month';
+    return name ? `Month approval — ${name}` : 'Month approval';
+  });
+
+  /** How many of the selected month's lines this actor could actually decide —
+   *  the denominator every scope statement is measured against. Excludes the
+   *  already-decided and the blocked lines, exactly as `checked()`'s own default
+   *  does, so "all of them" means the same thing on both sides of the count. */
+  protected decidableCount = computed(() => this.lines().filter(l => this.decidable(l)).length);
+
+  /**
+   * P2-22 — true when the batch has been narrowed BELOW the whole month, i.e.
+   * when the word "month" on an action would overstate what it touches. Read off
+   * `checked()` (what `decide()` actually sends) against `decidableCount()`, not
+   * off `rows()`/`lines()`: a label wired to the row count would restate today's
+   * overpromise more confidently.
+   *
+   * Nothing checked is deliberately NOT partial — both actions are disabled in
+   * that state, so there is no scope to misstate.
+   */
+  protected partialScope = computed(() => {
+    const n = this.checked().size;
+    return n > 0 && n < this.decidableCount();
+  });
+
+  protected approveLabel = computed(() => {
+    const n = this.checked().size;
+    if (this.multi()) return this.partialScope() ? `Approve selected (${n}) & Continue` : 'Approve & Continue';
+    return this.partialScope() ? `Approve selected (${n})` : 'Approve month';
+  });
+
+  protected rejectLabel = computed(() =>
+    this.partialScope() ? `Reject selected (${this.checked().size})` : 'Reject month');
+
+  /** The register's "riepilogo dello scope": what the two actions will affect,
+   *  in full, including the case where the actor can decide none of what is on
+   *  screen (every line blocked — the footer buttons are disabled and this says
+   *  why they would be). */
+  protected scopeSummary = computed(() => {
+    const total = this.decidableCount();
+    const month = this.monthLabelLong(this.selectedMonth());
+    if (total === 0) return `Nothing here can be decided by you in ${month}.`;
+    return `${this.checked().size} of ${total} project${total === 1 ? '' : 's'} selected in ${month}.`;
   });
 
   /** Multi-resource mode (Task 12): `lines()` regrouped by resource, in `rows()`

@@ -359,6 +359,108 @@ describe('ApprovalModalComponent — scoped decision (D §3.4)', () => {
   });
 });
 
+/**
+ * B7 / P2-22 — the footer copy is the user's only statement of what a decision
+ * will affect, so every assertion below reads the RENDERED label with `toBe` on
+ * the trimmed text: `toContain('Approve')` is true of every state this batch
+ * distinguishes, and so is `toContain('selected')` once the fix exists.
+ *
+ * ROW_TWO_PENDING is the fixture that makes these falsifiable: it has TWO
+ * decidable lines, so "the whole month" and "part of the month" are different
+ * batches. Against ROW (one decidable line) every label below would read
+ * identically whether the code consults `checked()` or `rows()`.
+ */
+describe('ApprovalModalComponent — scope-truthful copy (P2-22)', () => {
+  const textOf = (host: HTMLElement, test: string) =>
+    host.querySelector(`[data-test="${test}"]`)!.textContent!.trim();
+
+  it('counts the batch in both action labels once the selection narrows below the month, and restores the month copy on the way back', () => {
+    const { fixture } = setup({ rows: [ROW_TWO_PENDING] });
+    const host = fixture.nativeElement as HTMLElement;
+
+    // Both pending lines start checked, so the batch really IS the whole month.
+    expect(fixture.componentInstance.checked().size).toBe(2);
+    expect(textOf(host, 'approve-label')).toBe('Approve month');
+    expect(textOf(host, 'reject-label')).toBe('Reject month');
+
+    host.querySelector<HTMLInputElement>('[aria-label="Select Mercury"]')!.click();
+    fixture.detectChanges();
+
+    expect(textOf(host, 'approve-label')).toBe('Approve selected (1)');
+    expect(textOf(host, 'reject-label')).toBe('Reject selected (1)');
+
+    // The round trip: re-checking the line makes the batch the month again, so a
+    // label hardcoded to the narrowed copy cannot pass either.
+    host.querySelector<HTMLInputElement>('[aria-label="Select Mercury"]')!.click();
+    fixture.detectChanges();
+
+    expect(textOf(host, 'approve-label')).toBe('Approve month');
+    expect(textOf(host, 'reject-label')).toBe('Reject month');
+  });
+
+  it('counts the multi-resource batch without dropping its "& Continue" promise', () => {
+    // ROW contributes one decidable line (Apollo), ROW_2 one (Zeus).
+    const { fixture } = setup({ rows: [ROW, ROW_2], months: ['2026-09'], multi: true });
+    const host = fixture.nativeElement as HTMLElement;
+    expect(textOf(host, 'approve-label')).toBe('Approve & Continue');
+
+    host.querySelector<HTMLInputElement>('[aria-label="Select Zeus"]')!.click();
+    fixture.detectChanges();
+
+    expect(textOf(host, 'approve-label')).toBe('Approve selected (1) & Continue');
+    expect(host.querySelector('[data-test="approve-month"]')).toBeNull(); // still the multi action
+  });
+
+  it('summarises the scope in the footer and re-states it when the selection changes', () => {
+    const { fixture } = setup({ rows: [ROW_TWO_PENDING] });
+    const host = fixture.nativeElement as HTMLElement;
+    expect(textOf(host, 'scope-summary')).toBe('2 of 2 projects selected in September 2026.');
+
+    host.querySelector<HTMLInputElement>('[aria-label="Select Mercury"]')!.click();
+    fixture.detectChanges();
+
+    expect(textOf(host, 'scope-summary')).toBe('1 of 2 projects selected in September 2026.');
+  });
+
+  it('claims no batch at all when the actor can decide none of the month', () => {
+    // Same shape as the decidability suite's refusal case: a pending line this
+    // actor is not the manager of. Nothing is checkable, so the summary must not
+    // read as "0 of 1 selected" (an invitation) and the label must not count.
+    const { fixture } = setup({ role: 'delivery-executive', userId: 'someone-else' });
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(textOf(host, 'scope-summary')).toBe('Nothing here can be decided by you in September 2026.');
+    expect(textOf(host, 'approve-label')).toBe('Approve month');
+    expect(host.querySelector<HTMLButtonElement>('[data-test="approve-month"]')!.disabled).toBe(true);
+  });
+
+  it('heads the panel with the month under review rather than promising to approve it', () => {
+    const { fixture } = setup({ rows: [ROW_TWO_PENDING] });
+    const host = fixture.nativeElement as HTMLElement;
+    const title = () => host.querySelector('#approvalModalTitle')!.textContent!.trim();
+    expect(title()).toBe('Month approval — Ada');
+
+    host.querySelector<HTMLInputElement>('[aria-label="Select Mercury"]')!.click();
+    fixture.detectChanges();
+
+    // Deliberately unchanged: the heading states no scope, so narrowing the
+    // batch cannot make it wrong (the footer carries the count instead).
+    expect(title()).toBe('Month approval — Ada');
+  });
+
+  it('lets the project row, its project name and the footer wrap — STRUCTURE ONLY: jsdom performs no layout, so the 390px overflow this fixes is not observable in this suite', () => {
+    const { fixture } = setup({ rows: [ROW_TWO_PENDING] });
+    const host = fixture.nativeElement as HTMLElement;
+
+    const row = host.querySelector('[data-test="project-line"] [data-test="line-row"]')!;
+    expect(row.classList.contains('flex-wrap')).toBe(true);
+    // Without min-w-0 a flex-1 item refuses to shrink below its content, so the
+    // row stays wider than the card however it wraps.
+    expect(row.querySelector('[data-test="line-project"]')!.classList.contains('min-w-0')).toBe(true);
+    expect(host.querySelector('[data-test="modal-footer"]')!.classList.contains('flex-wrap')).toBe(true);
+  });
+});
+
 describe('ApprovalModalComponent — mixed and failed decisions (carried-forward finding)', () => {
   it('surfaces the single error verbatim and still emits decided on a mixed decided/error response', () => {
     const { fixture, notifyStub } = setup({
