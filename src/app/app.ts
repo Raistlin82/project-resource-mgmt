@@ -442,6 +442,7 @@ export class App {
         { label: 'What-if', icon: 'tune', route: '/what-if' },
         { label: 'Utilization', icon: 'bar_chart', route: '/utilization', badge: 'overbooked' },
         { label: 'Capacity', icon: 'calendar_view_month', route: '/capacity' },
+        { label: 'Bench', icon: 'event_busy', route: '/bench' },
         { label: 'Allocation Approvals', icon: 'fact_check', route: '/allocation-approvals' },
         { label: 'Reporting', icon: 'insights', route: '/reporting', badge: 'risks' },
       ],
@@ -521,6 +522,7 @@ export class App {
         if (group.label === 'Analytics') {
           const items = group.items.filter(item => {
             if (item.route === '/capacity') return canViewCapacity;
+            if (item.route === '/bench') return canViewCapacity;
             if (item.route === '/allocation-approvals') return canViewAllocationApprovals;
             if (item.route === '/reporting') return canViewPortfolio;
             return canReadStaffing;

@@ -229,7 +229,7 @@ const SSR_ROUTES = [
   '/projects', '/projects/1', '/project-partners', '/project-documents',
   '/project-plans', '/financial-plans', '/project-cost-centers', '/project-tasks',
   '/project-issues', '/change-requests', '/customers', '/contracts',
-  '/contracts/CT1', '/orders', '/billing', '/reporting', '/capacity',
+  '/contracts/CT1', '/orders', '/billing', '/reporting', '/capacity', '/bench',
   '/allocation-approvals', '/config/language', '/config/skill-catalogs',
   '/config/proficiency-sets', '/config/skills', '/config/project-roles',
   '/config/cost-centers', '/config/service-orgs', '/config/resource-orgs',

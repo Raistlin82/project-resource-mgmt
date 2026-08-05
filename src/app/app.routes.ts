@@ -56,6 +56,7 @@ export const routes: Routes = [
   // Tracked in .superpowers/ux-remediation/reconciliation-report.md §10.
   { path: 'reporting', title: 'Reporting', canMatch: [roleGuard(a => a.canViewPortfolioDashboard())], loadComponent: () => import('./reporting/reporting').then(m => m.Reporting) },
   { path: 'capacity', title: 'Capacity', canMatch: [capacityGuard], loadComponent: () => import('./capacity/capacity.component').then(m => m.CapacityComponent) },
+  { path: 'bench', title: 'Bench', canMatch: [capacityGuard], loadComponent: () => import('./bench/bench.component').then(m => m.BenchComponent) },
   { path: 'allocation-approvals', title: 'Allocation Approvals', canMatch: [allocationApprovalsGuard], loadComponent: () => import('./allocation-approvals/allocation-approvals.component').then(m => m.AllocationApprovalsComponent) },
 
   // Configuration
