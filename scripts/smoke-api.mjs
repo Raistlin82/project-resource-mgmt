@@ -37,6 +37,7 @@ const UPDATED_SMOKE_MANAGER = 'John Miller';
 
 let passed = 0;
 let failed = 0;
+let skipped = 0;
 
 /** Record and print a single PASS/FAIL line. */
 function check(name, ok, detail = '') {
@@ -48,6 +49,19 @@ function check(name, ok, detail = '') {
     console.log(`FAIL  ${name}${detail ? ` — ${detail}` : ''}`);
   }
   return ok;
+}
+
+/**
+ * Record and print a single SKIP line — deliberately NOT a PASS. A check that
+ * cannot run on this backend must say so loudly, distinct from both PASS and
+ * FAIL, and must never be counted toward `passed`. Reporting an unexercised
+ * check as a pass is the exact blind-green-gate shape this project's
+ * conventions forbid (see the FK-violation check below for the concrete case
+ * this exists to prevent).
+ */
+function skip(name, detail = '') {
+  skipped++;
+  console.log(`SKIP  ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -5822,6 +5836,60 @@ async function checkResourceManagerCycle() {
   }
 }
 
+/**
+ * POSTGRES-ONLY — the FK-violation -> 409 mapping fixed in 0420c80.
+ *
+ * `isFkViolation()` (src/server/fk-violation.util.ts) walks drizzle-orm's
+ * `.cause` chain because the `pg` driver's SQLSTATE never survives flat on
+ * the outer error once drizzle wraps it (see that file's doc comment). This
+ * behavior can ONLY be observed against a real Postgres FK constraint — the
+ * InMemory adapter has no FK enforcement at all, so DELETEing an
+ * FK-referenced row there just succeeds (204) and silently orphans the child
+ * row instead of raising anything for the mapper to catch.
+ *
+ * GATED ON DATABASE_URL, the same switch `getRepositories()` itself uses to
+ * choose the adapter (CLAUDE.md's "dev<->prod parity switch"): this check is
+ * meaningless unless the server it is talking to is Postgres-backed, and this
+ * project's own dual-run recipe (Task 10 of f-bench-availability) runs the
+ * Postgres-backed server and this smoke suite in the SAME shell session, so
+ * DATABASE_URL being set here is the same signal the server used to pick its
+ * adapter.
+ *
+ * LOUD SKIP, NEVER A SILENT PASS: when DATABASE_URL is unset in this process,
+ * this check cannot exercise anything real. Counting it as a pass would
+ * reproduce the exact blind-green-gate shape as the bug it exists to catch —
+ * `npm test`'s in-memory adapter can't raise SQLSTATE 23503 either, which is
+ * why the underlying bug went unnoticed for as long as it did. It is logged
+ * as SKIP and deliberately excluded from `passed`.
+ */
+async function checkFkViolationMapping() {
+  const NAME = 'DELETE /api/customers/C1 (referenced by contract CT1) -> clean 409, not a raw 500';
+  if (!process.env.DATABASE_URL) {
+    skip(
+      NAME,
+      'DATABASE_URL is not set in this process — the InMemory adapter cannot raise a real Postgres FK violation, so this check has nothing to exercise. Re-run with DATABASE_URL set against a Postgres-backed server to exercise it (see docs/architecture/03-backend-and-data.md and CLAUDE.md\'s dev<->prod parity switch).',
+    );
+    return;
+  }
+
+  const { status, body } = await req('DELETE', '/customers/C1');
+  check(
+    NAME,
+    status === 409 && body?.error === 'Cannot delete: the record is still referenced by other records',
+    `status=${status}, body=${JSON.stringify(body)}`,
+  );
+
+  // Confirm the row actually survived — Postgres must have REJECTED the
+  // delete outright (the FK constraint aborts the statement), not applied it
+  // and merely reported the outcome wrong.
+  const { status: listStatus, body: list } = await req('GET', '/customers');
+  check(
+    'customers/C1 still present after the rejected delete',
+    listStatus === 200 && Array.isArray(list) && list.some(c => c.id === 'C1'),
+    `listStatus=${listStatus}`,
+  );
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -6034,8 +6102,20 @@ async function main() {
     failed++;
   }
 
+  // Own try/catch: guarded so an unexpected error in the Postgres-only
+  // FK-violation mapping check never masks or blocks any of the prior section
+  // results. Runs LAST and is safe to run anywhere in the order: on a match it
+  // asserts the delete was REJECTED (customers/C1 survives), so it never
+  // mutates state other sections depend on.
+  try {
+    await checkFkViolationMapping();
+  } catch (err) {
+    console.log(`FAIL  FK-violation -> 409 mapping check — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
   console.log('---------------------------------------------------------------');
-  console.log(`SUMMARY  ${passed} passed, ${failed} failed`);
+  console.log(`SUMMARY  ${passed} passed, ${failed} failed${skipped > 0 ? `, ${skipped} SKIPPED (not exercised — see SKIP lines above)` : ''}`);
   process.exit(failed === 0 ? 0 : 1);
 }
 
