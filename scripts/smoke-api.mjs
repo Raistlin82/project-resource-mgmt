@@ -6186,6 +6186,18 @@ async function checkSearchableReads() {
     check('resources?q=zzznonsense123 -> zero rows', Array.isArray(body) && body.length === 0, `length=${body?.length}`);
   }
 
+  // Case-insensitivity: search.util.ts's matchesQuery lower-cases both sides
+  // before comparing. Every check above uses the seed's own casing ("Julie",
+  // "Globex"), which can't tell a working .toLowerCase() apart from one that
+  // was silently dropped -- this was curled manually once during Task 2 and
+  // never committed (see the dispatch for this fix). Opposite-case here so a
+  // regression in that call can no longer pass unnoticed.
+  {
+    const { status, body } = await req('GET', '/resources?q=JULIE');
+    check('GET /api/resources?q=JULIE (opposite case) -> 200', status === 200, `status=${status}`);
+    check('resources?q=JULIE (opposite case) still returns EXACTLY resource id 1', Array.isArray(body) && body.length === 1 && body[0].id === '1', JSON.stringify(body?.map((r) => r.id)));
+  }
+
   // Projects: open read, any authenticated role, exact seed row.
   {
     const { status, body } = await req('GET', '/projects?q=Alpha', { headers: EMPLOYEE_HEADERS });
@@ -6204,6 +6216,13 @@ async function checkSearchableReads() {
     const { status, body } = await req('GET', '/contracts?q=Globex');
     check('GET /api/contracts?q=Globex -> 200', status === 200, `status=${status}`);
     check('contracts?q=Globex returns EXACTLY contract CT1', Array.isArray(body) && body.length === 1 && body[0].id === 'CT1', JSON.stringify(body?.map((c) => c.id)));
+  }
+  // Case-insensitivity, opposite case from the seed's own "Globex" -- same
+  // rationale as the resources?q=JULIE check above.
+  {
+    const { status, body } = await req('GET', '/contracts?q=globex');
+    check('GET /api/contracts?q=globex (opposite case) -> 200', status === 200, `status=${status}`);
+    check('contracts?q=globex (opposite case) still returns EXACTLY contract CT1', Array.isArray(body) && body.length === 1 && body[0].id === 'CT1', JSON.stringify(body?.map((c) => c.id)));
   }
   {
     const byName = await req('GET', '/orders?q=Globex');
