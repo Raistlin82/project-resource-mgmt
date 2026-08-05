@@ -142,6 +142,33 @@ export const resources: Resource[] = [
     skills: [{ name: 'Java', level: 3 }], projectRoles: ['Senior Developer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 0, utilizationPlanned: 0, capacity: 40,
     organization: 'Engineering', location: 'Remote', hireDate: '2026-01-01', contractHoursPerDay: 8 },
+  // BLOCK F fixture (design spec §11, row 4): a plain internal resource fully
+  // allocated for the whole displayed window (Apr-Sep) with NOTHING booked
+  // beyond it. Proves availabilityDate stays 'beyond-horizon' on the LAST
+  // shown month even though the look-ahead month (Oct, fetched but never
+  // shown) already knows the answer — the two fields deliberately have
+  // different data scopes (spec §7).
+  { id: '7', name: 'Priya Kapoor', role: 'Developer', kind: 'internal',
+    skills: [{ name: 'Java', level: 3 }], projectRoles: ['Senior Developer'],
+    externalExperience: [], profilePicture: '', resume: '', utilization: 100, utilizationPlanned: 100, capacity: 40,
+    organization: 'Engineering', location: 'Remote', hireDate: '2020-01-01', contractHoursPerDay: 8 },
+  // BLOCK F fixture (design spec §11, row 5): hireDate IS the '2026-04' anchor
+  // month's own start, with NO booking ever. Proves `isActiveInMonth`'s guard
+  // truncates the look-back at Feb/Mar (both inactive) instead of reading the
+  // absence of earlier months as "idle since forever" — April must bucket B,
+  // never D.
+  { id: '8', name: 'Marco Belli', role: 'Developer', kind: 'internal',
+    skills: [{ name: 'Java', level: 2 }], projectRoles: ['Developer'],
+    externalExperience: [], profilePicture: '', resume: '', utilization: 0, utilizationPlanned: 0, capacity: 40,
+    organization: 'Engineering', location: 'Remote', hireDate: '2026-04-01', contractHoursPerDay: 8 },
+  // BLOCK F fixture (design spec §11, row 6): terminated mid-March, WITH a real
+  // booking inside the fetch window's look-back (Jan-Mar15) — proves the
+  // exclusion from every displayed month (Apr-Sep) is the termination gate,
+  // not an absence of data that would pass for lack of trying.
+  { id: '9', name: 'Elena Rossi', role: 'Developer', kind: 'internal',
+    skills: [{ name: 'Java', level: 2 }], projectRoles: ['Developer'],
+    externalExperience: [], profilePicture: '', resume: '', utilization: 100, utilizationPlanned: 100, capacity: 40,
+    organization: 'Engineering', location: 'Remote', hireDate: '2018-01-01', terminationDate: '2026-03-15', contractHoursPerDay: 8 },
 ];
 
 export const users: User[] = [
@@ -183,6 +210,14 @@ export const requests: ResourceRequest[] = [
   // without lying about their own identity (a time entry's project must be its
   // assignment's request's project — that is what the Log Hours UI writes).
   { id: '6', name: 'Project Beta - Backend Development', requiredRole: 'Developer', requiredEffort: 8, staffedEffort: 8, staffedEffortPlanned: 8, status: 'Fulfilled', skills: ['Java'], description: 'Backend workstream on Project Beta, priced at the negotiated Developer rate', startDate: '2026-06-01', endDate: '2026-06-30', requesterId: '1', projectId: '2' },
+  // BLOCK F fixtures (design spec §11). staffedEffort === requiredEffort on
+  // every one of these so `requestStatusFor` derives 'Fulfilled' (B9 rule),
+  // matching the seed's own convention above.
+  { id: '7', name: 'Subco Mediolanum - Backend (Feb-Mar)', requiredRole: 'Developer', requiredEffort: 336, staffedEffort: 336, staffedEffortPlanned: 336, status: 'Fulfilled', skills: ['Java'], description: 'Full allocation ahead of Project Alpha ramp-up', startDate: '2026-02-01', endDate: '2026-03-31', requesterId: '1', projectId: '1' },
+  { id: '8', name: 'Subco Mediolanum - Ramp-down day', requiredRole: 'Developer', requiredEffort: 0.4, staffedEffort: 0.4, staffedEffortPlanned: 0.4, status: 'Fulfilled', skills: ['Java'], description: 'Single partial day closing out the engagement', startDate: '2026-04-01', endDate: '2026-04-01', requesterId: '1', projectId: '1' },
+  { id: '9', name: 'Dummy Senior Developer - Alpha backfill', requiredRole: 'Developer', requiredEffort: 1048, staffedEffort: 1048, staffedEffortPlanned: 1048, status: 'Fulfilled', skills: [], description: 'Placeholder booking pending a real hire', startDate: '2026-04-01', endDate: '2026-09-30', requesterId: '1', projectId: '1' },
+  { id: '10', name: 'Project Alpha - Priya full allocation', requiredRole: 'Developer', requiredEffort: 1048, staffedEffort: 1048, staffedEffortPlanned: 1048, status: 'Fulfilled', skills: ['Java'], description: 'Full-time booking through the displayed window', startDate: '2026-04-01', endDate: '2026-09-30', requesterId: '1', projectId: '1' },
+  { id: '11', name: 'Project Alpha - Elena (pre-termination)', requiredRole: 'Developer', requiredEffort: 408, staffedEffort: 408, staffedEffortPlanned: 408, status: 'Fulfilled', skills: ['Java'], description: 'Work booked before her termination date', startDate: '2026-01-01', endDate: '2026-03-15', requesterId: '1', projectId: '1' },
 ];
 
 // Resource Schedule (Approach B): every assignment carries an explicit booking
@@ -226,6 +261,26 @@ const assignmentsBase: readonly Omit<Assignment, 'status'>[] = [
   // the one it documents (A1+A2, 130% in 2026-06-15..06-30) and no new conflict
   // is invented here.
   { id: '6', requestId: '6', resourceId: '1', assignedHours: 8, startDate: '2026-06-01', endDate: '2026-06-01', allocationPct: 20 },
+  // BLOCK F fixtures (design spec §11) — see the requests above for context.
+  // Resource '6' (subco): full 8h/day Feb-Mar, then a single 0.4h day in
+  // April and nothing after. 336 = 42 working days (20 Feb + 22 Mar) × 8h;
+  // distributeHoursOverWindow spreads it back to exactly 8h/day, no remainder.
+  { id: '7', requestId: '7', resourceId: '6', assignedHours: 336, startDate: '2026-02-01', endDate: '2026-03-31', allocationPct: 100 },
+  // Deliberately 0.4h — rounds to "0.00%" of April's ~176h target in any
+  // display, but is NOT zero: a genuine (if tiny) booking, pinning the
+  // BENCH-vs-PARTIAL boundary at exactly 0 (design spec §3).
+  { id: '8', requestId: '8', resourceId: '6', assignedHours: 0.4, startDate: '2026-04-01', endDate: '2026-04-01', allocationPct: 1 },
+  // Resource '4' (dummy): flat 8h/day for the whole displayed window.
+  // 1048 = 131 working days (22+21+22+23+21+22, Apr..Sep) × 8h.
+  { id: '9', requestId: '9', resourceId: '4', assignedHours: 1048, startDate: '2026-04-01', endDate: '2026-09-30', allocationPct: 100 },
+  // Resource '7' (new internal): flat 8h/day for the whole displayed window,
+  // nothing booked in the look-ahead month (October) — the point of this fixture.
+  { id: '10', requestId: '10', resourceId: '7', assignedHours: 1048, startDate: '2026-04-01', endDate: '2026-09-30', allocationPct: 100 },
+  // Resource '9' (new internal, terminated 2026-03-15): real booking entirely
+  // BEFORE the displayed window but partly INSIDE the fetch window's look-back
+  // (Feb-Mar15). 408 = 51 working days (Jan2..Mar13, skipping the 2026-01-01
+  // holiday) × 8h.
+  { id: '11', requestId: '11', resourceId: '9', assignedHours: 408, startDate: '2026-01-01', endDate: '2026-03-15', allocationPct: 100 },
 ];
 
 // --- Time-phased allocation (B1) config --------------------------------------
