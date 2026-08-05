@@ -100,6 +100,37 @@ function recognisedRevenueTrendCard(fixture: { nativeElement: unknown }): HTMLEl
   return card as HTMLElement;
 }
 
+/**
+ * The Margin & Variance drill-down's own `<table>`, located via its heading
+ * rather than a bare `table.command-data-table` selector — this page has
+ * several other tables sharing that class (Customer Profitability, etc.),
+ * so an unscoped query could resolve a header cell or row from the wrong
+ * table entirely.
+ */
+function marginVarianceTable(fixture: { nativeElement: unknown }): HTMLElement {
+  const heading = Array.from(host(fixture).querySelectorAll('h3')).find(h => h.textContent?.includes('Project Margin & Variance'));
+  expect(heading, 'the Project Margin & Variance heading must exist').toBeDefined();
+  const card = heading!.closest('.command-card');
+  expect(card, 'the Project Margin & Variance card must exist').toBeDefined();
+  const table = card!.querySelector('table.command-data-table');
+  expect(table, 'the Project Margin & Variance table must exist').toBeDefined();
+  return table as HTMLElement;
+}
+
+/**
+ * Resolves a column's position from the table's OWN header text, never a
+ * fixed numeric index — so a test built on this helper degrades correctly:
+ * removing a column fails at the specific `expect` that names it (the
+ * header lookup itself, or the cell it points at), rather than silently
+ * shifting every later column's assertion onto the wrong cell.
+ */
+function columnIndex(table: HTMLElement, label: string): number {
+  const headers = Array.from(table.querySelectorAll('thead th'));
+  const idx = headers.findIndex(h => h.textContent?.trim() === label);
+  expect(idx, `the "${label}" column header must exist`).toBeGreaterThanOrEqual(0);
+  return idx;
+}
+
 describe('Reporting — internal-capacity KPIs (C1)', () => {
   it('averages utilization over internal resources only, ignoring dummy and subco', async () => {
     const fixture = await setup();
@@ -168,7 +199,7 @@ describe('Reporting — negotiated sell rates reach the rendered T&M figure (Tas
 });
 
 describe('Reporting — Baseline vs Planned columns (design spec, block E)', () => {
-  it('renders the hand-verified +120 EUR / +20.00% baseline delta for a project with a frozen October baseline', async () => {
+  it('renders all four required columns (Baseline / Planned / Delta / Delta %) with the hand-verified October figures, scoped to one project row', async () => {
     const project: Project = { id: 'P1', name: 'Project One', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution' };
     const resource: Resource = { id: 'R1', name: 'Res', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, costRate: 90, billRate: 180 };
     const request = { id: 'REQ1', name: 'Req', requiredRole: 'Consultant', requiredEffort: 8, status: 'Fulfilled' as const, skills: [], projectId: 'P1' };
@@ -200,15 +231,31 @@ describe('Reporting — Baseline vs Planned columns (design spec, block E)', () 
     expect(row?.pcpDelta).toBe(120);
     expect(row?.pcpDeltaPct).toBeCloseTo(20, 5);
 
-    // Rendered DOM, scoped to the Margin & Variance table's own row (not a
-    // whole-page textContent scan, which this large page's many other
-    // percentage cells could coincidentally satisfy).
-    const rows = Array.from(host(fixture).querySelectorAll('table.command-data-table tbody tr'));
+    // Rendered DOM. Spec §7 names FOUR columns for this table — Baseline /
+    // Planned / Delta € / Delta % — so this checks all four, each resolved
+    // by its own header text (not a fixed cell index) and scoped to this
+    // one project's row within the Margin & Variance table specifically
+    // (not a whole-page or whole-row textContent scan: this page has many
+    // percentage- and currency-bearing cells, and a bare substring check
+    // like `.toContain('€120')` would also match the negative `"-€120"`, so
+    // each figure is checked for its exact sign too).
+    const table = marginVarianceTable(fixture);
+    const baselineCol = columnIndex(table, 'Baseline');
+    const plannedCol = columnIndex(table, 'Planned');
+    const deltaCol = columnIndex(table, 'Delta');
+    const deltaPctCol = columnIndex(table, 'Delta %');
+
+    const rows = Array.from(table.querySelectorAll('tbody tr'));
     const projectRow = rows.find(tr => tr.textContent?.includes('Project One'));
     expect(projectRow, 'the Project One table row must exist').toBeDefined();
-    const rowText = projectRow!.textContent ?? '';
-    expect(rowText).toContain('+20.00%');
-    expect(rowText).toContain('€120');
+    const cells = Array.from(projectRow!.querySelectorAll('td'));
+
+    expect(cells[baselineCol].textContent).toContain('€600');
+    expect(cells[plannedCol].textContent).toContain('€720');
+    expect(cells[deltaCol].textContent).toContain('€120');
+    expect(cells[deltaCol].textContent).not.toContain('-€120');
+    expect(cells[deltaPctCol].textContent).toContain('+20.00%');
+    expect(cells[deltaPctCol].textContent).not.toContain('-20.00%');
   });
 
   it('renders "—" (never a fabricated percentage) in the PCP Delta % column when a project has no frozen baseline at all', async () => {

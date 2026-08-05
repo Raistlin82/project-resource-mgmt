@@ -387,7 +387,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
 
       <!-- Per-project drill-down with stacked cost-driver mini-bar -->
       @defer (hydrate on viewport) {
-      <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="6" [columns]="13" label="margin &amp; variance" (retry)="reloadData()">
+      <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="6" [columns]="14" label="margin &amp; variance" (retry)="reloadData()">
       <ng-template>
       <div class="command-card overflow-hidden">
         <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-muted">
@@ -418,6 +418,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
                 <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">VAC</th>
                 <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Burn %</th>
                 <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Baseline</th>
+                <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Planned</th>
                 <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Delta</th>
                 <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Delta %</th>
               </tr>
@@ -446,12 +447,13 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
                   <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-positive-text]="r.vac >= 0" [class.text-critical-text]="r.vac < 0">{{ r.vac | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-critical-text]="r.burnPct >= alertThresholds.burnWarnPct" [class.text-ink-secondary]="r.burnPct < alertThresholds.burnWarnPct">{{ r.burnPct | number:'1.0-0' }}%</td>
                   <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ r.pcpBaseline | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ r.pcpPlanned | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-positive-text]="r.pcpDelta <= 0" [class.text-critical-text]="r.pcpDelta > 0">{{ r.pcpDelta | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-5 text-right font-mono tabular-nums">{{ r.pcpDeltaPct !== null ? ((r.pcpDeltaPct > 0 ? '+' : '') + (r.pcpDeltaPct | number:'1.2-2') + '%') : '—' }}</td>
                 </tr>
               } @empty {
                 <tr>
-                  <td colspan="13" class="px-6 sm:px-8 py-8 text-center text-ink-muted text-sm">No projects with revenue or cost yet.</td>
+                  <td colspan="14" class="px-6 sm:px-8 py-8 text-center text-ink-muted text-sm">No projects with revenue or cost yet.</td>
                 </tr>
               }
             </tbody>
@@ -469,6 +471,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
                   <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-positive-text]="marginTotals().vac >= 0" [class.text-critical-text]="marginTotals().vac < 0">{{ marginTotals().vac | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-4"></td>
                   <td class="px-4 py-4 text-right font-mono tabular-nums">{{ marginTotals().pcpBaseline | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-4 text-right font-mono tabular-nums">{{ marginTotals().pcpPlanned | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-positive-text]="marginTotals().pcpDelta <= 0" [class.text-critical-text]="marginTotals().pcpDelta > 0">{{ marginTotals().pcpDelta | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-4"></td>
                 </tr>
@@ -1480,6 +1483,7 @@ export class Reporting {
       { key: 'vac', header: `VAC (${cur} base)`, map: r => r.vac.toFixed(2) },
       { key: 'burnPct', header: 'Burn %', map: r => r.burnPct.toFixed(0) },
       { key: 'pcpBaseline', header: `PCP Baseline (${cur} base)`, map: r => r.pcpBaseline.toFixed(2) },
+      { key: 'pcpPlanned', header: `PCP Planned (${cur} base)`, map: r => r.pcpPlanned.toFixed(2) },
       { key: 'pcpDelta', header: `PCP Delta (${cur} base)`, map: r => r.pcpDelta.toFixed(2) },
       { key: 'pcpDeltaPct', header: 'PCP Delta %', map: r => r.pcpDeltaPct !== null ? r.pcpDeltaPct.toFixed(2) : '—' },
     ]);
