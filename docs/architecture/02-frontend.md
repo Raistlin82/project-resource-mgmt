@@ -356,6 +356,39 @@ Other accessibility affordances baked in:
 - **Inert collapsed nav:** collapsed nav groups get `[inert]` so they are removed
   from the tab order; `aria-expanded` / `aria-controls` / `aria-current` are
   wired on the nav.
+- **Active group auto-opens:** `App.expandedGroups` is a `linkedSignal` sourced on
+  the active group, so a navigation into a different group opens it — a link can
+  never land inside a collapsed (and therefore `[inert]`) group. It stays
+  writable, so the header button can still collapse the active group afterwards.
+
+### The app shell's one-element-two-roles nav
+
+`#primary-navigation` (`src/app/app.ts`) is **the same `<aside>`** in both roles:
+the slide-in mobile drawer below `lg`, and the persistent desktop sidebar at `lg`
+and above. Two independent, breakpoint-scoped signals drive it:
+
+| Signal | Meaningful | Drives |
+| --- | --- | --- |
+| `isMobileMenuOpen` | below `lg` only | slide-in transform, CDK focus trap, `main[inert]`, the `<html>` scroll lock, `data-drawer` |
+| `desktopSidebarOpen` | `lg` and above only | `lg:relative` / `lg:hidden` |
+
+Whether the **closed drawer's links leave the tab order** is decided in
+`src/styles.css` off `data-drawer="closed"` (`visibility: hidden`, since a
+transform alone leaves every link tabbable off-screen) and **re-opened inside a
+`@media (min-width: 64rem)` block at equal specificity**. Nothing binds `[inert]`
+or `[hidden]` on this element: at `lg+` it is the desktop sidebar, so a blanket
+attribute strands desktop navigation entirely. The breakpoint literal lives in
+one place — the exported `DESKTOP_NAV_QUERY` in `app.ts`, which `app.spec.ts`
+asserts the stylesheet against — and must track Tailwind's `lg:` variant.
+
+`⌘K` / `Ctrl+K` (`focusNavSearch()`) therefore opens **whichever** of the two
+containers governs the current viewport (`matchMedia`; a missing `matchMedia`
+falls back to *desktop*, because the mobile branch inerts `<main>`) and defers the
+focus by one animation frame — `focus()` on a still-hidden element silently
+no-ops. The drawer's focus-trap auto-capture is withheld for that one open, or it
+would capture the Close button and fight the focus. The `<kbd>` hint and the
+input's `aria-keyshortcuts` both come from `navShortcutHint()`, so a PC keyboard
+is never told about a `⌘` key.
 
 ### SSR-safe blob downloads
 

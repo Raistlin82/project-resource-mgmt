@@ -417,6 +417,61 @@ textarea:focus-visible,
   border-right: 1px solid var(--color-line);
 }
 
+/* ------------------------------------------------------------
+   MOBILE DRAWER ⇄ DESKTOP SIDEBAR — one element, two roles (P1-23)
+
+   Below lg, #primary-navigation is the mobile drawer. Closed, it is translated
+   off-canvas — and `visibility: hidden` is what actually removes its ~40 links,
+   the filter input and the sign-out/theme buttons from the TAB ORDER. A
+   transform alone leaves every one of them tabbable off-screen, so a keyboard
+   user tabbing through the page falls into an invisible menu.
+
+   At lg and above the SAME element is the always-present desktop sidebar, so the
+   rule is re-opened inside a min-width query at EQUAL specificity (same
+   selector, later source order wins within its media context). That breakpoint
+   scope is the whole point: this deliberately is not an [inert]/[hidden]/[class]
+   binding in app.ts, because a blanket attribute on this element strands desktop
+   navigation entirely.
+
+   `visibility` joins the transition so closing still slides out — CSS
+   interpolates visibility discretely, holding `visible` for the full duration on
+   the way out and applying it immediately on the way in. The cost is that the
+   links stay tabbable for the 300ms of the closing animation; focus has already
+   been restored to the toggle button by then, and reduced-motion users skip the
+   window entirely (see the prefers-reduced-motion block below).
+
+   `translate` is listed alongside `transform` because Tailwind v4's
+   -translate-x-full compiles to the `translate` property, not `transform`.
+   ------------------------------------------------------------ */
+.command-drawer {
+  transition-property: transform, translate, visibility;
+}
+
+.command-drawer[data-drawer="closed"] {
+  visibility: hidden;
+}
+
+@media (min-width: 64rem) {
+  .command-drawer[data-drawer="closed"] {
+    visibility: visible;
+  }
+}
+
+/* Scroll lock while the mobile drawer is open: below lg the DOCUMENT is the
+   scroll container (<main> only becomes one at lg via lg:h-screen), so without
+   this the page scrolls away behind the scrim. Toggled on <html> by App's
+   drawer effect, and breakpoint-scoped for the same reason as above — at lg+
+   that aside is the desktop sidebar and the page must keep scrolling. */
+.command-drawer-open {
+  overflow: hidden;
+}
+
+@media (min-width: 64rem) {
+  .command-drawer-open {
+    overflow: visible;
+  }
+}
+
 .command-brand {
   font-family: var(--font-display);
   color: var(--color-ink);
@@ -512,7 +567,10 @@ textarea:focus-visible,
   border: 1px solid var(--color-line);
   border-radius: var(--radius-sm);
   background: var(--color-surface);
-  padding: 0.45rem 2.6rem 0.45rem 2rem;
+  /* Right padding clears the shortcut hint, which is now platform-aware: the
+     `Ctrl K` form is ~3.1rem wide against `⌘K`'s ~1.4rem, and at 2.6rem the
+     placeholder ran underneath it on every non-Mac keyboard. */
+  padding: 0.45rem 3.7rem 0.45rem 2rem;
   color: var(--color-ink);
   font-size: 0.82rem;
 }
@@ -538,6 +596,8 @@ textarea:focus-visible,
   font-family: var(--font-mono);
   font-size: 0.62rem;
   line-height: 1.1;
+  /* `Ctrl K` must stay on one line whatever the sidebar width. */
+  white-space: nowrap;
   pointer-events: none;
 }
 
@@ -617,7 +677,10 @@ textarea:focus-visible,
 
 @media (prefers-reduced-motion: reduce) {
   .command-nav-group-body,
-  .command-nav-chevron {
+  .command-nav-chevron,
+  /* Also drops the drawer's visibility transition, so a closed drawer leaves the
+     tab order instantly instead of after the 300ms slide-out. */
+  .command-drawer {
     transition: none;
   }
 }
