@@ -1,4 +1,4 @@
-import { Assignment, Resource, ResourceRequest, Order, OrderLine, FinancialItem, TimeEntry, BillingPlanItem, Contract, Customer, Milestone, ChangeRequest, Project, FxRate, NegotiatedRate, BASE_CURRENCY, AssignmentDay, AssignmentMonth } from './api.service';
+import { Assignment, Resource, ResourceRequest, Order, OrderLine, FinancialItem, TimeEntry, BillingPlanItem, Contract, Customer, Milestone, ChangeRequest, Project, FxRate, NegotiatedRate, BASE_CURRENCY, AssignmentDay, AssignmentMonth, CostBaseline } from './api.service';
 import { customerFacingBillingAmount } from './billing-validation.util';
 import { sellRateFor, hoursPerDayOrDefault } from './sell-rate.util';
 import { monthRowId } from './allocation-month.util';
@@ -31,6 +31,9 @@ export interface FinanceData {
    */
   assignmentDays?: AssignmentDay[];
   assignmentMonths?: AssignmentMonth[];
+  /** Optional frozen monthly cost baselines (design spec, block E, §3).
+   *  Consumed ONLY by `costBaselineComparison`. */
+  costBaselines?: CostBaseline[];
   /**
    * Optional negotiated sell rates (design spec §4/§6). Consumed ONLY by the
    * as-incurred (TimeAndMaterials/Capped/Expense) branch of recognitionSchedule,
@@ -201,6 +204,70 @@ export function plannedCostSchedule(
   return periodList.map((period, i) => {
     cumulative += finite(costByPeriod[i]);
     return { period, plannedCost: finite(costByPeriod[i]), cumulative };
+  });
+}
+
+/**
+ * The CURRENT baseline row per period for a project: the row with the
+ * latest `frozenAt` among all rows sharing that (projectId, period) —
+ * NEVER the first one found (design spec §3.4: a re-freeze is a new row,
+ * never an update, so more than one row can share a period).
+ */
+function currentCostBaselinesByPeriod(rows: readonly CostBaseline[], projectId: string): Map<string, CostBaseline> {
+  const out = new Map<string, CostBaseline>();
+  for (const row of rows) {
+    if (row.projectId !== projectId) continue;
+    const existing = out.get(row.period);
+    if (existing === undefined || row.frozenAt > existing.frozenAt) out.set(row.period, row);
+  }
+  return out;
+}
+
+export interface CostBaselineComparisonRow {
+  period: string;
+  baseline: number;
+  planned: number;
+  delta: number;
+  deltaPct: number | null;
+  outOfBaselineHorizon: boolean;
+}
+
+/**
+ * Baseline vs. live plan, month by month (design spec §4). "Planned" is
+ * always the LIVE value of `plannedCostSchedule` on today's plan, never a
+ * second snapshot. The period universe is the union of every period with a
+ * CURRENT baseline row and every period with at least one booked
+ * AssignmentDay for the project — never the intersection, so a descoped or
+ * never-frozen month is visible rather than silently dropped — expanded
+ * contiguously from the earliest to the latest such period.
+ */
+export function costBaselineComparison(data: FinanceData, projectId: string): CostBaselineComparisonRow[] {
+  const current = currentCostBaselinesByPeriod(data.costBaselines ?? [], projectId);
+  const reqIds = new Set(data.requests.filter(r => r.projectId === projectId).map(r => r.id));
+  const assignmentIds = new Set(data.assignments.filter(a => reqIds.has(a.requestId)).map(a => a.id));
+  const bookedMonths = (data.assignmentDays ?? [])
+    .filter(d => assignmentIds.has(d.assignmentId))
+    .map(d => periodOf(d.date));
+  const allMonths = [...new Set([...current.keys(), ...bookedMonths])].sort();
+  if (allMonths.length === 0) return [];
+
+  const periodsList = periodRange(allMonths[0], allMonths[allMonths.length - 1]);
+  const planned = plannedCostSchedule(data, { from: periodsList[0], to: periodsList[periodsList.length - 1] }, { projectId });
+  const plannedByPeriod = new Map(planned.map(p => [p.period, p.plannedCost]));
+
+  return periodsList.map(period => {
+    const baselineRow = current.get(period);
+    const baselineAmount = baselineRow?.amount ?? 0;
+    const plannedAmount = plannedByPeriod.get(period) ?? 0;
+    const delta = plannedAmount - baselineAmount;
+    return {
+      period,
+      baseline: baselineAmount,
+      planned: plannedAmount,
+      delta,
+      deltaPct: baselineAmount !== 0 ? (delta / baselineAmount) * 100 : null,
+      outOfBaselineHorizon: baselineRow === undefined,
+    };
   });
 }
 

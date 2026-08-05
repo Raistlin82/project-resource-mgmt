@@ -43,8 +43,10 @@ import {
   FinanceData,
   plannedCostSchedule,
   PlannedCostPeriod,
+  costBaselineComparison,
+  CostBaselineComparisonRow,
 } from './finance.util';
-import { Resource, ResourceRequest, Assignment, Order, OrderLine, FinancialItem, TimeEntry, BillingPlanItem, Contract, Customer, Milestone, ChangeRequest, Project, FxRate, AssignmentDay, AssignmentMonth } from './api.service';
+import { Resource, ResourceRequest, Assignment, Order, OrderLine, FinancialItem, TimeEntry, BillingPlanItem, Contract, Customer, Milestone, ChangeRequest, Project, FxRate, AssignmentDay, AssignmentMonth, CostBaseline } from './api.service';
 
 function res(id: string, costRate: number, billRate: number): Resource {
   return { id, name: `R${id}`, role: 'Dev', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, costRate, billRate };
@@ -60,6 +62,9 @@ function day(id: string, assignmentId: string, date: string, hours: number): Ass
 }
 function month(assignmentId: string, month: string, status: AssignmentMonth['status']): AssignmentMonth {
   return { id: `${assignmentId}:${month}`, assignmentId, month, status };
+}
+function baseline(id: string, projectId: string, period: string, amount: number, frozenAt: string): CostBaseline {
+  return { id, projectId, period, amount, frozenAt, frozenBy: 'u1' };
 }
 function order(id: string, type: Order['type'], status: Order['status']): Order {
   return { id, contractId: 'CT', type, amount: 0, currency: 'EUR', status, orderDate: '2026-01-01' };
@@ -923,6 +928,105 @@ describe('finance.util plannedCostSchedule', () => {
     const rawCost = plannedCostSchedule(raw, ['2026-10'], { projectId: 'P' })[0].plannedCost;
     expect(resolvedCost).toBe(720); // 8h x 90 EUR/h — the seeded John Miller figure (Task 1)
     expect(rawCost / resolvedCost).toBe(8); // hoursPerDay — proves the trap, does not silently pass at ratio 1
+  });
+});
+
+describe('finance.util costBaselineComparison', () => {
+  // Mirrors the seeded fixture exactly (Task 1): resource '1' at 90 EUR/HOUR
+  // (resolved), one Allocated day of 8h in project 'P' period '2026-10'
+  // (720 EUR planned). A frozen baseline of 600 gives a hand-verifiable
+  // +120 EUR / +20.00% delta.
+  const withOctoberPlan: FinanceData = {
+    resources: [res('1', 90, 180)],
+    requests: [req('r1', 'P')],
+    assignments: [assign('a1', 'r1', '1', 0)],
+    orders: [], orderLines: [], financials: [],
+    assignmentDays: [day('ad1', 'a1', '2026-10-05', 8)],
+    assignmentMonths: [month('a1', '2026-10', 'Allocated')],
+  };
+
+  it('reports +120 EUR / +20.00% when the live plan (720) exceeds a 600 baseline', () => {
+    const d: FinanceData = { ...withOctoberPlan, costBaselines: [baseline('CB1', 'P', '2026-10', 600, '2026-09-15T09:00:00.000Z')] };
+    const rows: CostBaselineComparisonRow[] = costBaselineComparison(d, 'P');
+    const oct = rows.find(r => r.period === '2026-10');
+    expect(oct).toBeDefined();
+    expect(oct?.baseline).toBe(600);
+    expect(oct?.planned).toBe(720);
+    expect(oct?.delta).toBe(120);
+    expect(oct?.deltaPct).toBeCloseTo(20, 5);
+    expect(oct?.outOfBaselineHorizon).toBe(false);
+  });
+
+  it('reports -500 EUR / -100.00% when a frozen month has no booked hours at all (descoped) — a real, severe value, never an em dash', () => {
+    // Rule A (design spec §4 line 139 / §9 table): deltaPct is null ONLY when
+    // baseline = 0. Here baseline is 500 (nonzero) and planned is a FACT of 0
+    // (the month genuinely has no booked hours, not an unknown/error state),
+    // so -100% is the precise, well-defined statement of "the whole baseline
+    // evaporated" — the loudest variance this feature exists to surface. An
+    // em dash here would conflate this severe, real case with "no baseline
+    // exists" (see the sibling outOfBaselineHorizon test below), exactly the
+    // none-vs-unknown conflation this project has already paid for elsewhere.
+    const d: FinanceData = { ...withOctoberPlan, costBaselines: [baseline('CB2', 'P', '2026-11', 500, '2026-09-15T09:00:00.000Z')] };
+    const rows = costBaselineComparison(d, 'P');
+    const nov = rows.find(r => r.period === '2026-11');
+    expect(nov).toBeDefined();
+    expect(nov?.baseline).toBe(500);
+    expect(nov?.planned).toBe(0);
+    expect(nov?.delta).toBe(-500);
+    expect(nov?.deltaPct).toBeCloseTo(-100, 5);
+    expect(nov?.outOfBaselineHorizon).toBe(false); // frozen explicitly at 500 — NOT the same as never-frozen
+  });
+
+  it('flags a booked month with NO baseline row as outOfBaselineHorizon, with baseline 0 and deltaPct null', () => {
+    const d: FinanceData = { ...withOctoberPlan, costBaselines: [] };
+    const rows = costBaselineComparison(d, 'P');
+    const oct = rows.find(r => r.period === '2026-10');
+    expect(oct?.baseline).toBe(0);
+    expect(oct?.deltaPct).toBeNull();
+    expect(oct?.outOfBaselineHorizon).toBe(true); // the pair of the two tests above: absence, not zero
+  });
+
+  // Not in the plan's original Step 1 — added because Rule A's null branch
+  // (design spec §4 line 139 / §9 table: deltaPct null ONLY when baseline =
+  // 0) was, before this test, only reachable via the NEVER-FROZEN case above
+  // (no costBaselines row at all). That leaves the OTHER baseline=0 sub-case
+  // the spec explicitly distinguishes (§4 line 137, §10 line 241: a baseline
+  // row that EXISTS but was frozen explicitly at 0 EUR, outOfBaselineHorizon
+  // staying false) completely untested — an untested branch that a future
+  // "simplification" could silently merge with the never-frozen case.
+  it('keeps outOfBaselineHorizon FALSE (never true) when the current baseline row exists but was explicitly frozen at 0 EUR, and still nulls deltaPct', () => {
+    const d: FinanceData = { ...withOctoberPlan, costBaselines: [baseline('CB_ZERO', 'P', '2026-10', 0, '2026-09-15T09:00:00.000Z')] };
+    const oct = costBaselineComparison(d, 'P').find(r => r.period === '2026-10');
+    expect(oct?.baseline).toBe(0);
+    expect(oct?.planned).toBe(720); // nonzero — the case Rule A must still null correctly
+    expect(oct?.delta).toBe(720);
+    expect(oct?.deltaPct).toBeNull();
+    expect(oct?.outOfBaselineHorizon).toBe(false); // a real row exists — distinct from "never frozen"
+  });
+
+  it('uses the row with the LATEST frozenAt for a re-frozen period, never the first one written', () => {
+    const d: FinanceData = {
+      ...withOctoberPlan,
+      costBaselines: [
+        baseline('CB_OLD', 'P', '2026-10', 600, '2026-09-01T00:00:00.000Z'),
+        baseline('CB_NEW', 'P', '2026-10', 750, '2026-09-20T00:00:00.000Z'),
+      ],
+    };
+    const oct = costBaselineComparison(d, 'P').find(r => r.period === '2026-10');
+    expect(oct?.baseline).toBe(750); // NOT 600 — the later re-freeze wins
+    expect(oct?.delta).toBe(720 - 750);
+  });
+
+  it('never mixes another project\'s baseline rows into this project\'s comparison', () => {
+    const d: FinanceData = { ...withOctoberPlan, costBaselines: [baseline('CB_OTHER', 'OTHER_PROJECT', '2026-10', 999, '2026-09-01T00:00:00.000Z')] };
+    const oct = costBaselineComparison(d, 'P').find(r => r.period === '2026-10');
+    expect(oct?.baseline).toBe(0);
+    expect(oct?.outOfBaselineHorizon).toBe(true);
+  });
+
+  it('returns an empty array when the project has neither a baseline nor any booked hours', () => {
+    const d: FinanceData = { resources: [], requests: [], assignments: [], orders: [], orderLines: [], financials: [], costBaselines: [] };
+    expect(costBaselineComparison(d, 'GHOST')).toEqual([]);
   });
 });
 
