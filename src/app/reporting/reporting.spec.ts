@@ -238,4 +238,54 @@ describe('Reporting — Baseline vs Planned columns (design spec, block E)', () 
     expect(projectRow, 'the Project Unfrozen table row must exist').toBeDefined();
     expect(projectRow!.textContent ?? '').toContain('—');
   });
+
+  // COORDINATOR-CAUGHT DEFECT: pcpBaseline/pcpPlanned/pcpDelta must restrict
+  // to periods with a current baseline row, never sum across
+  // costBaselineComparison's full period union — which also includes every
+  // out-of-horizon month (booked hours, baseline 0). The single-month
+  // fixture above never exercises this: with only one period total, "sum
+  // everything" and "sum only frozen periods" coincide, which is exactly
+  // how the same bug shipped unnoticed in this file, project-details.ts and
+  // dashboard.component.ts alike.
+  it('restricts pcpBaseline/pcpPlanned/pcpDelta to periods with a current baseline row, never summing a never-frozen month into the ratio', async () => {
+    const project: Project = { id: 'P3', name: 'Project Mixed', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution' };
+    const resource: Resource = { id: 'R3', name: 'Res Three', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, costRate: 100, billRate: 200 };
+    const request = { id: 'REQ3', name: 'Req', requiredRole: 'Consultant', requiredEffort: 8, status: 'Fulfilled' as const, skills: [], projectId: 'P3' };
+    const assignment = { id: 'A3', requestId: 'REQ3', resourceId: 'R3', assignedHours: 8, status: 'Allocated' as const };
+    const order = { id: 'O3', contractId: 'CT3', type: 'Customer' as const, amount: 1000, currency: 'EUR', status: 'Invoiced' as const, orderDate: '2026-01-01' };
+    const line = { id: 'L3', orderId: 'O3', projectId: 'P3', description: 'x', amount: 1000 };
+
+    const fixture = await setup([resource], {
+      getProjects: () => of([project]),
+      getRequests: () => of([request]),
+      getAssignments: () => of([assignment]),
+      getOrders: () => of([order]),
+      getOrderLines: () => of([line]),
+      // January: booked, NO baseline row at all (never frozen) -> out of
+      // horizon, baseline 0, planned 1000 (10h x 100 EUR/h). February:
+      // booked AND frozen at 400 -> planned 500 (5h x 100), delta 100.
+      getAssignmentDays: () => of([
+        { id: 'A3:2026-01-05', assignmentId: 'A3', date: '2026-01-05', hours: 10 },
+        { id: 'A3:2026-02-05', assignmentId: 'A3', date: '2026-02-05', hours: 5 },
+      ]),
+      getAssignmentMonths: () => of([
+        { id: 'A3:2026-01', assignmentId: 'A3', month: '2026-01', status: 'Allocated' as const },
+        { id: 'A3:2026-02', assignmentId: 'A3', month: '2026-02', status: 'Allocated' as const },
+      ]),
+      getCostBaselines: () => of([{ id: 'CB_FEB', projectId: 'P3', period: '2026-02', amount: 400, frozenAt: '2026-01-15T00:00:00.000Z', frozenBy: 'u4' }]),
+    });
+    await flush(fixture);
+
+    const row = fixture.componentInstance.marginRows().find(r => r.id === 'P3');
+    expect(row, 'the P3 margin row must exist').toBeDefined();
+    // Restricted (correct): only February counts (has a frozen row).
+    // baseline 400, planned 500, delta 100, deltaPct 25.00%.
+    // UNRESTRICTED (the defect this pins): baseline still 400 (January
+    // contributes 0 either way), planned 1500 (Jan's 1000 + Feb's 500),
+    // delta 1100, deltaPct 275%.
+    expect(row?.pcpBaseline).toBe(400);
+    expect(row?.pcpPlanned).toBe(500);
+    expect(row?.pcpDelta).toBe(100);
+    expect(row?.pcpDeltaPct).toBeCloseTo(25, 5);
+  });
 });

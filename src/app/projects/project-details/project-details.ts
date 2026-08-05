@@ -428,8 +428,22 @@ export class ProjectDetailsComponent {
   // (returns [] only when neither a baseline nor any booked hours exist) so
   // there is one definition of "empty" in one place, not two that can drift.
   protected hasComparisonRows = computed(() => this.baselineRows().length > 0);
+  /**
+   * Portfolio-vs-baseline coordinator ruling (block E, post-Task-8 review):
+   * the summary totals must aggregate the SAME population as the ratio's
+   * denominator — periods that actually have a current baseline row — never
+   * every period in baselineRows()'s union (which also includes out-of-
+   * -horizon months with baseline 0 purely because they have booked hours).
+   * Summing planned cost across those never-frozen months against a
+   * denominator that only ever contains the few frozen ones produces a
+   * numerator and denominator describing DIFFERENT populations — a ratio
+   * that is arithmetically derivable but semantically meaningless (a
+   * five-digit percentage). The per-period table below is unaffected: each
+   * row's own baseline/planned/delta/deltaPct already reflects its own
+   * period correctly (Rule A, Task 4) — only this AGGREGATE was wrong.
+   */
   protected baselineTotals = computed(() => {
-    const rows = this.baselineRows();
+    const rows = this.baselineRows().filter(r => !r.outOfBaselineHorizon);
     const baseline = rows.reduce((s, r) => s + r.baseline, 0);
     const planned = rows.reduce((s, r) => s + r.planned, 0);
     const delta = planned - baseline;

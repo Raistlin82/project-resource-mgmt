@@ -251,6 +251,52 @@ describe('Dashboard — Baseline vs Planned portfolio tile (design spec, block E
     expect(tileText).not.toContain('-€120');
   });
 
+  // COORDINATOR-CAUGHT DEFECT: totalBaselineDelta/totalBaselineAmount must
+  // restrict to periods with a current baseline row, never sum across
+  // costBaselineComparison's full period union — which also includes every
+  // out-of-horizon month (booked hours, baseline 0). Summing planned cost
+  // across never-frozen months into the numerator, against a denominator
+  // that only ever contains the frozen periods, compares two different
+  // populations: on the real seed this produced a numerator around 235k EUR
+  // against a ~1,100 EUR denominator — a five-digit percentage. The single-
+  // month fixture above never exercises this (one period means "sum
+  // everything" and "sum only frozen periods" coincide).
+  it('restricts the portfolio total to periods with a current baseline row, never summing a never-frozen month into the ratio', async () => {
+    const { fixture } = await render('finance', {
+      getProjects: vi.fn(() => of([
+        { id: 'P1', name: 'Project One', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution' },
+      ])),
+      getRequests: vi.fn(() => of([{ id: 'REQ1', name: 'Req', requiredRole: 'Consultant', requiredEffort: 8, status: 'Fulfilled', skills: [], projectId: 'P1' }])),
+      getAssignments: vi.fn(() => of([{ id: 'A1', requestId: 'REQ1', resourceId: 'R1', assignedHours: 8, status: 'Allocated' }])),
+      getResources: vi.fn(() => of([{ id: 'R1', name: 'Res', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, costRate: 100, billRate: 200 }])),
+      // January: booked, NO baseline row at all (never frozen) -> out of
+      // horizon, baseline 0, planned 1000 (10h x 100 EUR/h). February: booked
+      // AND frozen at 400 -> planned 500 (5h x 100), delta 100.
+      getAssignmentDays: vi.fn(() => of([
+        { id: 'A1:2026-01-05', assignmentId: 'A1', date: '2026-01-05', hours: 10 },
+        { id: 'A1:2026-02-05', assignmentId: 'A1', date: '2026-02-05', hours: 5 },
+      ])),
+      getAssignmentMonths: vi.fn(() => of([
+        { id: 'A1:2026-01', assignmentId: 'A1', month: '2026-01', status: 'Allocated' },
+        { id: 'A1:2026-02', assignmentId: 'A1', month: '2026-02', status: 'Allocated' },
+      ])),
+      getCostBaselines: vi.fn(() => of([{ id: 'CB_FEB', projectId: 'P1', period: '2026-02', amount: 400, frozenAt: '2026-01-15T00:00:00.000Z', frozenBy: 'u4' }])),
+    });
+
+    const host = fixture.nativeElement as HTMLElement;
+    const tile = host.querySelector('[data-test="baseline-tile"]');
+    expect(tile).not.toBeNull();
+    const tileText = tile!.textContent ?? '';
+    // Restricted (correct): only February counts (has a frozen row).
+    // baseline 400, planned 500, delta 100, deltaPct 25.00%.
+    // UNRESTRICTED (the defect this pins): delta 1100 (Jan's 1000 + Feb's
+    // 100), deltaPct 275% against the same 400 EUR denominator.
+    expect(tileText).toContain('€100');
+    expect(tileText).not.toContain('€1,100');
+    expect(tileText).toContain('25.00%');
+    expect(tileText).not.toContain('275');
+  });
+
   it('is absent for a pm — portfolio dashboard stays finance/delivery-executive/admin only, unchanged by this block', async () => {
     const { fixture } = await render('pm');
     expect(fixture.nativeElement.textContent).not.toContain('Baseline vs Planned');

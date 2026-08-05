@@ -1048,7 +1048,16 @@ export class Reporting {
         // pcpBaseline = 0 (never frozen or frozen explicitly at zero) — a
         // descoped month with a nonzero baseline still renders a real,
         // well-defined percentage, never an em dash.
-        const baselineRows = costBaselineComparison(d, p.id);
+        //
+        // COORDINATOR-CAUGHT DEFECT (post-Task-8 review): restricted to
+        // periods with a current baseline row (`!outOfBaselineHorizon`)
+        // before summing — the unfiltered union also includes every
+        // out-of-horizon month (booked hours, baseline 0), so summing
+        // planned cost across those never-frozen months against a
+        // denominator that only ever contains the few frozen periods
+        // compares two different populations (same defect shape as Tasks 6
+        // and 7, caught in the same review).
+        const baselineRows = costBaselineComparison(d, p.id).filter(r => !r.outOfBaselineHorizon);
         const pcpBaseline = baselineRows.reduce((s, r) => s + r.baseline, 0);
         const pcpPlanned = baselineRows.reduce((s, r) => s + r.planned, 0);
         const pcpDelta = pcpPlanned - pcpBaseline;

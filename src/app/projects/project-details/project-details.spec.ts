@@ -10,6 +10,27 @@ function host(fixture: { nativeElement: unknown }): HTMLElement {
   return fixture.nativeElement as HTMLElement;
 }
 
+/**
+ * Reads a "Baseline vs Planned" summary KPI tile by its exact label text
+ * ("Baseline" / "Planned" / "Delta"), returning its value and note text.
+ * Scoped to the specific tile (matched by exact label, not a substring) so
+ * an assertion here cannot be satisfied by a different tile that happens to
+ * render a similar-looking figure elsewhere on this page — `baselineTotals`
+ * itself is `protected` (template-only, matching this codebase's convention
+ * for signals no other class should reach into), so the rendered DOM is
+ * also the only way to observe it without weakening that visibility.
+ */
+function baselineKpi(fixture: { nativeElement: unknown }, label: 'Baseline' | 'Planned' | 'Delta'): { value: string; note: string } {
+  const labels = Array.from(host(fixture).querySelectorAll('.command-kpi-label'));
+  const labelEl = labels.find(el => el.textContent?.trim() === label);
+  expect(labelEl, `the "${label}" KPI tile must exist`).toBeDefined();
+  const tile = labelEl!.closest('.command-kpi');
+  expect(tile, `the "${label}" KPI tile's container must exist`).toBeDefined();
+  const value = tile!.querySelector('.command-kpi-value')?.textContent?.trim() ?? '';
+  const note = tile!.querySelector('.command-kpi-note')?.textContent?.trim() ?? '';
+  return { value, note };
+}
+
 async function tick(fixture: ComponentFixture<unknown>, microtasks = 5): Promise<void> {
   fixture.detectChanges();
   for (let i = 0; i < microtasks; i++) await Promise.resolve();
@@ -98,6 +119,57 @@ describe('ProjectDetailsComponent — Baseline vs Planned card (design spec, blo
     expect(text).toContain('Baseline vs Planned');
     expect(text).toContain('2026-10');
     expect(text).toMatch(/\+?20\.00%/);
+  });
+
+  // COORDINATOR-CAUGHT DEFECT: the KPI summary totals (baselineTotals) must
+  // aggregate the SAME population as the ratio's own denominator — periods
+  // that actually carry a current baseline row — never every period in
+  // baselineRows()'s union, which also includes out-of-horizon months
+  // (booked hours, baseline 0) purely so the per-period table can flag them
+  // "not frozen". The single-month fixture used by every other test in this
+  // file never exercises this: with only one period total, "sum everything"
+  // and "sum only frozen periods" coincide, which is exactly how this shipped
+  // unnoticed through this file's own test suite.
+  it('restricts baselineTotals to periods with a current baseline row, never summing a never-frozen month into the ratio', async () => {
+    const rate100: Resource = { ...RESOURCE, costRate: 100, billRate: 200 };
+    const days: AssignmentDay[] = [
+      { id: 'A1:2026-01-05', assignmentId: 'A1', date: '2026-01-05', hours: 10 },
+      { id: 'A1:2026-02-05', assignmentId: 'A1', date: '2026-02-05', hours: 5 },
+    ];
+    const months: AssignmentMonth[] = [
+      { id: 'A1:2026-01', assignmentId: 'A1', month: '2026-01', status: 'Allocated' },
+      { id: 'A1:2026-02', assignmentId: 'A1', month: '2026-02', status: 'Allocated' },
+    ];
+    // January has booked hours but NO baseline row at all (never frozen) ->
+    // outOfBaselineHorizon: true, baseline 0, planned 1000 (10h x 100 EUR/h).
+    // February HAS a frozen baseline (400) -> planned 500 (5h x 100), delta
+    // 100, deltaPct 25.00%.
+    const baseline: CostBaseline[] = [
+      { id: 'CB_FEB', projectId: 'P1', period: '2026-02', amount: 400, frozenAt: '2026-01-15T00:00:00.000Z', frozenBy: 'u4' },
+    ];
+    const { fixture } = await render('pm', {
+      getResources: () => of([rate100]),
+      getAssignmentDays: () => of(days),
+      getAssignmentMonths: () => of(months),
+      getCostBaselines: () => of(baseline),
+    });
+    // Restricted (correct): only February counts, since only it has a
+    // frozen row. baseline 400, planned 500, delta 100, deltaPct 25.00%.
+    // UNRESTRICTED (the defect this pins): baseline 400 (still just Feb —
+    // January contributes 0 either way), planned 1500 (Jan's 1000 + Feb's
+    // 500), delta 1100, deltaPct 275% — the exact five-digit-percentage
+    // shape (scaled down for a fast hand-check) from summing a never-frozen
+    // month into a ratio against a denominator that never included it.
+    const baselineTile = baselineKpi(fixture, 'Baseline');
+    const plannedTile = baselineKpi(fixture, 'Planned');
+    const deltaTile = baselineKpi(fixture, 'Delta');
+    expect(baselineTile.value).toContain('400');
+    expect(plannedTile.value).toContain('500');
+    expect(plannedTile.value).not.toContain('1,500');
+    expect(deltaTile.value).toContain('100');
+    expect(deltaTile.value).not.toContain('1,100');
+    expect(deltaTile.note).toContain('25.00%');
+    expect(deltaTile.note).not.toContain('275');
   });
 
   it('renders "—" for a period whose baseline is 0 (never frozen), not a fabricated percentage', async () => {

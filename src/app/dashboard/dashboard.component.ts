@@ -909,13 +909,30 @@ export class DashboardComponent {
     this.data().projects.reduce((sum, p) => sum + computeProjectFinancials(p.id, this.financeData()).varianceAtCompletion, 0),
   );
 
-  /** Portfolio Baseline vs Planned total (design spec, block E, §7) — a
-   *  portfolio total only, no per-project column (a dense table already). */
+  /**
+   * Portfolio Baseline vs Planned total (design spec, block E, §7) — a
+   * portfolio total only, no per-project column (a dense table already).
+   *
+   * COORDINATOR-CAUGHT DEFECT (post-Task-8 review): both totals — and
+   * therefore the ratio between them — must be restricted to periods that
+   * actually carry a current baseline row (`!outOfBaselineHorizon`), never
+   * summed over costBaselineComparison's full period union. That union also
+   * includes every out-of-horizon month (booked hours, baseline 0, for
+   * PROJECTS/PERIODS with no freeze at all) purely so the per-period table
+   * can show them with a "not frozen" badge. Summing planned cost across
+   * those never-frozen months into the numerator, while the denominator
+   * only ever contains the few periods someone actually froze, compares two
+   * different populations: with this seed that produced a numerator around
+   * 235k EUR against a ~1,100 EUR denominator — a five-digit percentage
+   * that is arithmetically derivable and completely meaningless. Restricting
+   * BOTH sums to the same filtered set keeps the headline EUR figure and its
+   * "% vs frozen PCP" subtitle describing the same thing.
+   */
   protected readonly totalBaselineDelta = computed(() =>
-    this.data().projects.reduce((sum, p) => sum + costBaselineComparison(this.financeData(), p.id).reduce((s, r) => s + r.delta, 0), 0),
+    this.data().projects.reduce((sum, p) => sum + costBaselineComparison(this.financeData(), p.id).filter(r => !r.outOfBaselineHorizon).reduce((s, r) => s + r.delta, 0), 0),
   );
   protected readonly totalBaselineAmount = computed(() =>
-    this.data().projects.reduce((sum, p) => sum + costBaselineComparison(this.financeData(), p.id).reduce((s, r) => s + r.baseline, 0), 0),
+    this.data().projects.reduce((sum, p) => sum + costBaselineComparison(this.financeData(), p.id).filter(r => !r.outOfBaselineHorizon).reduce((s, r) => s + r.baseline, 0), 0),
   );
   protected readonly totalBaselineDeltaPct = computed(() => {
     const baseline = this.totalBaselineAmount();
