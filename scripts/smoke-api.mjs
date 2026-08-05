@@ -1207,6 +1207,15 @@ async function checkCapacityMonthly() {
  * Block F — `/bench/monthly`: the pre-aggregated 6-month BENCH/PARTIAL/
  * ALLOCATED rollup + hiring demand. Same READ_RULE roles as `/capacity`
  * (extended, not duplicated — design spec §8); 'employee' must be refused.
+ *
+ * Round-1 review addition: the 9-month FETCH window (2 look-back + 6 shown +
+ * 1 look-ahead, `src/server.ts:3629-3633`) has its own boundary checks below,
+ * because the response's `months` field is `displayMonths` — computed
+ * independently of `fetchFrom`/`fetchTo` — so the plain "6 months 04..09"
+ * assertion above cannot observe either edge of that window. Both new checks
+ * hit the LIVE endpoint (bench.util.spec.ts already covers the pure function
+ * with hand-built arrays; this is the "through the server" gap that left
+ * unobserved).
  */
 async function checkBenchMonthly() {
   const EMPLOYEE_HEADERS = { 'X-User-Id': '2', 'X-User-Role': 'employee' };
@@ -1234,6 +1243,50 @@ async function checkBenchMonthly() {
 
   const hiring4 = (body.hiringDemand || []).filter((h) => h.role === 'Developer' && h.hours > 0);
   check('hiringDemand has 6 Developer rows (one per shown month) with hours > 0', hiring4.length >= 6, `count=${hiring4.length}`);
+
+  // FETCH-WINDOW LOOK-AHEAD (+1 on fetchTo) — resource '7' (Priya Kapoor):
+  // ALLOCATED every shown month (never BENCH in the display window), so its
+  // ONLY way to reveal itself as about to free up is the look-ahead month
+  // (October, never itself returned as a row). Mirrors
+  // bench.util.spec.ts:256-268's three-part assertion, but through the live
+  // endpoint. Dropping the `+ 1` on `fetchTo` removes October from the fetch
+  // window entirely, which flips September's flag to false (no next month to
+  // read) while leaving everything else identical — this is the only seeded
+  // resource that can observe that specific edge.
+  const priya = (body.internalRows || []).find((r) => r.resourceId === '7');
+  check(
+    "resource '7' (Priya Kapoor, internal): ALLOCATED all 6 shown months -> availabilityDate is beyond-horizon at 2026-09",
+    Boolean(priya) && priya.availabilityDate?.kind === 'beyond-horizon' && priya.availabilityDate?.horizonEndMonth === '2026-09',
+    JSON.stringify(priya?.availabilityDate),
+  );
+  check(
+    "resource '7' September upcomingUnallocated is true — visible ONLY via the un-displayed October look-ahead month",
+    priya?.monthly?.['2026-09']?.upcomingUnallocated === true,
+    JSON.stringify(priya?.monthly?.['2026-09']),
+  );
+  check(
+    "resource '7' August upcomingUnallocated is false — paired absence: August's next month (September) is still ALLOCATED, so a hard-coded 'true' would leave the September check above green too",
+    priya?.monthly?.['2026-08']?.upcomingUnallocated === false,
+    JSON.stringify(priya?.monthly?.['2026-08']),
+  );
+
+  // FETCH-WINDOW LOOK-BACK (from - 2 on fetchFrom) — resource '1' (Julie
+  // Armstrong): no assignment starts before 2026-05, so she is idle straight
+  // through the whole 9-month fetch window. April (the FIRST shown month)
+  // needs BOTH extra look-back months (Feb + Mar) to correctly count 3
+  // consecutive idle months and cap at bucket 'D'; with only one look-back
+  // month the count undercounts to 'C'. May onward never needs more than one
+  // look-back month (spec §8's own math), so April is the only cell that can
+  // observe this specific edge. NOTE: this is NOT caught by the resource '7'
+  // checks above — '7' is never BENCH in the display window, so the aging
+  // path is never exercised for it; this look-back edge needs its own
+  // resource.
+  const julie = (body.internalRows || []).find((r) => r.resourceId === '1');
+  check(
+    "resource '1' (Julie Armstrong) April agingBucket is 'D' — only reachable by fetching BOTH look-back months",
+    julie?.monthly?.['2026-04']?.agingBucket === 'D',
+    JSON.stringify(julie?.monthly?.['2026-04']),
+  );
 
   const { status: empStatus } = await req('GET', '/bench/monthly', { headers: EMPLOYEE_HEADERS });
   check('GET /api/bench/monthly (employee) -> 403', empStatus === 403, `status=${empStatus}`);
