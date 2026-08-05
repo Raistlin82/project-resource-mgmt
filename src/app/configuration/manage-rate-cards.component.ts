@@ -325,14 +325,23 @@ export class ManageRateCardsComponent {
     };
     const id = this.editingId();
     const done = () => {
-      // Read BEFORE the reload: `this.items()` is every OTHER existing card.
-      // The card just saved is never counted as its own ancestor or
-      // descendant by conflictingCardMessage, so no id-based self-exclusion
-      // is needed, and there is no need to wait for the reload first (design
-      // spec §7b). Non-blocking: the save has already succeeded by this point.
+      // Read BEFORE the reload: `this.items()` is the pre-save cache, which on
+      // an EDIT still contains the stale pre-edit copy of the very card being
+      // saved. Round-1 review (Important 2): excluding it by id is REQUIRED,
+      // not optional — on a create there is no id yet so nothing to exclude,
+      // but on an edit that moves a card's own organization (e.g. Backend ->
+      // Platform), the stale copy still sitting at "Backend" would otherwise
+      // be read as a DIFFERENT card conflicting with the one just saved,
+      // producing "this role already has a card on Backend" about the very
+      // card that no longer lives there. Same id-exclusion `duplicateExists`
+      // already applies above (`c.id !== editId`) — conflictingCardMessage
+      // has no id parameter of its own, so the filter happens on the array
+      // passed in, here, before the call. Non-blocking either way: the save
+      // has already succeeded by this point.
+      const otherCards = this.items().filter(c => c.id !== id);
       const conflict = conflictingCardMessage(
         { organization: payload.organization, role: payload.role ?? '', currency: payload.currency ?? BASE_CURRENCY },
-        this.items(),
+        otherCards,
         this.orgOptions() as unknown as OrgNode[],
       );
       this.itemsRes.reload();

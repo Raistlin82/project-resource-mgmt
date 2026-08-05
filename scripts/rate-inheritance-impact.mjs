@@ -188,7 +188,7 @@ async function main() {
   console.log(`INFO  ${resources.length} resources, ${rateCards.length} rate card(s), ${orgNodes.length} org node(s)`);
 
   const EPS = 1e-6; // guard against float noise, not a real difference
-  let rows = 0;
+  const printedRows = []; // { organization, costDelta, billDelta } for the duplicate-signature check below
 
   for (const r of [...resources].sort((a, b) => a.id.localeCompare(b.id))) {
     if (!r.role) continue;
@@ -205,21 +205,55 @@ async function main() {
     const billDiffers = Math.abs((afterBill ?? 0) - (beforeBill ?? 0)) > EPS || (beforeBill === undefined) !== (afterBill === undefined);
     if (!costDiffers && !billDiffers) continue;
 
-    rows++;
     const costBefore = beforeCost === undefined ? '(none)' : eur(beforeCost);
     const costAfter = afterCost === undefined ? '(none)' : eur(afterCost);
     const billBefore = beforeBill === undefined ? '(none)' : eur(beforeBill);
     const billAfter = afterBill === undefined ? '(none)' : eur(afterBill);
-    const costDelta = beforeCost !== undefined && afterCost !== undefined ? ` delta=${eur(afterCost - beforeCost)}` : '';
-    const billDelta = beforeBill !== undefined && afterBill !== undefined ? ` delta=${eur(afterBill - beforeBill)}` : '';
+    // Rounded to 2dp (eur()) BEFORE comparing below -- the duplicate-signature
+    // check is about what a human reads on screen, not float-exact equality.
+    const costDeltaVal = beforeCost !== undefined && afterCost !== undefined ? eur(afterCost - beforeCost) : undefined;
+    const billDeltaVal = beforeBill !== undefined && afterBill !== undefined ? eur(afterBill - beforeBill) : undefined;
+    const costDelta = costDeltaVal !== undefined ? ` delta=${costDeltaVal}` : '';
+    const billDelta = billDeltaVal !== undefined ? ` delta=${billDeltaVal}` : '';
     console.log(
       `DIFF  resource=${r.id} name="${r.name}" role="${r.role}" organization="${r.organization ?? '(none)'}" `
       + `cost: ${costBefore} -> ${costAfter}${costDelta} EUR/day  bill: ${billBefore} -> ${billAfter}${billDelta} EUR/day`,
     );
+    printedRows.push({ organization: r.organization ?? '(none)', costDelta: costDeltaVal, billDelta: billDeltaVal });
+  }
+
+  // ROBUSTNESS AGAINST THE ORDERING NUANCE (round-1 review): running
+  // smoke-api.mjs's own rate-card-inheritance checks before this script
+  // leaves a scoped test resource behind on the SAME organization as a real
+  // seed resource (no DELETE endpoint for resources) -- both then print an
+  // IDENTICAL delta, which is still the CORRECT number for each (not a
+  // wrong-number risk), but a reader who ran the scripts in the undocumented
+  // order sees a row count contradicting the deploy checklist's "exactly one
+  // row" claim with nothing here explaining why. This is the exact signature
+  // of that specific, already-known, harmless case -- warn on it explicitly
+  // rather than only documenting it in the deploy checklist (which a reader
+  // running the script directly may never open).
+  const byGroup = new Map(); // "organization|costDelta|billDelta" -> count
+  for (const row of printedRows) {
+    if (row.costDelta === undefined && row.billDelta === undefined) continue;
+    const key = `${row.organization}|${row.costDelta ?? ''}|${row.billDelta ?? ''}`;
+    byGroup.set(key, (byGroup.get(key) ?? 0) + 1);
+  }
+  for (const [key, count] of byGroup) {
+    if (count < 2) continue;
+    const [organization] = key.split('|');
+    console.log(
+      `WARN  ${count} resources on organization="${organization}" printed the IDENTICAL delta above -- `
+      + `each number is individually correct, but this is the exact signature of running smoke-api.mjs's `
+      + `own rate-card-inheritance checks before this script on the same warm server (it leaves a scoped `
+      + `test resource behind, no DELETE endpoint exists for resources). See docs/architecture/`
+      + `06-deployment-operations.md §11 for why, and re-run against a freshly booted server for the `
+      + `canonical single-resource reading if that is what you expected here.`,
+    );
   }
 
   console.log('---------------------------------------------------------------');
-  console.log(`SUMMARY  ${rows} resource(s) with a differing effective rate (${rateCards.length} rate card(s) on this environment)`);
+  console.log(`SUMMARY  ${printedRows.length} resource(s) with a differing effective rate (${rateCards.length} rate card(s) on this environment)`);
   process.exit(0);
 }
 

@@ -29,16 +29,16 @@ const ORG_NODES: ResourceOrganization[] = [
 
 function setup(
   resources: Resource[] = RESOURCES,
-  orgNodes: ResourceOrganization[] = [],
-  rateCards: RateCard[] = [],
+  orgNodes: ResourceOrganization[] | Observable<ResourceOrganization[]> = [],
+  rateCards: RateCard[] | Observable<RateCard[]> = [],
   assignments$: Observable<Assignment[]> = of([]),
 ) {
   const getResources = vi.fn(() => of(resources));
   const getProjectRoles = vi.fn(() => of([]));
-  const getResourceOrganizations = vi.fn(() => of(orgNodes));
+  const getResourceOrganizations = vi.fn(() => (Array.isArray(orgNodes) ? of(orgNodes) : orgNodes));
   const getCountries = vi.fn(() => of([]));
   const getCities = vi.fn(() => of([]));
-  const getRateCards = vi.fn(() => of(rateCards));
+  const getRateCards = vi.fn(() => (Array.isArray(rateCards) ? of(rateCards) : rateCards));
   const getVendors = vi.fn(() => of(VENDORS));
   const getAssignments = vi.fn(() => assignments$);
   const createResource = vi.fn(() => of({} as Resource));
@@ -425,6 +425,28 @@ describe('ResourcesComponent', () => {
       fixture.componentInstance.form.controls.organization.setValue('Backend');
       fixture.detectChanges();
       expect(fixture.componentInstance.rateCardProvenance()).toBeNull();
+    });
+
+    it('shows the error panel, not a stale/crashing provenance, when rate cards fail to load', async () => {
+      // review round 1 (Important 1): inheritedRate/rateCardProvenance read
+      // this.rateCards()/this.orgOptions() UNGATED -- rxResource.value() THROWS
+      // ResourceValueError when status() === 'error', so without the gate this
+      // would crash the render instead of showing app-list-state's error panel.
+      const { fixture } = setup(RESOURCES, ORG_NODES, throwError(() => new Error('401 Unauthorized')));
+      await flush(fixture);
+      fixture.componentInstance.showForm.set(true);
+      fixture.componentInstance.form.controls.role.setValue('Developer');
+      fixture.componentInstance.form.controls.organization.setValue('Backend');
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.rateFiguresState()).toBe('error');
+      expect(fixture.componentInstance.rateCardProvenance()).toBeNull();
+      const host = fixture.nativeElement as HTMLElement;
+      // Absence pair to the presence assertions elsewhere in this block: no
+      // provenance text, no "No rate card for this role" false confident
+      // claim either -- the error state must render NEITHER.
+      expect(host.querySelector('[data-test="rate-card-provenance"]')).toBeNull();
+      expect(host.textContent).not.toContain('No rate card for this role');
     });
   });
 

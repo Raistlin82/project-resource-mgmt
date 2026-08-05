@@ -352,7 +352,11 @@ const REMOTE_LOCATION = 'Remote';
               </div>
 
               <!-- RATE CARDS (Phase E): cost/bill default to the role's rate card.
-                   Leaving an input empty INHERITS the card; a typed value OVERRIDES it. -->
+                   Leaving an input empty INHERITS the card; a typed value OVERRIDES it.
+                   The inputs themselves always render (a manual override must stay
+                   enterable even if the card lookup below is loading or erroring);
+                   only the placeholder's inherited-value text depends on
+                   inheritedRate(), which is itself gated (see its own doc comment). -->
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label for="res-cost" class="block text-sm font-medium text-ink-secondary mb-1">Cost rate (€/day)</label>
@@ -365,32 +369,34 @@ const REMOTE_LOCATION = 'Remote';
                          [placeholder]="inheritedRate() ? ('Inherited: ' + (inheritedRate()!.billRate | number:'1.0-2')) : 'e.g. 1120'">
                 </div>
               </div>
-              @if (inheritedRate(); as ir) {
-                <p class="-mt-2 text-xs text-[var(--cc-muted)]">
-                  Leave empty to inherit the <strong class="text-ink-secondary">{{ form.controls.role.value }}</strong>
-                  rate card (cost {{ ir.costRate | number:'1.0-2' }} · bill {{ ir.billRate | number:'1.0-2' }} {{ ir.currency }}/day). Enter a value to override.
-                  <span data-test="rate-card-provenance">{{ rateCardProvenance() }}.</span>
-                </p>
-              } @else if (form.controls.role.value) {
-                <p class="-mt-2 text-xs text-[var(--cc-muted)]">No rate card for this role — enter cost/bill rates manually, or define one under Configuration → Rate Cards.</p>
-              }
 
-              <!-- BILLABILITY (rate-card-inheritance block, Task 4): only for an
-                   existing resource — a new one has no id to filter assignments
-                   by. Three-state gated (never a zero standing in for a failed
-                   or still-loading read, design spec §8). -->
-              @if (editingId()) {
-                <app-list-state [loading]="rateFiguresState() === 'loading'" [error]="rateFiguresState() === 'error'"
-                                skeleton="block" label="billability" (retry)="assignmentsRes.reload()">
-                  <ng-template>
-                    @if (billability(); as b) {
-                      <p data-test="resource-billability" class="-mt-2 text-xs text-[var(--cc-muted)]">
-                        Billability to date: cost {{ b.cost | number:'1.0-2' }} · billable {{ b.billable | number:'1.0-2' }} ({{ b.hours | number:'1.0-2' }} h)
-                      </p>
-                    }
-                  </ng-template>
-                </app-list-state>
-              }
+              <!-- RATE CARDS provenance + BILLABILITY (rate-card-inheritance block,
+                   Tasks 3-4, round-1 review Important 1): both surfaces read
+                   rateCardsRes/orgsRes (billability also assignmentsRes/resourcesRes),
+                   so both share ONE app-list-state keyed off rateFiguresState() -- one
+                   shared input list per design spec §6, so neither can independently
+                   render a wrong number or crash while the other is fine. -->
+              <app-list-state [loading]="rateFiguresState() === 'loading'" [error]="rateFiguresState() === 'error'"
+                              skeleton="block" label="rate card details" (retry)="reloadRateFiguresInputs()">
+                <ng-template>
+                  @if (inheritedRate(); as ir) {
+                    <p class="-mt-2 text-xs text-[var(--cc-muted)]">
+                      Leave empty to inherit the <strong class="text-ink-secondary">{{ form.controls.role.value }}</strong>
+                      rate card (cost {{ ir.costRate | number:'1.0-2' }} · bill {{ ir.billRate | number:'1.0-2' }} {{ ir.currency }}/day). Enter a value to override.
+                      <span data-test="rate-card-provenance">{{ rateCardProvenance() }}.</span>
+                    </p>
+                  } @else if (form.controls.role.value) {
+                    <p class="-mt-2 text-xs text-[var(--cc-muted)]">No rate card for this role — enter cost/bill rates manually, or define one under Configuration → Rate Cards.</p>
+                  }
+                  <!-- BILLABILITY: only for an existing resource — a new one has no
+                       id to filter assignments by (design spec §8). -->
+                  @if (editingId() && billability(); as b) {
+                    <p data-test="resource-billability" class="-mt-2 text-xs text-[var(--cc-muted)]">
+                      Billability to date: cost {{ b.cost | number:'1.0-2' }} · billable {{ b.billable | number:'1.0-2' }} EUR ({{ b.hours | number:'1.0-2' }} h)
+                    </p>
+                  }
+                </ng-template>
+              </app-list-state>
 
               <div class="pt-4 flex justify-end gap-3">
                 <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
@@ -523,6 +529,13 @@ export class ResourcesComponent {
     if (!this.auth.authReady() || inputs.some(r => r.isLoading())) return 'loading';
     return 'ready';
   });
+
+  /** Retry target for the shared RATE CARDS + BILLABILITY app-list-state
+   *  (round-1 review, Important 1): reloads every input rateFiguresState()
+   *  depends on, so a retry can never leave one of the two surfaces stale. */
+  reloadRateFiguresInputs(): void {
+    for (const r of this.billabilityInputs()) r.reload();
+  }
 
   /** Cost/billable/hours for the resource being edited (design spec §8) — null
    *  while creating (no id to filter assignments by) or whenever the inputs
@@ -735,8 +748,16 @@ export class ResourcesComponent {
   private roleValue = toSignal(this.form.controls.role.valueChanges, { initialValue: this.form.controls.role.value });
   private orgValue = toSignal(this.form.controls.organization.valueChanges, { initialValue: this.form.controls.organization.value });
   /** The rate card matching the current role+org, walking the org tree for an
-   *  ancestor's card when the resource's own node has none (design spec §2). */
+   *  ancestor's card when the resource's own node has none (design spec §2).
+   *  GATED on rateFiguresState() (round-1 review, Important 1): `rateCards()`/
+   *  `orgOptions()` are rxResource `.value()` accessors, which THROW
+   *  ResourceValueError when the underlying resource's status is 'error' --
+   *  reading them unguarded here crashed this computed (and every template
+   *  expression that reads it, including the always-rendered cost/bill
+   *  placeholders) the instant either read failed. Checking the shared state
+   *  FIRST means this is never even attempted outside 'ready'. */
   inheritedRate = computed<RateCard | null>(() => {
+    if (this.rateFiguresState() !== 'ready') return null;
     const role = this.roleValue() ?? undefined;
     const org = this.orgValue() ?? undefined;
     return pickRateCard(this.rateCards(), role, org, this.orgOptions()) ?? null;

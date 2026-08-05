@@ -159,5 +159,25 @@ describe('ManageRateCardsComponent', () => {
       expect(createRateCard).toHaveBeenCalled();
       expect(fixture.componentInstance.showForm()).toBe(false); // form closed -- save proceeded
     });
+
+    it('editing a card to move it does not false-positive warn about its own pre-edit position', async () => {
+      // Round-1 review (Important 2): this.items() is the stale pre-reload
+      // cache, so on an edit it still holds the OLD copy of the very card
+      // being saved -- conflictingCardMessage has no id parameter to
+      // self-exclude by. The card being edited itself sits on Backend;
+      // moving it to Platform must NOT warn "this role already has a card on
+      // Backend" about itself. This is the ONLY test in this block that
+      // exercises the edit branch of save() -- every other test here calls
+      // openForm() with no argument (create path only).
+      const cardToMove: RateCard = { id: 'MOVE', role: 'Developer', organization: 'Backend', currency: 'EUR', costRate: 700, billRate: 1300 };
+      const { fixture, notifyStub, updateRateCard } = setup(ORG_NODES, [cardToMove]);
+      await flush(fixture);
+      const c = fixture.componentInstance;
+      c.openForm(cardToMove); // EDIT path -- editingId() becomes 'MOVE'
+      c.form.controls.organization.setValue('Platform');
+      c.save();
+      expect(updateRateCard).toHaveBeenCalledWith('MOVE', expect.objectContaining({ organization: 'Platform' }));
+      expect(notifyStub.show).not.toHaveBeenCalledWith(expect.anything(), 'info');
+    });
   });
 });

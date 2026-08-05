@@ -116,4 +116,16 @@ describe('conflictingCardMessage', () => {
     const others = [card('ENG', 'Engineering', 640, 1200, 'USD')];
     expect(conflictingCardMessage({ organization: 'Platform', role: 'Developer', currency: 'EUR' }, others, NODES)).toBeNull();
   });
+
+  it('is silent when the only other card shares the same organization literal (spec §13)', () => {
+    // Not an ancestor, not a descendant -- the SAME node as the card being
+    // saved. The server's own uniqueness rule (role+organization+currency)
+    // would refuse this as a duplicate before conflictingCardMessage is ever
+    // called in the real save flow; this test pins that the function itself
+    // is also correct in isolation, since neither ancestorNames (built from
+    // .slice(1), which excludes the node itself) nor descendantIds' own-id
+    // exclusion (`otherNode.id !== node.id`) ever match the node's own name.
+    const others = [card('PRA', 'Platform', 660, 1250)];
+    expect(conflictingCardMessage({ organization: 'Platform', role: 'Developer', currency: 'EUR' }, others, NODES)).toBeNull();
+  });
 });
