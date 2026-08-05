@@ -67,8 +67,16 @@ export function isActiveInMonth(r: { hireDate?: string; terminationDate?: string
   return true;
 }
 
-export function rollupMonthly(input: RollupInput): CapacityRollup {
-  const { resources, assignments, assignmentDays, assignmentMonths, months, hoursPerDay, holidays } = input;
+/**
+ * Per-resource, per-month {confirmed, planned} hours, aggregated from
+ * assignmentDays weighted by each day's OWN month-row status (B3) — the exact
+ * arithmetic `rollupMonthly` has always used, extracted so `bench.util.ts`'s
+ * `benchRollup` can reuse it verbatim instead of re-deriving it (design spec §4).
+ */
+export function hoursByResourceMonth(
+  input: Pick<RollupInput, 'assignments' | 'assignmentDays' | 'assignmentMonths'>,
+): Map<string, Map<string, { confirmed: number; planned: number }>> {
+  const { assignments, assignmentDays, assignmentMonths } = input;
   const asgById = new Map(assignments.map(a => [a.id, a]));
   const statusByRowId = new Map(assignmentMonths.map(m => [`${m.assignmentId}:${m.month}`, m.status]));
   const byResMonth = new Map<string, Map<string, { confirmed: number; planned: number }>>();
@@ -88,6 +96,12 @@ export function rollupMonthly(input: RollupInput): CapacityRollup {
     if (PLANNED.has(status)) c.planned += d.hours;
     if (CONFIRMED.has(status)) c.confirmed += d.hours;
   }
+  return byResMonth;
+}
+
+export function rollupMonthly(input: RollupInput): CapacityRollup {
+  const { resources, assignments, assignmentDays, assignmentMonths, months, hoursPerDay, holidays } = input;
+  const byResMonth = hoursByResourceMonth({ assignments, assignmentDays, assignmentMonths });
   const targetByMonth = new Map(months.map(m => [m, standardMonthlyHours(m, hoursPerDay, holidays)]));
   const totals: Record<string, CapacityTotals> = {};
   for (const m of months) {

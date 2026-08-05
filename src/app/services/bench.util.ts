@@ -11,6 +11,9 @@
  * exclusive by construction, never merged into one bucket set (spec §5).
  */
 
+import { RollupInput, isActiveInMonth, standardMonthlyHours, hoursByResourceMonth } from './capacity.util';
+import { countsTowardDeliveryCapacity, kindOf } from './resource-kind.util';
+
 export type BenchState = 'BENCH' | 'PARTIAL' | 'ALLOCATED';
 
 /**
@@ -85,4 +88,135 @@ export function availabilityDateFor(
   const firstBench = cells.find(c => c.state === 'BENCH');
   if (firstBench) return { kind: 'date', date: `${firstBench.month}-01` };
   return { kind: 'beyond-horizon', horizonEndMonth: cells[cells.length - 1]?.month ?? '' };
+}
+
+export interface HiringDemandRow { month: string; role: string; hours: number; }
+
+/**
+ * Hiring demand from DUMMY placeholders only (spec §6) — subco rows go to
+ * bench (§4), never here. `hours` is RAW, unrounded; the FTE conversion is a
+ * rendering-only step (§6/§10), never computed here.
+ */
+export function hiringDemandByMonth(
+  resources: readonly { id: string; role: string; kind?: string }[],
+  hoursByResMonth: ReturnType<typeof hoursByResourceMonth>,
+  months: readonly string[],
+): HiringDemandRow[] {
+  const totals = new Map<string, number>(); // key: `${month}:${role}`
+  for (const r of resources) {
+    if (kindOf(r) !== 'dummy') continue;
+    const byMonth = hoursByResMonth.get(r.id);
+    if (!byMonth) continue;
+    for (const m of months) {
+      const cell = byMonth.get(m);
+      if (!cell || cell.planned <= 0) continue;
+      const key = `${m}:${r.role}`;
+      totals.set(key, (totals.get(key) ?? 0) + cell.planned);
+    }
+  }
+  return [...totals.entries()]
+    .map(([key, hours]) => {
+      const [month, role] = key.split(':');
+      return { month, role, hours };
+    })
+    .sort((a, b) => (a.month === b.month ? a.role.localeCompare(b.role) : a.month.localeCompare(b.month)));
+}
+
+export interface BenchCell {
+  state: BenchState;
+  agingBucket?: UnallocatedAgingBucket;
+  upcomingUnallocated: boolean;
+}
+export interface BenchRow {
+  resourceId: string; resourceName: string; kind: 'internal' | 'subco';
+  monthly: Record<string, BenchCell>;
+  availabilityDate: AvailabilityDate;
+}
+export interface BenchRollup {
+  months: string[];
+  internalRows: BenchRow[];
+  subcoRows: BenchRow[];
+  hiringDemand: HiringDemandRow[];
+}
+export const EMPTY_BENCH_ROLLUP: BenchRollup = { months: [], internalRows: [], subcoRows: [], hiringDemand: [] };
+
+export interface BenchRollupInput extends RollupInput {
+  // Narrows `RollupInput['resources']` (which has no `role` — `rollupMonthly`
+  // never needs one) to add the field `hiringDemandByMonth` requires. Kept
+  // local to this interface rather than added to `RollupResource` itself:
+  // widening the shared type would force `role` onto every `rollupMonthly`
+  // fixture across the codebase, most of which omit it.
+  resources: (RollupInput['resources'][number] & { role: string })[];
+  /** The 6 months to return as rows — see the server's window construction (Task 6). */
+  displayMonths: string[];
+}
+
+/**
+ * Composes the whole Block F view: BENCH/PARTIAL/ALLOCATED + aging + the
+ * forward-looking signal + availability, split into `internalRows`/`subcoRows`
+ * by `countsTowardDeliveryCapacity` (NOT `countsTowardInternalCapacity` —
+ * spec §4's whole point: a subco belongs in bench, a dummy never does), plus
+ * `hiringDemand` from the dummy rows this split excludes.
+ *
+ * `input.months` is the WIDER fetch window (2 look-back + 6 shown + 1
+ * look-ahead, spec §8); `input.displayMonths` is the 6 shown months. A
+ * resource gets a row only if active in at least one DISPLAY month — a
+ * DELIBERATE narrowing from `rollupMonthly`'s own `hasAny` gate (which
+ * considers every fetched month): a resource whose only booking falls in the
+ * look-back window (spec §11 fixture 6) must NOT surface a row here.
+ */
+export function benchRollup(input: BenchRollupInput, today: string): BenchRollup {
+  const { resources, months, displayMonths, hoursPerDay, holidays } = input;
+  const hoursByResMonth = hoursByResourceMonth(input);
+  const targetByMonth = new Map(months.map(m => [m, standardMonthlyHours(m, hoursPerDay, holidays)]));
+  const monthIndex = new Map(months.map((m, i) => [m, i]));
+
+  const internalRows: BenchRow[] = [];
+  const subcoRows: BenchRow[] = [];
+
+  for (const r of resources) {
+    const kind = kindOf(r);
+    if (!countsTowardDeliveryCapacity(kind)) continue; // dummy: never in bench (spec §4)
+
+    const activeOf = new Map<string, boolean>();
+    const stateOf = new Map<string, BenchState>();
+    for (const m of months) {
+      const active = isActiveInMonth(r, m);
+      activeOf.set(m, active);
+      if (!active) continue;
+      const cell = hoursByResMonth.get(r.id)?.get(m) ?? { confirmed: 0, planned: 0 };
+      stateOf.set(m, benchStateFor(cell.planned, targetByMonth.get(m)!));
+    }
+
+    if (!displayMonths.some(m => activeOf.get(m))) continue; // never active in a SHOWN month -> no row
+
+    const benchFlags = months.map(m => (activeOf.get(m) ?? false) && stateOf.get(m) === 'BENCH');
+
+    const monthly: Record<string, BenchCell> = {};
+    for (const m of displayMonths) {
+      if (!activeOf.get(m)) continue;
+      const state = stateOf.get(m)!;
+      const cell: BenchCell = { state, upcomingUnallocated: false };
+      if (state === 'BENCH') cell.agingBucket = bucketForMonthsIdle(monthsIdleAt(benchFlags, monthIndex.get(m)!));
+      monthly[m] = cell;
+    }
+    for (const m of displayMonths) {
+      const cell = monthly[m];
+      if (!cell) continue;
+      const idx = monthIndex.get(m)!;
+      const nextMonth = months[idx + 1];
+      const activeNext = nextMonth !== undefined && (activeOf.get(nextMonth) ?? false);
+      const stateNext = nextMonth !== undefined ? stateOf.get(nextMonth) : undefined;
+      cell.upcomingUnallocated = freeingUpNextMonth(activeOf.get(m) ?? false, cell.state, activeNext, stateNext);
+    }
+
+    const cellsInOrder = displayMonths.filter(m => monthly[m] !== undefined).map(m => ({ month: m, state: monthly[m].state }));
+    const row: BenchRow = {
+      resourceId: r.id, resourceName: r.name, kind: kind as 'internal' | 'subco',
+      monthly, availabilityDate: availabilityDateFor(cellsInOrder, today),
+    };
+    if (kind === 'internal') internalRows.push(row); else subcoRows.push(row);
+  }
+
+  return { months: displayMonths, internalRows, subcoRows, hiringDemand: hiringDemandByMonth(resources, hoursByResMonth, displayMonths) };
 }

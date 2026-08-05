@@ -100,3 +100,154 @@ describe('availabilityDateFor (design spec §7 — three branches, in order)', (
     expect(availabilityDateFor(cells, '2026-04-17')).toEqual({ kind: 'beyond-horizon', horizonEndMonth: '2026-05' });
   });
 });
+
+import { resources, assignments, assignmentDays, assignmentMonths, holidays } from '../../db/seed';
+import { benchRollup, hiringDemandByMonth, EMPTY_BENCH_ROLLUP, type BenchRollupInput } from './bench.util';
+import { hoursByResourceMonth } from './capacity.util';
+
+const HOURS_PER_DAY = 8;
+const HOLIDAY_SET = new Set(holidays.map(h => h.id));
+const FETCH_MONTHS = ['2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10'];
+const DISPLAY_MONTHS = ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09'];
+const TODAY = '2026-04-17';
+
+function rollup() {
+  const input: BenchRollupInput = {
+    resources, assignments, assignmentDays, assignmentMonths,
+    months: FETCH_MONTHS, displayMonths: DISPLAY_MONTHS,
+    hoursPerDay: HOURS_PER_DAY, holidays: HOLIDAY_SET,
+  };
+  return benchRollup(input, TODAY);
+}
+
+describe('EMPTY_BENCH_ROLLUP', () => {
+  it('is the all-empty default a rxResource should show before authReady() settles', () => {
+    expect(EMPTY_BENCH_ROLLUP).toEqual({ months: [], internalRows: [], subcoRows: [], hiringDemand: [] });
+  });
+});
+
+describe('hiringDemandByMonth (design spec §6 — dummy-only, raw hours summed per role/month)', () => {
+  const fixtureResources = [
+    { id: 'd1', role: 'Developer', kind: 'dummy' },
+    { id: 'd2', role: 'Developer', kind: 'dummy' },
+    { id: 'd3', role: 'Consultant', kind: 'dummy' },
+    { id: 'i1', role: 'Developer', kind: 'internal' },
+    { id: 's1', role: 'Developer', kind: 'subco' },
+  ];
+  const fixtureHours = new Map([
+    ['d1', new Map([['2026-05', { confirmed: 0, planned: 100 }]])],
+    ['d2', new Map([['2026-05', { confirmed: 0, planned: 50 }]])],
+    ['d3', new Map([['2026-05', { confirmed: 0, planned: 20 }]])],
+    // Deliberately huge, so a wrong predicate that let these through would be obvious.
+    ['i1', new Map([['2026-05', { confirmed: 0, planned: 999 }]])],
+    ['s1', new Map([['2026-05', { confirmed: 0, planned: 999 }]])],
+  ]);
+
+  it('sums planned hours across dummies sharing a role in the same month, excluding internal/subco', () => {
+    const rows = hiringDemandByMonth(fixtureResources, fixtureHours, ['2026-05']);
+    const dev = rows.find(r => r.month === '2026-05' && r.role === 'Developer')!;
+    expect(dev.hours).toBe(150); // d1(100) + d2(50) only — NOT i1's or s1's 999
+    const total = rows.reduce((sum, r) => sum + r.hours, 0);
+    expect(total).toBe(170); // 150 Developer + 20 Consultant; the two 999s never enter
+  });
+  it('a dummy with zero planned hours in a month contributes no row for that month (guards cell.planned <= 0)', () => {
+    const map = new Map([['d1', new Map([['2026-06', { confirmed: 0, planned: 0 }]])]]);
+    const rows = hiringDemandByMonth([{ id: 'd1', role: 'Developer', kind: 'dummy' }], map, ['2026-06']);
+    expect(rows).toEqual([]);
+  });
+  it('a month outside the requested `months` list is never summed, even if the dummy has hours there', () => {
+    const rows = hiringDemandByMonth(fixtureResources, fixtureHours, ['2026-06']); // fixtureHours only has 2026-05
+    expect(rows).toEqual([]);
+  });
+});
+
+describe('benchRollup — seed integration (design spec §11 fixture table)', () => {
+  const out = rollup();
+
+  it('resource 6 (subco): PARTIAL in April, then B/C/D/D/D May-Sep', () => {
+    const row = out.subcoRows.find(r => r.resourceId === '6')!;
+    expect(row).toBeDefined();
+    expect(row.monthly['2026-04'].state).toBe('PARTIAL');
+    expect(row.monthly['2026-04'].agingBucket).toBeUndefined();
+    expect(row.monthly['2026-04'].upcomingUnallocated).toBe(true); // May is BENCH
+    expect(row.monthly['2026-05']).toMatchObject({ state: 'BENCH', agingBucket: 'B' });
+    expect(row.monthly['2026-06']).toMatchObject({ state: 'BENCH', agingBucket: 'C' });
+    expect(row.monthly['2026-07']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
+    expect(row.monthly['2026-08']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
+    expect(row.monthly['2026-09']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
+    expect(row.availabilityDate).toEqual({ kind: 'date', date: '2026-05-01' });
+  });
+  it('resource 6 is in subcoRows ONLY — the case that matters most (spec §11, commit 2cb462b regression class)', () => {
+    expect(out.internalRows.some(r => r.resourceId === '6')).toBe(false);
+  });
+
+  it('resource 4 (dummy): drives hiringDemand for every one of the 6 months, role Developer, hours > 0', () => {
+    for (const m of DISPLAY_MONTHS) {
+      const row = out.hiringDemand.find(h => h.month === m && h.role === 'Developer');
+      expect(row).toBeDefined();
+      expect(row!.hours).toBeGreaterThan(0);
+    }
+  });
+  // The test above alone has a blind spot: resource 7 (Priya, ALSO role
+  // 'Developer', but kind 'internal', ALLOCATED every displayed month) would
+  // satisfy "role Developer, hours > 0 in every month" all by itself even if
+  // the dummy/kind filter in hiringDemandByMonth were flipped to admit
+  // internal resources instead of dummy ones — found by mutation-testing this
+  // exact swap (kindOf(r) !== 'dummy' -> kindOf(r) !== 'internal'), which left
+  // the test above green. This test isolates resource 4's OWN contribution by
+  // comparing hiringDemand's Developer-role total against a total computed
+  // independently from `hoursByResourceMonth` restricted to resource '4' only
+  // (the sole dummy with role Developer in this seed) — a mutation that
+  // substitutes ANY other Developer-role resource's hours breaks the equality.
+  it('the Developer-role hiringDemand total is driven EXACTLY by resource 4 alone, not by any internal Developer (isolates the dummy-kind filter from the "resource 4" test above)', () => {
+    const hoursByResMonth = hoursByResourceMonth({ assignments, assignmentDays, assignmentMonths });
+    for (const m of DISPLAY_MONTHS) {
+      const expected = hoursByResMonth.get('4')?.get(m)?.planned ?? 0;
+      expect(expected).toBeGreaterThan(0); // sanity: the independent computation itself is non-trivial
+      const row = out.hiringDemand.find(h => h.month === m && h.role === 'Developer');
+      expect(row!.hours).toBe(expected);
+    }
+  });
+  it('resource 4 (dummy) NEVER appears in internalRows or subcoRows despite real booked hours', () => {
+    expect(out.internalRows.some(r => r.resourceId === '4')).toBe(false);
+    expect(out.subcoRows.some(r => r.resourceId === '4')).toBe(false);
+  });
+
+  it('resource 5 (dummy, untouched) contributes NO row to hiringDemand — meaningful because resource 4 (also a dummy) DOES', () => {
+    // Not the "bench is empty" trap: with resource 4 already proven above to
+    // populate hiringDemand for all 6 months, this suite's hiringDemand list is
+    // provably non-empty by construction — so 5's absence here is a genuine
+    // negative, not a pass for lack of data anywhere in this test.
+    const resource5Role = resources.find(r => r.id === '5')!.role;
+    const contributedByFive = out.hiringDemand.filter(h => h.role === resource5Role && DISPLAY_MONTHS.includes(h.month));
+    expect(contributedByFive.length).toBe(0);
+  });
+
+  it('resource 7 (new internal): ALLOCATED every shown month, beyond-horizon availability, upcomingUnallocated ONLY via the look-ahead month', () => {
+    const row = out.internalRows.find(r => r.resourceId === '7')!;
+    expect(row).toBeDefined();
+    for (const m of DISPLAY_MONTHS) expect(row.monthly[m].state).toBe('ALLOCATED');
+    expect(row.availabilityDate).toEqual({ kind: 'beyond-horizon', horizonEndMonth: '2026-09' });
+    expect(row.monthly['2026-09'].upcomingUnallocated).toBe(true);
+  });
+
+  it('resource 8 (hired exactly on the anchor month): April is bucket B, not D — the look-back truncation', () => {
+    const row = out.internalRows.find(r => r.resourceId === '8')!;
+    expect(row.monthly['2026-04']).toMatchObject({ state: 'BENCH', agingBucket: 'B' });
+    expect(row.monthly['2026-05']).toMatchObject({ state: 'BENCH', agingBucket: 'C' });
+    expect(row.monthly['2026-06']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
+    expect(row.monthly['2026-09']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
+  });
+
+  it('resource 9 (terminated 2026-03-15) is absent from internalRows for ALL 6 shown months, despite real booked hours in the look-back', () => {
+    expect(out.internalRows.some(r => r.resourceId === '9')).toBe(false);
+  });
+
+  it('sanity check (free, no new fixture needed): Julie/John/Alice are already BENCH in April 2026', () => {
+    for (const id of ['1', '2', '3']) {
+      const row = out.internalRows.find(r => r.resourceId === id)!;
+      expect(row).toBeDefined();
+      expect(row.monthly['2026-04'].state).toBe('BENCH');
+    }
+  });
+});

@@ -1,5 +1,6 @@
 import {
   standardMonthlyHours, fteOf, semaphoreBand, monthsInRange, isActiveInMonth, rollupMonthly,
+  hoursByResourceMonth,
 } from './capacity.util';
 import { workingDaysInMonth } from './calendar.util';
 
@@ -28,6 +29,32 @@ describe('monthsInRange', () => {
     expect(monthsInRange('2026-11', '2027-01')).toEqual(['2026-11', '2026-12', '2027-01']);
   });
   it('single month', () => expect(monthsInRange('2026-05', '2026-05')).toEqual(['2026-05']));
+});
+
+describe('hoursByResourceMonth (extracted so bench.util can reuse the exact same per-cell arithmetic, spec §4)', () => {
+  it('splits confirmed vs planned per resource/month, ignoring a day whose month row is missing', () => {
+    const out = hoursByResourceMonth({
+      assignments: [{ id: 'a1', resourceId: 'r1' }, { id: 'a2', resourceId: 'r1' }],
+      assignmentMonths: [{ assignmentId: 'a1', month: '2026-05', status: 'Allocated' }, { assignmentId: 'a2', month: '2026-05', status: 'Requested' }],
+      assignmentDays: [
+        { assignmentId: 'a1', date: '2026-05-04', hours: 100 },
+        { assignmentId: 'a2', date: '2026-05-05', hours: 40 },
+        { assignmentId: 'a2', date: '2026-06-01', hours: 999 }, // no 'a2:2026-06' month row -> ignored
+      ],
+    });
+    const cell = out.get('r1')!.get('2026-05')!;
+    expect(cell.confirmed).toBe(100);
+    expect(cell.planned).toBe(140);
+    expect(out.get('r1')!.has('2026-06')).toBe(false);
+  });
+  it('ignores non-finite hours (NaN would poison the sum)', () => {
+    const out = hoursByResourceMonth({
+      assignments: [{ id: 'a1', resourceId: 'r1' }],
+      assignmentMonths: [{ assignmentId: 'a1', month: '2026-05', status: 'Requested' }],
+      assignmentDays: [{ assignmentId: 'a1', date: '2026-05-04', hours: Number.NaN }],
+    });
+    expect(out.get('r1')?.get('2026-05')?.planned ?? 0).toBe(0);
+  });
 });
 
 describe('isActiveInMonth (hireDate ≤ monthStart AND (no term OR term ≥ monthStart))', () => {
