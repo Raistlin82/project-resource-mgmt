@@ -628,4 +628,46 @@ describe('ResourcesComponent', () => {
       expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['10']);
     });
   });
+
+  // "Active only" renders inside the SAME bordered toolbar strip as the filter
+  // bar, directly beneath it, with no divider or separate section -- a user
+  // reads it as one more active filter on this list (Block G, Task 9 ruling).
+  // "Clear all" must therefore reset it too, not just the five select facets
+  // and the text query.
+  describe('"Clear all" resets "Active only" (Block G, Task 9 ruling)', () => {
+    it('resets an unchecked "Active only" back to checked, via the REAL "Clear all" button', async () => {
+      const { fixture } = setup();
+      await flush(fixture);
+
+      // Uncheck "Active only" and engage a facet, so activeChips() is
+      // non-empty and the real "Clear all" button actually renders.
+      fixture.componentInstance.activeOnly.set(false);
+      fixture.componentInstance.kindFilter.set('subco');
+      fixture.detectChanges();
+
+      const host = fixture.nativeElement as HTMLElement;
+      const clearAll = host.querySelector('[data-test="filter-bar-clear-all"]') as HTMLButtonElement;
+      expect(clearAll).not.toBeNull();
+      clearAll.click();
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.activeOnly()).toBe(true);
+      expect(fixture.componentInstance.kindFilter()).toBe('');
+    });
+
+    it('leaves "Active only" at its default (true) when it was never touched', async () => {
+      const { fixture } = setup();
+      await flush(fixture);
+
+      fixture.componentInstance.kindFilter.set('subco');
+      fixture.detectChanges();
+
+      const host = fixture.nativeElement as HTMLElement;
+      const clearAll = host.querySelector('[data-test="filter-bar-clear-all"]') as HTMLButtonElement;
+      clearAll.click();
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.activeOnly()).toBe(true);
+    });
+  });
 });

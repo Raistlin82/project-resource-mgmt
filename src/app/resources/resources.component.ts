@@ -670,6 +670,14 @@ export class ResourcesComponent {
     this.practiceFilter.set('');
     this.competenceFilter.set('');
     this.managerFilter.set('');
+    // "Active only" renders directly beneath the filter bar, inside the SAME
+    // bordered toolbar strip -- a user reads it as one more active filter on
+    // this list (it narrows the same rows, and defaults ON so the list is
+    // already filtered on load), not as an independent view-mode toggle
+    // living elsewhere on the page. "Clear all" that left it engaged would be
+    // a false statement about the screen's state. Resets to its declared
+    // field-init default (true), not an arbitrary value.
+    this.activeOnly.set(true);
   }
 
   filteredResources = computed(() => {
