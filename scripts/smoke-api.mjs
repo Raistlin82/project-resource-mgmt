@@ -1371,6 +1371,43 @@ async function checkAssignmentRawReads() {
 }
 
 /**
+ * Block E, Task 3 — the narrow CONTENT check `checkAssignmentRawReads` above
+ * (Block F) does not cover: it pins shape and COUNT only ("a row has
+ * assignmentId/date/hours", "length > 0"), so it stays green even if block
+ * E's own seeded fixture (assignment '12', request '12', resource '2' John
+ * Miller, 2026-10-05, 8h — src/db/seed.ts, Task 1 of the block E plan) stopped
+ * flowing through these two shared endpoints entirely. Additive only: no new
+ * routes, no duplicate client methods, does not touch `checkAssignmentRawReads`
+ * or any route/RBAC Block F owns.
+ */
+async function checkAssignmentDaysAndMonthsCarryBlockESeed() {
+  const days = await req('GET', '/assignment-days');
+  check(
+    "GET /api/assignment-days includes assignment '12''s 2026-10-05 day (8h) — block E's Task 1 seed",
+    Array.isArray(days.body) && days.body.some(d => d.assignmentId === '12' && d.date === '2026-10-05' && d.hours === 8),
+    JSON.stringify(Array.isArray(days.body) ? days.body.filter(d => d.assignmentId === '12') : days.body),
+  );
+
+  const months = await req('GET', '/assignment-months');
+  check(
+    "GET /api/assignment-months includes '12:2026-10' with status Allocated — block E's Task 1 seed",
+    Array.isArray(months.body) && months.body.some(m => m.id === '12:2026-10' && m.status === 'Allocated'),
+    JSON.stringify(Array.isArray(months.body) ? months.body.find(m => m.id === '12:2026-10') : months.body),
+  );
+
+  // Cross-check via the pre-existing /assignments endpoint (not owned by this
+  // task) that the row actually IS resource '2' on request '12', matching the
+  // seed comment in src/db/seed.ts exactly.
+  const assignments = await req('GET', '/assignments');
+  const a12 = Array.isArray(assignments.body) ? assignments.body.find(a => a.id === '12') : undefined;
+  check(
+    "assignment '12' (via /assignments) is booked for resource '2' on request '12'",
+    Boolean(a12) && a12.resourceId === '2' && a12.requestId === '12',
+    JSON.stringify(a12),
+  );
+}
+
+/**
  * B3 — the per-month approval lifecycle. Editing ONE month of an approved
  * assignment must demote only that month; its siblings stay Allocated.
  */
@@ -6080,6 +6117,18 @@ async function main() {
     await checkAssignmentRawReads();
   } catch (err) {
     console.log(`FAIL  assignment raw-reads (Block F/E plumbing) — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the block E content
+  // check (Task 3 — proves the Task 1 seed actually flows through the
+  // shared /assignment-days and /assignment-months endpoints, not just that
+  // the endpoints have the right shape) never masks or blocks any of the
+  // prior section results.
+  try {
+    await checkAssignmentDaysAndMonthsCarryBlockESeed();
+  } catch (err) {
+    console.log(`FAIL  assignment-days/assignment-months carry block E's seed (Task 3) — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 
