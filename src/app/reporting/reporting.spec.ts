@@ -48,6 +48,10 @@ async function setup(resources: Resource[] = RESOURCES, overrides: Partial<ApiSe
     getCustomers: empty,
     getFxRates: empty,
     getNegotiatedRates: empty,
+    // Baseline vs Planned columns (design spec, block E, Task 8).
+    getAssignmentDays: empty,
+    getAssignmentMonths: empty,
+    getCostBaselines: empty,
     // The EUR/day -> EUR/hour divisor for a negotiated rate. 8 is the seeded and
     // default working day, so the figures below read as "one 8h day per day rate".
     getHoursPerDay: () => of({ value: 8 }),
@@ -160,5 +164,78 @@ describe('Reporting — negotiated sell rates reach the rendered T&M figure (Tas
     expect(text).toContain('€1K');
     expect(text).not.toContain('€2K');
     expect(text).not.toContain('€8K');
+  });
+});
+
+describe('Reporting — Baseline vs Planned columns (design spec, block E)', () => {
+  it('renders the hand-verified +120 EUR / +20.00% baseline delta for a project with a frozen October baseline', async () => {
+    const project: Project = { id: 'P1', name: 'Project One', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution' };
+    const resource: Resource = { id: 'R1', name: 'Res', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, costRate: 90, billRate: 180 };
+    const request = { id: 'REQ1', name: 'Req', requiredRole: 'Consultant', requiredEffort: 8, status: 'Fulfilled' as const, skills: [], projectId: 'P1' };
+    const assignment = { id: 'A1', requestId: 'REQ1', resourceId: 'R1', assignedHours: 8, status: 'Allocated' as const };
+    // Revenue is required for marginRows() to include the project at all
+    // (it filters to projects carrying revenue or cost) — an order line gives
+    // it non-zero cost-driver revenue independent of the baseline figures.
+    const order = { id: 'O1', contractId: 'CT1', type: 'Customer' as const, amount: 1000, currency: 'EUR', status: 'Invoiced' as const, orderDate: '2026-01-01' };
+    const line = { id: 'L1', orderId: 'O1', projectId: 'P1', description: 'x', amount: 1000 };
+
+    const fixture = await setup([resource], {
+      getProjects: () => of([project]),
+      getRequests: () => of([request]),
+      getAssignments: () => of([assignment]),
+      getOrders: () => of([order]),
+      getOrderLines: () => of([line]),
+      getAssignmentDays: () => of([{ id: 'A1:2026-10-05', assignmentId: 'A1', date: '2026-10-05', hours: 8 }]),
+      getAssignmentMonths: () => of([{ id: 'A1:2026-10', assignmentId: 'A1', month: '2026-10', status: 'Allocated' as const }]),
+      getCostBaselines: () => of([{ id: 'CB1', projectId: 'P1', period: '2026-10', amount: 600, frozenAt: '2026-09-15T00:00:00.000Z', frozenBy: 'u4' }]),
+    });
+    await flush(fixture);
+
+    // Direct signal check first — a rendered string could coincidentally match
+    // even if the underlying row's fields were wrong.
+    const row = fixture.componentInstance.marginRows().find(r => r.id === 'P1');
+    expect(row, 'the P1 margin row must exist').toBeDefined();
+    expect(row?.pcpBaseline).toBe(600);
+    expect(row?.pcpPlanned).toBe(720);
+    expect(row?.pcpDelta).toBe(120);
+    expect(row?.pcpDeltaPct).toBeCloseTo(20, 5);
+
+    // Rendered DOM, scoped to the Margin & Variance table's own row (not a
+    // whole-page textContent scan, which this large page's many other
+    // percentage cells could coincidentally satisfy).
+    const rows = Array.from(host(fixture).querySelectorAll('table.command-data-table tbody tr'));
+    const projectRow = rows.find(tr => tr.textContent?.includes('Project One'));
+    expect(projectRow, 'the Project One table row must exist').toBeDefined();
+    const rowText = projectRow!.textContent ?? '';
+    expect(rowText).toContain('+20.00%');
+    expect(rowText).toContain('€120');
+  });
+
+  it('renders "—" (never a fabricated percentage) in the PCP Delta % column when a project has no frozen baseline at all', async () => {
+    const project: Project = { id: 'P2', name: 'Project Unfrozen', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution' };
+    const order = { id: 'O2', contractId: 'CT2', type: 'Customer' as const, amount: 500, currency: 'EUR', status: 'Invoiced' as const, orderDate: '2026-01-01' };
+    const line = { id: 'L2', orderId: 'O2', projectId: 'P2', description: 'x', amount: 500 };
+
+    const fixture = await setup([], {
+      getProjects: () => of([project]),
+      getOrders: () => of([order]),
+      getOrderLines: () => of([line]),
+      // getAssignmentDays/getAssignmentMonths/getCostBaselines all default to
+      // empty via setup()'s apiStub — this project has neither booked hours
+      // nor any cost_baselines row, the genuinely-empty case (Task 6's own
+      // hasComparisonRows fix) where costBaselineComparison legitimately
+      // returns [] and every pcp* total is 0/null, never a fabricated number.
+    });
+    await flush(fixture);
+
+    const row = fixture.componentInstance.marginRows().find(r => r.id === 'P2');
+    expect(row, 'the P2 margin row must exist').toBeDefined();
+    expect(row?.pcpBaseline).toBe(0);
+    expect(row?.pcpDeltaPct).toBeNull();
+
+    const rows = Array.from(host(fixture).querySelectorAll('table.command-data-table tbody tr'));
+    const projectRow = rows.find(tr => tr.textContent?.includes('Project Unfrozen'));
+    expect(projectRow, 'the Project Unfrozen table row must exist').toBeDefined();
+    expect(projectRow!.textContent ?? '').toContain('—');
   });
 });

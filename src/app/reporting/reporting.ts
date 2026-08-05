@@ -3,9 +3,9 @@ import { MatIconModule } from '@angular/material/icon';
 import { isPlatformBrowser, CurrencyPipe, DecimalPipe } from '@angular/common';
 import { forkJoin, of, map } from 'rxjs';
 import { rxResource } from '@angular/core/rxjs-interop';
-import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, OrderLine, FinancialItem, TimeEntry, Issue, ChangeRequest, Milestone, BillingPlanItem, Contract, Customer, FxRate, NegotiatedRate, BASE_CURRENCY } from '../services/api.service';
+import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, OrderLine, FinancialItem, TimeEntry, Issue, ChangeRequest, Milestone, BillingPlanItem, Contract, Customer, FxRate, NegotiatedRate, BASE_CURRENCY, AssignmentDay, AssignmentMonth, CostBaseline } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
-import { computeProjectFinancials, FinanceData, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, realizationMetrics, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, recognitionSchedule, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity } from '../services/finance.util';
+import { computeProjectFinancials, costBaselineComparison, FinanceData, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, realizationMetrics, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, recognitionSchedule, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity } from '../services/finance.util';
 import { NotificationService } from '../services/notification.service';
 import { toCsv, downloadCsv } from '../services/export.util';
 import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
@@ -50,6 +50,10 @@ interface ReportingData {
    * fall back to the default-8 assumption instead of the configured value.
    */
   hoursPerDay: number;
+  /** Baseline vs Planned columns (design spec, block E, §7). */
+  assignmentDays: AssignmentDay[];
+  assignmentMonths: AssignmentMonth[];
+  costBaselines: CostBaseline[];
 }
 
 interface ArAgingBarRow extends ArAgingBucketTotal {
@@ -383,7 +387,7 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
 
       <!-- Per-project drill-down with stacked cost-driver mini-bar -->
       @defer (hydrate on viewport) {
-      <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="6" [columns]="10" label="margin &amp; variance" (retry)="reloadData()">
+      <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="6" [columns]="13" label="margin &amp; variance" (retry)="reloadData()">
       <ng-template>
       <div class="command-card overflow-hidden">
         <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-muted">
@@ -413,6 +417,9 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
                 <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">EAC</th>
                 <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">VAC</th>
                 <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Burn %</th>
+                <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Baseline</th>
+                <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Delta</th>
+                <th class="px-4 py-4 font-semibold uppercase tracking-wider text-xs text-right">Delta %</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-line">
@@ -438,10 +445,13 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
                   <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ r.eac | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-positive-text]="r.vac >= 0" [class.text-critical-text]="r.vac < 0">{{ r.vac | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-critical-text]="r.burnPct >= alertThresholds.burnWarnPct" [class.text-ink-secondary]="r.burnPct < alertThresholds.burnWarnPct">{{ r.burnPct | number:'1.0-0' }}%</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ r.pcpBaseline | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-positive-text]="r.pcpDelta <= 0" [class.text-critical-text]="r.pcpDelta > 0">{{ r.pcpDelta | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-5 text-right font-mono tabular-nums">{{ r.pcpDeltaPct !== null ? ((r.pcpDeltaPct > 0 ? '+' : '') + (r.pcpDeltaPct | number:'1.2-2') + '%') : '—' }}</td>
                 </tr>
               } @empty {
                 <tr>
-                  <td colspan="10" class="px-6 sm:px-8 py-8 text-center text-ink-muted text-sm">No projects with revenue or cost yet.</td>
+                  <td colspan="13" class="px-6 sm:px-8 py-8 text-center text-ink-muted text-sm">No projects with revenue or cost yet.</td>
                 </tr>
               }
             </tbody>
@@ -457,6 +467,9 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
                   <td class="px-4 py-4"></td>
                   <td class="px-4 py-4 text-right font-mono tabular-nums">{{ marginTotals().eac | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-positive-text]="marginTotals().vac >= 0" [class.text-critical-text]="marginTotals().vac < 0">{{ marginTotals().vac | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-4"></td>
+                  <td class="px-4 py-4 text-right font-mono tabular-nums">{{ marginTotals().pcpBaseline | currency:'EUR':'symbol':'1.0-0' }}</td>
+                  <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-positive-text]="marginTotals().pcpDelta <= 0" [class.text-critical-text]="marginTotals().pcpDelta > 0">{{ marginTotals().pcpDelta | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-4"></td>
                 </tr>
               </tfoot>
@@ -910,9 +923,16 @@ export class Reporting {
             // independent one so the priced figure never renders from a partial
             // envelope (a money figure must never do that).
             hoursPerDay: this.api.getHoursPerDay().pipe(map(r => r.value)),
+            // Baseline vs Planned columns (design spec, block E, §7) — appended
+            // AFTER hoursPerDay, matching this forkJoin's own established
+            // convention (see the negotiatedRates/hoursPerDay comments above)
+            // so a new leg is never inserted mid-block.
+            assignmentDays: this.api.getAssignmentDays(),
+            assignmentMonths: this.api.getAssignmentMonths(),
+            costBaselines: this.api.getCostBaselines(),
           })
-        : of<ReportingData>({ resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [], negotiatedRates: [], hoursPerDay: DEFAULT_HOURS_PER_DAY }),
-    defaultValue: { resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [], negotiatedRates: [], hoursPerDay: DEFAULT_HOURS_PER_DAY },
+        : of<ReportingData>({ resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [], negotiatedRates: [], hoursPerDay: DEFAULT_HOURS_PER_DAY, assignmentDays: [], assignmentMonths: [], costBaselines: [] }),
+    defaultValue: { resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [], negotiatedRates: [], hoursPerDay: DEFAULT_HOURS_PER_DAY, assignmentDays: [], assignmentMonths: [], costBaselines: [] },
   });
 
   /**
@@ -972,7 +992,7 @@ export class Reporting {
 
   private financeData = computed<FinanceData>(() => {
     const d = this.dataRes.value();
-    return { requests: d.requests, assignments: d.assignments, resources: d.resources, orders: d.orders, orderLines: d.orderLines, financials: d.financials, timeEntries: d.timeEntries, changeRequests: d.changeRequests, projects: d.projects, billingItems: d.billingItems, contracts: d.contracts, customers: d.customers, milestones: d.milestones, fxRates: this.fxRes.value(), negotiatedRates: d.negotiatedRates, hoursPerDay: d.hoursPerDay };
+    return { requests: d.requests, assignments: d.assignments, resources: d.resources, orders: d.orders, orderLines: d.orderLines, financials: d.financials, timeEntries: d.timeEntries, changeRequests: d.changeRequests, projects: d.projects, billingItems: d.billingItems, contracts: d.contracts, customers: d.customers, milestones: d.milestones, fxRates: this.fxRes.value(), negotiatedRates: d.negotiatedRates, hoursPerDay: d.hoursPerDay, assignmentDays: d.assignmentDays, assignmentMonths: d.assignmentMonths, costBaselines: d.costBaselines };
   });
 
   /** Real per-project profitability (revenue/margin) from the commercial + finance data. */
@@ -1023,6 +1043,15 @@ export class Reporting {
         const md = marginDrivers(p.id, d);
         const f = computeProjectFinancials(p.id, d);
         const totalCost = md.laborCost + md.externalCost + md.expenseCost;
+        // Baseline vs Planned columns (design spec, block E, §7). Rule A
+        // (Task 4/6/7, coordinator-confirmed): pcpDeltaPct is null ONLY when
+        // pcpBaseline = 0 (never frozen or frozen explicitly at zero) — a
+        // descoped month with a nonzero baseline still renders a real,
+        // well-defined percentage, never an em dash.
+        const baselineRows = costBaselineComparison(d, p.id);
+        const pcpBaseline = baselineRows.reduce((s, r) => s + r.baseline, 0);
+        const pcpPlanned = baselineRows.reduce((s, r) => s + r.planned, 0);
+        const pcpDelta = pcpPlanned - pcpBaseline;
         return {
           id: p.id,
           name: p.name,
@@ -1035,6 +1064,10 @@ export class Reporting {
           eac: f.eac,
           vac: f.varianceAtCompletion,
           burnPct: f.burnPct,
+          pcpBaseline,
+          pcpPlanned,
+          pcpDelta,
+          pcpDeltaPct: pcpBaseline !== 0 ? (pcpDelta / pcpBaseline) * 100 : null,
           // Stacked cost-driver mini-bar widths (% of this row's total cost; 0 when no cost).
           laborW: totalCost > 0 ? (md.laborCost / totalCost) * 100 : 0,
           externalW: totalCost > 0 ? (md.externalCost / totalCost) * 100 : 0,
@@ -1056,6 +1089,9 @@ export class Reporting {
       margin: rows.reduce((s, r) => s + r.margin, 0),
       eac: rows.reduce((s, r) => s + r.eac, 0),
       vac: rows.reduce((s, r) => s + r.vac, 0),
+      pcpBaseline: rows.reduce((s, r) => s + r.pcpBaseline, 0),
+      pcpPlanned: rows.reduce((s, r) => s + r.pcpPlanned, 0),
+      pcpDelta: rows.reduce((s, r) => s + r.pcpDelta, 0),
     };
   });
 
@@ -1434,6 +1470,9 @@ export class Reporting {
       { key: 'eac', header: `EAC (${cur} base)`, map: r => r.eac.toFixed(2) },
       { key: 'vac', header: `VAC (${cur} base)`, map: r => r.vac.toFixed(2) },
       { key: 'burnPct', header: 'Burn %', map: r => r.burnPct.toFixed(0) },
+      { key: 'pcpBaseline', header: `PCP Baseline (${cur} base)`, map: r => r.pcpBaseline.toFixed(2) },
+      { key: 'pcpDelta', header: `PCP Delta (${cur} base)`, map: r => r.pcpDelta.toFixed(2) },
+      { key: 'pcpDeltaPct', header: 'PCP Delta %', map: r => r.pcpDeltaPct !== null ? r.pcpDeltaPct.toFixed(2) : '—' },
     ]);
     downloadCsv('Margin_And_Variance.csv', csv);
     this.notificationService.show('Margin & variance exported', 'success');
