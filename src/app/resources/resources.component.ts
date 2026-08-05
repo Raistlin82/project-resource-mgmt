@@ -22,6 +22,7 @@ import { dimensionsOf } from '../services/org-scope.util';
 import { pickRateCard } from '../services/rate-card.util';
 import { resourceBillability, type FinanceData } from '../services/finance.util';
 import { todayLocalIso } from '../services/local-date.util';
+import { SearchFilterBarComponent, type Facet } from '../shared/search-filter-bar.component';
 
 /** Today as an ISO 'YYYY-MM-DD' string, used for status derivation + the terminate default. */
 function todayIso(): string {
@@ -48,7 +49,7 @@ const REMOTE_LOCATION = 'Remote';
 @Component({
   selector: 'app-resources',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective, ListStateComponent, ResourceKindBadgeComponent, DecimalPipe],
+  imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective, ListStateComponent, ResourceKindBadgeComponent, DecimalPipe, SearchFilterBarComponent],
   template: `
     <div class="max-w-6xl mx-auto space-y-8">
       <div class="flex items-center justify-between">
@@ -64,67 +65,20 @@ const REMOTE_LOCATION = 'Remote';
 
       <div class="command-card overflow-hidden">
         <div class="p-4 border-b border-[var(--cc-line)] flex flex-col gap-4 bg-[var(--cc-panel-muted)]">
-          <div class="flex flex-col sm:flex-row gap-4">
-            <div class="flex-1 relative">
-              <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted">search</mat-icon>
-              <input type="text" placeholder="Search resources..."
-                     [ngModel]="search()" (ngModelChange)="search.set($event)"
-                     aria-label="Search resources"
-                     class="w-full pl-10 pr-4 py-2 bg-surface focus:bg-surface border border-line-strong rounded-xl text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:ring-2 focus:ring-accent/25 transition-all outline-none">
-            </div>
-            <label class="inline-flex items-center gap-2 text-sm font-medium text-ink-secondary select-none">
-              <input type="checkbox" [ngModel]="activeOnly()" (ngModelChange)="activeOnly.set($event)"
-                     aria-label="Show active resources only"
-                     class="size-4 rounded border-line-strong text-accent focus:ring-2 focus:ring-accent/25">
-              Active only
-            </label>
-            <!-- Kind filter (C1): isolate internal / dummy / subco rows. -->
-            <select [ngModel]="kindFilter()" (ngModelChange)="kindFilter.set($event)"
-                    aria-label="Filter by kind" class="command-select sm:w-52">
-              <option value="">All kinds</option>
-              @for (opt of resourceKindOptions; track opt.value) {
-                <option [value]="opt.value">{{ opt.label }}</option>
-              }
-            </select>
-          </div>
-          <!-- Capability / Practice / Competence / People Manager filters (D, Task 8).
-               Derived through dimensionsOf, so a capability filter also matches a
-               resource attached BELOW it (e.g. a competence two levels down) — never
-               a raw equality check against r.organization. These <select>s load their
-               <option>s from an async rxResource, so per the established trap they use
-               (change) + per-option [selected] rather than [value]/[ngModel] on the
-               <select> itself (that binding is applied before the @for's <option>s
-               exist and is silently dropped). -->
-          <div class="flex flex-col sm:flex-row gap-4">
-            <select (change)="onCapabilityChange($event)" aria-label="Filter by capability"
-                    data-test="capability-filter" class="command-select sm:w-48">
-              <option value="" [selected]="capabilityFilter() === ''">All capabilities</option>
-              @for (name of capabilityOptions(); track name) {
-                <option [value]="name" [selected]="name === capabilityFilter()">{{ name }}</option>
-              }
-            </select>
-            <select (change)="onPracticeChange($event)" aria-label="Filter by practice"
-                    data-test="practice-filter" class="command-select sm:w-48">
-              <option value="" [selected]="practiceFilter() === ''">All practices</option>
-              @for (name of practiceOptions(); track name) {
-                <option [value]="name" [selected]="name === practiceFilter()">{{ name }}</option>
-              }
-            </select>
-            <select (change)="onCompetenceChange($event)" aria-label="Filter by competence"
-                    data-test="competence-filter" class="command-select sm:w-48">
-              <option value="" [selected]="competenceFilter() === ''">All competences</option>
-              @for (name of competenceOptions(); track name) {
-                <option [value]="name" [selected]="name === competenceFilter()">{{ name }}</option>
-              }
-            </select>
-            <select (change)="onManagerFilterChange($event)" aria-label="Filter by People Manager"
-                    data-test="manager-filter" class="command-select sm:w-48">
-              <option value="" [selected]="managerFilter() === ''">All people managers</option>
-              @for (m of managerFilterOptions(); track m.id) {
-                <option [value]="m.id" [selected]="m.id === managerFilter()">{{ m.name }}</option>
-              }
-            </select>
-          </div>
+          <app-search-filter-bar
+            [query]="search()"
+            [facets]="filterFacets()"
+            placeholder="Search by name, role, organization, or location..."
+            (queryChange)="search.set($event)"
+            (facetChange)="onFacetChange($event)"
+            (clearAll)="clearAllFilters()"
+          />
+          <label class="inline-flex items-center gap-2 text-sm font-medium text-ink-secondary select-none">
+            <input type="checkbox" [ngModel]="activeOnly()" (ngModelChange)="activeOnly.set($event)"
+                   aria-label="Show active resources only"
+                   class="size-4 rounded border-line-strong text-accent focus:ring-2 focus:ring-accent/25">
+            Active only
+          </label>
         </div>
 
         <app-list-state
@@ -683,17 +637,39 @@ export class ResourcesComponent {
       .sort((a, b) => a.name.localeCompare(b.name));
   });
 
-  onCapabilityChange(event: Event): void {
-    this.capabilityFilter.set((event.target as HTMLSelectElement).value);
+  // Block G (Task 9): the facet-list projection SearchFilterBarComponent renders.
+  // Builds from the SAME existing option sources above -- no new filtering logic,
+  // only a re-shaping of the six pre-existing predicates into one Facet[].
+  // allLabel on each facet reproduces this screen's OWN pre-migration wording
+  // byte-for-byte (verified against the bespoke markup this task replaces) --
+  // English pluralization is not mechanical, so the shared component's
+  // generic "All <label>" fallback would silently ship "All Kind"/"All
+  // Capability"/"All Practice"/"All Competence"/"All People Manager" instead.
+  protected filterFacets = computed<Facet[]>(() => [
+    { id: 'kind', label: 'Kind', allLabel: 'All kinds', value: this.kindFilter(), options: this.resourceKindOptions.map(o => ({ value: o.value, label: o.label })) },
+    { id: 'capability', label: 'Capability', allLabel: 'All capabilities', value: this.capabilityFilter(), options: this.capabilityOptions().map(name => ({ value: name, label: name })) },
+    { id: 'practice', label: 'Practice', allLabel: 'All practices', value: this.practiceFilter(), options: this.practiceOptions().map(name => ({ value: name, label: name })) },
+    { id: 'competence', label: 'Competence', allLabel: 'All competences', value: this.competenceFilter(), options: this.competenceOptions().map(name => ({ value: name, label: name })) },
+    { id: 'manager', label: 'People Manager', allLabel: 'All people managers', value: this.managerFilter(), options: this.managerFilterOptions().map(m => ({ value: m.id, label: m.name })) },
+  ]);
+
+  protected onFacetChange(event: { id: string; value: string }): void {
+    switch (event.id) {
+      case 'kind': this.kindFilter.set(event.value as '' | ResourceKind); break;
+      case 'capability': this.capabilityFilter.set(event.value); break;
+      case 'practice': this.practiceFilter.set(event.value); break;
+      case 'competence': this.competenceFilter.set(event.value); break;
+      case 'manager': this.managerFilter.set(event.value); break;
+    }
   }
-  onPracticeChange(event: Event): void {
-    this.practiceFilter.set((event.target as HTMLSelectElement).value);
-  }
-  onCompetenceChange(event: Event): void {
-    this.competenceFilter.set((event.target as HTMLSelectElement).value);
-  }
-  onManagerFilterChange(event: Event): void {
-    this.managerFilter.set((event.target as HTMLSelectElement).value);
+
+  protected clearAllFilters(): void {
+    this.search.set('');
+    this.kindFilter.set('');
+    this.capabilityFilter.set('');
+    this.practiceFilter.set('');
+    this.competenceFilter.set('');
+    this.managerFilter.set('');
   }
 
   filteredResources = computed(() => {

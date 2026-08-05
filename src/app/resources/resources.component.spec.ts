@@ -27,6 +27,18 @@ const ORG_NODES: ResourceOrganization[] = [
   { id: '6', name: 'Backend', description: '', costCenters: [], level: 'competence', parentId: '5' },
 ];
 
+/** Jane Doe sits on Backend (competence, two levels under Engineering);
+ *  John Miller sits directly on Consulting (a capability with no children).
+ *  Each has a distinct People Manager, so the manager filter has something
+ *  to discriminate on too. */
+const ORG_RESOURCES: Resource[] = [
+  { id: '10', name: 'Jane Doe', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal', organization: 'Backend', managerId: 'm1' },
+  { id: '11', name: 'John Miller', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal', organization: 'Consulting', managerId: 'm2' },
+  { id: 'm1', name: 'Mona Manager', role: 'Delivery Lead', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal' },
+  { id: 'm2', name: 'Nora Manager', role: 'Delivery Lead', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal' },
+];
+
+
 function setup(
   resources: Resource[] = RESOURCES,
   orgNodes: ResourceOrganization[] | Observable<ResourceOrganization[]> = [],
@@ -206,17 +218,6 @@ describe('ResourcesComponent', () => {
   });
 
   describe('org-dimension and people-manager filters (D, Task 8)', () => {
-    /** Jane Doe sits on Backend (competence, two levels under Engineering);
-     *  John Miller sits directly on Consulting (a capability with no children).
-     *  Each has a distinct People Manager, so the manager filter has something
-     *  to discriminate on too. */
-    const ORG_RESOURCES: Resource[] = [
-      { id: '10', name: 'Jane Doe', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal', organization: 'Backend', managerId: 'm1' },
-      { id: '11', name: 'John Miller', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal', organization: 'Consulting', managerId: 'm2' },
-      { id: 'm1', name: 'Mona Manager', role: 'Delivery Lead', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal' },
-      { id: 'm2', name: 'Nora Manager', role: 'Delivery Lead', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal' },
-    ];
-
     it('filters the list by capability', async () => {
       // Fixture: one resource on 'Backend' (competence under Platform under Engineering),
       // one on 'Consulting' (a capability of its own).
@@ -235,7 +236,7 @@ describe('ResourcesComponent', () => {
       const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
       await flush(fixture);
       const host = fixture.nativeElement as HTMLElement;
-      const opts = [...host.querySelectorAll<HTMLOptionElement>('[data-test="capability-filter"] option')]
+      const opts = [...host.querySelectorAll<HTMLOptionElement>('[data-test="filter-bar-facet-capability"] option')]
         .map(o => o.value);
       expect(opts).toEqual(['', 'Engineering', 'Consulting']);   // '' = all
     });
@@ -263,7 +264,7 @@ describe('ResourcesComponent', () => {
       await flush(fixture);
 
       const host = fixture.nativeElement as HTMLElement;
-      const opts = [...host.querySelectorAll<HTMLOptionElement>('[data-test="manager-filter"] option')]
+      const opts = [...host.querySelectorAll<HTMLOptionElement>('[data-test="filter-bar-facet-manager"] option')]
         .map(o => o.textContent?.trim());
       expect(opts).toEqual(['All people managers', 'Mona Manager', 'Nora Manager']);
 
@@ -507,6 +508,124 @@ describe('ResourcesComponent', () => {
       expect(fixture.componentInstance.billability()).toBeNull();
       const host = fixture.nativeElement as HTMLElement;
       expect(host.querySelector('[data-test="resource-billability"]')).toBeNull();
+  // Block G, Task 9: the migration to SearchFilterBarComponent silently changed
+  // FOUR of these five facets' "All X" wording (nothing was asserting it) before
+  // this block was added -- only the manager facet had a pre-existing test, which
+  // is why that one alone caught the regression. These assert all five, plus each
+  // facet's aria-label (the shared component's generic aria-label dropped the
+  // "Filter by " prefix every original bespoke <select> carried).
+  describe('facet wording and accessibility (Block G, Task 9 -- reproduces this screen\'s own pre-migration text, verified against resources.component.ts before the migration)', () => {
+    it('Kind facet: "All kinds" pseudo-option and "Filter by Kind" aria-label', async () => {
+      const { fixture } = setup();
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const select = host.querySelector('[data-test="filter-bar-facet-kind"]') as HTMLSelectElement;
+      expect(select.getAttribute('aria-label')).toBe('Filter by Kind');
+      expect(select.querySelector('option')!.textContent?.trim()).toBe('All kinds');
+    });
+
+    it('Capability facet: "All capabilities" pseudo-option and "Filter by Capability" aria-label', async () => {
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const select = host.querySelector('[data-test="filter-bar-facet-capability"]') as HTMLSelectElement;
+      expect(select.getAttribute('aria-label')).toBe('Filter by Capability');
+      expect(select.querySelector('option')!.textContent?.trim()).toBe('All capabilities');
+    });
+
+    it('Practice facet: "All practices" pseudo-option and "Filter by Practice" aria-label', async () => {
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const select = host.querySelector('[data-test="filter-bar-facet-practice"]') as HTMLSelectElement;
+      expect(select.getAttribute('aria-label')).toBe('Filter by Practice');
+      expect(select.querySelector('option')!.textContent?.trim()).toBe('All practices');
+    });
+
+    it('Competence facet: "All competences" pseudo-option and "Filter by Competence" aria-label', async () => {
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const select = host.querySelector('[data-test="filter-bar-facet-competence"]') as HTMLSelectElement;
+      expect(select.getAttribute('aria-label')).toBe('Filter by Competence');
+      expect(select.querySelector('option')!.textContent?.trim()).toBe('All competences');
+    });
+
+    it('People Manager facet: "All people managers" pseudo-option (byte-identical to pre-migration) and "Filter by People Manager" aria-label', async () => {
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const select = host.querySelector('[data-test="filter-bar-facet-manager"]') as HTMLSelectElement;
+      expect(select.getAttribute('aria-label')).toBe('Filter by People Manager');
+      expect(select.querySelector('option')!.textContent?.trim()).toBe('All people managers');
+    });
+  });
+
+  // Block G, Task 9: every OTHER test in this file that exercises a facet sets
+  // the underlying signal directly (e.g. `kindFilter.set('subco')`), bypassing
+  // `onFacetChange` entirely. That leaves the actual (change) -> onFacetChange
+  // dispatch wired in the template UNEXERCISED -- a typo'd case label (e.g.
+  // 'kindx' instead of 'kind') would ship with all 20 other tests green. These
+  // drive a REAL DOM change event through each <select> instead.
+  describe('facet (change) events reach onFacetChange (Block G, Task 9)', () => {
+    it('selecting "Subco" in the Kind select narrows the list via onFacetChange', async () => {
+      const { fixture } = setup();
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const select = host.querySelector('[data-test="filter-bar-facet-kind"]') as HTMLSelectElement;
+      select.value = 'subco';
+      select.dispatchEvent(new Event('change'));
+      fixture.detectChanges();
+      expect(fixture.componentInstance.kindFilter()).toBe('subco');
+      expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['6']);
+    });
+
+    it('selecting "Engineering" in the Capability select narrows the list via onFacetChange', async () => {
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const select = host.querySelector('[data-test="filter-bar-facet-capability"]') as HTMLSelectElement;
+      select.value = 'Engineering';
+      select.dispatchEvent(new Event('change'));
+      fixture.detectChanges();
+      expect(fixture.componentInstance.capabilityFilter()).toBe('Engineering');
+      expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['10']);
+    });
+
+    it('selecting "Platform" in the Practice select narrows the list via onFacetChange', async () => {
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const select = host.querySelector('[data-test="filter-bar-facet-practice"]') as HTMLSelectElement;
+      select.value = 'Platform';
+      select.dispatchEvent(new Event('change'));
+      fixture.detectChanges();
+      expect(fixture.componentInstance.practiceFilter()).toBe('Platform');
+      expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['10']);
+    });
+
+    it('selecting "Backend" in the Competence select narrows the list via onFacetChange', async () => {
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const select = host.querySelector('[data-test="filter-bar-facet-competence"]') as HTMLSelectElement;
+      select.value = 'Backend';
+      select.dispatchEvent(new Event('change'));
+      fixture.detectChanges();
+      expect(fixture.componentInstance.competenceFilter()).toBe('Backend');
+      expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['10']);
+    });
+
+    it('selecting "Mona Manager" in the People Manager select narrows the list via onFacetChange', async () => {
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const select = host.querySelector('[data-test="filter-bar-facet-manager"]') as HTMLSelectElement;
+      select.value = 'm1';
+      select.dispatchEvent(new Event('change'));
+      fixture.detectChanges();
+      expect(fixture.componentInstance.managerFilter()).toBe('m1');
+      expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['10']);
     });
   });
 });

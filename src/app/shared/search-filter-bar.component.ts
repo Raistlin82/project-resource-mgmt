@@ -6,6 +6,18 @@ export interface Facet {
   label: string;
   options: readonly FacetOption[];
   value: string; // '' means "no filter" for this facet
+  /**
+   * Text for the "show everything" pseudo-option, e.g. "All kinds". Optional,
+   * defaulting to `All ${label}` — but English pluralization is NOT mechanical
+   * ("All Kind" / "All People Manager" read wrong), so any consumer migrating
+   * an EXISTING screen with its own hand-written wording must supply this
+   * explicitly to stay byte-identical to what the screen rendered before.
+   * `label` itself feeds the `<select>`'s `aria-label` too (via "Filter by
+   * <label>") — a single string cannot correctly serve both jobs, which is
+   * why this is a second, independent field rather than a pluralization
+   * helper applied to `label`.
+   */
+  allLabel?: string;
 }
 
 /**
@@ -35,11 +47,11 @@ export interface Facet {
         @for (facet of facets(); track facet.id) {
           <select
             [attr.data-test]="'filter-bar-facet-' + facet.id"
-            [attr.aria-label]="facet.label"
+            [attr.aria-label]="'Filter by ' + facet.label"
             class="command-select sm:w-48"
             (change)="facetChange.emit({ id: facet.id, value: $any($event.target).value })"
           >
-            <option value="" [selected]="facet.value === ''">All {{ facet.label }}</option>
+            <option value="" [selected]="facet.value === ''">{{ allLabelFor(facet) }}</option>
             @for (opt of facet.options; track opt.value) {
               <option [value]="opt.value" [selected]="opt.value === facet.value">{{ opt.label }}</option>
             }
@@ -85,5 +97,12 @@ export class SearchFilterBarComponent {
   protected removeChip(key: string): void {
     if (key === 'query') { this.queryChange.emit(''); return; }
     this.facetChange.emit({ id: key, value: '' });
+  }
+
+  /** `facet.allLabel` if the consumer supplied one (migrating a screen with its
+   *  own existing wording); otherwise a generic `All <label>` fallback for a
+   *  brand-new facet that has no prior wording to preserve. */
+  protected allLabelFor(facet: Facet): string {
+    return facet.allLabel ?? `All ${facet.label}`;
   }
 }
