@@ -287,3 +287,42 @@ describe('benchRollup — seed integration (design spec §11 fixture table)', ()
     }
   });
 });
+
+// Neither seed fixture exercises a resource active for only PART of the
+// display window: resource 8 is hired exactly on the anchor month (active
+// every displayed month), and resource 9 is inactive for the whole window
+// (caught by the outer `displayMonths.some(...)` guard before `monthly` is
+// even built). A hire landing mid-quarter — an ordinary production case, not
+// a contrived one — exercises the per-month `if (!activeOf.get(m)) continue;`
+// guard (bench.util.ts) that must leave SOME display-month keys genuinely
+// ABSENT from `monthly` rather than present with a placeholder/undefined
+// state. Built as a standalone fixture here (not a new seed row) precisely so
+// Task 1's verified seed is never perturbed.
+describe('benchRollup — resource active for only part of the display window (hired mid-quarter)', () => {
+  const midWindowResources = [
+    { id: 'x1', name: 'Mid-Quarter Hire', role: 'Developer', kind: 'internal', hireDate: '2026-06-15' },
+  ];
+  const input: BenchRollupInput = {
+    resources: midWindowResources,
+    assignments: [], assignmentDays: [], assignmentMonths: [],
+    months: FETCH_MONTHS, displayMonths: DISPLAY_MONTHS,
+    hoursPerDay: HOURS_PER_DAY, holidays: HOLIDAY_SET,
+  };
+  const out = benchRollup(input, TODAY);
+  const row = out.internalRows.find(r => r.resourceId === 'x1')!;
+
+  it('is active for only the back half of the 6 display months: the earlier ones are genuinely ABSENT keys, not zeroed cells', () => {
+    expect(row).toBeDefined();
+    // hireDate 2026-06-15: inactive for Apr/May/Jun (isActiveInMonth requires
+    // hireDate <= monthStart), active from Jul onward.
+    expect(row.monthly['2026-04']).toBeUndefined();
+    expect(row.monthly['2026-05']).toBeUndefined();
+    expect(row.monthly['2026-06']).toBeUndefined();
+    expect(Object.keys(row.monthly)).toEqual(['2026-07', '2026-08', '2026-09']);
+  });
+  it('the present months classify correctly once active: BENCH throughout (no bookings), aging B/C/D counted from the hire month forward, never from the inactive months before it', () => {
+    expect(row.monthly['2026-07']).toMatchObject({ state: 'BENCH', agingBucket: 'B' });
+    expect(row.monthly['2026-08']).toMatchObject({ state: 'BENCH', agingBucket: 'C' });
+    expect(row.monthly['2026-09']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
+  });
+});
