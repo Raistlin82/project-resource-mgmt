@@ -780,10 +780,13 @@ export const negotiatedRates: NegotiatedRate[] = [
 // exceeds it -> delta +120 EUR / +20.00%, the "spending more than planned"
 // case this block exists to surface.
 // 'CB2' has NO assignmentDay in project '1' for November in this seed ->
-// planned = 0, delta = 0 - 500 = -500 EUR, deltaPct: null (rendered '—') —
-// the descoped-month case (design spec §4). This holds across block F's
-// assignments '7'-'11' too (all on project '1', all Jan-Sep 2026) — none of
-// them reaches November either.
+// planned = 0, delta = 0 - 500 = -500 EUR, deltaPct = -100.00% (rendered
+// normally, NEVER an em dash: the baseline here is 500, not 0, so the
+// "null only when baseline = 0" rule (design spec §4 line 139 / §9) does not
+// apply — the whole baseline evaporated, which is the loudest variance this
+// block exists to surface) — the descoped-month case (design spec §4). This
+// holds across block F's assignments '7'-'11' too (all on project '1', all
+// Jan-Sep 2026) — none of them reaches November either.
 // Free, from existing seed data: assignments '1'/'2' of project '1' (May-Aug
 // 2026) carry no cost_baselines row at all, exercising
 // outOfBaselineHorizon: true for those four months with no new fixture.
