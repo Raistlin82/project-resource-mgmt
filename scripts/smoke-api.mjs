@@ -5837,6 +5837,125 @@ async function checkResourceManagerCycle() {
 }
 
 /**
+ * Rate-card inheritance (design spec §2, plan Task 2) — end-to-end through the
+ * real HTTP surface, on the seed's OWN Engineering > Platform > Backend tree
+ * and the seed's OWN RC_DEV_ENG card. Does not need a new seed row (that is
+ * Task 7's concern, for the impact report, not this one). Rate cards created
+ * here are deleted at the end (checks 4 and 8); the resource created in check
+ * 2 is left in place — resources have no DELETE endpoint (logical deletion
+ * only), matching the established checkResourceKinds precedent of creating
+ * scoped resources with no cleanup.
+ */
+async function checkRateCardInheritance() {
+  // 1) A new card on Platform (a practice — nearer to Backend than Engineering).
+  const platformCard = await req('POST', '/rate-cards', {
+    body: { role: 'Developer', organization: 'Platform', currency: 'EUR', costRate: 660, billRate: 1250 },
+  });
+  check(
+    "POST /api/rate-cards {role:'Developer', organization:'Platform', currency:'EUR', costRate:660, billRate:1250} -> 200",
+    platformCard.status === 200 && platformCard.body?.organization === 'Platform',
+    `status=${platformCard.status}, body=${JSON.stringify(platformCard.body)}`,
+  );
+  const platformCardId = typeof platformCard.body?.id === 'string' ? platformCard.body.id : undefined;
+
+  // 2) A fresh resource attached to Backend (a competence, under Platform, under Engineering).
+  const createdResource = await req('POST', '/resources', {
+    body: {
+      name: 'RC-Inheritance smoke — Backend', role: 'Developer', organization: 'Backend',
+      skills: [], projectRoles: [], externalExperience: [], capacity: 40, hireDate: '2026-02-15',
+    },
+  });
+  check(
+    'POST /api/resources — fresh Developer on Backend -> 201',
+    createdResource.status === 201,
+    `status=${createdResource.status}, body=${JSON.stringify(createdResource.body)}`,
+  );
+  const backendResourceId = typeof createdResource.body?.id === 'string' ? createdResource.body.id : undefined;
+
+  // 3) With Platform's card in place, resolution must prefer it — the nearest
+  //    ancestor — over Engineering's RC_DEV_ENG (640/1200) and the generic
+  //    RC_DEV (600/1120). This is the check that fails against the
+  //    exact-match-only resolver that shipped before this block.
+  if (backendResourceId) {
+    const { status, body } = await req('GET', `/resources/${backendResourceId}`);
+    check(
+      'GET /api/resources/:id — Backend resource resolves the NEAREST ancestor card (Platform, 660/1250), not Engineering or the generic card',
+      status === 200 && body?.costRateDay === 660 && body?.billRateDay === 1250,
+      `status=${status}, costRateDay=${body?.costRateDay}, billRateDay=${body?.billRateDay}`,
+    );
+  } else {
+    check('GET /api/resources/:id — Backend resource resolves Platform\'s card', false, 'no resource id from check 2');
+  }
+
+  // 4) Remove Platform's card — cleanup, and sets up check 5.
+  if (platformCardId) {
+    const del = await req('DELETE', `/rate-cards/${platformCardId}`);
+    check(`DELETE /api/rate-cards/${platformCardId} (Platform card) -> 204`, del.status === 204, `status=${del.status}`);
+  }
+
+  // 5) With Platform's card gone, resolution re-walks to Engineering's
+  //    RC_DEV_ENG — proves the walk is live on every read, not cached at
+  //    creation time.
+  if (backendResourceId) {
+    const { status, body } = await req('GET', `/resources/${backendResourceId}`);
+    check(
+      'GET /api/resources/:id — after Platform\'s card is removed, falls through to Engineering\'s RC_DEV_ENG (640/1200)',
+      status === 200 && body?.costRateDay === 640 && body?.billRateDay === 1200,
+      `status=${status}, costRateDay=${body?.costRateDay}, billRateDay=${body?.billRateDay}`,
+    );
+  } else {
+    check('GET /api/resources/:id — falls through to Engineering after Platform card removed', false, 'no resource id from check 2');
+  }
+
+  // 6) A card on Backend itself — the resource's OWN node.
+  const backendCard = await req('POST', '/rate-cards', {
+    body: { role: 'Developer', organization: 'Backend', currency: 'EUR', costRate: 700, billRate: 1300 },
+  });
+  check(
+    "POST /api/rate-cards {role:'Developer', organization:'Backend', currency:'EUR', costRate:700, billRate:1300} -> 200",
+    backendCard.status === 200 && backendCard.body?.organization === 'Backend',
+    `status=${backendCard.status}, body=${JSON.stringify(backendCard.body)}`,
+  );
+  const backendCardId = typeof backendCard.body?.id === 'string' ? backendCard.body.id : undefined;
+
+  // 7) The own-node card wins over Engineering's ancestor card, even though
+  //    Engineering's card is still present.
+  if (backendResourceId) {
+    const { status, body } = await req('GET', `/resources/${backendResourceId}`);
+    check(
+      'GET /api/resources/:id — own-node card (Backend, 700/1300) wins over the Engineering ancestor card',
+      status === 200 && body?.costRateDay === 700 && body?.billRateDay === 1300,
+      `status=${status}, costRateDay=${body?.costRateDay}, billRateDay=${body?.billRateDay}`,
+    );
+  } else {
+    check('GET /api/resources/:id — own-node card wins over ancestor', false, 'no resource id from check 2');
+  }
+
+  // 8) Cleanup — remove Backend's own card.
+  if (backendCardId) {
+    const del = await req('DELETE', `/rate-cards/${backendCardId}`);
+    check(`DELETE /api/rate-cards/${backendCardId} (Backend card) -> 204`, del.status === 204, `status=${del.status}`);
+  }
+
+  // 9) A legacy/orphan organization value is refused at the API boundary
+  //    (validateResourceCatalogRefs) — the tree-walk's handling of an
+  //    unresolvable organization is exercised by the unit test in
+  //    rate-card.util.spec.ts, not by smoke, precisely because the live API
+  //    never lets such a value be created.
+  const orphanAttempt = await req('POST', '/resources', {
+    body: {
+      name: 'RC-Inheritance smoke — orphan org', role: 'Developer', organization: 'This Org Does Not Exist',
+      skills: [], projectRoles: [], externalExperience: [], capacity: 40, hireDate: '2026-02-15',
+    },
+  });
+  check(
+    "POST /api/resources with organization:'This Org Does Not Exist' -> 400 (catalog reference check refuses it before any orphan value can exist)",
+    orphanAttempt.status === 400,
+    `status=${orphanAttempt.status}, body=${JSON.stringify(orphanAttempt.body)}`,
+  );
+}
+
+/**
  * POSTGRES-ONLY — the FK-violation -> 409 mapping fixed in 0420c80.
  *
  * `isFkViolation()` (src/server/fk-violation.util.ts) walks drizzle-orm's
@@ -6099,6 +6218,18 @@ async function main() {
     await checkResourceManagerCycle();
   } catch (err) {
     console.log(`FAIL  resource-manager-cycle flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the rate-card
+  // inheritance flow never masks or blocks any of the prior section results.
+  // Safe anywhere in the order: it creates/deletes its own scoped rate cards
+  // and one scoped resource (never touched again), never mutates seed rows
+  // other sections depend on.
+  try {
+    await checkRateCardInheritance();
+  } catch (err) {
+    console.log(`FAIL  rate-card inheritance flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

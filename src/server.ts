@@ -18,10 +18,11 @@ import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { benchRollup } from './app/services/bench.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, type FinanceData } from './app/services/finance.util';
 import { negotiatedRateCurrencyError, sellRateFor } from './app/services/sell-rate.util';
+import { pickRateCard } from './app/services/rate-card.util';
 import { billingPlanValidationError } from './app/services/billing-validation.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { isResourceKind, RESOURCE_KINDS, kindOf, dailyCapFor } from './app/services/resource-kind.util';
-import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, scopeOf, accountableApproversOf, nodeManagersAbove, isTerminatedAsOf, type OrgLevel } from './app/services/org-scope.util';
+import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, scopeOf, accountableApproversOf, nodeManagersAbove, isTerminatedAsOf, type OrgLevel, type OrgNode } from './app/services/org-scope.util';
 import { maxIdSeq } from './server/id-seq.util';
 import { isUuidV4, newEntityId } from './server/entity-id.util';
 import { isFkViolation } from './server/fk-violation.util';
@@ -1598,7 +1599,6 @@ async function autoApprovesAllocation(req: Request, resourceId: string): Promise
 // resource that hasn't overridden. Lookup: same role + base currency (EUR),
 // preferring an org-specific card over the generic (no-org) one.
 // ---------------------------------------------------------------------------
-const RATE_BASE_CURRENCY = 'EUR';
 const DEFAULT_HOURS_PER_DAY = 8;
 /** The configured working hours/day (settings.hoursPerDay), default 8 if unset/invalid. */
 async function getHoursPerDay(repositorySet: Repositories = repos): Promise<number> {
@@ -1622,12 +1622,6 @@ async function resolveBaseCap(
     ? raw
     : await getHoursPerDay(repositorySet);
 }
-function pickRateCard(cards: RateCard[], role: string | undefined, organization: string | undefined): RateCard | undefined {
-  if (!role) return undefined;
-  const forRole = cards.filter(c => c.role === role && (c.currency ?? RATE_BASE_CURRENCY) === RATE_BASE_CURRENCY);
-  return forRole.find(c => c.organization && c.organization === organization)
-      ?? forRole.find(c => !c.organization);
-}
 /**
  * Resolve a resource's rates (hybrid day model). Rate cards + the per-resource
  * override (the cost_rate/bill_rate columns) are in €/DAY. This exposes:
@@ -1635,9 +1629,11 @@ function pickRateCard(cards: RateCard[], role: string | undefined, organization:
  *   - costRateDay/billRateDay           — the effective €/day (override ?? card),
  *   - costRate/billRate                 — the effective €/HOUR (= €/day ÷ hpd),
  *     which all margin math (finance.util, billing, match, accrual) consumes.
+ * `pickRateCard` now walks the org tree's ancestor chain (rate-card.util.ts,
+ * design spec §2) — node, then nearest ancestor, then the generic card.
  */
-function withEffectiveRates(r: Resource, cards: RateCard[], hpd: number): Resource {
-  const card = pickRateCard(cards, r.role, r.organization);
+function withEffectiveRates(r: Resource, cards: RateCard[], hpd: number, nodes: readonly OrgNode[]): Resource {
+  const card = pickRateCard(cards, r.role, r.organization, nodes);
   const costOverrideDay = r.costRate ?? null;
   const billOverrideDay = r.billRate ?? null;
   const costDay = costOverrideDay ?? card?.costRate;
@@ -1652,11 +1648,14 @@ function withEffectiveRates(r: Resource, cards: RateCard[], hpd: number): Resour
     billRate: billDay != null ? billDay / hpd : undefined,
   };
 }
-/** Resolve effective rates over a resource list (one shared rate-card + hpd fetch). */
+/** Resolve effective rates over a resource list (one shared rate-card + org-tree + hpd fetch). */
 async function resolveResourceRates(rows: Resource[]): Promise<Resource[]> {
-  const cards = (await repos.rateCards.list()) as unknown as RateCard[];
+  const [cards, nodes] = await Promise.all([
+    repos.rateCards.list() as unknown as Promise<RateCard[]>,
+    repos.resourceOrganizations.list(),
+  ]);
   const hpd = await getHoursPerDay();
-  return rows.map(r => withEffectiveRates(r, cards, hpd));
+  return rows.map(r => withEffectiveRates(r, cards, hpd, nodes));
 }
 /**
  * Map the form's costRateOverride/billRateOverride onto the persisted cost_rate/
