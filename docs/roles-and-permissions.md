@@ -149,6 +149,7 @@ and **403** otherwise. Path tests use `startsWith`.
 | `/assignments`, `/requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/capacity`, `/bench` (ONE predicate — `p.startsWith('/capacity') \|\| p.startsWith('/bench')`, not two rules — read-only computed rollups, e.g. `GET /capacity/monthly` (B2) and `GET /bench/monthly` (Block F, design spec §8); the latter extends this rule rather than duplicating the role array) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/assignment-days`, `/assignment-months` (raw per-day/per-month assignment rows, e.g. `GET /assignment-days` — shared plumbing for Block F's client-side What-If bench composition and block E's own spec; same need-to-know as `/capacity` and `/assignments` above, just unaggregated) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/cost-baselines` (block E: the frozen monthly PCP/budget snapshot and its live-plan comparison — read is deliberately **disjoint** from freeze, spec §5: the PM/People Manager can see the variance to act on it early even though they cannot move the target that measures them) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/time-entries` | `employee`, `pm`, `resource-manager`, `delivery-executive`, `finance`, `sales`, `admin` |
 | `/approval-requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/allocation-approvals` (B3 People Manager feed, e.g. `GET /allocation-approvals?from&to&status`) | `resource-manager`, `delivery-executive`, `admin` |
@@ -183,6 +184,7 @@ A role not in the matched rule's list gets **403**. Path tests use `startsWith`
 | `/approval-requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/allocation-approvals` (B3 batch month decisions, `POST /allocation-approvals/decide`) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/assignment-months` (C2 dummy substitution, `POST /assignment-months/:id/substitute`) | `resource-manager`, `delivery-executive`, `admin` |
+| `/cost-baselines` (`POST /cost-baselines` — freeze/re-freeze; no `PUT`/`DELETE` exposed, spec §3.5) | `finance`, `delivery-executive`, `admin` |
 | `/integrations` | `finance`, `delivery-executive`, `admin` |
 
 **Open mutations (no rule):** collections not matched above are open to any
@@ -219,6 +221,18 @@ base currency `EUR` is fixed at rate 1).
 > `/assignments`) and *read* the raw month rows, but may not hand them to a
 > person (see
 > [C2 substitution](#c2-substituting-a-dummy-with-a-real-person) below).
+>
+> `/cost-baselines` (block E) is the same narrowing shape again, and for the
+> same reason as `/resources`: whoever is *measured* on a variance must not be
+> able to rewrite the metric that measures them. `pm`/`resource-manager` sit in
+> the *read* rule (five roles, mirroring `/capacity`) but **not** the
+> *mutation* rule (three roles, `finance`/`delivery-executive`/`admin` only) —
+> a `pm` can see the frozen-baseline-vs-live-plan delta on their own project
+> and act on it while there is still time, but cannot freeze or re-freeze the
+> baseline itself. Freezing has no `PUT`/`DELETE` at all: a re-freeze is a
+> fresh `POST`, appending a new row rather than editing the old one (see
+> [architecture/03-backend-and-data.md](architecture/03-backend-and-data.md)
+> for the write-once/append-only semantics).
 
 ---
 

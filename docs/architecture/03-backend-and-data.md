@@ -463,6 +463,7 @@ erDiagram
     projects  ||--o{ projectTasks      : "has"
     projects  ||--o{ projectIssues     : "has"
     projects  ||--o{ changeRequests    : "has"
+    projects  ||--o{ costBaselines     : "has (write-once, append-only re-freeze)"
     projectPartners ||--o{ projectTasks: "subcontracts (partnerId)"
 
     projects {
@@ -482,6 +483,12 @@ erDiagram
     changeRequests  { text id PK
         text projectId FK
         text createdBy "server-pinned" }
+    costBaselines   { text id PK
+        text projectId FK
+        text period "'YYYY-MM'"
+        double amount "frozen, never recomputed"
+        text frozenAt
+        text frozenBy }
 ```
 
 ### Commercial, billing & FX
@@ -586,6 +593,33 @@ hours' date as a **value** and never reads a clock. See
 `/negotiated-rates`, and
 [functional/commercial.md](../functional/commercial.md#negotiate-a-sell-rate-for-a-contract-or-a-project)
 for the negotiation workflow.
+
+#### Frozen monthly cost baselines — write-once, and "current" means latest `frozenAt`
+
+Migration `0018_lowly_lady_bullseye.sql` adds `cost_baselines`: a **frozen
+monthly PCP/budget snapshot per project**, one row per `(projectId, period)`
+at freeze time. `amount` is the resolved EUR figure `plannedCostSchedule`
+produced **at the moment of freezing** — never the raw hours/rate inputs,
+and never recomputed afterward. Freezing hours × rate instead of the
+resolved amount would let the baseline silently drift on every `costRate`
+edit, producing a believable but wrong number no test or schema constraint
+would catch.
+
+**No `PUT`/`DELETE` is exposed, and there is no unique constraint on
+`(projectId, period)` by design.** A re-freeze (`POST /cost-baselines`
+again) does not update or replace anything — it appends a brand-new batch
+of rows with a later `frozenAt`. More than one row can therefore share a
+`(projectId, period)` pair; **the "current" baseline for a period is, by
+definition, the row with the latest `frozenAt` for that pair** — resolved
+entirely in the pure `costBaselineComparison` layer
+(`src/app/services/finance.util.ts`), never by an `UPDATE`. This is what
+keeps "was the target moved?" answerable after the fact: every freeze, the
+first and every subsequent one, survives as its own row with its own
+`frozenBy`/`frozenAt`, never hidden by a later write. See
+[roles-and-permissions.md](../roles-and-permissions.md) for who may freeze
+(mutate) versus read the comparison, and
+[functional/project-delivery.md](../functional/project-delivery.md) for the
+Project 360 "Baseline vs Planned" card this feeds.
 
 ### Governance, config & audit
 
@@ -767,6 +801,7 @@ foreign keys; *(soft)* marks columns that carry a reference without a hard FK.
 | `billingPlanItems` | Per-`BillingType` billing plan | `id`, `type`, `amount`, `capAmount`, `currency`, `status`; **FK** `contractId→contracts`, `projectId→projects`, `milestoneId→milestones`, `orderId→orders` | Billing |
 | `fxRates` | FX rate to base (natural key `currency`) | `currency` PK, `rateToBase` | Billing / Finance |
 | `negotiatedRates` | Negotiated SELL rate per contract, with an optional per-project override | `id`, `role`, `currency`, `billRate`; **FK** `contractId→contracts`, `projectId→projects` *(exactly one of the two set — write-time invariant, not a CHECK; validity comes from the referenced contract's own period, not from a column here)* | Commercial |
+| `costBaselines` | Frozen monthly PCP/budget snapshot per project | `id`, `period` (`'YYYY-MM'`), `amount` *(frozen, never recomputed)*, `frozenAt`, `frozenBy`; **FK** `projectId→projects` *(no unique constraint on `projectId`+`period` — a re-freeze appends a new row; "current" = latest `frozenAt` for that pair, resolved in `costBaselineComparison`, never by an UPDATE)* | Project / Finance |
 | `approvalRequests` | Multi-step approval chains | `id`, `kind`, `amount`, `steps`, `currentStep`, `requestedBy` *(server-pinned SoD)*; **FK** `projectId→projects`; `refId` *(soft, polymorphic)* | Governance |
 | `auditLogs` | Append-only mutation trail | `id`, `at` *(indexed DESC)*, `actorId`, `method`, `path`, `before`, `after` | Governance |
 
@@ -774,7 +809,8 @@ foreign keys; *(soft)* marks columns that carry a reference without a hard FK.
 
 Every monetary amount (contract `totalValue`, order/line/billing `amount`,
 `costRate`/`billRate`, negotiated-rate `billRate`, FX `rateToBase`, project
-budgets) is stored as **`doublePrecision`** — IEEE-754 floating point. This
+budgets, cost-baseline `amount`) is stored as **`doublePrecision`** — IEEE-754
+floating point. This
 matches the JS `number` runtime the in-memory mock uses, so dev and prod agree
 exactly, and it is fine for the demo's previews, rollups, and exports.
 

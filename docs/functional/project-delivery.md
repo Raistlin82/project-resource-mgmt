@@ -141,6 +141,25 @@ centers, tasks, issues, changes) on one tabbed screen.
 The 360's delivery-health flag turns **amber** when burn > 85% or there are open
 change requests, escalating with VAC/alerts.
 
+**Baseline vs Planned card (block E).** A second card on the Overview tab,
+below the revenue breakdown, compares the project's **frozen monthly PCP
+baseline** against its **live planned cost**, month by month
+(`costBaselineComparison`, fed by `plannedCostSchedule` — the monthly cost
+side of the plan `computeProjectFinancials`'s whole-project `plannedLaborCost`
+does not have). It is gated on `canReadStaffing()` — `pm`, `resource-manager`,
+`finance`, `delivery-executive`, `admin` — **absent entirely**, not a zeroed
+card, for `employee`/`sales`. **"Freeze baseline"** is visible only to
+`finance`/`delivery-executive`/`admin`: whoever is measured on the variance
+(the PM) must not be able to move the target that measures them. Freezing is
+**pinned**: a baseline never moves on its own, not even when a Change Request
+is approved — an approved CR instead widens the visible delta (the effective
+Budget line above already reflects the CR; the frozen Baseline deliberately
+does not), which is the early-warning signal this card exists to surface. A
+re-freeze is always a fresh action (a new row, never an edit) — see
+[architecture/03-backend-and-data.md](../architecture/03-backend-and-data.md)
+for why, and [Review Margin & Variance drivers](reporting-analytics.md#review-margin--variance-drivers)
+for the same comparison rolled up per-project and portfolio-wide in Reporting.
+
 **RACI.**
 
 | Step | Responsible | Accountable | Consulted | Informed |
@@ -148,6 +167,8 @@ change requests, escalating with VAC/alerts.
 | Open the 360 | pm | pm | — | delivery-executive |
 | Read financial health | pm / delivery-executive | delivery-executive | finance | — |
 | Drill into a tab | pm / delivery-executive | pm | finance | — |
+| Read Baseline vs Planned | pm / resource-manager / finance | delivery-executive | finance | — |
+| Freeze / re-freeze baseline | finance | finance | delivery-executive | pm |
 
 **Process flow.**
 
@@ -179,8 +200,11 @@ flowchart TD
 |-----------|-----------------|
 | No revenue | margin flags never fire; marginPct = 0. |
 | No budget (no financial plan, no approved CR) | burn/EAC flags never fire — nothing to measure against. |
-| Approved CR present | inflates `budget` (effective), changing burn% and VAC — EAC itself is unchanged. |
+| Approved CR present | inflates `budget` (effective), changing burn% and VAC — EAC itself is unchanged; the frozen Baseline is unaffected (pinned by design). |
 | Unauthenticated user | sensitive reads 401; load is gated on `authReady`. |
+| `employee` / `sales` viewing the 360 | the Baseline vs Planned card is **absent**, not empty or zeroed. |
+| Project has booked hours but was never frozen | the card still shows the month with a "not frozen" badge and a real planned figure — `outOfBaselineHorizon: true`, never hidden. |
+| Baseline read fails / is still loading | "Couldn't load cost baseline" + Retry, or a loading skeleton — never a number. |
 
 **Metrics.**
 
@@ -190,6 +214,7 @@ flowchart TD
 | VAC | effective budget − EAC (negative = projected overrun). |
 | Margin % | margin / revenue. |
 | Open changes | Count of CRs in Draft/Submitted. |
+| Baseline / Delta / Delta % | frozen monthly PCP total / live-vs-frozen delta / delta as a % of baseline (null, rendered `—`, only when baseline = 0). |
 
 **Related.** [Maintain Financial Plans & Project Cost Centers](#maintain-financial-plans--project-cost-centers),
 [Raise & decide a Change Request](#raise--decide-a-change-request),

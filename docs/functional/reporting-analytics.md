@@ -229,6 +229,23 @@ flowchart TD
    - **How:** `burnPct = actualCost / effective budget × 100`; rows at/over the
      warn level (`burnWarnPct` = 90) are coloured red.
    - **Output:** an early overrun signal that feeds the alerts SOP.
+4. **Read the Baseline / Delta / Delta % columns (block E).**
+   - **Who:** `pm` / `resource-manager` / `finance` / `delivery-executive` /
+     `admin` (same audience as the rest of this table — the whole page
+     already fails fast for `sales`/`employee`, so these three columns
+     inherit that gate rather than adding a second one).
+   - **How:** `Baseline` is the CURRENT frozen monthly PCP total for the
+     project (the row with the latest `frozenAt` per period, summed —
+     `costBaselineComparison`); `Delta` = live planned cost − that baseline;
+     `Delta %` follows the same null rule as the Project 360 card (see
+     [Project 360 review](project-delivery.md#project-360-review)): null,
+     rendered `—`, **only** when the baseline itself is 0 (never frozen). A
+     descoped month against a real frozen baseline still shows a real,
+     signed percentage — never an em dash. The portfolio footer sums
+     Baseline/Delta but leaves Delta % blank, exactly like it already leaves
+     Margin %/Burn % blank rather than averaging a percentage.
+   - **Output:** per-project and portfolio PCP variance, exported alongside
+     everything else in the CSV.
 
 **Exceptions.**
 
@@ -236,6 +253,7 @@ flowchart TD
 | --- | --- |
 | No projects with revenue/cost | Table empty state. |
 | No budget on a project | Burn % is 0 (nothing to measure against). |
+| No baseline ever frozen for a project | Baseline/Delta are 0, Delta % is `—` — never a fabricated percentage. |
 
 **Metrics.**
 
@@ -244,12 +262,17 @@ flowchart TD
 | labor / external / expense | `marginDrivers` cost dimensions (mutually exclusive). |
 | Margin / Margin % | `revenue − cost` / `margin ÷ revenue × 100`. |
 | Burn % | `actualCost ÷ effective budget × 100`. |
+| Baseline / Delta / Delta % | frozen monthly PCP total / live-vs-frozen delta / delta as a % of baseline (null only when baseline = 0). |
 
 **Action it drives.** Reallocate or renegotiate where one driver dominates;
-escalate a thin-margin or over-burn project into change control.
+escalate a thin-margin or over-burn project into change control; a widening
+PCP delta against a frozen baseline is an early signal that a project is
+spending ahead of what was committed.
 
 **Related.** [Act on alerts](#act-on-margin-compression--delivery-alerts) ·
-[Export to CSV](#export-a-table-to-csv).
+[Export to CSV](#export-a-table-to-csv) ·
+[Project 360 review](project-delivery.md#project-360-review) (the
+per-project Baseline vs Planned card this table's columns mirror).
 
 ---
 
