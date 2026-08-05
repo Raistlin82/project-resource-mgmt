@@ -20,6 +20,18 @@ describe('monthsIdleAt (walks backward from index while benchFlags holds, capped
   it('bench for 3 consecutive months -> capped at 3', () => expect(monthsIdleAt([false, true, true, true], 3)).toBe(3));
   it('bench for 4 consecutive months -> STILL capped at 3, not 4', () =>
     expect(monthsIdleAt([true, true, true, true], 3)).toBe(3));
+  // The five tests above never force index 0 of `benchFlags` to actually be
+  // inspected: the "capped" cases hit n>=3 and break one iteration before i
+  // reaches 0, and the short cases never have enough true flags to get there
+  // either. Mutating the loop's lower bound from `i >= 0` to `i > 0` leaves
+  // all five green. This case is the minimal one where reaching the cap of 3
+  // REQUIRES the loop body to run at i === 0 (idle since the earliest
+  // fetched month, index 0 of the 9-month window's look-back — see spec §8):
+  // only 3 flags exist (indices 0, 1, 2), all true, walking back from index 2.
+  it('bench for 3 consecutive months counting all the way back to index 0 -> 3 '
+    + '(the earliest-fetched-month case; requires the loop to actually inspect benchFlags[0], not stop at index 1 — '
+    + 'an `i > 0` boundary bug would report 2, a one-month-off aging misclassification)', () =>
+    expect(monthsIdleAt([true, true, true], 2)).toBe(3));
 });
 
 describe('bucketForMonthsIdle', () => {
@@ -51,6 +63,19 @@ describe('freeingUpNextMonth (mutually exclusive with a BENCH state this month, 
   it('activeNext false blocks the signal even though stateNext is BENCH '
     + '(isolates the activeNext guard, independently of the state check — deleting it flips this to true)', () =>
     expect(freeingUpNextMonth(true, 'ALLOCATED', false, 'BENCH')).toBe(false));
+  // Every `activeNext: true` case above pairs it with `stateNext: 'BENCH'` —
+  // none of the six tests above independently prove the `stateNext ===
+  // 'BENCH'` conjunct is doing anything: deleting it and collapsing the
+  // function to `activeThis && stateThis !== 'BENCH' && activeNext` leaves
+  // all six green. The two tests below plug that gap: activeNext is
+  // genuinely true, but stateNext is a real, defined BenchState other than
+  // 'BENCH' — the only way either can produce `false` is the state check.
+  it('activeNext true but stateNext PARTIAL (not BENCH) -> false '
+    + '(isolates the stateNext===BENCH conjunct with a genuine defined non-BENCH state, unlike the activeNext=false/stateNext=undefined '
+    + 'case above — deleting the conjunct flips this to true)', () =>
+    expect(freeingUpNextMonth(true, 'ALLOCATED', true, 'PARTIAL')).toBe(false));
+  it('activeNext true but stateNext ALLOCATED (not BENCH) -> false (same isolation, the other non-BENCH state)', () =>
+    expect(freeingUpNextMonth(true, 'ALLOCATED', true, 'ALLOCATED')).toBe(false));
 });
 
 describe('availabilityDateFor (design spec §7 — three branches, in order)', () => {
