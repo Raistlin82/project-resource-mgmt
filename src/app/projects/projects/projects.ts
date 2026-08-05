@@ -10,6 +10,7 @@ import { AuthService } from '../../services/auth.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { authGatedResource } from '../../services/auth-gated-resource.util';
 import { endNotBeforeStart } from '../../services/date-range.validator';
+import { SearchFilterBarComponent } from '../../shared/search-filter-bar.component';
 
 /** Allowed location sentinel for fully-remote projects (mirrors the server + seed). */
 const REMOTE_LOCATION = 'Remote';
@@ -17,7 +18,7 @@ const REMOTE_LOCATION = 'Remote';
 @Component({
   selector: 'app-projects',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DatePipe, ReactiveFormsModule, FormsModule, RouterLink, ModalDialogDirective],
+  imports: [MatIconModule, DatePipe, ReactiveFormsModule, FormsModule, RouterLink, ModalDialogDirective, SearchFilterBarComponent],
   template: `
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -35,12 +36,13 @@ const REMOTE_LOCATION = 'Remote';
 
       <!-- Search and Filter -->
       <div class="command-card p-4 flex flex-col sm:flex-row gap-4">
-        <div class="flex-1 relative">
-          <mat-icon class="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted text-[20px] w-[20px] h-[20px]">search</mat-icon>
-          <input [formControl]="searchControl" type="text" placeholder="Search projects by name, ID, or location..."
-                 aria-label="Search projects"
-                 class="w-full pl-10 pr-4 py-3 bg-surface border border-line-strong rounded-xl text-sm text-ink placeholder:text-ink-muted focus:bg-surface focus:border-accent focus:ring-2 focus:ring-accent/25 transition-all outline-none">
-        </div>
+        <app-search-filter-bar
+          class="flex-1"
+          [query]="searchValue() ?? ''"
+          placeholder="Search projects by name, ID, or location..."
+          (queryChange)="searchControl.setValue($event)"
+          (clearAll)="searchControl.setValue('')"
+        />
       </div>
 
       <!-- Projects Grid -->
