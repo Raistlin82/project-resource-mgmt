@@ -22,7 +22,9 @@ import {
   Resource,
   ResourceRequest,
   TimeEntry,
+  type BenchRollup,
 } from '../services/api.service';
+import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
 import {
   computeProjectFinancials,
   FinanceData,
@@ -63,6 +65,13 @@ interface DashboardData {
    * needs for a negotiated rate. In this same envelope, never a second load.
    */
   hoursPerDay: number;
+  /**
+   * BENCH/PARTIAL/ALLOCATED rollup for the "In Bench" tile (Block F, Task 9).
+   * Two counts only (internal, subco), never summed — an idle internal gets
+   * reallocated, an idle subcontractor does not get renewed and their cost
+   * simply stops, so there is no single action a combined total could name.
+   */
+  benchRollup: BenchRollup;
 }
 
 type DeliveryHealth = 'green' | 'amber' | 'red';
@@ -171,8 +180,8 @@ interface ProjectCommandRow {
               <div class="command-skeleton h-28"></div>
             }
           </section>
-          <section class="grid grid-cols-1 lg:grid-cols-4 gap-4">
-            @for (tile of [1, 2, 3, 4]; track tile) {
+          <section class="grid grid-cols-1 lg:grid-cols-5 gap-4">
+            @for (tile of [1, 2, 3, 4, 5]; track tile) {
               <div class="command-skeleton h-24"></div>
             }
           </section>
@@ -261,7 +270,7 @@ interface ProjectCommandRow {
         </div>
       </section>
 
-      <section class="grid grid-cols-1 lg:grid-cols-4 gap-4">
+      <section class="grid grid-cols-1 lg:grid-cols-5 gap-4">
         <div class="command-card-muted p-4">
           <div class="command-kpi-label">Open Resource Requests</div>
           <div class="mt-2 flex items-end justify-between gap-3">
@@ -298,6 +307,13 @@ interface ProjectCommandRow {
               <div class="font-mono text-lg font-semibold text-critical-text">{{ healthDistribution().red }}</div>
               <div class="text-[10px] font-bold uppercase text-critical-text">Red</div>
             </div>
+          </div>
+        </div>
+        <div class="command-card-muted p-4" data-test="bench-tile">
+          <div class="command-kpi-label">In Bench</div>
+          <div class="mt-2 flex items-end justify-between gap-3">
+            <span class="font-mono text-2xl font-semibold text-[var(--cc-ink)]">{{ internalBenchCount() }} <span class="text-sm font-normal text-ink-muted">int.</span> / {{ subcoBenchCount() }} <span class="text-sm font-normal text-ink-muted">subco</span></span>
+            <a routerLink="/bench" class="text-sm font-bold text-[var(--cc-primary)]">Bench</a>
           </div>
         </div>
       </section>
@@ -578,6 +594,7 @@ export class DashboardComponent {
     contracts: [],
     negotiatedRates: [],
     hoursPerDay: DEFAULT_HOURS_PER_DAY,
+    benchRollup: EMPTY_BENCH_ROLLUP,
   };
 
   // FX rates feed FinanceData so portfolio rollups (margin, revenue, EAC, VAC)
@@ -627,6 +644,19 @@ export class DashboardComponent {
             // `hoursPerDay`): in THIS forkJoin so the revenue
             // chart never paints from a partial envelope.
             hoursPerDay: this.api.getHoursPerDay().pipe(map(r => r.value)),
+            // "In Bench" tile (Block F, Task 9) — appended AFTER hoursPerDay,
+            // never inserted mid-block, to avoid a merge collision on this
+            // exact forkJoin (this file's own established convention, see the
+            // contracts/negotiatedRates comment above). REQUIRED leg,
+            // deliberately no catchError: a failed bench read must surface as
+            // this whole page's error state, never silently render "0 in
+            // bench" — the Global Constraint this codebase keeps re-fixing.
+            // Since dataRes already gates the entire tile grid behind
+            // hasError()/isLoading() (computed over this SAME forkJoin), no
+            // separate gating is needed for this one tile: the page was
+            // already all-or-nothing across its other 13 legs, and this is
+            // leg 14, not a new failure surface.
+            benchRollup: this.api.getBenchMonthly(),
           })
         : of(DashboardComponent.EMPTY_DATA),
     defaultValue: DashboardComponent.EMPTY_DATA,
@@ -853,6 +883,20 @@ export class DashboardComponent {
     this.data().issues.filter(i => i.status !== 'Resolved' && (i.severity === 'Critical' || i.severity === 'High' || i.escalated)).length,
   );
   escalations = computed(() => this.data().issues.filter(i => i.status !== 'Resolved' && i.escalated).length);
+
+  // --- "In Bench" tile (Block F, Task 9) --------------------------------------
+  // Two SEPARATE counts, never summed (design spec decision 4): an idle
+  // internal gets reallocated, an idle subcontractor does not get renewed and
+  // their cost simply stops — the two actions have no common denominator, so
+  // there is never an `internalBenchCount() + subcoBenchCount()` anywhere here.
+  /** `months[0]` is the rollup's current/anchor month — same convention as bench.component.ts / utilization.component.ts. */
+  private readonly currentBenchMonth = computed(() => this.data().benchRollup.months[0] ?? '');
+  readonly internalBenchCount = computed(() =>
+    this.data().benchRollup.internalRows.filter(r => r.monthly[this.currentBenchMonth()]?.state === 'BENCH').length,
+  );
+  readonly subcoBenchCount = computed(() =>
+    this.data().benchRollup.subcoRows.filter(r => r.monthly[this.currentBenchMonth()]?.state === 'BENCH').length,
+  );
 
   /**
    * C1: a dummy is a placeholder for a hole to be filled, not a real over-booked
