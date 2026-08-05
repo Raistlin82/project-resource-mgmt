@@ -127,11 +127,22 @@ describe('Forecast — bench retargeted onto bench.util (retired benchList/Bench
     const fixture = await setup();
     await flush(fixture);
 
-    const headers = Array.from(host(fixture).querySelectorAll('.command-card th')).map(th => th.textContent?.trim());
-    expect(headers).toContain('Kind');
-    expect(headers).toContain('Status');
-    // Paired absence: the retired BenchEntry-shaped columns must be gone.
+    // Scoped to the Bench card specifically — an earlier version of this test
+    // queried '.command-card th' unscoped, which also collects the untouched
+    // Skill Gap table's own <th>Status</th> (forecast.ts's Skill Gap section).
+    // Both tables render a "Status" header, so an unscoped query passes even
+    // if the Bench table's own Status column is deleted outright: the
+    // assertion would still be satisfied by Skill Gap's. Scoping to the card
+    // whose <h2> reads "Bench" makes the check actually about Bench.
+    const benchSection = Array.from(host(fixture).querySelectorAll('.command-card'))
+      .find(card => card.querySelector('h2')?.textContent?.trim() === 'Bench');
+    expect(benchSection).toBeTruthy();
+    const headers = Array.from(benchSection!.querySelectorAll('th')).map(th => th.textContent?.trim());
+    expect(headers).toEqual(['Resource', 'Kind', 'Status']);
+    // Paired absence: the retired BenchEntry-shaped columns must be gone from
+    // THIS table (redundant with the exact toEqual above, kept explicit).
     expect(headers).not.toContain('Available');
+    expect(headers).not.toContain('Role');
   });
 });
 
@@ -140,13 +151,16 @@ describe('Forecast — failed read renders as an error state, never a confident 
     const fixture = await setup({ getResources: () => throwError(() => new Error('boom')) as unknown as Observable<Resource[]> });
     await flush(fixture);
 
-    const text = host(fixture).textContent ?? '';
-    expect(text).toContain("Couldn't load the forecast");
+    // The shared ListStateComponent (app-list-state) renders its error panel
+    // with role="alert" — the accessible signal a screen-reader announces,
+    // which the previous hand-rolled card did not carry.
+    const alert = host(fixture).querySelector('[role="alert"]');
+    expect(alert).not.toBeNull();
+    expect(alert?.textContent).toContain("Couldn't load forecast data");
     // Absence: the ordinary "no forecast data yet" empty copy must NOT also render —
     // an error must never be presented as a benign "nothing here" state.
-    expect(text).not.toContain('No forecast data yet');
-    const retryButton = Array.from(host(fixture).querySelectorAll('button')).find(b => b.textContent?.trim() === 'Retry');
-    expect(retryButton).toBeTruthy();
+    expect(host(fixture).textContent).not.toContain('No forecast data yet');
+    expect(alert?.querySelector('button')).toBeTruthy();
   });
 
   it('the retry button actually calls reload — a dead button would leave a user stuck on a failed read forever', async () => {
@@ -155,7 +169,7 @@ describe('Forecast — failed read renders as an error state, never a confident 
     await flush(fixture);
     const callsBeforeRetry = getResources.mock.calls.length;
 
-    const retryButton = Array.from(host(fixture).querySelectorAll('button')).find(b => b.textContent?.trim() === 'Retry') as HTMLButtonElement;
+    const retryButton = host(fixture).querySelector('[role="alert"] button') as HTMLButtonElement;
     retryButton.click();
     await flush(fixture);
 

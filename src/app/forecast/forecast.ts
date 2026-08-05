@@ -24,6 +24,7 @@ import {
   BarSeries,
   TrendSeries,
 } from '../shared/charts';
+import { ListStateComponent } from '../shared/list-state.component';
 
 /** Selectable rolling horizon, in weeks. */
 type Horizon = 8 | 12;
@@ -42,7 +43,7 @@ interface PeriodRow extends CapacityPeriod {
 @Component({
   selector: 'app-forecast',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [DecimalPipe, RouterLink, CommandBarChartComponent, CommandTrendChartComponent],
+  imports: [DecimalPipe, RouterLink, CommandBarChartComponent, CommandTrendChartComponent, ListStateComponent],
   template: `
     <div class="command-page space-y-6">
       <header class="command-header">
@@ -71,13 +72,10 @@ interface PeriodRow extends CapacityPeriod {
         </div>
       </header>
 
-      @if (dataRes.status() === 'error') {
-        <div class="command-card border-critical! p-10 text-center flex flex-col items-center gap-4">
-          <h3 class="font-display text-lg font-bold text-[var(--cc-ink)]">Couldn't load the forecast</h3>
-          <p class="text-[var(--cc-muted)] text-sm">Something went wrong while fetching the data.</p>
-          <button type="button" (click)="dataRes.reload()" class="command-button">Retry</button>
-        </div>
-      } @else if (hasData()) {
+      <app-list-state [loading]="loading()" [error]="dataRes.status() === 'error'"
+                      label="forecast data" (retry)="dataRes.reload()">
+        <ng-template>
+        @if (hasData()) {
         <!-- KPI strip -->
         <section class="grid grid-cols-2 gap-4 sm:gap-6 lg:grid-cols-5" aria-label="Capacity key metrics">
           <div class="command-kpi" [class.warning]="avgBand() === 'tight'" [class.danger]="avgBand() === 'over'" [class.green]="avgBand() === 'under'">
@@ -311,7 +309,7 @@ interface PeriodRow extends CapacityPeriod {
             </table>
           </div>
         </section>
-      } @else if (!loading()) {
+      } @else {
         <div class="command-card">
           <div class="command-empty">
             <div class="command-empty-title">No forecast data yet</div>
@@ -321,7 +319,9 @@ interface PeriodRow extends CapacityPeriod {
             </p>
           </div>
         </div>
-      }
+        }
+        </ng-template>
+      </app-list-state>
     </div>
   `,
 })

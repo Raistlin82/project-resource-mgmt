@@ -31,6 +31,7 @@ import {
   TrendSeries,
 } from '../shared/charts';
 import { authGatedResource } from '../services/auth-gated-resource.util';
+import { ListStateComponent } from '../shared/list-state.component';
 
 /** Rolling horizon (weeks) for the sandbox forecast. Fixed: this is a comparison, not a tuning, surface. */
 const HORIZON_WEEKS = 12;
@@ -92,7 +93,7 @@ interface TimelineRow {
 @Component({
   selector: 'app-what-if',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [DecimalPipe, ReactiveFormsModule, CommandBarChartComponent, CommandTrendChartComponent],
+  imports: [DecimalPipe, ReactiveFormsModule, CommandBarChartComponent, CommandTrendChartComponent, ListStateComponent],
   template: `
     <div class="command-page space-y-6">
       <header class="command-header">
@@ -141,27 +142,20 @@ interface TimelineRow {
         </div>
       </header>
 
-      @if (dataState() === 'error') {
-        <div class="command-card border-critical! p-10 text-center flex flex-col items-center gap-4">
-          <h3 class="font-display text-lg font-bold text-[var(--cc-ink)]">Couldn't load the forecast</h3>
-          <p class="text-[var(--cc-muted)] text-sm">Something went wrong while fetching the data.</p>
-          <button type="button" (click)="reloadData()" class="command-button">Retry</button>
-        </div>
-      } @else if (dataState() === 'loading') {
-        <div class="command-card p-6">
-          <div class="command-skeleton h-24"></div>
-        </div>
-      } @else if (!hasData()) {
-        <div class="command-card">
-          <div class="command-empty">
-            <div class="command-empty-title">No capacity data yet</div>
-            <p class="command-empty-note">
-              Add resources with capacity, then create resource requests and assignments to model
-              what-if scenarios against a baseline.
-            </p>
+      <app-list-state [loading]="dataState() === 'loading'" [error]="dataState() === 'error'"
+                      label="what-if data" (retry)="reloadData()">
+        <ng-template>
+        @if (!hasData()) {
+          <div class="command-card">
+            <div class="command-empty">
+              <div class="command-empty-title">No capacity data yet</div>
+              <p class="command-empty-note">
+                Add resources with capacity, then create resource requests and assignments to model
+                what-if scenarios against a baseline.
+              </p>
+            </div>
           </div>
-        </div>
-      } @else {
+        } @else {
         <!-- Delta KPI strip -->
         <section class="grid grid-cols-1 gap-4 sm:gap-6 sm:grid-cols-2 xl:grid-cols-4" aria-label="Scenario versus baseline metrics">
           @for (k of kpis(); track k.label) {
@@ -412,7 +406,9 @@ interface TimelineRow {
             </table>
           </div>
         </section>
-      }
+        }
+        </ng-template>
+      </app-list-state>
     </div>
   `,
 })

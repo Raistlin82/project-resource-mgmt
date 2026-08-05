@@ -5,14 +5,20 @@ import { WhatIf } from './what-if';
 import { ApiService, Resource } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
+import { todayLocalIso } from '../services/local-date.util';
 
 /**
  * A single ALLOCATED resource this month, booked well beyond any standard
  * monthly hours — so the BASE scenario starts with bench count 0. This lets
  * `hire()`'s effect on the SCENARIO be unambiguous: any bench row that shows
  * up afterward can only be the newly-hired, unbooked resource.
+ *
+ * `todayLocalIso()` — NOT `new Date().toISOString()` — matching what-if.ts's
+ * own `currentMonth` (local time). In a timezone ahead of UTC (this repo's
+ * commits are +0200), a UTC-derived month tag can name a different month than
+ * the component computes near the end of the UTC day, a date-dependent flake.
  */
-const CURRENT_MONTH = new Date().toISOString().slice(0, 7);
+const CURRENT_MONTH = todayLocalIso().slice(0, 7);
 const RESOURCES: Resource[] = [
   { id: 'booked', name: 'Fully Booked', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal' },
 ];
@@ -142,11 +148,14 @@ describe('WhatIf — failed read renders as an error state, never a confident em
     const fixture = await setup({ getResources: () => throwError(() => new Error('boom')) as unknown as Observable<Resource[]> });
     await flush(fixture);
 
-    const text = host(fixture).textContent ?? '';
-    expect(text).toContain("Couldn't load the forecast");
-    expect(text).not.toContain('No capacity data yet');
-    const retryButton = Array.from(host(fixture).querySelectorAll('button')).find(b => b.textContent?.trim() === 'Retry');
-    expect(retryButton).toBeTruthy();
+    // The shared ListStateComponent (app-list-state) renders its error panel
+    // with role="alert" — the accessible signal the previous hand-rolled card
+    // (no role, no icon) did not carry.
+    const alert = host(fixture).querySelector('[role="alert"]');
+    expect(alert).not.toBeNull();
+    expect(alert?.textContent).toContain("Couldn't load what-if data");
+    expect(host(fixture).textContent).not.toContain('No capacity data yet');
+    expect(alert?.querySelector('button')).toBeTruthy();
   });
 
   it('the retry button actually calls reload', async () => {
@@ -155,7 +164,7 @@ describe('WhatIf — failed read renders as an error state, never a confident em
     await flush(fixture);
     const callsBeforeRetry = getResources.mock.calls.length;
 
-    const retryButton = Array.from(host(fixture).querySelectorAll('button')).find(b => b.textContent?.trim() === 'Retry') as HTMLButtonElement;
+    const retryButton = host(fixture).querySelector('[role="alert"] button') as HTMLButtonElement;
     retryButton.click();
     await flush(fixture);
 
