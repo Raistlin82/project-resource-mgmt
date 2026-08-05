@@ -19,6 +19,7 @@ import { ListStateComponent } from '../shared/list-state.component';
 import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
 import { RESOURCE_KINDS, RESOURCE_KIND_LABELS, countsTowardInternalCapacity, kindOf, type ResourceKind } from '../services/resource-kind.util';
 import { dimensionsOf } from '../services/org-scope.util';
+import { pickRateCard } from '../services/rate-card.util';
 import { todayLocalIso } from '../services/local-date.util';
 
 /** Today as an ISO 'YYYY-MM-DD' string, used for status derivation + the terminate default. */
@@ -367,6 +368,7 @@ const REMOTE_LOCATION = 'Remote';
                 <p class="-mt-2 text-xs text-[var(--cc-muted)]">
                   Leave empty to inherit the <strong class="text-ink-secondary">{{ form.controls.role.value }}</strong>
                   rate card (cost {{ ir.costRate | number:'1.0-2' }} · bill {{ ir.billRate | number:'1.0-2' }} {{ ir.currency }}/day). Enter a value to override.
+                  <span data-test="rate-card-provenance">{{ rateCardProvenance() }}.</span>
                 </p>
               } @else if (form.controls.role.value) {
                 <p class="-mt-2 text-xs text-[var(--cc-muted)]">No rate card for this role — enter cost/bill rates manually, or define one under Configuration → Rate Cards.</p>
@@ -674,13 +676,24 @@ export class ResourcesComponent {
   // Live role/organization values drive the inherited-rate lookup as the user edits.
   private roleValue = toSignal(this.form.controls.role.valueChanges, { initialValue: this.form.controls.role.value });
   private orgValue = toSignal(this.form.controls.organization.valueChanges, { initialValue: this.form.controls.organization.value });
-  /** The rate card matching the current role+org (org-specific wins over generic). */
+  /** The rate card matching the current role+org, walking the org tree for an
+   *  ancestor's card when the resource's own node has none (design spec §2). */
   inheritedRate = computed<RateCard | null>(() => {
-    const role = this.roleValue();
-    const org = this.orgValue();
-    if (!role) return null;
-    const forRole = this.rateCards().filter(c => c.role === role && (c.currency ?? 'EUR') === 'EUR');
-    return forRole.find(c => c.organization && c.organization === org) ?? forRole.find(c => !c.organization) ?? null;
+    const role = this.roleValue() ?? undefined;
+    const org = this.orgValue() ?? undefined;
+    return pickRateCard(this.rateCards(), role, org, this.orgOptions()) ?? null;
+  });
+
+  /** Where the resolved card came from — derived from `card.organization`
+   *  alone, no second return value needed from `pickRateCard` (design spec
+   *  §7a). Three branches, not two: an own-node match is not "inherited",
+   *  and a generic card has no node to name. */
+  rateCardProvenance = computed<string | null>(() => {
+    const card = this.inheritedRate();
+    if (!card) return null;
+    if (!card.organization) return 'the generic rate card';
+    if (card.organization === this.orgValue()) return `the ${card.organization} rate card`;
+    return `Inherited from ${card.organization}`;
   });
 
   // Live kind value drives the vendor field's visibility in the template (C1).

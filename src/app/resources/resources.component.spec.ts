@@ -1,8 +1,8 @@
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { of, Subject } from 'rxjs';
 import { ResourcesComponent } from './resources.component';
-import { ApiService, Resource, ResourceOrganization, Vendor } from '../services/api.service';
+import { ApiService, Resource, ResourceOrganization, RateCard, Vendor } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 
@@ -27,13 +27,13 @@ const ORG_NODES: ResourceOrganization[] = [
   { id: '6', name: 'Backend', description: '', costCenters: [], level: 'competence', parentId: '5' },
 ];
 
-function setup(resources: Resource[] = RESOURCES, orgNodes: ResourceOrganization[] = []) {
+function setup(resources: Resource[] = RESOURCES, orgNodes: ResourceOrganization[] = [], rateCards: RateCard[] = []) {
   const getResources = vi.fn(() => of(resources));
   const getProjectRoles = vi.fn(() => of([]));
   const getResourceOrganizations = vi.fn(() => of(orgNodes));
   const getCountries = vi.fn(() => of([]));
   const getCities = vi.fn(() => of([]));
-  const getRateCards = vi.fn(() => of([]));
+  const getRateCards = vi.fn(() => of(rateCards));
   const getVendors = vi.fn(() => of(VENDORS));
   const createResource = vi.fn(() => of({} as Resource));
   const updateResource = vi.fn(() => of({} as Resource));
@@ -308,6 +308,117 @@ describe('ResourcesComponent', () => {
       fixture.componentInstance.search.set('');
       fixture.detectChanges();
       expect(fixture.componentInstance.filteredResources().map(r => r.id)).toEqual(['11']); // capability alone is John
+    });
+  });
+
+  describe('rate-card inheritance and provenance (rate-card-inheritance block, Task 3)', () => {
+    /** Same tree as the org-dimension describe block above: Engineering
+     *  (capability) > Platform (practice) > Backend (competence). */
+    const RATE_CARDS_ANCESTOR: RateCard[] = [
+      { id: 'GEN', role: 'Developer', currency: 'EUR', costRate: 600, billRate: 1120 },
+      { id: 'ENG', role: 'Developer', organization: 'Engineering', currency: 'EUR', costRate: 640, billRate: 1200 },
+    ];
+    const RATE_CARDS_OWN: RateCard[] = [
+      ...RATE_CARDS_ANCESTOR,
+      { id: 'BACK', role: 'Developer', organization: 'Backend', currency: 'EUR', costRate: 700, billRate: 1300 },
+    ];
+
+    it("inheritedRate resolves the ancestor card when the resource's own node has none", async () => {
+      const { fixture } = setup(RESOURCES, ORG_NODES, RATE_CARDS_ANCESTOR);
+      await flush(fixture);
+      fixture.componentInstance.form.controls.role.setValue('Developer');
+      fixture.componentInstance.form.controls.organization.setValue('Backend');
+      fixture.detectChanges();
+      expect(fixture.componentInstance.inheritedRate()).toEqual(RATE_CARDS_ANCESTOR[1]); // Engineering, not generic
+    });
+
+    it("inheritedRate keeps the resource's own card even when an ancestor also has one", async () => {
+      const { fixture } = setup(RESOURCES, ORG_NODES, RATE_CARDS_OWN);
+      await flush(fixture);
+      fixture.componentInstance.form.controls.role.setValue('Developer');
+      fixture.componentInstance.form.controls.organization.setValue('Backend');
+      fixture.detectChanges();
+      expect(fixture.componentInstance.inheritedRate()).toEqual(RATE_CARDS_OWN[2]); // Backend's own, not Engineering's
+    });
+
+    it('rateCardProvenance labels an ancestor match as Inherited from Engineering', async () => {
+      const { fixture } = setup(RESOURCES, ORG_NODES, RATE_CARDS_ANCESTOR);
+      await flush(fixture);
+      fixture.componentInstance.form.controls.role.setValue('Developer');
+      fixture.componentInstance.form.controls.organization.setValue('Backend');
+      fixture.detectChanges();
+      expect(fixture.componentInstance.rateCardProvenance()).toBe('Inherited from Engineering');
+    });
+
+    it('rateCardProvenance labels an own-node match without the word inherited', async () => {
+      const { fixture } = setup(RESOURCES, ORG_NODES, RATE_CARDS_OWN);
+      await flush(fixture);
+      fixture.componentInstance.form.controls.role.setValue('Developer');
+      fixture.componentInstance.form.controls.organization.setValue('Backend');
+      fixture.detectChanges();
+      const provenance = fixture.componentInstance.rateCardProvenance();
+      expect(provenance).toBe('the Backend rate card');
+      expect(provenance).not.toContain('Inherited');
+    });
+
+    it('rateCardProvenance labels a generic-card match without naming any node', async () => {
+      const genericOnly: RateCard[] = [{ id: 'GEN', role: 'Developer', currency: 'EUR', costRate: 600, billRate: 1120 }];
+      const { fixture } = setup(RESOURCES, ORG_NODES, genericOnly);
+      await flush(fixture);
+      fixture.componentInstance.form.controls.role.setValue('Developer');
+      fixture.componentInstance.form.controls.organization.setValue('Backend');
+      fixture.detectChanges();
+      expect(fixture.componentInstance.rateCardProvenance()).toBe('the generic rate card');
+    });
+
+    it('renders the ancestor provenance sentence in the form hint, scoped to the hint element', async () => {
+      const { fixture } = setup(RESOURCES, ORG_NODES, RATE_CARDS_ANCESTOR);
+      await flush(fixture);
+      fixture.componentInstance.showForm.set(true);
+      fixture.componentInstance.form.controls.role.setValue('Developer');
+      fixture.componentInstance.form.controls.organization.setValue('Backend');
+      fixture.detectChanges();
+      const host = fixture.nativeElement as HTMLElement;
+      const provenanceEl = host.querySelector('[data-test="rate-card-provenance"]');
+      expect(provenanceEl?.textContent?.trim()).toBe('Inherited from Engineering.');
+    });
+
+    it('rateCardProvenance is null while orgsRes is still loading', async () => {
+      // No generic card in this fixture, deliberately: an Engineering-only
+      // card that COULD resolve for Backend once the tree loads, so a null
+      // result here proves the component isn't guessing ahead of the tree —
+      // not merely that there was nothing to resolve either way.
+      const orgs$ = new Subject<ResourceOrganization[]>();
+      const apiStub = {
+        getResources: () => of(RESOURCES),
+        getProjectRoles: () => of([]),
+        getResourceOrganizations: () => orgs$,
+        getCountries: () => of([]),
+        getCities: () => of([]),
+        getRateCards: () => of([{ id: 'ENG', role: 'Developer', organization: 'Engineering', currency: 'EUR', costRate: 640, billRate: 1200 }] as RateCard[]),
+        getVendors: () => of([]),
+      } as unknown as ApiService;
+      const authStub = { authReady: signal(true), isAuthenticated: signal(true) } as unknown as AuthService;
+      const notifyStub = { show: vi.fn() } as unknown as NotificationService;
+      TestBed.configureTestingModule({
+        imports: [ResourcesComponent],
+        providers: [
+          { provide: ApiService, useValue: apiStub },
+          { provide: AuthService, useValue: authStub },
+          { provide: NotificationService, useValue: notifyStub },
+        ],
+      });
+      const fixture = TestBed.createComponent(ResourcesComponent);
+      // whenStable() HANGS here — orgs$ is a deliberately open stream. Tick
+      // microtasks instead, so every OTHER (synchronous) read still settles.
+      fixture.detectChanges();
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+      fixture.detectChanges();
+
+      fixture.componentInstance.form.controls.role.setValue('Developer');
+      fixture.componentInstance.form.controls.organization.setValue('Backend');
+      fixture.detectChanges();
+      expect(fixture.componentInstance.rateCardProvenance()).toBeNull();
     });
   });
 });
