@@ -8,10 +8,13 @@ import { AuthService } from '../services/auth.service';
 import {
   ApiService,
   Assignment,
+  AssignmentDay,
+  AssignmentMonth,
   BASE_CURRENCY,
   BillingPlanItem,
   ChangeRequest,
   Contract,
+  CostBaseline,
   FinancialItem,
   FxRate,
   Issue,
@@ -27,6 +30,7 @@ import {
 import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
 import {
   computeProjectFinancials,
+  costBaselineComparison,
   FinanceData,
   PeriodDelta,
   PortfolioAlertRow,
@@ -72,6 +76,15 @@ interface DashboardData {
    * simply stops, so there is no single action a combined total could name.
    */
   benchRollup: BenchRollup;
+  /**
+   * Baseline vs Planned portfolio tile (design spec, block E, §7) —
+   * portfolio total only, no per-project column. Raw per-day/per-month
+   * assignment rows plus frozen cost baselines, joined per-project via
+   * costBaselineComparison and summed across the portfolio below.
+   */
+  assignmentDays: AssignmentDay[];
+  assignmentMonths: AssignmentMonth[];
+  costBaselines: CostBaseline[];
 }
 
 type DeliveryHealth = 'green' | 'amber' | 'red';
@@ -174,9 +187,9 @@ interface ProjectCommandRow {
         <!-- 11-endpoint load in flight: skeletons in place of fabricated zeros. -->
         <div class="space-y-6" aria-busy="true" aria-label="Loading delivery command center">
           <div class="command-eyebrow">Portfolio Financials</div>
-          <section class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-4">
+          <section class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-7 gap-4">
             <div class="command-skeleton h-28 xl:col-span-2"></div>
-            @for (tile of [1, 2, 3, 4]; track tile) {
+            @for (tile of [1, 2, 3, 4, 5]; track tile) {
               <div class="command-skeleton h-28"></div>
             }
           </section>
@@ -200,7 +213,7 @@ interface ProjectCommandRow {
         </span>
       </div>
 
-      <section class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-4">
+      <section class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-7 gap-4">
         <div class="command-kpi xl:col-span-2" [class.danger]="portfolioMarginPct() < 0" [class.warning]="portfolioMarginPct() >= 0 && portfolioMarginPct() < 15">
           <div class="flex items-start justify-between gap-3">
             <div>
@@ -255,6 +268,12 @@ interface ProjectCommandRow {
           <div class="command-kpi-label">Portfolio EAC</div>
           <div class="command-kpi-value">{{ totalEac() | currency:'EUR':'symbol':'1.0-0' }}</div>
           <div class="command-kpi-note">Actuals + planned residual</div>
+        </div>
+
+        <div class="command-kpi" data-test="baseline-tile" [class.danger]="totalBaselineDelta() > 0" [class.info]="totalBaselineDelta() <= 0">
+          <div class="command-kpi-label">Baseline vs Planned</div>
+          <div class="command-kpi-value">{{ totalBaselineDelta() | currency:'EUR':'symbol':'1.0-0' }}</div>
+          <div class="command-kpi-note">{{ totalBaselineDeltaPct() !== null ? ((totalBaselineDeltaPct()! > 0 ? '+' : '') + (totalBaselineDeltaPct() | number:'1.2-2') + '% vs frozen PCP') : 'No baseline frozen yet' }}</div>
         </div>
 
         <div class="command-kpi warning">
@@ -595,6 +614,9 @@ export class DashboardComponent {
     negotiatedRates: [],
     hoursPerDay: DEFAULT_HOURS_PER_DAY,
     benchRollup: EMPTY_BENCH_ROLLUP,
+    assignmentDays: [],
+    assignmentMonths: [],
+    costBaselines: [],
   };
 
   // FX rates feed FinanceData so portfolio rollups (margin, revenue, EAC, VAC)
@@ -657,6 +679,16 @@ export class DashboardComponent {
             // already all-or-nothing across its other 14 legs, and this is
             // leg 15, not a new failure surface.
             benchRollup: this.api.getBenchMonthly(),
+            // Baseline vs Planned portfolio tile (design spec, block E, Task 7)
+            // — appended AFTER benchRollup, matching this forkJoin's own
+            // established convention (see the contracts/negotiatedRates and
+            // benchRollup comments above) so a new leg is never inserted
+            // mid-block. REQUIRED legs, deliberately no catchError: same
+            // reasoning as benchRollup — a failed read must surface as this
+            // whole page's error state, never silently render a zeroed tile.
+            assignmentDays: this.api.getAssignmentDays(),
+            assignmentMonths: this.api.getAssignmentMonths(),
+            costBaselines: this.api.getCostBaselines(),
           })
         : of(DashboardComponent.EMPTY_DATA),
     defaultValue: DashboardComponent.EMPTY_DATA,
@@ -690,6 +722,10 @@ export class DashboardComponent {
       hoursPerDay: d.hoursPerDay,
       // Normalise multi-currency amounts to base for portfolio money rollups.
       fxRates: this.fxRates(),
+      // Baseline vs Planned portfolio tile (design spec, block E, §7).
+      assignmentDays: d.assignmentDays,
+      assignmentMonths: d.assignmentMonths,
+      costBaselines: d.costBaselines,
     };
   });
 
@@ -872,6 +908,19 @@ export class DashboardComponent {
   totalVac = computed(() =>
     this.data().projects.reduce((sum, p) => sum + computeProjectFinancials(p.id, this.financeData()).varianceAtCompletion, 0),
   );
+
+  /** Portfolio Baseline vs Planned total (design spec, block E, §7) — a
+   *  portfolio total only, no per-project column (a dense table already). */
+  protected readonly totalBaselineDelta = computed(() =>
+    this.data().projects.reduce((sum, p) => sum + costBaselineComparison(this.financeData(), p.id).reduce((s, r) => s + r.delta, 0), 0),
+  );
+  protected readonly totalBaselineAmount = computed(() =>
+    this.data().projects.reduce((sum, p) => sum + costBaselineComparison(this.financeData(), p.id).reduce((s, r) => s + r.baseline, 0), 0),
+  );
+  protected readonly totalBaselineDeltaPct = computed(() => {
+    const baseline = this.totalBaselineAmount();
+    return baseline !== 0 ? (this.totalBaselineDelta() / baseline) * 100 : null;
+  });
 
   activeProjects = computed(() => this.data().projects.filter(p => p.status !== 'Completed').length);
   openRequests = computed(() => this.data().requests.filter(r => r.status === 'Open').length);

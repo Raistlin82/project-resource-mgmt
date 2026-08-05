@@ -41,6 +41,14 @@ const DASHBOARD_METHODS = [
   // "In Bench" tile (Block F, Task 9) — appended AFTER getHoursPerDay in the
   // component's forkJoin, matching the same evaluation-order convention.
   'getBenchMonthly',
+  // Baseline vs Planned portfolio tile (block E, Task 7) — appended AFTER
+  // getBenchMonthly, matching this file's own established convention of
+  // adding new forkJoin legs at the end rather than mid-block, to avoid a
+  // merge collision on this exact array (see the getHoursPerDay/getBenchMonthly
+  // comments above for the historical incident this convention now avoids).
+  'getAssignmentDays',
+  'getAssignmentMonths',
+  'getCostBaselines',
 ] as const;
 
 function makeApiStub(): Record<(typeof DASHBOARD_METHODS)[number], ReturnType<typeof vi.fn>> {
@@ -200,5 +208,51 @@ describe('Dashboard "In Bench" tile (Block F, Task 9)', () => {
     const comp = fixture.componentInstance;
     expect(comp.internalBenchCount()).toBe(0);
     expect(comp.subcoBenchCount()).toBe(0);
+  });
+});
+
+describe('Dashboard — Baseline vs Planned portfolio tile (design spec, block E)', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('renders the portfolio Baseline vs Planned delta for a finance reader', async () => {
+    // Mirrors Task 1's own seeded fixture exactly (720 planned, 600 frozen ->
+    // +120 EUR / +20.00%), so this figure is hand-verifiable the same way as
+    // the Project 360 card (Task 6) and Task 1's seed comment.
+    const { fixture } = await render('finance', {
+      getProjects: vi.fn(() => of([
+        { id: 'P1', name: 'Project One', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution' },
+      ])),
+      getRequests: vi.fn(() => of([{ id: 'REQ1', name: 'Req', requiredRole: 'Consultant', requiredEffort: 8, status: 'Fulfilled', skills: [], projectId: 'P1' }])),
+      getAssignments: vi.fn(() => of([{ id: 'A1', requestId: 'REQ1', resourceId: 'R1', assignedHours: 8, status: 'Allocated' }])),
+      getResources: vi.fn(() => of([{ id: 'R1', name: 'Res', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, costRate: 90, billRate: 180 }])),
+      getAssignmentDays: vi.fn(() => of([{ id: 'A1:2026-10-05', assignmentId: 'A1', date: '2026-10-05', hours: 8 }])),
+      getAssignmentMonths: vi.fn(() => of([{ id: 'A1:2026-10', assignmentId: 'A1', month: '2026-10', status: 'Allocated' }])),
+      getCostBaselines: vi.fn(() => of([{ id: 'CB1', projectId: 'P1', period: '2026-10', amount: 600, frozenAt: '2026-09-15T00:00:00.000Z', frozenBy: 'u4' }])),
+    });
+
+    // Planned (720) - baseline (600) = +120 EUR portfolio-wide, the same
+    // hand-verified figure as the seed fixture (Task 1) and the Project 360
+    // card (Task 6).
+    expect(fixture.nativeElement.textContent).toContain('Baseline vs Planned');
+    // Scoped to the tile itself (this dashboard has several sibling
+    // .command-kpi tiles sharing the same class, e.g. VAC/Portfolio EAC —
+    // an unscoped page-wide query is exactly the failure mode this project's
+    // reviews keep catching on shared-class siblings) AND checked for the
+    // EXACT sign: Angular's CurrencyPipe renders a negative amount as
+    // "-€120", which a bare `.toContain('€120')` would still match — that
+    // substring check cannot tell +120 from -120 apart, so a sign-flip
+    // mutation would pass silently. Assert the precise rendered string
+    // instead of a loose substring.
+    const host = fixture.nativeElement as HTMLElement;
+    const tile = host.querySelector('[data-test="baseline-tile"]');
+    expect(tile).not.toBeNull();
+    const tileText = tile!.textContent ?? '';
+    expect(tileText).toContain('€120');
+    expect(tileText).not.toContain('-€120');
+  });
+
+  it('is absent for a pm — portfolio dashboard stays finance/delivery-executive/admin only, unchanged by this block', async () => {
+    const { fixture } = await render('pm');
+    expect(fixture.nativeElement.textContent).not.toContain('Baseline vs Planned');
   });
 });
