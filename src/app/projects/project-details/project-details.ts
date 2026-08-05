@@ -4,9 +4,10 @@ import { MatIconModule } from '@angular/material/icon';
 import { CurrencyPipe, DatePipe, DecimalPipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { of } from 'rxjs';
-import { ApiService, Project, Order, OrderLine, ResourceRequest, Assignment, Resource, FinancialItem, TimeEntry, Issue, ChangeRequest } from '../../services/api.service';
+import { ApiService, Project, Order, OrderLine, ResourceRequest, Assignment, Resource, FinancialItem, TimeEntry, Issue, ChangeRequest, CostBaseline, AssignmentDay, AssignmentMonth } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
-import { computeProjectFinancials, FinanceData } from '../../services/finance.util';
+import { computeProjectFinancials, costBaselineComparison, CostBaselineComparisonRow, FinanceData } from '../../services/finance.util';
+import { NotificationService } from '../../services/notification.service';
 import { ProjectPartners } from '../project-partners/project-partners';
 import { ProjectDocuments } from '../project-documents/project-documents';
 import { ProjectPlans } from '../project-plans/project-plans';
@@ -16,6 +17,7 @@ import { ProjectTasks } from '../project-tasks/project-tasks';
 import { ProjectIssues } from '../project-issues/project-issues';
 import { ChangeRequests } from '../change-requests/change-requests';
 import { ProjectRates } from '../project-rates/project-rates';
+import { ListStateComponent } from '../../shared/list-state.component';
 import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 @Component({
@@ -35,7 +37,8 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
     ProjectTasks,
     ProjectIssues,
     ChangeRequests,
-    ProjectRates
+    ProjectRates,
+    ListStateComponent
   ],
   template: `
     <div class="command-page space-y-6">
@@ -204,6 +207,73 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
                 <p class="text-sm text-[var(--cc-muted)]">No customer revenue recorded for this project yet. Add a Customer order with a line imputed to this project (Commercial → Orders).</p>
               }
             </div>
+
+            @if (auth.canReadStaffing()) {
+              <div class="command-card p-6 sm:p-8">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
+                  <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] tracking-tight">Baseline vs Planned</h3>
+                  @if (auth.canApproveFinancials()) {
+                    <button type="button" (click)="freezeBaseline()" [disabled]="freezingBaseline()"
+                            class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
+                      <mat-icon class="text-[18px] w-[18px] h-[18px]">ac_unit</mat-icon>
+                      {{ freezingBaseline() ? 'Freezing…' : 'Freeze baseline' }}
+                    </button>
+                  }
+                </div>
+                <app-list-state [loading]="baselineLoading()" [error]="baselineErrored()" skeleton="table-rows" [rows]="3" [columns]="5" label="cost baseline" (retry)="reloadBaseline()">
+                  <ng-template>
+                    @if (!hasComparisonRows()) {
+                      <p class="text-sm text-[var(--cc-muted)]">No baseline frozen for this project yet.</p>
+                    } @else {
+                      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+                        <div class="command-kpi">
+                          <p class="command-kpi-label">Baseline</p>
+                          <p class="command-kpi-value font-mono tabular-nums">{{ baselineTotals().baseline | currency:'EUR':'symbol':'1.0-0' }}</p>
+                        </div>
+                        <div class="command-kpi">
+                          <p class="command-kpi-label">Planned</p>
+                          <p class="command-kpi-value font-mono tabular-nums">{{ baselineTotals().planned | currency:'EUR':'symbol':'1.0-0' }}</p>
+                        </div>
+                        <div class="command-kpi" [class.danger]="baselineTotals().delta > 0">
+                          <p class="command-kpi-label">Delta</p>
+                          <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="baselineTotals().delta <= 0" [class.text-critical-text]="baselineTotals().delta > 0">{{ baselineTotals().delta | currency:'EUR':'symbol':'1.0-0' }}</p>
+                          <p class="command-kpi-note">{{ baselineTotals().deltaPct !== null ? ((baselineTotals().deltaPct! > 0 ? '+' : '') + (baselineTotals().deltaPct! | number:'1.2-2') + '%') : '—' }}</p>
+                        </div>
+                      </div>
+                      <div class="overflow-x-auto">
+                        <table class="command-data-table">
+                          <thead class="bg-surface-muted border-b border-line text-ink-muted">
+                            <tr>
+                              <th class="px-4 py-3 font-semibold uppercase tracking-wider text-xs text-left">Period</th>
+                              <th class="px-4 py-3 font-semibold uppercase tracking-wider text-xs text-right">Baseline</th>
+                              <th class="px-4 py-3 font-semibold uppercase tracking-wider text-xs text-right">Planned</th>
+                              <th class="px-4 py-3 font-semibold uppercase tracking-wider text-xs text-right">Delta</th>
+                              <th class="px-4 py-3 font-semibold uppercase tracking-wider text-xs text-right">Delta %</th>
+                            </tr>
+                          </thead>
+                          <tbody class="divide-y divide-line">
+                            @for (row of baselineRows(); track row.period) {
+                              <tr>
+                                <td class="px-4 py-3 font-medium text-ink">
+                                  {{ row.period }}
+                                  @if (row.outOfBaselineHorizon) {
+                                    <span class="command-status amber ml-2 text-[10px]">not frozen</span>
+                                  }
+                                </td>
+                                <td class="px-4 py-3 text-right font-mono tabular-nums">{{ row.baseline | currency:'EUR':'symbol':'1.0-0' }}</td>
+                                <td class="px-4 py-3 text-right font-mono tabular-nums">{{ row.planned | currency:'EUR':'symbol':'1.0-0' }}</td>
+                                <td class="px-4 py-3 text-right font-mono tabular-nums" [class.text-positive-text]="row.delta <= 0" [class.text-critical-text]="row.delta > 0">{{ row.delta | currency:'EUR':'symbol':'1.0-0' }}</td>
+                                <td class="px-4 py-3 text-right font-mono tabular-nums">{{ row.deltaPct !== null ? ((row.deltaPct > 0 ? '+' : '') + (row.deltaPct | number:'1.2-2') + '%') : '—' }}</td>
+                              </tr>
+                            }
+                          </tbody>
+                        </table>
+                      </div>
+                    }
+                  </ng-template>
+                </app-list-state>
+              </div>
+            }
           </div>
         }
         @if (activeTab() === 'partners') {
@@ -252,7 +322,8 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
 })
 export class ProjectDetailsComponent {
   private api = inject(ApiService);
-  private auth = inject(AuthService);
+  protected auth = inject(AuthService);
+  private notificationService = inject(NotificationService);
 
   // Route param ':id' bound via withComponentInputBinding()
   id = input.required<string>();
@@ -298,6 +369,26 @@ export class ProjectDetailsComponent {
     stream: ({ params: ready }) => (ready ? this.api.getTimeEntries() : of<TimeEntry[]>([])),
     defaultValue: [] as TimeEntry[],
   });
+
+  // Baseline vs Planned (design spec, block E, §8). Gated on BOTH authReady
+  // AND canReadStaffing — unlike the pre-existing KPIs above (authReady only)
+  // — so employee/sales never even issue these three fetches.
+  private assignmentDaysRes = rxResource<AssignmentDay[], boolean>({
+    params: () => this.auth.authReady() && this.auth.canReadStaffing(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getAssignmentDays() : of<AssignmentDay[]>([])),
+    defaultValue: [] as AssignmentDay[],
+  });
+  private assignmentMonthsRes = rxResource<AssignmentMonth[], boolean>({
+    params: () => this.auth.authReady() && this.auth.canReadStaffing(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getAssignmentMonths() : of<AssignmentMonth[]>([])),
+    defaultValue: [] as AssignmentMonth[],
+  });
+  private costBaselinesRes = rxResource<CostBaseline[], boolean>({
+    params: () => this.auth.authReady() && this.auth.canReadStaffing(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getCostBaselines() : of<CostBaseline[]>([])),
+    defaultValue: [] as CostBaseline[],
+  });
+
   private issuesRes = authGatedResource(() => this.api.getProjectIssues(), [] as Issue[]);
   private changesRes = authGatedResource(() => this.api.getChangeRequests(), [] as ChangeRequest[]);
 
@@ -311,6 +402,63 @@ export class ProjectDetailsComponent {
     timeEntries: this.timeEntriesRes.value(),
   }));
   financials = computed(() => computeProjectFinancials(this.id(), this.financeData()));
+
+  protected baselineLoading = computed(() => !this.auth.authReady()
+    || this.requestsRes.isLoading() || this.assignmentsRes.isLoading() || this.resourcesRes.isLoading()
+    || this.assignmentDaysRes.isLoading() || this.assignmentMonthsRes.isLoading() || this.costBaselinesRes.isLoading());
+  protected baselineErrored = computed(() => this.requestsRes.status() === 'error' || this.assignmentsRes.status() === 'error'
+    || this.resourcesRes.status() === 'error' || this.assignmentDaysRes.status() === 'error'
+    || this.assignmentMonthsRes.status() === 'error' || this.costBaselinesRes.status() === 'error');
+  private baselineData = computed<FinanceData>(() => ({
+    requests: this.requestsRes.value(),
+    assignments: this.assignmentsRes.value(),
+    resources: this.resourcesRes.value(),
+    orders: [], orderLines: [], financials: [],
+    assignmentDays: this.assignmentDaysRes.value(),
+    assignmentMonths: this.assignmentMonthsRes.value(),
+    costBaselines: this.costBaselinesRes.value(),
+  }));
+  protected baselineRows = computed<CostBaselineComparisonRow[]>(() => costBaselineComparison(this.baselineData(), this.id()));
+  // Named for exactly what it checks (not "does a CostBaseline row exist" —
+  // costBaselineComparison's own union of baseline-periods and booked-periods
+  // means a project with booked hours but NO frozen baseline still produces a
+  // real row, flagged outOfBaselineHorizon: true, that the UI must show with
+  // its "not frozen" badge rather than hide behind an empty-state message).
+  // Reuses costBaselineComparison's OWN definition of "truly nothing to show"
+  // (returns [] only when neither a baseline nor any booked hours exist) so
+  // there is one definition of "empty" in one place, not two that can drift.
+  protected hasComparisonRows = computed(() => this.baselineRows().length > 0);
+  protected baselineTotals = computed(() => {
+    const rows = this.baselineRows();
+    const baseline = rows.reduce((s, r) => s + r.baseline, 0);
+    const planned = rows.reduce((s, r) => s + r.planned, 0);
+    const delta = planned - baseline;
+    return { baseline, planned, delta, deltaPct: baseline !== 0 ? (delta / baseline) * 100 : null };
+  });
+
+  protected freezingBaseline = signal(false);
+  freezeBaseline(): void {
+    const id = this.project()?.id;
+    if (!id || this.freezingBaseline()) return;
+    this.freezingBaseline.set(true);
+    this.api.freezeCostBaseline(id).subscribe({
+      next: () => {
+        this.freezingBaseline.set(false);
+        this.costBaselinesRes.reload();
+        this.notificationService.show('Baseline frozen', 'success');
+      },
+      error: (err: { error?: { error?: string } }) => {
+        this.freezingBaseline.set(false);
+        this.notificationService.show(err.error?.error ?? 'Could not freeze baseline', 'error');
+      },
+    });
+  }
+  reloadBaseline(): void {
+    this.assignmentDaysRes.reload();
+    this.assignmentMonthsRes.reload();
+    this.costBaselinesRes.reload();
+  }
+
   openIssues = computed(() =>
     this.issuesRes.value().filter(i => i.projectId === this.id() && i.status !== 'Resolved' && i.status !== 'Closed' && (i.severity === 'High' || i.severity === 'Critical' || i.escalated)).length,
   );
