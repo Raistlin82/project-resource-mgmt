@@ -1995,19 +1995,20 @@ git commit -m "docs: block E in the entity catalogue, RBAC, and the Project 360 
 
 ## Verification Checklist (before merge)
 
-- [ ] `plannedCostSchedule` counts a day whose owning month is `Allocated` or `Requested`, and zeroes `Draft`/`Rejected`/absent.
-- [ ] The unit-pinning test proves a raw (EUR/day) resource feed produces exactly `hoursPerDay` (8) times the resolved (EUR/hour) figure — never silently 1.
-- [ ] The freeze handler builds its own `FinanceData` via `resolveResourceRates(await repos.resources.list())`, never `loadFinanceData()`.
-- [ ] `POST /cost-baselines` writes one row per booked month, ignores a client-forged `amount`/`period`/`frozenAt`/`frozenBy`, 400s on a missing/unknown `projectId` and on an empty freeze horizon, and never rejects a re-freeze.
-- [ ] A re-freeze appends a NEW batch; the comparison always resolves to the row with the latest `frozenAt` for a period.
-- [ ] The hand-verified fixture holds exactly: `2026-10` = +120 EUR / +20.00%; `2026-11` = −500 EUR / `—`; the four pre-existing project-`'1'` months (May-Aug 2026) show `outOfBaselineHorizon: true`.
-- [ ] `GET /cost-baselines`, `GET /assignment-days`, `GET /assignment-months` are readable by `pm`/`resource-manager`/`finance`/`delivery-executive`/`admin` and 403 for `employee`/`sales`.
-- [ ] `POST /cost-baselines` 403s for `pm` (read access does not imply write access) and succeeds for `finance`/`delivery-executive`/`admin`.
-- [ ] The freeze `POST` produces an append-only audit-log entry with no extra wiring.
-- [ ] The Baseline card is ABSENT (not empty, not zeroed) for `employee`/`sales` on the Project 360; shows a skeleton while loading; shows "Couldn't load cost baseline" + Retry on a dependency error; shows "No baseline frozen for this project yet." only when `costBaselines` is genuinely empty for that project.
-- [ ] "Freeze baseline" is visible only for `finance`/`delivery-executive`/`admin`.
-- [ ] Every EUR figure renders with ≤ 2 decimals; every `deltaPct` renders `—` (em dash) when `null`, never a fabricated percentage.
-- [ ] Unit, lint, build, live smoke (with and without `AUTH_TRUST_HEADERS`), the impact script, and the fresh-Postgres run are all green.
+- [x] `plannedCostSchedule` counts a day whose owning month is `Allocated` or `Requested`, and zeroes `Draft`/`Rejected`/absent. (Task 2 unit tests, one per guard.)
+- [x] The unit-pinning test proves a raw (EUR/day) resource feed produces exactly `hoursPerDay` (8) times the resolved (EUR/hour) figure — never silently 1. (Task 2's "is fed resolved... rates" test.)
+- [x] The freeze handler builds its own `FinanceData` via `resolveResourceRates(await repos.resources.list())`, never `loadFinanceData()`. (Task 5; mutation-verified — feeding raw rates inflated October 8x, exactly the shipped defect shape.)
+- [x] `POST /cost-baselines` writes one row per booked month, ignores a client-forged `amount`/`period`/`frozenAt`/`frozenBy`, 400s on a missing/unknown `projectId` and on an empty freeze horizon, and never rejects a re-freeze. (Task 5 smoke checks.)
+- [x] A re-freeze appends a NEW batch; the comparison always resolves to the row with the latest `frozenAt` for a period. (Task 4's re-freeze test + Task 5's smoke append check + Task 9's impact-script re-freeze.)
+- [x] The hand-verified fixture holds exactly: `2026-10` = +120 EUR / +20.00%; `2026-11` = −500 EUR / **−100.00%** (corrected during Task 4's review — the em dash this checklist originally named is WRONG: Rule A nulls `deltaPct` only when baseline = 0, and November's baseline is 500, so it renders a real, severe percentage, never a dash; see the design-spec fix commit `f600e71`); the four pre-existing project-`'1'` months (May-Aug 2026) show `outOfBaselineHorizon: true`.
+- [x] `GET /cost-baselines`, `GET /assignment-days`, `GET /assignment-months` are readable by `pm`/`resource-manager`/`finance`/`delivery-executive`/`admin` and 403 for `employee`/`sales`. (Task 5's full 7-role smoke matrix — discharging Task 1's recorded debt — plus Task 3's block-F-plumbing content check.)
+- [x] `POST /cost-baselines` 403s for `pm` (read access does not imply write access) and succeeds for `finance`/`delivery-executive`/`admin`. (Task 5.)
+- [x] The freeze `POST` produces an append-only audit-log entry with no extra wiring. (Task 5 smoke check.)
+- [x] The Baseline card is ABSENT (not empty, not zeroed) for `employee`/`sales` on the Project 360; shows a skeleton while loading; shows "Couldn't load cost baseline" + Retry on a dependency error; shows "No baseline frozen for this project yet." only when `costBaselines` is genuinely empty for that project. (Task 6, with the `hasComparisonRows` fix: "genuinely empty" means neither a baseline nor any booked hours — the plan's own original `hasAnyBaseline` draft would have shown the empty message even for a booked-but-unfrozen month, hiding the "not frozen" case this block exists to surface.)
+- [x] "Freeze baseline" is visible only for `finance`/`delivery-executive`/`admin`. (Task 6 test.)
+- [x] Every EUR figure renders with ≤ 2 decimals; every `deltaPct` renders `—` (em dash) when `null` (baseline = 0 only, per Rule A), a real signed percentage otherwise, never a fabricated one. (`1.2-2` digitsInfo on the card, tile, and report/CSV — deliberately not the `1.0-2` this plan's own snippets used, since that drops trailing zeros on a whole-number percentage; see the progress ledger for the one-liner distinguishing this from block F's opposite ruling on an FTE field.)
+- [x] Unit, lint, build, live smoke (with and without `AUTH_TRUST_HEADERS`), the impact script, and the fresh-Postgres run are all green. (68 files / 986 tests, lint clean, build clean; smoke-api.mjs 606/0/1-skipped and 608/0 on Postgres; smoke-noauth.mjs 147/0; impact script 14/14 on a fresh boot, in-memory and Postgres alike.)
+- [x] **Not in the original checklist, added post-Task-8 review:** every AGGREGATE Baseline/Planned/Delta total (the Project 360 card's KPI strip, the dashboard portfolio tile, and Reporting's per-project PCP columns) is restricted to periods that actually carry a current baseline row — never summed across every period in `costBaselineComparison`'s full union, which also includes out-of-horizon months with baseline 0. The per-period table rows were always correct; only these three aggregates were not, and all three shared the identical defect independently (see the progress ledger's "Portfolio-tile scope check" entry for the full arithmetic).
 
 ---
 
