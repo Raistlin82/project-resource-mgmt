@@ -403,6 +403,7 @@ export class App {
       label: 'Resource Control',
       items: [
         { label: 'Dashboard', icon: 'dashboard', route: '/', exact: true },
+        { label: 'Search', icon: 'search', route: '/search' },
         { label: 'My Profile', icon: 'person', route: '/profile' },
         { label: 'My Assignments', icon: 'event_note', route: '/assignments' },
         { label: 'Resource Requests', icon: 'assignment', route: '/requests', badge: 'requests' },

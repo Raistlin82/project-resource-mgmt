@@ -17,6 +17,7 @@ export const routes: Routes = [
 
   // Project Management
   { path: 'projects', title: 'Projects', loadComponent: () => import('./projects/projects/projects').then(m => m.ProjectsComponent) },
+  { path: 'search', title: 'Search', loadComponent: () => import('./search/search.component').then(m => m.SearchComponent) },
   { path: 'projects/:id', title: 'Project Details', canMatch: [roleGuard(a => a.canReadStaffing())], loadComponent: () => import('./projects/project-details/project-details').then(m => m.ProjectDetailsComponent) },
   { path: 'project-partners', title: 'Project Partners', canMatch: [roleGuard(a => a.canManageProjects())], loadComponent: () => import('./projects/project-partners/project-partners').then(m => m.ProjectPartners) },
   { path: 'project-documents', title: 'Project Documents', canMatch: [roleGuard(a => a.canManageProjects())], loadComponent: () => import('./projects/project-documents/project-documents').then(m => m.ProjectDocuments) },
