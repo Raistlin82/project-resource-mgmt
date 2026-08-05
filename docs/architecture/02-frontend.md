@@ -376,13 +376,28 @@ financial data into spreadsheet apps.
 | Area | Routes (see §4) | Notes |
 | --- | --- | --- |
 | **Shell** | `App` (`app.ts`) | sidebar nav, capability-filtered groups, live nav badges (`rxResource` on `authReady`), auth footer (sign in/out) |
-| **Resource Control** | `/`, `/profile`, `/assignments`, `/requests`, `/staffing`, `/approvals`, `/utilization` | staffing, utilization, approvals |
+| **Resource Control** | `/`, `/profile`, `/assignments`, `/requests`, `/staffing`, `/approvals`, `/utilization`, `/search` | staffing, utilization, approvals; `/search` (Block G) is the cross-entity faceted search page, ungated at the route level (mirrors `/projects`) |
 | **Project Control** | `/projects`, `/projects/:id`, `/project-plans`, `/project-tasks`, `/project-issues`, `/change-requests`, `/project-documents`, `/project-partners`, `/financial-plans`, `/project-cost-centers` | project execution |
 | **Commercial** *(gated)* | `/customers`, `/contracts`, `/contracts/:id`, `/orders`, `/billing` | `commercialGuard` (+ `financeGuard` for billing) |
 | **Analytics** | `/forecast`, `/what-if`, `/utilization`, `/reporting`, `/bench` | `Reporting` is the reference example of the `authReady` data pattern; `/bench` (Block F) shares `capacityGuard` with `/capacity` (see [`../roles-and-permissions.md`](../roles-and-permissions.md#route-access-client-guards)) |
 | **Configuration** | `/config/*` | catalogs, roles, orgs; `/config/integrations` gated on `financeGuard` |
 
 For what each of these *does* functionally, see the [`../functional/`](../functional) area docs.
+
+`src/app/shared/search-filter-bar.component.ts` (`SearchFilterBarComponent`, Block G)
+is the shared text-box + N-facet `<select>` + active-filter-chip + Clear-all
+primitive: a text query and zero or more parameterized `Facet` dimensions,
+reused as-is by five consumers — the `/search` page itself, `resources.component.ts`
+(all five of its existing filters: kind/capability/practice/competence/manager),
+`projects.ts` (its text box only), and `customers.ts`/`contracts.ts`/`orders.ts`
+(first-ever filter on each, text-only). Each `Facet` carries an optional
+`allLabel` overriding the generic `All <label>` pseudo-option text — English
+pluralization isn't mechanical, so a screen migrating its own pre-existing
+wording supplies this explicitly to stay byte-identical to what it rendered
+before. `staffing.component.ts`/`allocation-approvals.component.ts` keep their
+own independent capability/practice/competence/manager filter implementations
+(same predicates, different screen subject) — a declared, named follow-up,
+not an oversight.
 
 `/forecast`'s and `/what-if`'s bench panel ("available for reallocation") calls
 `bench.util.ts`'s pure `benchRollup`/`notFullyAllocatedAt` directly, client-side,

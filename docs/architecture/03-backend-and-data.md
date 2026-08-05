@@ -38,12 +38,18 @@ Most collections are plain keyed resources, so a single generic helper mounts
 their four endpoints against any `Repository<T>`:
 
 ```
-crud(router, path, repo, allowed, numericFields?)
-  GET    /${path}      -> repo.list()
+crud(router, path, repo, allowed, numericFields?, validate?, searchable?)
+  GET    /${path}      -> repo.list(), then optional q/limit/offset search+paginate (Block G)
   POST   /${path}      -> validate numerics, pick allow-list, id = newId(), repo.create()
   PUT    /${path}/:id  -> 404 if missing, validate, repo.update()
   DELETE /${path}/:id  -> repo.remove(); 404 when id was absent, else 204
 ```
+
+`searchable` (Block G) is a 6th, optional parameter — an array of field names
+this collection's `GET` should text-match on via `search.util.ts`'s
+`searchPage()`. Default `[]`: every `crud()` caller that doesn't pass it (all
+except `customers`, which passes `['name']`) is byte-for-byte unaffected — `q`
+is never read for their `GET` route at all.
 
 `crud()` is used for the simple collections (`project-partners`,
 `project-documents`, `work-packages`, `project-financials`,
@@ -315,6 +321,47 @@ gated by the **same** `READ_RULES` predicate
 (`p.startsWith('/capacity') || p.startsWith('/bench')`,
 `src/server.ts`) — extended, not duplicated, when Block F was added — and both
 run under `roleGate`'s GLOBAL middleware, so neither handler re-gates itself.
+
+## Cross-entity search (Block G, no schema, no new endpoint)
+
+Six existing collection reads — `GET /resources`, `/projects`, `/requests`,
+`/customers`, `/contracts`, `/orders` — gained optional `q`/`limit`/`offset`
+query parameters. Like `/capacity`/`/bench` above, this adds **no schema**:
+no migration, no new table, and (unlike `/capacity`/`/bench`) **no new
+endpoint either** — a combined `GET /search` was deliberately rejected in
+favor of extending the six reads each collection already had, so every one
+keeps the exact `READ_RULES` entry it has today (see
+[`roles-and-permissions.md`](../roles-and-permissions.md#a-read_rules--gated-get-collections)) —
+zero new `authorizeRead()` calls anywhere in this block's diff.
+
+**`src/app/services/search.util.ts`** is the shared pure layer (`clampSearchPage`,
+`matchesQuery`, `searchPage`) — no I/O, no clock, mirroring `/audit-logs`'s own
+`AUDIT_LOG_DEFAULT_LIMIT`/`AUDIT_LOG_MAX_LIMIT` clamp shape with this feature's
+own thresholds (`SEARCH_DEFAULT_LIMIT = 20`, `SEARCH_MAX_LIMIT = 100`). Every
+extended handler calls it **after** the existing, unmodified `repos.X.list()`
+— there is no `if (db) { SQL } else { ... }` branch, because there is no
+adapter-specific operator to keep in sync: the in-memory adapter and the
+Postgres/Drizzle adapter both hand the SAME full array to the SAME
+in-process filter/paginate function, so parity is a consequence of calling
+one function once, not a second code path to keep from drifting. This is a
+deliberate deferral, not an oversight: no `pg_trgm`/`tsvector`/GIN index, no
+ranking, no typo tolerance — a Postgres text index cannot exist on the
+in-memory adapter, and adding one only on the Postgres side would itself be
+the exact kind of divergence the dev↔prod parity rule (see
+[above](#the-composition-root-and-the-env-switch)) forbids.
+
+Match fields are the same level of sophistication each collection's own
+client-side filter already had (or, for customers/contracts/orders, their
+first-ever filter): `resources` on `name`/`role`/`organization`/`location`;
+`projects` on `name`/`location`; `requests` on `name`/`description`;
+`customers`/`contracts` on `name`; `orders` on `invoiceNumber` only — an order
+has no `name` field, and deliberately does **not** join to its parent
+contract/customer name, so `GET /orders?q=Globex` (a customer name) matches
+zero rows while `GET /contracts?q=Globex` and `GET /customers?q=Globex` both
+match. Omitting `q` entirely on any of the six reads returns the exact same
+full, unfiltered, unpaginated array they returned before this block — the
+one backward-compatibility invariant every pre-existing caller (`resources.component.ts`,
+`dashboard.component.ts`, `reporting.ts`, `forecast.ts`, and others) depends on.
 
 ## Domain ER diagrams (reference)
 

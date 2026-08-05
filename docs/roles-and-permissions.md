@@ -85,6 +85,7 @@ server, re-evaluate in the browser after `authReady`).
 | `resources` | `roleGuard(a => a.hasAnyRole(['resource-manager','delivery-executive','admin']))` | `resource-manager`, `delivery-executive`, `admin` |
 | `capacity` (B2), `bench` (Block F) | `capacityGuard` → `hasAnyRole(CAPACITY_ROLES)` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `allocation-approvals` (B3, the People Manager per-month approval page) | `allocationApprovalsGuard` → `hasAnyRole(ALLOCATION_APPROVAL_ROLES)` | `resource-manager`, `delivery-executive`, `admin` |
+| `search` (Block G, the cross-entity faceted search page) | _none_ — mirrors `projects`: composes the same six already-gated collection reads client-side, pre-filtered by `canReadStaffing()`/`canReadCommercial()` so a role never fires a request it cannot read | open to any signed-in user (an `employee` reaches the page and sees only its Projects section populated) |
 | Everything else (dashboard, profile, assignments, requests, staffing, utilization, forecast, what-if, remaining `projects/*`, `reporting`, remaining `config/*`) | _none_ | open to any signed-in user (UX layer; API still enforces RBAC) |
 
 > The **`schedule`** route (the read-only Resource Schedule timeline) is gated to
@@ -142,11 +143,11 @@ and **403** otherwise. Path tests use `startsWith`.
 | Collection(s) | Allowed roles |
 | --- | --- |
 | `/audit-logs` | `admin`, `delivery-executive` |
-| `/customers`, `/contracts`, `/orders`, `/order-lines`, `/billing-plan-items`, `/negotiated-rates` | `sales`, `finance`, `delivery-executive`, `admin` |
+| `/customers`, `/contracts`, `/orders` (all three also accept optional `q`/`limit`/`offset` for Block G's cross-entity search, e.g. `GET /customers?q=Globex` — same roles, same 403/401 behavior, no new rule), `/order-lines`, `/billing-plan-items`, `/negotiated-rates` | `sales`, `finance`, `delivery-executive`, `admin` |
 | `/project-financials`, `/project-cost-centers`, `/cost-centers` | `finance`, `delivery-executive`, `admin` |
-| `/resources` (incl. `/resources/:id`), `/users` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/resources` (incl. `/resources/:id`; also accepts optional `q`/`limit`/`offset` for Block G's cross-entity search — same roles, same 403/401 behavior, no new rule), `/users` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/rate-cards` (role/organization default cost-bill rates, resolved onto every `/resources` read — the ancestor-walk resolution, rate-card inheritance block, design spec §2) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
-| `/assignments`, `/requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/assignments`, `/requests` (`/requests` also accepts optional `q`/`limit`/`offset` for Block G's cross-entity search — same roles, same 403/401 behavior, no new rule; `/assignments` itself is untouched by Block G) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/capacity`, `/bench` (ONE predicate — `p.startsWith('/capacity') \|\| p.startsWith('/bench')`, not two rules — read-only computed rollups, e.g. `GET /capacity/monthly` (B2) and `GET /bench/monthly` (Block F, design spec §8); the latter extends this rule rather than duplicating the role array) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/assignment-days`, `/assignment-months` (raw per-day/per-month assignment rows, e.g. `GET /assignment-days` — shared plumbing for Block F's client-side What-If bench composition and block E's own spec; same need-to-know as `/capacity` and `/assignments` above, just unaggregated) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/cost-baselines` (block E: the frozen monthly PCP/budget snapshot and its live-plan comparison — read is deliberately **disjoint** from freeze, spec §5: the PM/People Manager can see the variance to act on it early even though they cannot move the target that measures them) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
@@ -163,6 +164,8 @@ Time-phased allocation (B1) adds `/holidays` and `/planning-periods` to this
 open-read set, deliberately: both are config catalogs read by the Task-8
 calendar (used by `pm`/`resource-manager`) to render holidays and open/closed
 months, so neither carries a `READ_RULE` despite being mutation-gated below.
+`/projects` also accepts optional `q`/`limit`/`offset` for Block G's
+cross-entity search (any authenticated principal, unchanged open-read status).
 
 ### (b) Mutation rules — POST / PUT / DELETE
 
