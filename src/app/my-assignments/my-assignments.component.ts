@@ -20,6 +20,9 @@ interface CalendarAssignment {
 interface CalendarDay {
   iso: string;
   dayOfMonth: number;
+  /** 'Mon'…'Sun'. Carries the weekday in the collapsed (below-`sm`) month list,
+   *  where the seven-column header strip is not rendered. */
+  weekdayLabel: string;
   isCurrentMonth: boolean;
   isToday: boolean;
   isWeekend: boolean;
@@ -72,278 +75,346 @@ interface WeekDay {
         </div>
       </div>
 
-      <!-- Overview Cards -->
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6">
-        <div class="command-kpi group">
-          <div class="flex items-center gap-5">
-            <div class="w-14 h-14 bg-accent-tint text-accent-text ring-1 ring-accent rounded-md flex items-center justify-center group-hover:scale-110 transition-transform shadow-sm">
-              <mat-icon class="text-[28px] w-[28px] h-[28px]">assignment</mat-icon>
-            </div>
-            <div>
-              <p class="command-kpi-label">Active Assignments</p>
-              <p class="command-kpi-value">{{ activeAssignmentsCount() }}</p>
-            </div>
-          </div>
-        </div>
-        <div class="command-kpi group">
-          <div class="flex items-center gap-5">
-            <div class="w-14 h-14 bg-positive-tint text-positive-text ring-1 ring-positive rounded-md flex items-center justify-center group-hover:scale-110 transition-transform shadow-sm">
-              <mat-icon class="text-[28px] w-[28px] h-[28px]">schedule</mat-icon>
-            </div>
-            <div>
-              <p class="command-kpi-label">Total Assigned Hours</p>
-              <p class="command-kpi-value">{{ totalAssignedHours() | number:'1.0-2' }}h</p>
-            </div>
-          </div>
-        </div>
-        <div class="command-kpi group"
-             [class.danger]="currentUtilization() > 110"
-             [class.green]="currentUtilization() >= 80 && currentUtilization() <= 110"
-             [class.warning]="currentUtilization() < 80">
-          <div class="flex items-center gap-5">
-            <div class="w-14 h-14 bg-caution-tint text-caution-text ring-1 ring-caution rounded-md flex items-center justify-center group-hover:scale-110 transition-transform shadow-sm">
-              <mat-icon class="text-[28px] w-[28px] h-[28px]">trending_up</mat-icon>
-            </div>
-            <div>
-              <p class="command-kpi-label">Current Utilization</p>
-              <p class="command-kpi-value">
-                {{ currentUtilization() | number:'1.0-0' }}%
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
+      <!-- ONE READ-STATE BOUNDARY OWNS THE WHOLE BODY.
+           Everything below dereferences dataRes.value() — through
+           myAssignments()/profile()/timeEntries() and every accessor derived from
+           them — and rxResource.value() THROWS while the resource is in its error
+           state. With the KPI tiles and the calendar sitting ABOVE the old wrapper
+           (which covered only the Assignment Details list), the first of those
+           bindings aborted the change-detection pass, and that made the error
+           panel and its Retry button — the markup written for exactly this
+           failure — unreachable code: an expired bearer on /self/profile left the
+           page as a header over three zero tiles, permanently. Reordering the
+           template does not fix that; the abort just moves to whichever binding
+           is now first. The only fix is that NOTHING outside this boundary
+           dereferences the value. Keep that invariant when adding markup here.
 
-      <!-- Calendar View -->
-      <div class="command-card overflow-hidden">
-        <div class="command-card-header">
-          <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">
-            {{ viewMode() === 'week' ? 'Weekly Schedule' : 'Monthly Overview' }}
-          </h2>
-          <div class="flex items-center gap-3">
-            <button type="button" (click)="periodOffset.set(periodOffset() - 1)" [attr.aria-label]="'Previous ' + viewMode()" [attr.title]="'Previous ' + viewMode()" class="w-8 h-8 rounded-full hover:bg-surface-muted flex items-center justify-center text-ink-muted transition-colors">
-              <mat-icon class="text-[20px] w-[20px] h-[20px]">chevron_left</mat-icon>
-            </button>
-            <span class="text-sm font-bold tracking-wide text-ink-secondary uppercase">{{ periodLabel() }}</span>
-            <button type="button" (click)="periodOffset.set(periodOffset() + 1)" [attr.aria-label]="'Next ' + viewMode()" [attr.title]="'Next ' + viewMode()" class="w-8 h-8 rounded-full hover:bg-surface-muted flex items-center justify-center text-ink-muted transition-colors">
-              <mat-icon class="text-[20px] w-[20px] h-[20px]">chevron_right</mat-icon>
-            </button>
-          </div>
-        </div>
+           The loading predicate folds auth readiness deliberately. params() is
+           false until the OIDC bootstrap settles, and the stream answers that
+           with of(<empty>) — a RESOLVED empty, not a pending one — so
+           isLoading() alone left the whole pre-authReady window, including the
+           SSR-rendered document, telling a person with five live bookings
+           "Active Assignments 0", "0h", a 0% utilization tile and "No
+           assignments found for this period.". Withheld is not zero. -->
+      <app-list-state [loading]="!auth.authReady() || dataRes.isLoading()"
+                      [error]="dataRes.status() === 'error'"
+                      label="assignments" [rows]="5" (retry)="dataRes.reload()">
+        <ng-template>
+          <div class="space-y-6">
+            <!-- Overview Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6">
+              <div class="command-kpi group">
+                <div class="flex items-center gap-5">
+                  <div class="w-14 h-14 bg-accent-tint text-accent-text ring-1 ring-accent rounded-md flex items-center justify-center group-hover:scale-110 transition-transform shadow-sm">
+                    <mat-icon class="text-[28px] w-[28px] h-[28px]">assignment</mat-icon>
+                  </div>
+                  <div>
+                    <p class="command-kpi-label">Active Assignments</p>
+                    <p class="command-kpi-value">{{ activeAssignmentsCount() }}</p>
+                  </div>
+                </div>
+              </div>
+              <div class="command-kpi group">
+                <div class="flex items-center gap-5">
+                  <div class="w-14 h-14 bg-positive-tint text-positive-text ring-1 ring-positive rounded-md flex items-center justify-center group-hover:scale-110 transition-transform shadow-sm">
+                    <mat-icon class="text-[28px] w-[28px] h-[28px]">schedule</mat-icon>
+                  </div>
+                  <div>
+                    <p class="command-kpi-label">Total Assigned Hours</p>
+                    <p class="command-kpi-value">{{ totalAssignedHours() | number:'1.0-2' }}h</p>
+                  </div>
+                </div>
+              </div>
+              <div class="command-kpi group"
+                   [class.danger]="currentUtilization() > 110"
+                   [class.green]="currentUtilization() >= 80 && currentUtilization() <= 110"
+                   [class.warning]="currentUtilization() < 80">
+                <div class="flex items-center gap-5">
+                  <div class="w-14 h-14 bg-caution-tint text-caution-text ring-1 ring-caution rounded-md flex items-center justify-center group-hover:scale-110 transition-transform shadow-sm">
+                    <mat-icon class="text-[28px] w-[28px] h-[28px]">trending_up</mat-icon>
+                  </div>
+                  <div>
+                    <p class="command-kpi-label">Current Utilization</p>
+                    <p class="command-kpi-value">
+                      {{ currentUtilization() | number:'1.0-0' }}%
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Calendar View -->
+            <div class="command-card overflow-hidden">
+              <div class="command-card-header">
+                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">
+                  {{ viewMode() === 'week' ? 'Weekly Schedule' : 'Monthly Overview' }}
+                </h2>
+                <div class="flex items-center gap-3">
+                  <button type="button" (click)="periodOffset.set(periodOffset() - 1)" [attr.aria-label]="'Previous ' + viewMode()" [attr.title]="'Previous ' + viewMode()" class="w-8 h-8 rounded-full hover:bg-surface-muted flex items-center justify-center text-ink-muted transition-colors">
+                    <mat-icon class="text-[20px] w-[20px] h-[20px]">chevron_left</mat-icon>
+                  </button>
+                  <span class="text-sm font-bold tracking-wide text-ink-secondary uppercase">{{ periodLabel() }}</span>
+                  <button type="button" (click)="periodOffset.set(periodOffset() + 1)" [attr.aria-label]="'Next ' + viewMode()" [attr.title]="'Next ' + viewMode()" class="w-8 h-8 rounded-full hover:bg-surface-muted flex items-center justify-center text-ink-muted transition-colors">
+                    <mat-icon class="text-[20px] w-[20px] h-[20px]">chevron_right</mat-icon>
+                  </button>
+                </div>
+              </div>
         
-        <div class="p-6 sm:p-8 overflow-x-auto">
-          <!-- Booking windows are real; daily hour splits are estimated because no
-               per-day assignment plan is stored. -->
-          <div class="mb-6 flex items-start gap-2 rounded-xl border border-caution ring-1 ring-caution bg-caution-tint px-4 py-3 text-sm text-caution-text">
-            <mat-icon class="text-[18px] w-[18px] h-[18px] mt-0.5 shrink-0">info</mat-icon>
-            <span>
-              Booking dates come from the assignment window, falling back to the linked request dates.
-              Daily hours are estimated because assignments store total hours, not a per-day timesheet plan.
-            </span>
-          </div>
-          @if (viewMode() === 'week') {
-            <table class="w-full text-left border-collapse min-w-[800px]">
-              <caption class="sr-only">Estimated assignment hours for {{ periodLabel() }}</caption>
-              <thead>
-                <tr class="text-xs font-semibold text-ink-muted uppercase tracking-wider border-b border-line">
-                  <th class="pb-4 pr-4 w-1/4">Project / Request</th>
-                  @for (day of weekDays(); track day.iso) {
-                    <th class="pb-4 px-2 text-center" [class.text-accent-text]="day.isToday">
-                      <span class="block">{{ day.label }}</span>
-                      <span class="block mt-1 font-mono text-[11px] normal-case">{{ day.dayLabel }}</span>
-                    </th>
-                  }
-                  <th class="pb-4 pl-4 text-right">Period est.</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-[var(--cc-line)]">
-                @for (assignment of periodAssignments(); track assignment.id) {
-                  <tr class="text-sm text-ink-secondary hover:bg-surface-muted transition-colors group">
-                    <td class="py-5 pr-4">
-                      <div class="font-bold text-[var(--cc-ink)]">{{ getRequestName(assignment.requestId) }}</div>
-                      <div class="text-xs font-semibold tracking-wide text-[var(--cc-muted)] mt-1 uppercase">{{ assignment.status }}</div>
-                      <div class="text-xs text-[var(--cc-muted)] mt-1 font-mono">{{ bookingLabel(assignment) }}</div>
-                    </td>
-                    @for (day of weekDays(); track day.iso) {
-                      <td class="py-5 px-2 text-center">
-                        <div class="inline-flex items-center justify-center w-10 h-10 rounded-xl ring-1 font-bold font-mono tabular-nums shadow-sm transition-colors"
-                             [class.bg-accent-tint]="estimatedHoursForDay(assignment, day.iso) > 0"
-                             [class.text-accent-text]="estimatedHoursForDay(assignment, day.iso) > 0"
-                             [class.ring-accent]="estimatedHoursForDay(assignment, day.iso) > 0"
-                             [class.bg-surface-muted]="estimatedHoursForDay(assignment, day.iso) === 0"
-                             [class.text-ink-muted]="estimatedHoursForDay(assignment, day.iso) === 0"
-                             [class.ring-line]="estimatedHoursForDay(assignment, day.iso) === 0">
-                          {{ estimatedHoursForDay(assignment, day.iso) || '—' }}
-                        </div>
-                      </td>
-                    }
-                    <td class="py-5 pl-4 text-right font-bold text-[var(--cc-ink)] text-lg font-mono tabular-nums">
-                      {{ assignedHoursInWeek(assignment) }}h
-                    </td>
-                  </tr>
-                }
-                @if (!periodAssignments().length) {
-                  <tr>
-                    <td colspan="7" class="py-12 text-center text-ink-muted font-medium italic">No assignments found for this period.</td>
-                  </tr>
-                }
-              </tbody>
-            </table>
-          } @else {
-            <!-- Monthly View -->
-            <div class="grid grid-cols-7 gap-px bg-surface-muted rounded-xl overflow-hidden border border-line">
-              <!-- Days of week header -->
-              <div class="bg-surface-muted py-2 text-center text-xs font-medium text-ink-muted uppercase tracking-wider">Mon</div>
-              <div class="bg-surface-muted py-2 text-center text-xs font-medium text-ink-muted uppercase tracking-wider">Tue</div>
-              <div class="bg-surface-muted py-2 text-center text-xs font-medium text-ink-muted uppercase tracking-wider">Wed</div>
-              <div class="bg-surface-muted py-2 text-center text-xs font-medium text-ink-muted uppercase tracking-wider">Thu</div>
-              <div class="bg-surface-muted py-2 text-center text-xs font-medium text-ink-muted uppercase tracking-wider">Fri</div>
-              <div class="bg-surface-muted py-2 text-center text-xs font-medium text-ink-muted uppercase tracking-wider">Sat</div>
-              <div class="bg-surface-muted py-2 text-center text-xs font-medium text-ink-muted uppercase tracking-wider">Sun</div>
-
-              @for (day of monthDays(); track day.iso) {
-                <div class="bg-surface min-h-[112px] p-2 hover:bg-surface-muted transition-colors"
-                     [class.opacity-50]="!day.isCurrentMonth"
-                     [class.bg-accent-tint]="day.isToday">
-                  <div class="flex items-center justify-between text-xs font-medium mb-2 font-mono tabular-nums"
-                       [class.text-accent-text]="day.isToday"
-                       [class.text-ink-muted]="!day.isToday">
-                    <span>{{ day.iso.slice(5) }}</span>
-                    <span>{{ day.dayOfMonth }}</span>
-                  </div>
-                  @if (day.assignments.length) {
-                    <div class="space-y-1">
-                      @for (item of day.assignments; track item.id) {
-                        <div class="text-[10px] font-medium bg-accent-tint text-accent-text ring-1 ring-accent px-2 py-1 rounded truncate"
-                             [title]="item.name + ' · ' + item.hours + 'h estimated'">
-                          {{ item.name }} · {{ item.hours }}h
-                        </div>
-                      }
-                      @if (day.hiddenCount > 0) {
-                        <div class="text-[10px] font-semibold text-ink-muted px-2">+{{ day.hiddenCount }} more</div>
-                      }
-                    </div>
-                  }
+              <div class="p-6 sm:p-8 overflow-x-auto">
+                <!-- Booking windows are real; daily hour splits are estimated because no
+                     per-day assignment plan is stored. -->
+                <div class="mb-6 flex items-start gap-2 rounded-xl border border-caution ring-1 ring-caution bg-caution-tint px-4 py-3 text-sm text-caution-text">
+                  <mat-icon class="text-[18px] w-[18px] h-[18px] mt-0.5 shrink-0">info</mat-icon>
+                  <span>
+                    Booking dates come from the assignment window, falling back to the linked request dates.
+                    Daily hours are estimated because assignments store total hours, not a per-day timesheet plan.
+                  </span>
                 </div>
-              }
-            </div>
-          }
-        </div>
-      </div>
+                @if (viewMode() === 'week') {
+                  <table class="w-full text-left border-collapse min-w-[800px]">
+                    <caption class="sr-only">Estimated assignment hours for {{ periodLabel() }}</caption>
+                    <thead>
+                      <tr class="text-xs font-semibold text-ink-muted uppercase tracking-wider border-b border-line">
+                        <th class="pb-4 pr-4 w-1/4">Project / Request</th>
+                        @for (day of weekDays(); track day.iso) {
+                          <th class="pb-4 px-2 text-center" [class.text-accent-text]="day.isToday">
+                            <span class="block">{{ day.label }}</span>
+                            <span class="block mt-1 font-mono text-[11px] normal-case">{{ day.dayLabel }}</span>
+                          </th>
+                        }
+                        <th class="pb-4 pl-4 text-right">Period est.</th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-[var(--cc-line)]">
+                      @for (assignment of periodAssignments(); track assignment.id) {
+                        <tr class="text-sm text-ink-secondary hover:bg-surface-muted transition-colors group">
+                          <td class="py-5 pr-4">
+                            <div class="font-bold text-[var(--cc-ink)]">{{ getRequestName(assignment.requestId) }}</div>
+                            <div class="text-xs font-semibold tracking-wide text-[var(--cc-muted)] mt-1 uppercase">{{ assignment.status }}</div>
+                            <div class="text-xs text-[var(--cc-muted)] mt-1 font-mono">{{ bookingLabel(assignment) }}</div>
+                          </td>
+                          @for (day of weekDays(); track day.iso) {
+                            <td class="py-5 px-2 text-center">
+                              <div class="inline-flex items-center justify-center w-10 h-10 rounded-xl ring-1 font-bold font-mono tabular-nums shadow-sm transition-colors"
+                                   [class.bg-accent-tint]="estimatedHoursForDay(assignment, day.iso) > 0"
+                                   [class.text-accent-text]="estimatedHoursForDay(assignment, day.iso) > 0"
+                                   [class.ring-accent]="estimatedHoursForDay(assignment, day.iso) > 0"
+                                   [class.bg-surface-muted]="estimatedHoursForDay(assignment, day.iso) === 0"
+                                   [class.text-ink-muted]="estimatedHoursForDay(assignment, day.iso) === 0"
+                                   [class.ring-line]="estimatedHoursForDay(assignment, day.iso) === 0">
+                                {{ estimatedHoursForDay(assignment, day.iso) || '—' }}
+                              </div>
+                            </td>
+                          }
+                          <td class="py-5 pl-4 text-right font-bold text-[var(--cc-ink)] text-lg font-mono tabular-nums">
+                            {{ assignedHoursInWeek(assignment) }}h
+                          </td>
+                        </tr>
+                      }
+                      @if (!periodAssignments().length) {
+                        <tr>
+                          <td colspan="7" class="py-12 text-center text-ink-muted font-medium italic">No assignments found for this period.</td>
+                        </tr>
+                      }
+                    </tbody>
+                  </table>
+                } @else {
+                  <!-- Monthly View -->
+                  <!-- SEVEN COLUMNS ARE A WIDE-VIEWPORT LAYOUT, NOT A FLOOR.
+                       "grid-cols-7" unconditionally divided the card by 7 at every
+                       width: at 320px that is ~33px per track and ~17px of content box
+                       per day, while the date header's min-content ("08-06" at 12px
+                       monospace plus the day number) is ~50px — so every header
+                       overflowed into the neighbouring day and Sunday's overflow was
+                       cut off by this container's own "overflow-hidden". The
+                       "overflow-x-auto" on the parent never engaged, because the grid
+                       had shrunk to fit rather than overflowed: there was no
+                       pan-to-read escape. Collapsing to a single column below "sm"
+                       gives each day the full card width; a "min-w-[]" floor would
+                       only have traded the overlap for a pan across a grid whose 10px
+                       chips are still unreadable. The weekday header strip belongs to
+                       the 7-track layout only, so it is hidden in the collapsed list
+                       where each row carries its own weekday. -->
+                  <div class="grid grid-cols-1 sm:grid-cols-7 gap-px bg-surface-muted rounded-xl overflow-hidden border border-line"
+                       data-test="month-grid">
+                    <!-- Days of week header -->
+                    <div class="hidden sm:block bg-surface-muted py-2 text-center text-xs font-medium text-ink-muted uppercase tracking-wider">Mon</div>
+                    <div class="hidden sm:block bg-surface-muted py-2 text-center text-xs font-medium text-ink-muted uppercase tracking-wider">Tue</div>
+                    <div class="hidden sm:block bg-surface-muted py-2 text-center text-xs font-medium text-ink-muted uppercase tracking-wider">Wed</div>
+                    <div class="hidden sm:block bg-surface-muted py-2 text-center text-xs font-medium text-ink-muted uppercase tracking-wider">Thu</div>
+                    <div class="hidden sm:block bg-surface-muted py-2 text-center text-xs font-medium text-ink-muted uppercase tracking-wider">Fri</div>
+                    <div class="hidden sm:block bg-surface-muted py-2 text-center text-xs font-medium text-ink-muted uppercase tracking-wider">Sat</div>
+                    <div class="hidden sm:block bg-surface-muted py-2 text-center text-xs font-medium text-ink-muted uppercase tracking-wider">Sun</div>
 
-      <!-- Assignment Details & Editing -->
-      <div class="command-card overflow-hidden">
-        <div class="command-card-header">
-          <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Assignment Details</h2>
-        </div>
-        <div class="p-6">
-          <app-list-state [loading]="dataRes.isLoading()" [error]="dataRes.status() === 'error'" label="assignments" (retry)="dataRes.reload()">
-          <ng-template>
-          <div class="space-y-4">
-            @for (assignment of myAssignments(); track assignment.id) {
-              <div class="command-card-muted p-5 hover:shadow-md transition-all">
-                <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div class="flex-1">
-                    <h3 class="text-lg font-medium text-[var(--cc-ink)]">{{ getRequestName(assignment.requestId) }}</h3>
-                    <div class="flex items-center gap-4 mt-2 text-sm text-[var(--cc-muted)]">
-                      <span class="flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px]">business</mat-icon> Client Project</span>
-                      <span class="flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px]">info</mat-icon> <span class="capitalize">{{ assignment.status }}</span></span>
-                    </div>
-                  </div>
-                  
-                  <div class="flex items-center gap-4">
-                    <div class="text-right">
-                      <div class="text-xl font-semibold text-[var(--cc-ink)] font-mono tabular-nums">{{ assignment.assignedHours | number:'1.0-2' }}h</div>
-                      <div class="text-xs text-[var(--cc-muted)] uppercase tracking-wider">Total Assigned</div>
-                      <div class="text-xs text-positive-text font-semibold mt-1 font-mono tabular-nums">{{ approvedHours(assignment.id) | number:'1.0-2' }}h approved actual</div>
-                      <div class="text-xs text-[var(--cc-muted)] mt-1">Planned hours are edited per day in the Allocation Calendar.</div>
-                    </div>
-                    @if (canSubmitOwnTime()) {
-                      <button type="button" (click)="startTimeEntry(assignment)" class="p-2 text-ink-muted hover:text-positive-text hover:bg-positive-tint rounded-lg transition-colors" aria-label="Log actual time" title="Log actual time">
-                        <mat-icon>more_time</mat-icon>
-                      </button>
-                    }
-                  </div>
-                </div>
-                @if (timeEntryAssignmentId() === assignment.id) {
-                  <form (ngSubmit)="saveTimeEntry(assignment)" class="mt-5 rounded-2xl border border-positive ring-1 ring-positive bg-positive-tint p-4">
-                    <div class="grid grid-cols-1 sm:grid-cols-[160px_120px_1fr_auto] gap-3 items-end">
-                      <div>
-                        <label for="timeEntryDate" class="block text-xs font-bold uppercase tracking-wider text-ink-muted mb-1">Date</label>
-                        <input id="timeEntryDate" name="timeEntryDate" type="date" required
-                               [disabled]="savingTimeEntryAssignmentId() !== null"
-                               [ngModel]="timeEntryDate()" (ngModelChange)="timeEntryDate.set($event)" class="command-input">
-                      </div>
-                      <div>
-                        <label for="timeEntryHours" class="block text-xs font-bold uppercase tracking-wider text-ink-muted mb-1">Hours</label>
-                        <input id="timeEntryHours" name="timeEntryHours" type="number" min="0.25" step="0.25" required
-                               [disabled]="savingTimeEntryAssignmentId() !== null"
-                               [ngModel]="timeEntryHours()" (ngModelChange)="timeEntryHours.set($event)" class="command-input font-mono tabular-nums">
-                      </div>
-                      <div>
-                        <label for="timeEntryNotes" class="block text-xs font-bold uppercase tracking-wider text-ink-muted mb-1">Notes</label>
-                        <input id="timeEntryNotes" name="timeEntryNotes" type="text"
-                               [disabled]="savingTimeEntryAssignmentId() !== null"
-                               [ngModel]="timeEntryNotes()" (ngModelChange)="timeEntryNotes.set($event)" class="command-input" placeholder="Work performed">
-                      </div>
-                      <div class="flex gap-2">
-                        <button type="submit" data-test="submit-time-entry"
-                                [disabled]="!!timeEntryValidationMessage(assignment) || savingTimeEntryAssignmentId() !== null"
-                                class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
-                          {{ savingTimeEntryAssignmentId() === assignment.id ? 'Submitting…' : 'Submit' }}
-                        </button>
-                        <button type="button" (click)="cancelTimeEntry()"
-                                [disabled]="savingTimeEntryAssignmentId() !== null"
-                                aria-label="Cancel time entry" title="Cancel time entry"
-                                class="p-2 rounded-lg text-ink-muted hover:bg-surface-muted disabled:opacity-50"><mat-icon>close</mat-icon></button>
-                      </div>
-                    </div>
-                    @if (timeEntryValidationMessage(assignment); as validationMessage) {
-                      <p class="mt-3 text-sm font-medium text-critical-text" aria-live="polite">{{ validationMessage }}</p>
-                    } @else if (timeEntrySubmissionError(); as submissionError) {
-                      <p class="mt-3 text-sm font-medium text-critical-text" role="alert">{{ submissionError }}</p>
-                    }
-                  </form>
-                }
-                @if (timeEntriesForAssignment(assignment.id).length) {
-                  <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    @for (entry of timeEntriesForAssignment(assignment.id); track entry.id) {
-                      <div class="command-card-muted px-4 py-3 text-sm">
-                        <div class="flex items-center justify-between gap-3">
-                          <span class="font-semibold text-ink-secondary font-mono tabular-nums">{{ entry.date }} · {{ entry.hours | number:'1.0-2' }}h</span>
-                          <span class="command-chip"
-                                [class.is-positive]="entry.status === 'Approved'"
-                                [class.is-caution]="entry.status === 'Submitted'"
-                                [class.is-neutral]="entry.status === 'Draft'"
-                                [class.is-critical]="entry.status === 'Rejected'">
-                            {{ entry.status }}
-                          </span>
+                    @for (day of monthDays(); track day.iso) {
+                      <div class="bg-surface min-h-[72px] sm:min-h-[112px] p-2 hover:bg-surface-muted transition-colors"
+                           [class.opacity-50]="!day.isCurrentMonth"
+                           [class.bg-accent-tint]="day.isToday">
+                        <div class="flex items-center justify-between text-xs font-medium mb-2 font-mono tabular-nums"
+                             data-test="month-day-header"
+                             [class.text-accent-text]="day.isToday"
+                             [class.text-ink-muted]="!day.isToday">
+                          <!-- The weekday replaces the dropped "iso.slice(5)": it is the
+                               fact the hidden column header used to carry, and unlike
+                               "08-06" it is not a restatement of the day number beside
+                               it. Hidden from "sm" up, where the header strip is back. -->
+                          <span class="sm:hidden uppercase">{{ day.weekdayLabel }}</span>
+                          <span>{{ day.dayOfMonth }}</span>
                         </div>
-                        @if (entry.notes) {
-                          <p class="text-xs text-ink-muted mt-1">{{ entry.notes }}</p>
+                        @if (day.assignments.length) {
+                          <div class="space-y-1">
+                            @for (item of day.assignments; track item.id) {
+                              <div class="text-[10px] font-medium bg-accent-tint text-accent-text ring-1 ring-accent px-2 py-1 rounded truncate"
+                                   [title]="item.name + ' · ' + item.hours + 'h estimated'">
+                                {{ item.name }} · {{ item.hours }}h
+                              </div>
+                            }
+                            @if (day.hiddenCount > 0) {
+                              <div class="text-[10px] font-semibold text-ink-muted px-2">+{{ day.hiddenCount }} more</div>
+                            }
+                          </div>
                         }
                       </div>
                     }
                   </div>
                 }
               </div>
-            }
-            @if (!myAssignments().length) {
-              <div class="text-center py-8 text-ink-muted">
-                You don't have any active assignments.
+            </div>
+
+            <!-- Assignment Details & Editing -->
+            <div class="command-card overflow-hidden">
+              <div class="command-card-header">
+                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Assignment Details</h2>
               </div>
-            }
+              <div class="p-6">
+                <div class="space-y-4">
+                  @for (assignment of myAssignments(); track assignment.id) {
+                    <div class="command-card-muted p-5 hover:shadow-md transition-all">
+                      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div class="flex-1">
+                          <h3 class="text-lg font-medium text-[var(--cc-ink)]">{{ getRequestName(assignment.requestId) }}</h3>
+                          <div class="flex items-center gap-4 mt-2 text-sm text-[var(--cc-muted)]">
+                            <span class="flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px]">business</mat-icon> Client Project</span>
+                            <span class="flex items-center gap-1"><mat-icon class="text-[16px] w-[16px] h-[16px]">info</mat-icon> <span class="capitalize">{{ assignment.status }}</span></span>
+                          </div>
+                        </div>
+                  
+                        <div class="flex items-center gap-4">
+                          <div class="text-right">
+                            <div class="text-xl font-semibold text-[var(--cc-ink)] font-mono tabular-nums">{{ assignment.assignedHours | number:'1.0-2' }}h</div>
+                            <div class="text-xs text-[var(--cc-muted)] uppercase tracking-wider">Total Assigned</div>
+                            <div class="text-xs text-positive-text font-semibold mt-1 font-mono tabular-nums">{{ approvedHours(assignment.id) | number:'1.0-2' }}h approved actual</div>
+                            <div class="text-xs text-[var(--cc-muted)] mt-1">Planned hours are edited per day in the Allocation Calendar.</div>
+                          </div>
+                          @if (canSubmitOwnTime()) {
+                            <button type="button" (click)="startTimeEntry(assignment)" class="p-2 text-ink-muted hover:text-positive-text hover:bg-positive-tint rounded-lg transition-colors" aria-label="Log actual time" title="Log actual time">
+                              <mat-icon>more_time</mat-icon>
+                            </button>
+                          }
+                        </div>
+                      </div>
+                      @if (timeEntryAssignmentId() === assignment.id) {
+                        <form (ngSubmit)="saveTimeEntry(assignment)" class="mt-5 rounded-2xl border border-positive ring-1 ring-positive bg-positive-tint p-4">
+                          <div class="grid grid-cols-1 sm:grid-cols-[160px_120px_1fr_auto] gap-3 items-end">
+                            <div>
+                              <label for="timeEntryDate" class="block text-xs font-bold uppercase tracking-wider text-ink-muted mb-1">Date</label>
+                              <!-- The disabled Submit is the actual dead end, so the
+                                   sentence that explains it must be reachable FROM the
+                                   control: aria-describedby names the live region and
+                                   aria-invalid marks which control it is about. -->
+                              <input id="timeEntryDate" name="timeEntryDate" type="date" required
+                                     aria-describedby="timeEntryMessage"
+                                     [attr.aria-invalid]="timeEntryDateInvalid()"
+                                     [disabled]="savingTimeEntryAssignmentId() !== null"
+                                     [ngModel]="timeEntryDate()" (ngModelChange)="timeEntryDate.set($event)" class="command-input">
+                            </div>
+                            <div>
+                              <label for="timeEntryHours" class="block text-xs font-bold uppercase tracking-wider text-ink-muted mb-1">Hours</label>
+                              <input id="timeEntryHours" name="timeEntryHours" type="number" min="0.25" step="0.25" required
+                                     aria-describedby="timeEntryMessage"
+                                     [attr.aria-invalid]="timeEntryHoursInvalid()"
+                                     [disabled]="savingTimeEntryAssignmentId() !== null"
+                                     [ngModel]="timeEntryHours()" (ngModelChange)="timeEntryHours.set($event)" class="command-input font-mono tabular-nums">
+                            </div>
+                            <div>
+                              <label for="timeEntryNotes" class="block text-xs font-bold uppercase tracking-wider text-ink-muted mb-1">Notes</label>
+                              <input id="timeEntryNotes" name="timeEntryNotes" type="text"
+                                     [disabled]="savingTimeEntryAssignmentId() !== null"
+                                     [ngModel]="timeEntryNotes()" (ngModelChange)="timeEntryNotes.set($event)" class="command-input" placeholder="Work performed">
+                            </div>
+                            <div class="flex gap-2">
+                              <button type="submit" data-test="submit-time-entry"
+                                      [disabled]="!!timeEntryValidationMessage(assignment) || savingTimeEntryAssignmentId() !== null"
+                                      class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                                {{ savingTimeEntryAssignmentId() === assignment.id ? 'Submitting…' : 'Submit' }}
+                              </button>
+                              <button type="button" (click)="cancelTimeEntry()"
+                                      [disabled]="savingTimeEntryAssignmentId() !== null"
+                                      aria-label="Cancel time entry" title="Cancel time entry"
+                                      class="p-2 rounded-lg text-ink-muted hover:bg-surface-muted disabled:opacity-50"><mat-icon>close</mat-icon></button>
+                            </div>
+                          </div>
+                          <!-- A LIVE REGION MUST EXIST BEFORE ITS CONTENT CHANGES.
+                               This paragraph used to be created by an "@if" in the same
+                               change-detection pass that produced its text, so screen
+                               readers had nothing to observe a change on and announced
+                               nothing at all — while the Submit button beside it went
+                               inert. The region is now mounted for the whole life of the
+                               open form and only its TEXT changes, which is the event
+                               "aria-live" reports. Empty text renders no visible line.
+                               "polite", not "assertive": the validation text changes on
+                               every keystroke in Hours, and an assertive region would
+                               interrupt the reader on each one. That deliberately
+                               demotes the submission error, which used to announce by
+                               being inserted as role="alert"; both messages now share
+                               one region, because two live regions competing over the
+                               same form is worse than a polite queue. -->
+                          <p id="timeEntryMessage" data-test="time-entry-message" aria-live="polite"
+                             class="mt-3 text-sm font-medium text-critical-text">{{ timeEntryValidationMessage(assignment) || timeEntrySubmissionError() }}</p>
+                        </form>
+                      }
+                      @if (timeEntriesForAssignment(assignment.id).length) {
+                        <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          @for (entry of timeEntriesForAssignment(assignment.id); track entry.id) {
+                            <div class="command-card-muted px-4 py-3 text-sm">
+                              <div class="flex items-center justify-between gap-3">
+                                <span class="font-semibold text-ink-secondary font-mono tabular-nums">{{ entry.date }} · {{ entry.hours | number:'1.0-2' }}h</span>
+                                <span class="command-chip"
+                                      [class.is-positive]="entry.status === 'Approved'"
+                                      [class.is-caution]="entry.status === 'Submitted'"
+                                      [class.is-neutral]="entry.status === 'Draft'"
+                                      [class.is-critical]="entry.status === 'Rejected'">
+                                  {{ entry.status }}
+                                </span>
+                              </div>
+                              @if (entry.notes) {
+                                <p class="text-xs text-ink-muted mt-1">{{ entry.notes }}</p>
+                              }
+                            </div>
+                          }
+                        </div>
+                      }
+                    </div>
+                  }
+                  @if (!myAssignments().length) {
+                    <div class="text-center py-8 text-ink-muted">
+                      You don't have any active assignments.
+                    </div>
+                  }
+                </div>
+              </div>
+            </div>
           </div>
-          </ng-template>
-          </app-list-state>
-        </div>
-      </div>
+        </ng-template>
+      </app-list-state>
     </div>
   `
 })
 export class MyAssignmentsComponent {
   private api = inject(ApiService);
-  private auth = inject(AuthService);
+  // Read from the template: the read-state boundary below folds auth readiness
+  // into its loading predicate, so it cannot be `private`.
+  protected auth = inject(AuthService);
   private notifications = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
 
@@ -454,6 +525,7 @@ export class MyAssignmentsComponent {
       days.push({
         iso,
         dayOfMonth: date.getDate(),
+        weekdayLabel: this.formatWeekday(date),
         isCurrentMonth: date.getMonth() === monthStart.getMonth(),
         isToday: iso === this.todayIso,
         isWeekend: !this.isBusinessDay(date),
@@ -637,6 +709,10 @@ export class MyAssignmentsComponent {
     return new Intl.DateTimeFormat('en', { day: '2-digit', month: 'short' }).format(date);
   }
 
+  private formatWeekday(date: Date): string {
+    return new Intl.DateTimeFormat('en', { weekday: 'short' }).format(date);
+  }
+
   private formatMonth(date: Date): string {
     return new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric' }).format(date);
   }
@@ -677,10 +753,20 @@ export class MyAssignmentsComponent {
     this.timeEntrySubmissionKeyFor = undefined;
   }
 
-  protected timeEntryValidationMessage(assignment: Assignment): string {
+  /**
+   * Per-control validity, so `aria-invalid` on the two inputs and the sentence
+   * the live region carries are derived from ONE source and cannot disagree —
+   * marking a control invalid while the message says otherwise is the failure
+   * mode that makes assistive output contradict the screen.
+   */
+  protected timeEntryDateInvalid = computed(() => this.parseIso(this.timeEntryDate()) === null);
+  protected timeEntryHoursInvalid = computed(() => {
     const hours = this.timeEntryHours();
-    if (!assignment.id || !this.parseIso(this.timeEntryDate()) ||
-        typeof hours !== 'number' || !Number.isFinite(hours) || hours <= 0) {
+    return typeof hours !== 'number' || !Number.isFinite(hours) || hours <= 0;
+  });
+
+  protected timeEntryValidationMessage(assignment: Assignment): string {
+    if (!assignment.id || this.timeEntryDateInvalid() || this.timeEntryHoursInvalid()) {
       return 'Enter a valid date and hours greater than zero.';
     }
     return '';

@@ -55,19 +55,31 @@ const SUBMITTED_ENTRY: TimeEntry = {
 
 function setup(overrides: {
   createMyTimeEntry?: ReturnType<typeof vi.fn>;
+  assignments?: Assignment[];
   requests?: ResourceRequest[];
   canSubmitOwnTime?: boolean;
+  /** Leave the four-leg forkJoin in flight (no leg ever emits). */
+  pending?: boolean;
+  /** Fail the /self/profile leg, as an expired bearer does. */
+  failing?: boolean;
+  /** false reproduces the pre-OIDC-bootstrap window (and the SSR document). */
+  authReady?: boolean;
 } = {}) {
   const createMyTimeEntry = overrides.createMyTimeEntry ?? vi.fn(() => of(SUBMITTED_ENTRY));
+  // A leg that never emits keeps forkJoin — and therefore the resource — loading.
+  const never = <T>() => new Subject<T>().asObservable();
+  const leg = <T>(value: T) => (overrides.pending ? never<T>() : of(value));
   const api = {
-    getMyAssignments: vi.fn(() => of([ASSIGNMENT])),
-    getMyRequests: vi.fn(() => of(overrides.requests ?? [REQUEST])),
-    getMyProfile: vi.fn(() => of(PROFILE)),
-    getMyTimeEntries: vi.fn(() => of([])),
+    getMyAssignments: vi.fn(() => leg(overrides.assignments ?? [ASSIGNMENT])),
+    getMyRequests: vi.fn(() => leg(overrides.requests ?? [REQUEST])),
+    getMyProfile: vi.fn(() => overrides.failing
+      ? throwError(() => new Error('401 Unauthorized'))
+      : leg(PROFILE)),
+    getMyTimeEntries: vi.fn(() => leg<TimeEntry[]>([])),
     createMyTimeEntry,
   } as unknown as ApiService;
   const auth = {
-    authReady: signal(true),
+    authReady: signal(overrides.authReady ?? true),
     hasResourceIdentity: signal(true),
     canSubmitOwnTime: signal(overrides.canSubmitOwnTime ?? true),
   } as unknown as AuthService;
@@ -311,5 +323,214 @@ describe('MyAssignmentsComponent time entry submission', () => {
       .filter(el => el.closest('form') === null);
     expect(editableOutsideTheTimeEntryForm).toEqual([]);
     expect(host.textContent).toContain('Planned hours are edited per day in the Allocation Calendar.');
+  });
+});
+
+/** The three KPI tile values, in template order, or [] when no tile is rendered. */
+function kpiValues(host: HTMLElement): string[] {
+  return [...host.querySelectorAll('.command-kpi-value')].map(el => el.textContent!.trim());
+}
+
+/** The one skeleton region ListState renders while loading, scoped to this page. */
+function skeleton(host: HTMLElement): Element | null {
+  return host.querySelector('[role="status"][aria-live="polite"][aria-busy="true"]');
+}
+
+const FIVE_ASSIGNMENTS: Assignment[] = [1, 2, 3, 4, 5].map(n => ({
+  id: `A${n}`,
+  requestId: 'REQ1',
+  resourceId: 'R1',
+  assignedHours: 64,   // 5 x 64 = 320h
+  status: 'Allocated',
+}));
+
+describe('MyAssignmentsComponent read-state boundary', () => {
+  it('renders no KPI tiles while the four-leg read is in flight, and the real figures once it resolves', async () => {
+    // The tiles used to sit ABOVE the ListState wrapper, so a person with five
+    // live bookings was told "Active Assignments 0", "0h" and a 0% utilization
+    // tile for the whole multi-round-trip window. Absence first...
+    const pending = setup({ pending: true, assignments: FIVE_ASSIGNMENTS });
+    // NOT flush(): whenStable() never settles while a resource is in flight —
+    // that pending state is exactly the state under test.
+    pending.fixture.detectChanges();
+    pending.fixture.detectChanges();
+    const pendingHost = pending.fixture.nativeElement as HTMLElement;
+
+    expect(pending.fixture.componentInstance['dataRes'].isLoading()).toBe(true);
+    expect(kpiValues(pendingHost)).toEqual([]);
+    expect(pendingHost.textContent).not.toContain('Active Assignments');
+    expect(pendingHost.textContent).not.toContain('Total Assigned Hours');
+    expect(skeleton(pendingHost)).not.toBeNull();
+
+    TestBed.resetTestingModule();
+
+    // ...and the presence twin, which is what stops "delete the tiles" passing:
+    // the resolved page MUST state the five bookings and the 320 hours.
+    const resolved = setup({ assignments: FIVE_ASSIGNMENTS });
+    await flush(resolved.fixture);
+    const resolvedHost = resolved.fixture.nativeElement as HTMLElement;
+
+    expect(resolvedHost.textContent).toContain('Active Assignments');
+    expect(skeleton(resolvedHost)).toBeNull();
+    const values = kpiValues(resolvedHost);
+    expect(values.length).toBe(3);
+    expect(values[0]).toBe('5');
+    expect(values[1]).toBe('320h');
+    // values[2] (Current Utilization) is DELIBERATELY not pinned: it divides
+    // lifetime assigned hours by a fixed four-weeks-of-weekly-capacity constant
+    // (my-assignments.component.ts currentUtilization()), which is a separate,
+    // still-open arithmetic defect. Asserting the number it produces today would
+    // certify it. The tile's presence is asserted through values.length.
+  });
+
+  it('shows the error panel and Retry instead of aborting change detection when a leg fails', async () => {
+    // dataRes.value() THROWS in the error state and every accessor above the old
+    // wrapper read it, so the first such binding aborted the pass and made this
+    // very panel unreachable code: header, three zero tiles, nothing else, forever.
+    const { fixture } = setup({ failing: true, assignments: FIVE_ASSIGNMENTS });
+    expect(() => fixture.detectChanges()).not.toThrow();
+    await fixture.whenStable();
+    expect(() => fixture.detectChanges()).not.toThrow();
+
+    const host = fixture.nativeElement as HTMLElement;
+    // The positive control: the test cannot go green by the read having quietly
+    // succeeded — which is how a spec of this shape usually goes blind.
+    expect(fixture.componentInstance['dataRes'].status()).toBe('error');
+    expect(host.textContent).toContain("Couldn't load assignments");
+    const retry = [...host.querySelectorAll('button')].find(b => b.textContent!.includes('Retry'));
+    expect(retry).toBeDefined();
+    // A failed read is not "no bookings": no zeros, and no empty-state copy.
+    expect(kpiValues(host)).toEqual([]);
+    expect(host.textContent).not.toContain('No assignments found for this period.');
+    expect(host.textContent).not.toContain("You don't have any active assignments.");
+  });
+
+  it('does not claim the period is empty before authReady, and does say so once a resolved read is empty', async () => {
+    // params() is false until the OIDC bootstrap settles and the stream answers
+    // with of(<empty>) — a RESOLVED empty. isLoading() alone was therefore false
+    // for that whole window (and for the SSR document), so the page asserted
+    // "No assignments found for this period." over data that exists.
+    const early = setup({ authReady: false, assignments: FIVE_ASSIGNMENTS });
+    await flush(early.fixture);
+    const earlyHost = early.fixture.nativeElement as HTMLElement;
+
+    expect(earlyHost.textContent).not.toContain('No assignments found for this period.');
+    expect(earlyHost.textContent).not.toContain("You don't have any active assignments.");
+    expect(kpiValues(earlyHost)).toEqual([]);
+    expect(skeleton(earlyHost)).not.toBeNull();
+
+    TestBed.resetTestingModule();
+
+    // The mirror, and the reason a permanent skeleton cannot pass: authReady with
+    // a genuinely empty result MUST say so, and MUST NOT show a skeleton.
+    const empty = setup({ authReady: true, assignments: [] });
+    await flush(empty.fixture);
+    const emptyHost = empty.fixture.nativeElement as HTMLElement;
+
+    expect(skeleton(emptyHost)).toBeNull();
+    expect(emptyHost.textContent).toContain('No assignments found for this period.');
+    expect(emptyHost.textContent).toContain("You don't have any active assignments.");
+  });
+});
+
+describe('MyAssignmentsComponent monthly view responsive contract', () => {
+  it('collapses the month grid below sm instead of floring 7 columns (jsdom proves the class contract only, not the 320px overlap)', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+
+    // The weekly table is the PAIRED GREEN for the same predicate: it carries a
+    // width floor today, which is what proves the predicate separates an element
+    // with a responsive escape from one without, rather than being a tautology.
+    const weekTokens = host.querySelector('table')!.className.split(/\s+/);
+    expect(weekTokens.some(t => t.startsWith('min-w-['))).toBe(true);
+
+    fixture.componentInstance.setViewMode('month');
+    await flush(fixture);
+    expect(host.querySelector('table')).toBeNull();
+
+    const gridTokens = host.querySelector('[data-test="month-grid"]')!.className.split(/\s+/);
+    expect(gridTokens).toContain('grid-cols-1');
+    expect(gridTokens).toContain('sm:grid-cols-7');
+    // The absence half, token-wise on purpose: a substring test would be
+    // satisfied by "sm:grid-cols-7" and could never see the unconditional floor.
+    expect(gridTokens).not.toContain('grid-cols-7');
+    // jsdom computes no grid tracks, so the ~17px content box and the header
+    // overflowing into the neighbouring day are NOT provable here; that needs a
+    // real engine at 320px. What is proven is the collapse contract.
+  });
+
+  it('labels each collapsed day with its weekday and no longer repeats the month-day beside the day number', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    fixture.componentInstance.setViewMode('month');
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+
+    const headers = [...host.querySelectorAll('[data-test="month-day-header"]')];
+    expect(headers.length).toBeGreaterThanOrEqual(28);
+    const text = headers[0].textContent!.trim().replace(/\s+/g, ' ');
+    // Presence: the weekday (the fact the hidden column header used to carry)
+    // followed by the day number — Angular strips the inter-element whitespace,
+    // hence the optional separator. Clock- and timezone-independent: WHICH weekday
+    // is not asserted, only that one is there next to the day of the month.
+    expect(text).toMatch(/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\.?\s?\d{1,2}$/i);
+    // Absence: the "08-06" restatement whose ~50px min-content overflowed the
+    // 33px track is gone from every cell, not just the first.
+    for (const header of headers) {
+      expect(header.textContent).not.toMatch(/\d{2}-\d{2}/);
+    }
+  });
+});
+
+describe('MyAssignmentsComponent time-entry validation announcement', () => {
+  it('keeps the validation live region mounted so the message is a text change, not an insertion', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
+    fixture.detectChanges();
+    const host = fixture.nativeElement as HTMLElement;
+
+    // Valid pre-filled entry: the region must already EXIST, and be silent.
+    const region = host.querySelector('[data-test="time-entry-message"]');
+    expect(region).not.toBeNull();
+    expect(region!.textContent!.trim()).toBe('');
+    expect(region!.getAttribute('aria-live')).toBe('polite');
+
+    fixture.componentInstance.timeEntryDate.set('');
+    fixture.detectChanges();
+
+    // SAME NODE. A region created in the same change-detection pass as its text
+    // is never announced, so node identity — not the text — is the contract, and
+    // it is what the previous @if shape could not satisfy at any text value.
+    expect(host.querySelector('[data-test="time-entry-message"]')).toBe(region);
+    expect(region!.textContent).toContain('Enter a valid date and hours greater than zero.');
+  });
+
+  it('marks only the offending control invalid, points it at the message, and clears the mark when valid', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
+    fixture.componentInstance.timeEntryDate.set('2026-09-01');
+    fixture.componentInstance.timeEntryHours.set(8);
+    fixture.detectChanges();
+    const host = fixture.nativeElement as HTMLElement;
+    const date = () => host.querySelector('#timeEntryDate')!;
+    const hours = () => host.querySelector('#timeEntryHours')!;
+
+    // The case that must still be ALLOWED — without it a rule that always
+    // reports "invalid" would pass every assertion below.
+    expect(date().getAttribute('aria-invalid')).toBe('false');
+    expect(hours().getAttribute('aria-invalid')).toBe('false');
+    expect((host.querySelector('[data-test="submit-time-entry"]') as HTMLButtonElement).disabled).toBe(false);
+
+    fixture.componentInstance.timeEntryHours.set(0);
+    fixture.detectChanges();
+
+    expect(hours().getAttribute('aria-invalid')).toBe('true');
+    expect(hours().getAttribute('aria-describedby')).toBe('timeEntryMessage');
+    expect(host.querySelector('#timeEntryMessage')).not.toBeNull();
+    // The date is still valid and must not be blamed for the hours.
+    expect(date().getAttribute('aria-invalid')).toBe('false');
   });
 });
