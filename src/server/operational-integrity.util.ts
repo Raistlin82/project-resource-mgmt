@@ -1,4 +1,4 @@
-import type { Assignment, ResourceRequest } from '../app/services/api.service';
+import type { Assignment, Order, ResourceRequest } from '../app/services/api.service';
 import { exceedsDailyCapacity, sumHoursByDate } from '../app/services/calendar.util';
 
 export interface AssignmentDependants {
@@ -23,6 +23,323 @@ const ALL_REQUEST_STATUSES = [...CLIENT_REQUEST_STATUSES, 'Fulfilled'] as const;
 
 function owns(value: object, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+/**
+ * Fields of an ORDER LINE that define the invoice already issued under the parent
+ * order's `invoiceNumber`. `projectId` is one of them: the FatturaPA artifact and
+ * `invoicedRevenueForProject` both attribute the line's money by project, so
+ * re-imputing a line moves issued revenue between projects.
+ */
+const ORDER_LINE_ISSUED_DEFINING_FIELDS = ['orderId', 'projectId', 'amount'] as const;
+
+/** True once an order carries a server-assigned invoice number. */
+function isIssuedOrder(order: Pick<Order, 'invoiceNumber'>): boolean {
+  return order.invoiceNumber !== undefined && order.invoiceNumber !== null;
+}
+
+/**
+ * Guard for `PUT /order-lines/:id`, the sibling of `issuedOrderFieldLockError`
+ * and `invoicedBillingItemDeleteError` one table over.
+ *
+ * The order HEADER and the billing condition were both locked once an invoice had
+ * been issued; the LINES were not. `portfolioTotalsInBase` and
+ * `invoicedRevenueForProject` compute invoiced revenue from order LINES, and
+ * `normalizeLines` in the FatturaPA adapter prefers the lines over the header
+ * amount — so `PUT /order-lines/L9 {"amount": 1}` on a line of an order already
+ * carrying INV-2026-0007 returned 200 and left the portfolio reporting 1 EUR of
+ * invoiced revenue for a document the customer holds at 120000, with the e-invoice
+ * export emitting `<PrezzoTotale>1.00` under the issued `<Numero>`.
+ *
+ * Re-sending an unchanged value stays allowed (the edit form re-PUTs every field);
+ * only a value that actually DIFFERS is refused, which is what keeps ordinary
+ * full-object updates of a line on an Open order working.
+ */
+export function issuedOrderLineWriteError(
+  order: Pick<Order, 'invoiceNumber' | 'status'>,
+  current: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): string | null {
+  if (!isIssuedOrder(order)) return null;
+  const changed = ORDER_LINE_ISSUED_DEFINING_FIELDS.filter(
+    field => owns(patch, field) && patch[field] !== current[field],
+  );
+  if (changed.length === 0) return null;
+  return `${changed.join(', ')} cannot be changed on a line of order ${order.invoiceNumber}, which has been `
+    + 'issued to the customer; issue a credit note instead';
+}
+
+/**
+ * Guard for `DELETE /order-lines/:id` and for `POST /order-lines` against an
+ * already-issued order.
+ *
+ * Deleting the line takes the whole amount out of invoiced revenue while the
+ * header keeps its legal invoice number, and the e-invoice silently falls back to
+ * the header amount. ADDING a line breaks the Σ-lines == order.amount invariant
+ * `assertGeneratedLineTotal` establishes when the invoice is generated.
+ */
+export function issuedOrderLineStructureError(
+  order: Pick<Order, 'invoiceNumber' | 'status'>,
+  operation: 'add' | 'remove',
+): string | null {
+  if (!isIssuedOrder(order)) return null;
+  const verb = operation === 'add' ? 'added to' : 'removed from';
+  return `a line cannot be ${verb} order ${order.invoiceNumber}, which has been issued to the customer; `
+    + 'issue a credit note instead';
+}
+
+/**
+ * The 409 body for a DELETE blocked by rows that still reference the parent.
+ *
+ * The in-memory adapter has NO cascade and no FK, so a bare `remove()` answered
+ * 204 and left the children pointing at an id nothing resolves — while the exact
+ * same request under Postgres answered 409 from the FK. Naming the blocking
+ * collections (and their counts) is what makes the refusal actionable instead of
+ * "something, somewhere, still uses this".
+ *
+ * Returns null when nothing blocks, so a childless parent still deletes — the
+ * assertion that keeps this from being a guard that always refuses.
+ */
+export function referencedChildMessage(
+  parent: string,
+  children: readonly { collection: string; count: number }[],
+): string | null {
+  const blocking = children.filter(child => child.count > 0);
+  if (blocking.length === 0) return null;
+  const detail = blocking.map(child => `${child.count} ${child.collection}`).join(', ');
+  return `Cannot delete this ${parent}: ${detail} still reference it`;
+}
+
+/** The only two states a milestone may hold. */
+export const MILESTONE_STATUSES = ['Pending', 'Achieved'] as const;
+
+/**
+ * `status` sits in MILESTONE_FIELDS and was never checked against this enum, so
+ * `PUT /milestones/:id {"status":"Bogus"}` persisted verbatim and rendered as a
+ * chip with none of the three status classes applied.
+ */
+export function milestoneStatusError(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (typeof value === 'string' && (MILESTONE_STATUSES as readonly string[]).includes(value)) return null;
+  return `status must be one of: ${MILESTONE_STATUSES.join(', ')}`;
+}
+
+/**
+ * Server-owned initial state for `POST /milestones`.
+ *
+ * REACHING 'Achieved' IS WHAT RELEASES MONEY: the milestone PUT flips every linked
+ * fixed-price billing condition still in 'Planned' to 'Ready' (i.e. invoiceable),
+ * and the trigger keys on the CURRENT status while `milestoneApprovalPatch` keys on
+ * the TRANSITION. So a milestone created already 'Achieved' has no `approvedBy`,
+ * and the next unrelated PUT (a rename) fires the money trigger with no approver
+ * on record — and the UI offers no control to attribute one, because the Approve
+ * button only renders for a 'Pending' milestone.
+ *
+ * The create form already sends 'Pending' (project-plans.ts), so pinning it here
+ * breaks no shipped client: the exposure was API-only.
+ */
+export function buildMilestoneCreate<T extends Record<string, unknown>>(
+  body: T,
+): T & { status: 'Pending' } {
+  return { ...body, status: 'Pending' };
+}
+
+/**
+ * Drop blank FOREIGN KEYS so they reach the adapter as absent, not as ''.
+ *
+ * A nullable FK sent as the empty string is the sharpest dev↔prod parity break in
+ * the app: the in-memory adapter stores `''` and answers 200, while Postgres
+ * raises 23503 (no row has id '') and the error middleware answers 409 "Cannot
+ * delete: the record is still referenced by other records" — for a CREATE. The
+ * Projects form ("no contract" is a legitimate choice) and every Internal task
+ * (`partnerId:''`) are unsavable in production while testing green under
+ * `ng serve`.
+ *
+ * The key is REMOVED rather than set to `undefined`: `{...body}` with an own
+ * `undefined` key still hands the column to the in-memory adapter, and the audit
+ * diff then reports a key that was never written.
+ */
+export function stripBlankForeignKeys<T extends object>(
+  body: T,
+  fields: readonly string[],
+): T {
+  const out = { ...body } as Record<string, unknown>;
+  for (const field of fields) {
+    if (!owns(out, field)) continue;
+    const value = out[field];
+    if (value === '' || value === null) delete out[field];
+  }
+  return out as T;
+}
+
+/** The nullable FKs a project body may legitimately leave blank. */
+export const PROJECT_BLANK_FOREIGN_KEYS = ['contractId'] as const;
+
+/**
+ * The ONE construction step for a `/projects` write, so the blank-FK
+ * normalisation cannot be bypassed: a spec over a free-standing normaliser stays
+ * green while the handler ignores it, which is exactly the blind-green shape this
+ * project keeps producing.
+ */
+export function buildProjectWrite<T extends object>(body: T): T {
+  return stripBlankForeignKeys(body, PROJECT_BLANK_FOREIGN_KEYS);
+}
+
+/**
+ * Reject an explicit JSON `null` (and, on create, an omitted value) for a column
+ * the schema declares NOT NULL.
+ *
+ * `crud()` forwarded whatever `pick()` copied, so `PUT /customers/C1 {"name":null}`
+ * returned 200 and the in-memory row LOST the key — every contract of that
+ * customer then rendered a blank Customer cell, unrecoverably — while the same
+ * request under Postgres raised an unmapped 23502 and a 500. Same request, two
+ * behaviours, plus silent destruction of commercial master data.
+ *
+ * On create the ABSENT case has to be refused too: `POST /customers {}` stored a
+ * nameless customer in memory and raised the SAME unmapped 23502 on Postgres, so a
+ * null-only check leaves half the parity break open.
+ */
+export function requiredFieldError(
+  body: Record<string, unknown>,
+  required: readonly string[],
+  verb: 'create' | 'update',
+): string | null {
+  for (const field of required) {
+    const present = owns(body, field);
+    if (verb === 'create' && (!present || body[field] === undefined)) {
+      return `${field} is required`;
+    }
+    if (present && body[field] === null) {
+      return `${field} cannot be null`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Bounded percentage: a progress/completion field on a notNull double column.
+ *
+ * `crud('work-packages')` passed `numericFields = []`, so `progress` — rendered as
+ * a percentage and used to drive a bar width — accepted -40, 5000, 'abc' and
+ * arrays. The non-negative numeric check alone still admits 5000.
+ */
+export function percentFieldError(
+  body: Record<string, unknown>,
+  fields: readonly string[],
+): string | null {
+  for (const field of fields) {
+    if (!owns(body, field) || body[field] === undefined) continue;
+    const value = body[field];
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100) {
+      return `${field} must be a number between 0 and 100`;
+    }
+  }
+  return null;
+}
+
+/** A finite number (positive OR negative — a change request may reduce scope). */
+export function signedNumberFieldError(
+  body: Record<string, unknown>,
+  fields: readonly string[],
+): string | null {
+  for (const field of fields) {
+    if (!owns(body, field) || body[field] === undefined) continue;
+    const value = body[field];
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      return `${field} must be a finite number`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Narrow guard for a PostgreSQL not-null-violation (SQLSTATE 23502), walking the
+ * `.cause` chain for the same reason `isFkViolation` does: drizzle-orm rethrows a
+ * `DrizzleQueryError` that never copies `.code` onto the outer error, so a flat
+ * `err.code` check never matches on this stack.
+ */
+export function isNotNullViolation(err: unknown): boolean {
+  let current: unknown = err;
+  for (let i = 0; i < 5 && typeof current === 'object' && current !== null; i++) {
+    if ('code' in current && (current as { code?: unknown }).code === '23502') return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/**
+ * The 409 body for a foreign-key violation, worded for the verb that raised it.
+ *
+ * The mapper answered "Cannot delete: the record is still referenced by other
+ * records" for EVERY 23503 — including a CREATE whose reference does not exist,
+ * where the message is not merely unhelpful but describes the opposite situation
+ * (nothing was being deleted, and nothing references the new row).
+ */
+export function referentialViolationMessage(method: string): string {
+  return method === 'DELETE'
+    ? 'Cannot delete: the record is still referenced by other records'
+    : 'A referenced record does not exist';
+}
+
+/**
+ * Resolve `/collection/:id` (and the two irregular shapes) into the audit
+ * registry's lookup key.
+ *
+ * Three reasons this is not a one-liner:
+ *  - the COLLECTION segment is matched case-insensitively, because Express routes
+ *    case-insensitively and the registry is lowercase-keyed;
+ *  - the ID segment is NOT: ids are case-sensitive (UUIDs, and the TE/AL/AR/OB
+ *    prefixes), so lower-casing it would miss every row;
+ *  - `/fx-rates/:currency` is the exception. The handler upper-cases
+ *    `req.params.currency` before writing, but the audit middleware resolves
+ *    against the RAW path, so `PUT /api/fx-rates/usd` found no row and the FX rate
+ *    that multiplies every converted amount in the portfolio was recorded with
+ *    `changedKeys: []` and no before/after — an entry that says something happened
+ *    but not what.
+ *  - `/settings/hours-per-day` is a singleton whose row id is `hoursPerDay`; it
+ *    rescales every effective rate, so it belongs in the trail too.
+ */
+export interface AuditTargetRef {
+  /** Registry key (always lowercase). */
+  segment: string;
+  /** Row id, exactly as the repository stores it. */
+  id: string;
+}
+
+export function auditTargetRef(path: string): AuditTargetRef | undefined {
+  const segments = path.split('/').filter(Boolean);
+  if (segments.length < 2) return undefined;
+  const segment = segments[0].toLowerCase();
+  if (segment === 'assignments' && segments[2]?.toLowerCase() === 'months' && segments.length >= 4) {
+    return { segment: 'assignment-months', id: `${segments[1]}:${segments[3]}` };
+  }
+  if (segment === 'settings') {
+    // The one setting with a route; its row id is camelCase, not the URL slug.
+    return segments[1].toLowerCase() === 'hours-per-day'
+      ? { segment: 'settings', id: 'hoursPerDay' }
+      : undefined;
+  }
+  if (segment === 'fx-rates') return { segment, id: segments[1].toUpperCase() };
+  return { segment, id: segments[1] };
+}
+
+/**
+ * Money-defining master data whose mutations MUST be diffable in the append-only
+ * trail. Each of these multiplies or defines amounts across the whole portfolio,
+ * so "who changed it, from what, to what" is the question the trail exists to
+ * answer — and for all three it answered `changedKeys: []`, `before: undefined`.
+ *
+ * Checked against the live registry at startup (see src/server.ts), so removing a
+ * registry entry fails loudly instead of silently blinding the trail again.
+ */
+export const MONEY_DEFINING_AUDIT_SEGMENTS: readonly string[] = [
+  'rate-cards', 'negotiated-rates', 'fx-rates', 'settings',
+];
+
+/** Money-defining segments missing from the audit registry, in declaration order. */
+export function auditRegistryGaps(registered: Iterable<string>): string[] {
+  const present = new Set(registered);
+  return MONEY_DEFINING_AUDIT_SEGMENTS.filter(segment => !present.has(segment));
 }
 
 /** Strict calendar ISO date, not Date.parse's permissive rollover/parser. */
