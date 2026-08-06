@@ -1,13 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import type { Assignment, ResourceRequest } from '../app/services/api.service';
+import type { Assignment, Order, ResourceRequest } from '../app/services/api.service';
 import {
+  MONEY_DEFINING_AUDIT_SEGMENTS,
   assignmentRetargetError,
   assignmentServerOwnedFieldError,
+  auditRegistryGaps,
+  auditTargetRef,
   bookingOutsideEmploymentError,
+  buildMilestoneCreate,
+  buildProjectWrite,
   contractHoursPerDayError,
   employmentWindowError,
+  isNotNullViolation,
+  issuedOrderLineStructureError,
+  issuedOrderLineWriteError,
+  milestoneStatusError,
+  percentFieldError,
+  referencedChildMessage,
+  referentialViolationMessage,
+  requiredFieldError,
   resourceRequestUpdateError,
   retargetDailyCapacityError,
+  signedNumberFieldError,
 } from './operational-integrity.util';
 
 const assignment: Assignment = {
@@ -170,5 +184,250 @@ describe('fully merged resource-request PUT validation', () => {
     expect(resourceRequestUpdateError(request, { description: 'Updated' })).toBeNull();
     expect(resourceRequestUpdateError(request, { status: 'Withdrawn' })).toBeNull();
     expect(resourceRequestUpdateError(request, { requiredEffort: 100, endDate: '2026-09-30' })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave 5 — the issued-document, not-null and referential guards.
+// ---------------------------------------------------------------------------
+
+const issuedOrder = {
+  id: 'O9', contractId: 'CT1', type: 'Customer', partnerId: '', amount: 120000,
+  currency: 'EUR', status: 'Invoiced', orderDate: '2026-08-05', invoiceNumber: 'INV-2026-0007',
+} as unknown as Order;
+const openOrder = { ...issuedOrder, id: 'O10', status: 'Open', invoiceNumber: undefined } as Order;
+const issuedLine = { id: 'L9', orderId: 'O9', projectId: 'P1', description: 'Phase 1', amount: 120000 };
+
+describe('issued order-line locks', () => {
+  it('refuses a rewrite of the money, the imputation or the parent of an issued line', () => {
+    // THE DEFECT. The order HEADER and the billing condition were locked once an
+    // invoice had been issued; the LINES were not, and invoicedRevenue (portfolio and
+    // per-project) plus the FatturaPA <PrezzoTotale> are computed FROM THE LINES. So
+    // `PUT /order-lines/L9 {"amount":1}` returned 200 and the portfolio reported 1 EUR
+    // for a document the customer holds at 120000.
+    expect(issuedOrderLineWriteError(issuedOrder, issuedLine, { amount: 5000 }))
+      .toContain('cannot be changed');
+    expect(issuedOrderLineWriteError(issuedOrder, issuedLine, { amount: 5000 }))
+      .toContain('INV-2026-0007');
+    expect(issuedOrderLineWriteError(issuedOrder, issuedLine, { projectId: 'P2' })).not.toBeNull();
+    expect(issuedOrderLineWriteError(issuedOrder, issuedLine, { orderId: 'O10' })).not.toBeNull();
+  });
+
+  it('still allows ordinary editing, and a no-op re-PUT of an issued line', () => {
+    // TWO ASSERTIONS OF ABSENCE. Without them a blanket `return 409` passes every
+    // expectation above while breaking the edit form, which re-PUTs every field.
+    expect(issuedOrderLineWriteError(openOrder, issuedLine, { amount: 5000 })).toBeNull();
+    expect(issuedOrderLineWriteError(issuedOrder, issuedLine, { amount: 120000, projectId: 'P1' })).toBeNull();
+    // A patch that names none of the locked fields is not a money change.
+    expect(issuedOrderLineWriteError(issuedOrder, issuedLine, { description: 'Phase 1 (rev B)' })).toBeNull();
+  });
+
+  it('refuses adding a line to, or removing one from, an issued order', () => {
+    // Deleting the line takes the whole amount out of invoicedRevenue while the header
+    // keeps its legal number; adding one breaks assertGeneratedLineTotal's
+    // sum-of-lines == order.amount invariant.
+    expect(issuedOrderLineStructureError(issuedOrder, 'remove')).toContain('removed from');
+    expect(issuedOrderLineStructureError(issuedOrder, 'add')).toContain('added to');
+    // ABSENCE TWIN: an order with no invoice number is freely composable — otherwise
+    // no order could ever be given its first line.
+    expect(issuedOrderLineStructureError(openOrder, 'remove')).toBeNull();
+    expect(issuedOrderLineStructureError(openOrder, 'add')).toBeNull();
+  });
+});
+
+describe('milestone create/status integrity', () => {
+  it('pins a new milestone to Pending whatever the body asked for', () => {
+    // THE DEFECT. Reaching 'Achieved' is what flips every linked fixed-price billing
+    // condition to 'Ready' (billable). The trigger keys on the CURRENT status while
+    // milestoneApprovalPatch keys on the TRANSITION, so a milestone POSTed already
+    // 'Achieved' had no approvedBy and the next unrelated PUT released the money with
+    // no approver on record — and the card offers no control to attribute one.
+    expect(buildMilestoneCreate({ projectId: '1', name: 'm', date: '2026-09-01', status: 'Achieved' }).status)
+      .toBe('Pending');
+  });
+
+  it('preserves every other field it was given', () => {
+    // ASSERTION OF ABSENCE: a builder that returned a bare {status:'Pending'} would
+    // satisfy the case above and silently drop the projectId, name and date.
+    const built = buildMilestoneCreate({ projectId: '1', name: 'Go live', date: '2026-09-01' });
+    expect(built).toStrictEqual({ projectId: '1', name: 'Go live', date: '2026-09-01', status: 'Pending' });
+    expect(Object.keys(built).sort()).toEqual(['date', 'name', 'projectId', 'status']);
+  });
+
+  it('rejects a status outside the enum on either verb, and passes the two real ones', () => {
+    expect(milestoneStatusError('Bogus')).toContain('Pending, Achieved');
+    expect(milestoneStatusError('achieved')).not.toBeNull();
+    expect(milestoneStatusError(null)).not.toBeNull();
+    // ABSENCE TWIN: both legal states, and an omitted status (a partial PUT), pass —
+    // a guard that refused everything would pass the three assertions above.
+    expect(milestoneStatusError('Pending')).toBeNull();
+    expect(milestoneStatusError('Achieved')).toBeNull();
+    expect(milestoneStatusError(undefined)).toBeNull();
+  });
+});
+
+describe('blank foreign keys', () => {
+  it('drops a blank contractId so the column is ABSENT, not an empty string', () => {
+    // THE DEFECT. "Project with no contract" is a legitimate choice the form offers,
+    // and it sends contractId:''. Postgres raises 23503 (no contracts row has id '')
+    // and the mapper answered 409 "Cannot delete: the record is still referenced by
+    // other records" — for a CREATE. In memory the identical request returned 200 and
+    // stored ''. The key must be GONE, not undefined: an own undefined key still
+    // reaches the adapter and shows up in the audit diff.
+    const built = buildProjectWrite({ name: 'Internal tooling', ownerId: 'R1', contractId: '' });
+    expect('contractId' in built).toBe(false);
+    expect(Object.keys(built).sort()).toEqual(['name', 'ownerId']);
+    expect(buildProjectWrite({ contractId: null as unknown as string })).toStrictEqual({});
+  });
+
+  it('leaves a real contractId untouched', () => {
+    // ASSERTION OF ABSENCE: a normaliser that blanked the FK unconditionally would
+    // pass the case above and quietly detach every project from its contract.
+    expect(buildProjectWrite({ name: 'Alpha', contractId: 'CT1' }))
+      .toStrictEqual({ name: 'Alpha', contractId: 'CT1' });
+  });
+});
+
+describe('not-null parity guards', () => {
+  it('refuses an explicit null on a notNull column, on either verb', () => {
+    // THE DEFECT. `PUT /customers/C1 {"name":null}` was a 200 and the in-memory row
+    // LOST the key — every contract of that customer then rendered a blank Customer
+    // cell, unrecoverably — while the same request under Postgres raised an unmapped
+    // 23502 and a 500.
+    expect(requiredFieldError({ name: null }, ['name'], 'update')).toBe('name cannot be null');
+    expect(requiredFieldError({ name: null }, ['name'], 'create')).toBe('name cannot be null');
+  });
+
+  it('refuses an ABSENT required field on create but not on update', () => {
+    // `POST /customers {}` stored a nameless customer in memory and raised the same
+    // unmapped 23502 on Postgres, so a null-only check leaves half the parity break
+    // open. A PUT that simply does not mention the column is an ordinary partial edit.
+    expect(requiredFieldError({}, ['name'], 'create')).toBe('name is required');
+    expect(requiredFieldError({ industry: 'Banking' }, ['name'], 'update')).toBeNull();
+  });
+
+  it('lets an ordinary write through', () => {
+    // ASSERTION OF ABSENCE. A guard that always refused would pass every expectation
+    // above while making the collection read-only — the shape the register warns about.
+    expect(requiredFieldError({ name: 'Renamed' }, ['name'], 'update')).toBeNull();
+    expect(requiredFieldError({ name: 'Acme', industry: 'Banking' }, ['name'], 'create')).toBeNull();
+    // An empty string is a value, not a null: refusing it here would reject every
+    // optional-but-present text field the forms send as ''.
+    expect(requiredFieldError({ name: '' }, ['name'], 'update')).toBeNull();
+  });
+
+  it('maps the Postgres not-null SQLSTATE through drizzle\'s wrapper', () => {
+    expect(isNotNullViolation({ code: '23502' })).toBe(true);
+    expect(isNotNullViolation({ cause: { cause: { code: '23502' } } })).toBe(true);
+    // ABSENCE TWIN: an FK violation must NOT be reported as a missing field, and an
+    // ordinary error must not be swallowed as one.
+    expect(isNotNullViolation({ code: '23503' })).toBe(false);
+    expect(isNotNullViolation(new Error('boom'))).toBe(false);
+  });
+
+  it('words the referential 409 for the verb that raised it', () => {
+    expect(referentialViolationMessage('DELETE')).toContain('still referenced');
+    // RED before: every 23503 got the delete wording, including a CREATE whose
+    // reference does not exist — where it describes the opposite situation.
+    expect(referentialViolationMessage('POST')).toBe('A referenced record does not exist');
+    expect(referentialViolationMessage('PUT')).toBe('A referenced record does not exist');
+  });
+});
+
+describe('bounded numeric fields', () => {
+  it('rejects an out-of-range or non-numeric percentage', () => {
+    // `crud('work-packages')` passed numericFields = [], so `progress` — a percentage
+    // on a notNull double column that drives a bar's width — accepted all of these.
+    expect(percentFieldError({ progress: -40 }, ['progress'])).toContain('between 0 and 100');
+    expect(percentFieldError({ progress: 5000 }, ['progress'])).not.toBeNull();
+    expect(percentFieldError({ progress: 'abc' }, ['progress'])).not.toBeNull();
+    expect(percentFieldError({ progress: [50] }, ['progress'])).not.toBeNull();
+    expect(percentFieldError({ progress: Number.NaN }, ['progress'])).not.toBeNull();
+  });
+
+  it('accepts the whole legal range and an omitted value', () => {
+    // ABSENCE TWIN: the bounds are inclusive, and a PUT that does not touch progress
+    // must not be refused — otherwise no work package could ever be edited.
+    expect(percentFieldError({ progress: 0 }, ['progress'])).toBeNull();
+    expect(percentFieldError({ progress: 100 }, ['progress'])).toBeNull();
+    expect(percentFieldError({ progress: 62.5 }, ['progress'])).toBeNull();
+    expect(percentFieldError({}, ['progress'])).toBeNull();
+  });
+
+  it('requires change-request impacts to be finite numbers, sign included', () => {
+    expect(signedNumberFieldError({ impactBudget: '5000' }, ['impactBudget'])).toContain('finite number');
+    expect(signedNumberFieldError({ impactScheduleDays: null }, ['impactScheduleDays'])).not.toBeNull();
+    expect(signedNumberFieldError({ impactBudget: Number.POSITIVE_INFINITY }, ['impactBudget'])).not.toBeNull();
+    // ABSENCE TWIN: a change request may REDUCE scope, so a negative figure is legal —
+    // a non-negative check here would break the documented behaviour.
+    expect(signedNumberFieldError({ impactBudget: -12000 }, ['impactBudget'])).toBeNull();
+    expect(signedNumberFieldError({ impactBudget: 0, impactScheduleDays: 14 }, ['impactBudget', 'impactScheduleDays']))
+      .toBeNull();
+  });
+});
+
+describe('referential delete guards', () => {
+  it('names every collection that still references the parent', () => {
+    const message = referencedChildMessage('contract', [
+      { collection: 'order(s)', count: 1 },
+      { collection: 'billing condition(s)', count: 3 },
+      { collection: 'project(s)', count: 0 },
+    ]);
+    expect(message).toContain('1 order(s)');
+    expect(message).toContain('3 billing condition(s)');
+    // Only the BLOCKING collections are named — a zero count is not a reason.
+    expect(message).not.toContain('project(s)');
+  });
+
+  it('still deletes a parent nothing references', () => {
+    // ASSERTION OF ABSENCE. A guard that always refused would pass the case above and
+    // strand every childless contract in the list forever.
+    expect(referencedChildMessage('contract', [
+      { collection: 'order(s)', count: 0 },
+      { collection: 'billing condition(s)', count: 0 },
+    ])).toBeNull();
+    expect(referencedChildMessage('contract', [])).toBeNull();
+  });
+});
+
+describe('audit target resolution', () => {
+  it('upper-cases the fx-rates natural key so a lowercase path still resolves', () => {
+    // THE DEFECT. The handler upper-cases req.params.currency before writing, but the
+    // audit middleware resolves against the RAW path — so `PUT /api/fx-rates/usd`
+    // found no row and the rate that multiplies every converted amount in the
+    // portfolio was recorded with changedKeys:[] and no before/after.
+    expect(auditTargetRef('/fx-rates/usd')).toStrictEqual({ segment: 'fx-rates', id: 'USD' });
+    expect(auditTargetRef('/fx-rates/USD')).toStrictEqual({ segment: 'fx-rates', id: 'USD' });
+  });
+
+  it('resolves the hours-per-day singleton onto its camelCase row id', () => {
+    // hours-per-day "rescales every effective rate" (the handler says so) and had no
+    // resolvable entity at all, so its mutations were audited blind.
+    expect(auditTargetRef('/settings/hours-per-day')).toStrictEqual({ segment: 'settings', id: 'hoursPerDay' });
+    expect(auditTargetRef('/settings/unknown-setting')).toBeUndefined();
+  });
+
+  it('never lower-cases an entity id, and keeps the nested month shape', () => {
+    // ASSERTION OF ABSENCE, and the reason only the collection segment is folded:
+    // ids here are case-sensitive (UUIDs and the TE/AL/AR/OB prefixes), so
+    // lower-casing them would miss every row it is meant to snapshot.
+    expect(auditTargetRef('/Resources/AbC-123')).toStrictEqual({ segment: 'resources', id: 'AbC-123' });
+    expect(auditTargetRef('/rate-cards/RC1')).toStrictEqual({ segment: 'rate-cards', id: 'RC1' });
+    expect(auditTargetRef('/assignments/A1/months/2026-09/note'))
+      .toStrictEqual({ segment: 'assignment-months', id: 'A1:2026-09' });
+    expect(auditTargetRef('/resources')).toBeUndefined();
+    expect(auditTargetRef('/')).toBeUndefined();
+  });
+
+  it('reports a money-defining collection missing from the audit registry', () => {
+    // The registry is a Map built in src/server.ts, which no spec can import (it
+    // instantiates the SSR engine). This is the wiring guarantee instead: the server
+    // calls auditRegistryGaps over the live Map's keys at startup and throws on a gap,
+    // so removing an entry fails loudly rather than silently blinding the trail again.
+    expect(auditRegistryGaps(['resources', 'orders'])).toEqual([...MONEY_DEFINING_AUDIT_SEGMENTS]);
+    expect(auditRegistryGaps(['rate-cards', 'negotiated-rates', 'settings'])).toEqual(['fx-rates']);
+    // ABSENCE TWIN: a complete registry reports NO gap — without this the function
+    // could return every segment unconditionally and still pass the two cases above.
+    expect(auditRegistryGaps([...MONEY_DEFINING_AUDIT_SEGMENTS, 'resources'])).toEqual([]);
   });
 });

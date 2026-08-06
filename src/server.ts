@@ -40,7 +40,9 @@ import {
 import { resourceIdFromOidcClaims } from './app/services/access-policy.util';
 import { isOwnAssignment, pickSelfProfilePatch, selfAssignments, selfRequests, toSelfProfile } from './server/self-service.util';
 import {
+  COMMERCIAL_MUTATION_RULES,
   canAccessGlobalTimeEntry,
+  canSubmitOwnTime,
   deriveTimeEntryLinks,
   hasGlobalTimeEntryCollectionAccess,
   pinnedChangeRequestCreateFields,
@@ -77,12 +79,26 @@ import {
 import {
   assignmentRetargetError,
   assignmentServerOwnedFieldError,
+  auditRegistryGaps,
+  auditTargetRef,
   bookingOutsideEmploymentError,
   bookingWindowOutsideEmploymentError,
+  buildMilestoneCreate,
+  buildProjectWrite,
   contractHoursPerDayError,
   employmentWindowError,
+  isNotNullViolation,
+  issuedOrderLineStructureError,
+  issuedOrderLineWriteError,
+  milestoneStatusError,
+  percentFieldError,
+  referencedChildMessage,
+  referentialViolationMessage,
+  requiredFieldError,
   resourceRequestUpdateError,
   retargetDailyCapacityError,
+  signedNumberFieldError,
+  stripBlankForeignKeys,
 } from './server/operational-integrity.util';
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
@@ -359,36 +375,36 @@ const auditRepoBySegment = new Map<string, AuditReadable>([
   // actually mounts) but keeps the map exhaustive over the Repositories surface.
   ['holidays', repos.holidays], ['planning-periods', repos.planningPeriods],
   ['assignment-days', repos.assignmentDays], ['assignment-months', repos.assignmentMonths],
+  // MONEY-DEFINING MASTER DATA. Absent from this map, every mutation of the three
+  // numbers that multiply the whole portfolio — an FX rate, a rate card's
+  // cost/bill rate, and the hours-per-day that rescales every effective rate —
+  // was recorded as `{changedKeys: [], before: undefined, after: undefined}`: the
+  // trail knew a PUT happened and nothing about what it did, so a disputed
+  // revaluation could not be reconstructed from it.
+  ['rate-cards', repos.rateCards], ['negotiated-rates', repos.negotiatedRates],
+  ['fx-rates', repos.fxRates], ['settings', repos.settings],
 ]);
+// Fail loudly at boot rather than silently blinding the trail again: the map above
+// is the ONLY thing standing between a money-defining mutation and an empty diff.
+const auditGaps = auditRegistryGaps(auditRepoBySegment.keys());
+if (auditGaps.length > 0) {
+  throw new Error(`audit registry is missing money-defining collections: ${auditGaps.join(', ')}`);
+}
 
 /**
  * Find the current entity targeted by a `/collection/:id` request path.
  *
- * Special-cases B3's nested per-month sub-resource shape
- * `/assignments/:id/months/:month/...` (the `note` PUT — `submit` is a POST,
- * which the audit middleware never before/after-snapshots): that handler
- * never touches the parent assignment, so resolving `segments[1]` against
- * `repos.assignments` (the generic path below) would diff an unchanged
- * assignment against itself and silently produce an empty `changedKeys`,
- * masking the actual mutation. Resolve against the assignmentMonths row
- * (composite id) instead.
+ * The path→(collection, id) resolution — including B3's nested per-month
+ * sub-resource shape, the `/settings/hours-per-day` singleton and the
+ * case-insensitive `/fx-rates/:currency` natural key — lives in
+ * `auditTargetRef`, so it is unit-testable; this function is only the repository
+ * lookup around it.
  */
 async function findAuditEntity(path: string): Promise<Entity | undefined> {
-  const segments = path.split('/').filter(Boolean);
-  if (segments.length < 2) return undefined;
-  // The COLLECTION segments are matched case-insensitively, for the same reason
-  // roleGate normalises its path: Express routes case-insensitively, so
-  // `PUT /api/Resources/<id>` reaches the handler, and this map is lowercase-keyed.
-  // The lookup used to miss, so the mutation was audited with `changedKeys: []` —
-  // an audit entry that records that something happened but not what.
-  // segments[1] and segments[3] are NOT lowercased: they are an entity id and a
-  // month key, and ids here are case-sensitive (UUIDs, and the TE/AL/AR/OB prefixes).
-  const collection = segments[0].toLowerCase();
-  if (collection === 'assignments' && segments[2]?.toLowerCase() === 'months' && segments.length >= 4) {
-    return repos.assignmentMonths.get(monthRowId(segments[1], segments[3]));
-  }
-  const repo = auditRepoBySegment.get(collection);
-  return repo ? repo.get(segments[1]) : undefined;
+  const ref = auditTargetRef(path);
+  if (ref === undefined) return undefined;
+  const repo = auditRepoBySegment.get(ref.segment);
+  return repo ? repo.get(ref.id) : undefined;
 }
 
 /** Shallow clone of a plain entity for an immutable audit snapshot. */
@@ -578,7 +594,12 @@ const trustedRoles = (req: Request): readonly UserRole[] => {
 const hasTrustedPrincipal = (req: Request): boolean =>
   req.verifiedRoles !== undefined || (trustHeaders && trustedRoles(req).length > 0);
 
-const canMutate = (role: UserRole | 'unknown', allowed: UserRole[]) => allowed.includes(role as UserRole);
+// `canMutate(trustedRole(req), […])` — a single-role membership test — used to live
+// here. It is gone deliberately: its last caller (POST /self/time-entries) was the
+// one place still authorizing on the DISPLAY role instead of the verified role set,
+// which locked a ['employee','sales'] principal out of their own timesheet. Every
+// remaining authorization site goes through `hasAnyAllowedRole(trustedRoles(req), …)`,
+// so the primary-vs-set confusion has no helper left to reintroduce it with.
 
 /**
  * Resolve a verified/trusted actor to an existing resource for /self routes.
@@ -667,8 +688,13 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
     return;
   }
 
-  const rules: { test: (path: string) => boolean; roles: UserRole[] }[] = [
-    { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items', '/negotiated-rates'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
+  const rules: { test: (path: string) => boolean; roles: readonly UserRole[] }[] = [
+    // The commercial slice comes from ONE exported, order-sensitive array: the
+    // narrow money-action rule (issue an invoice / settle it — finance-grade)
+    // precedes the coarse commercial prefix rule that admits `sales`. Inlining the
+    // two here again is how the narrow rule would end up after the coarse one and
+    // become dead code that still reads as a guard.
+    ...COMMERCIAL_MUTATION_RULES,
     { test: p => ['/project-financials', '/project-cost-centers', '/cost-centers'].some(prefix => p.startsWith(prefix)), roles: ['finance', 'delivery-executive', 'admin'] },
     // Cost baselines (design spec, block E, §5): freeze/re-freeze restricted to
     // finance-grade roles. pm/resource-manager can read it (READ_RULES below)
@@ -819,6 +845,14 @@ function crud<T extends { id: string }>(
   // project-issues, cost-centers) passes nothing here and is byte-for-byte
   // unaffected: `q` is simply never read for their GET route.
   searchable: readonly (keyof T)[] = [],
+  // ADAPTER PARITY: the columns schema.ts declares notNull. Required on create,
+  // and never nullable on update — see `requiredFieldError`. Left empty for a
+  // collection until its notNull set is transcribed, which keeps every existing
+  // caller byte-identical.
+  required: readonly string[] = [],
+  // Nullable FKs whose blank ('' / null) form must reach the adapter as ABSENT.
+  // `''` is a 23503 on Postgres and a stored empty string in memory.
+  blankForeignKeys: readonly string[] = [],
 ) {
   router.get(`/${path}`, async (req, res) => {
     const all = await repo.list();
@@ -827,11 +861,15 @@ function crud<T extends { id: string }>(
     res.json(q === undefined ? all : searchPage(all, searchable, q, clampSearchPage(req.query)));
   });
   router.post(`/${path}`, async (req, res) => {
-    const data = pick(req.body, allowed);
+    // Blank nullable FKs are dropped BEFORE the required check, so a required
+    // column sent as '' is reported as missing rather than reaching the adapter.
+    const data = stripBlankForeignKeys(pick(req.body, allowed) as Record<string, unknown>, blankForeignKeys);
+    const missing = requiredFieldError(data, required, 'create');
+    if (missing) { res.status(400).json({ error: missing }); return; }
     const bad = findInvalidNumericField(data, numericFields);
     if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
     if (validate) {
-      const err = await validate(data as Record<string, unknown>);
+      const err = await validate(data);
       if (err) { res.status(400).json({ error: err }); return; }
     }
     const item = { id: newId(), ...data } as T;
@@ -841,11 +879,13 @@ function crud<T extends { id: string }>(
   router.put(`/${path}/:id`, async (req, res) => {
     const existing = await repo.get(req.params.id);
     if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
-    const data = pick(req.body, allowed);
+    const data = stripBlankForeignKeys(pick(req.body, allowed) as Record<string, unknown>, blankForeignKeys);
+    const nulled = requiredFieldError(data, required, 'update');
+    if (nulled) { res.status(400).json({ error: nulled }); return; }
     const bad = findInvalidNumericField(data, numericFields);
     if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
     if (validate) {
-      const err = await validate(data as Record<string, unknown>, { id: req.params.id });
+      const err = await validate(data, { id: req.params.id });
       if (err) { res.status(400).json({ error: err }); return; }
     }
     const updated = await repo.update(req.params.id, data as Partial<T>);
@@ -972,6 +1012,22 @@ async function validateCurrency(body: { currency?: unknown }): Promise<string | 
   if (!(await isKnownCurrency(currency))) {
     return `currency must be a configured currency (one of ${[...(await knownCurrencies())].sort().join(', ')})`;
   }
+  return null;
+}
+
+/**
+ * REFERENTIAL INTEGRITY for the project sub-resource collections mounted with
+ * `crud()`. Six of them (project-partners, project-documents, work-packages,
+ * project-financials, project-tasks, project-issues) declare `project_id` notNull
+ * REFERENCES projects.id and never checked it: `projectId:'NOPE'` was a 200 plus an
+ * unreachable row in memory, and under Postgres a 23503 the middleware reported as
+ * "Cannot delete: the record is still referenced by other records" — for a CREATE.
+ * An ABSENT projectId is passed through here (the PUT path must not be forced to
+ * re-send it); `required` refuses it on create.
+ */
+async function validateProjectReference(projectId: unknown): Promise<string | null> {
+  if (projectId === undefined) return null;
+  if (!(await existsRepo(repos.projects, projectId))) return 'projectId must reference an existing project';
   return null;
 }
 
@@ -2118,7 +2174,12 @@ apiRouter.get('/self/time-entries', async (req, res) => {
 apiRouter.post('/self/time-entries', async (req, res) => {
   const resourceId = await requireSelfResourceId(req, res);
   if (!resourceId) return;
-  if (!canMutate(trustedRole(req), ['employee', 'pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'])) {
+  // AUTHORIZE ON THE WHOLE VERIFIED ROLE SET, exactly as roleGate does. Collapsing
+  // to the highest-priority role is a DISPLAY choice: a presales consultant whose
+  // Keycloak roles are ['employee','sales'] resolves to primary 'sales', and every
+  // submit of their OWN timesheet answered 403 while their reads (full set) returned
+  // their bookings. `trustedRole` is kept for the message only.
+  if (!canSubmitOwnTime(trustedRoles(req))) {
     res.status(403).json({ error: `Role ${trustedRole(req)} cannot submit time` });
     return;
   }
@@ -2438,17 +2499,23 @@ apiRouter.put('/assignments/:id', async (req, res) => {
     const monthRows = (await repos.assignmentMonths.list())
       .filter(m => m.assignmentId === authoritativeOld.id && (m.status === 'Allocated' || m.status === 'Requested'));
     for (const row of monthRows) {
-      const before = await allocationLifecycle.run(row.id, async transactionRepos => {
+      const revised = await allocationLifecycle.run(row.id, async transactionRepos => {
         const current = await transactionRepos.assignmentMonths.get(row.id);
         if (!current || (current.status !== 'Allocated' && current.status !== 'Requested')) return undefined;
-        await reviseAllocationMonthAfterEdit(transactionRepos, row.id, {
+        const after = await reviseAllocationMonthAfterEdit(transactionRepos, row.id, {
           autoApprove: selfManaged,
           reason: 'resource retargeted',
           createApproval: () => createAllocationApprovalEntry(req, mergedAssig, row.id, transactionRepos),
         });
-        return current;
+        return { before: current, after };
       });
-      if (!before) continue;
+      if (!revised) continue;
+      const before = revised.before;
+      // GOVERNANCE TRAIL: an 'Allocated' month walked back to 'Requested' means work
+      // that WAS approved is no longer approved, and on the self-managed branch a
+      // month is re-approved under a different assignee. Neither moved the parent
+      // assignment, so neither appeared in the trail at all.
+      await appendMonthTransitionAudit(req, before, revised.after);
       if (selfManaged) {
         // C2 — THE SELF-MANAGED BRANCH IS AN IMPLICIT APPROVAL, so it owes the
         // same give-back an explicit one does. The month lands 'Allocated' with
@@ -2743,6 +2810,10 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   // (and the edit opens a fresh revision) or wholly after it (and its old
   // approvalId fails the CAS); it can never approve the new hours under the old
   // request. The resource lock retains the capacity TOCTOU guard.
+  // GOVERNANCE TRAIL for the month row itself (see the note below the lifecycle
+  // call). Captured inside the transaction, written after it commits.
+  let monthBefore: AssignmentMonth | undefined;
+  let monthAfter: AssignmentMonth | undefined;
   const replaced = await withLock(`res:${resource.id}`, () => allocationLifecycle.run(
     allocationMonthId,
     async (transactionRepos): Promise<{ offender?: string; error?: string; status?: number }> => {
@@ -2784,7 +2855,8 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
         }
       }
       await recomputeAssignedHours(assig.id, transactionRepos);
-      await reviseAllocationMonthAfterEdit(transactionRepos, allocationMonthId, {
+      monthBefore = await transactionRepos.assignmentMonths.get(allocationMonthId);
+      monthAfter = await reviseAllocationMonthAfterEdit(transactionRepos, allocationMonthId, {
         autoApprove: selfManaged,
         createApproval: () => createAllocationApprovalEntry(req, assig, allocationMonthId, transactionRepos),
       });
@@ -2793,6 +2865,17 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   ));
   if (replaced.error !== undefined) { res.status(replaced.status ?? 400).json({ error: replaced.error }); return; }
   if (replaced.offender !== undefined) { res.status(400).json({ error: capExceeded(replaced.offender) }); return; }
+  // GOVERNANCE TRAIL. `autoApprovesAllocation` makes this endpoint an IMPLICIT
+  // SELF-APPROVAL for a manager editing their own report's month: the pending
+  // approval is withdrawn and the row is rewritten `status:'Allocated', approvalId
+  // cleared` with no approval request left to decide. The audit middleware only ever
+  // saw the ASSIGNMENT, whose assignedHours and derived status are unchanged when
+  // hours merely move between days — so the trail's sole record of the operation was
+  // `{path:'/assignments/A1/allocation', changedKeys: []}`: an entry that
+  // affirmatively asserts nothing changed, on the one act an audit trail exists to
+  // catch. Written only when the month row actually MOVED, so an unchanged row does
+  // not add a second empty-diff entry alongside the middleware's.
+  await appendMonthTransitionAudit(req, monthBefore, monthAfter);
   // The assignment's own status is a rollup of its months — recompute it last.
   await refreshDerivedAssignmentStatus(assig.id);
 
@@ -4378,6 +4461,12 @@ apiRouter.delete('/countries/:code', async (req, res) => {
   res.status(204).send();
 });
 
+// NOT-NULL PARITY (the `required` argument on every crud() below): the column
+// sets are transcribed from src/db/schema.ts. Without them an explicit JSON
+// `null` reached the adapter, and the SAME request behaved two ways — 200 plus a
+// row that silently LOST the column in memory, an unmapped 23502 → 500 under
+// Postgres. On create an omitted value is refused for the same reason.
+
 // CITIES — id-keyed catalog; `countryCode` is a REQUIRED FK to /countries.
 crud(apiRouter, 'cities', repos.cities, ['name', 'countryCode'], [], async data => {
   if (data['countryCode'] === undefined) return 'countryCode is required';
@@ -4385,18 +4474,18 @@ crud(apiRouter, 'cities', repos.cities, ['name', 'countryCode'], [], async data 
     return 'countryCode must reference an existing country';
   }
   return null;
-});
+}, [], ['name', 'countryCode']);
 
 // Simple {id, name} catalogs.
-crud(apiRouter, 'industries', repos.industries, ['name']);
-crud(apiRouter, 'cost-categories', repos.costCategories, ['name']);
-crud(apiRouter, 'partner-roles', repos.partnerRoles, ['name']);
+crud(apiRouter, 'industries', repos.industries, ['name'], [], undefined, [], ['name']);
+crud(apiRouter, 'cost-categories', repos.costCategories, ['name'], [], undefined, [], ['name']);
+crud(apiRouter, 'partner-roles', repos.partnerRoles, ['name'], [], undefined, [], ['name']);
 
 // VENDORS — partner/supplier companies. REFERENCE-DATA INTEGRITY (Phase F2):
 // `country` (when supplied) must be a valid ISO-2 country code from the countries
 // catalog (the natural key). Optional; an omitted/empty country passes.
 crud(apiRouter, 'vendors', repos.vendors, ['name', 'vatId', 'country'], [], data =>
-  validateCatalogValue(data['country'], 'country', countryCodes, 'country (ISO-2 code)'));
+  validateCatalogValue(data['country'], 'country', countryCodes, 'country (ISO-2 code)'), [], ['name']);
 
 // RATE CARDS (Phase E) — role-based default cost/bill rates customizing.
 // REFERENCE-DATA INTEGRITY: `role` -> project-roles (name, required), optional
@@ -4432,7 +4521,7 @@ crud(apiRouter, 'rate-cards', repos.rateCards, ['role', 'organization', 'currenc
       return `A rate card already exists for "${role}" / ${org || 'All organizations'} in ${currency}. Edit that card instead of adding a duplicate.`;
     }
     return null;
-  });
+  }, [], ['role', 'currency', 'costRate', 'billRate']);
 
 // HYBRID DAY MODEL — working hours-per-day that converts the €/day rate cards into
 // the €/hour the margin math consumes. Read is open (the resolver + forms need it);
@@ -4498,13 +4587,34 @@ apiRouter.put('/planning-periods/:id', async (req, res) => {
 });
 
 const PROJECT_FIELDS = ['name', 'location', 'startDate', 'endDate', 'status', 'description', 'ownerId', 'contractId'] as const;
+
+/**
+ * A project's `contractId` is OPTIONAL (an internal project has none), so only a
+ * value that survived `buildProjectWrite`'s blank-stripping is checked — and it is
+ * checked here rather than left to the FK, so a wrong id is a 400 naming the field
+ * instead of a 409 describing a delete.
+ */
+async function validateProjectContract(body: Partial<Project>): Promise<string | null> {
+  if (body.contractId === undefined) return null;
+  if (!(await existsRepo(repos.contracts, body.contractId))) {
+    return 'contractId must reference an existing contract';
+  }
+  return null;
+}
 apiRouter.get('/projects', async (req, res) => {
   const all = await repos.projects.list();
   const q = typeof req.query['q'] === 'string' ? req.query['q'] : undefined;
   res.json(q === undefined ? all : searchPage(all, ['name', 'location'], q, clampSearchPage(req.query)));
 });
 apiRouter.post('/projects', async (req, res) => {
-  const body = pick<Project>(req.body, PROJECT_FIELDS);
+  // BLANK NULLABLE FK: the form leaves the Contract select on its empty default for
+  // a project with no contract — a legitimate choice — and sends `contractId:''`.
+  // Postgres raises 23503 (no contracts row has id '') and the error mapper answered
+  // 409 "Cannot delete: the record is still referenced by other records" for a
+  // CREATE, so the whole feature tested green under `ng serve` and could not save a
+  // single contract-less project in production. `buildProjectWrite` is the ONLY path
+  // to repos.projects.create() here, which is what makes the normalisation provable.
+  const body = buildProjectWrite(pick<Project>(req.body, PROJECT_FIELDS));
   // REFERENCE-DATA INTEGRITY (Phase D): `ownerId` is a person reference to the
   // resources catalog by ID (the Owner SELECT stores the resource id). It is required
   // on create and must reference an existing resource.
@@ -4512,6 +4622,10 @@ apiRouter.post('/projects', async (req, res) => {
     res.status(400).json({ error: 'ownerId must reference an existing resource' });
     return;
   }
+  // A non-empty contractId is checked HERE so a bad id is a clean 400 rather than a
+  // DB-layer 409 — mirroring ownerId above.
+  const contractErr = await validateProjectContract(body);
+  if (contractErr) { res.status(400).json({ error: contractErr }); return; }
   // REFERENCE-DATA INTEGRITY (Phase F2): `location` -> cities catalog (name) or the
   // 'Remote' sentinel. Optional; only a supplied non-empty value is checked.
   const locErr = await validateCatalogValue(body.location, 'location', cityNames, 'city (location catalog name) or "Remote"', [REMOTE_LOCATION]);
@@ -4525,13 +4639,17 @@ apiRouter.post('/projects', async (req, res) => {
 apiRouter.put('/projects/:id', async (req, res) => {
   const existing = await repos.projects.get(req.params.id);
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
-  const body = pick<Project>(req.body, PROJECT_FIELDS);
+  // Same blank-FK normalisation as POST: clearing an existing project's contract
+  // through the form 409'd on Postgres for exactly the same reason.
+  const body = buildProjectWrite(pick<Project>(req.body, PROJECT_FIELDS));
   // REFERENCE-DATA INTEGRITY (Phase D): validate `ownerId` only when supplied, so a
   // partial edit that omits it is never blocked; a supplied value must be a resource id.
   if (body.ownerId !== undefined && body.ownerId !== null && body.ownerId !== '' && !(await existsRepo(repos.resources, body.ownerId))) {
     res.status(400).json({ error: 'ownerId must reference an existing resource' });
     return;
   }
+  const contractErr = await validateProjectContract(body);
+  if (contractErr) { res.status(400).json({ error: contractErr }); return; }
   // REFERENCE-DATA INTEGRITY (Phase F2): validate any supplied `location`.
   const locErr = await validateCatalogValue(body.location, 'location', cityNames, 'city (location catalog name) or "Remote"', [REMOTE_LOCATION]);
   if (locErr) { res.status(400).json({ error: locErr }); return; }
@@ -4549,18 +4667,29 @@ apiRouter.delete('/projects/:id', async (req, res) => { await repos.projects.rem
 // -> partner-roles catalog (name). `contact` stays FREE (external person). Both FKs
 // optional at the validator level; the UI enforces required.
 crud(apiRouter, 'project-partners', repos.projectPartners, ['projectId', 'company', 'role', 'contact', 'status'], [], async data => {
+  const projectErr = await validateProjectReference(data['projectId']);
+  if (projectErr) return projectErr;
   const companyErr = await validateCatalogValue(data['company'], 'company', vendorNames, 'vendor (company catalog name)');
   if (companyErr) return companyErr;
   return validateCatalogValue(data['role'], 'role', partnerRoleNames, 'partner role (catalog name)');
-});
+}, [], ['projectId', 'company', 'role', 'contact', 'status']);
 
-crud(apiRouter, 'project-documents', repos.projectDocuments, ['projectId', 'name', 'type', 'size', 'uploadedAt', 'author', 'authorInitials']);
+crud(apiRouter, 'project-documents', repos.projectDocuments,
+  ['projectId', 'name', 'type', 'size', 'uploadedAt', 'author', 'authorInitials'], [],
+  async data => validateProjectReference(data['projectId']), [],
+  ['projectId', 'name', 'type', 'size', 'uploadedAt', 'author', 'authorInitials']);
 
 // PHASE D — work-package `assignee` is a person reference ('Unassigned' allowed).
 // Phase G — start/end must be ISO (end >= start) when supplied.
-crud(apiRouter, 'work-packages', repos.workPackages, ['projectId', 'name', 'startDate', 'endDate', 'status', 'progress', 'assignee'], [],
-  async data => validateDateFields(data, ['startDate', 'endDate'], { from: 'startDate', to: 'endDate' })
-    ?? await validatePersonRefs(data, ['assignee'], ['assignee']));
+// `progress` is a PERCENTAGE on a notNull double column and had no numeric check at
+// all (numericFields was []), so -40, 5000, 'abc' and arrays all landed on it and
+// drove a progress bar's width. Bounded to [0,100] here, not merely non-negative.
+crud(apiRouter, 'work-packages', repos.workPackages, ['projectId', 'name', 'startDate', 'endDate', 'status', 'progress', 'assignee'], ['progress'],
+  async data => percentFieldError(data, ['progress'])
+    ?? await validateProjectReference(data['projectId'])
+    ?? validateDateFields(data, ['startDate', 'endDate'], { from: 'startDate', to: 'endDate' })
+    ?? await validatePersonRefs(data, ['assignee'], ['assignee']),
+  [], ['projectId', 'name', 'startDate', 'endDate', 'status', 'progress', 'assignee']);
 
 interface MilestoneEntry { id: string; projectId: string; name: string; date: string; status: 'Pending' | 'Achieved'; approvedBy?: string; approvedAt?: string }
 // `approvedBy` / `approvedAt` are deliberately ABSENT from this allow-list: they
@@ -4576,7 +4705,18 @@ apiRouter.post('/milestones', async (req, res) => {
   // Phase G: the milestone `date` must be ISO when supplied.
   const dateErr = validateDateFields(body as Record<string, unknown>, ['date']);
   if (dateErr) { res.status(400).json({ error: dateErr }); return; }
-  const item = { id: newId(), ...body } as MilestoneEntry;
+  // REFERENTIAL INTEGRITY: project_id is notNull REFERENCES projects.id, and this
+  // handler never checked it — `projectId:'NOPE'` was a 200 in memory and an
+  // unmapped 23503 under Postgres.
+  if (!(await existsRepo(repos.projects, body.projectId))) {
+    res.status(400).json({ error: 'projectId must reference an existing project' });
+    return;
+  }
+  const statusErr = milestoneStatusError(body.status);
+  if (statusErr) { res.status(400).json({ error: statusErr }); return; }
+  // 'Achieved' IS A MONEY EVENT, so it is server-owned and reachable only through
+  // the PUT transition that pins `approvedBy` — see `buildMilestoneCreate`.
+  const item = { id: newId(), ...buildMilestoneCreate(body as Record<string, unknown>) } as unknown as MilestoneEntry;
   res.json(await repos.milestones.create(item));
 });
 apiRouter.put('/milestones/:id', async (req, res) => {
@@ -4587,6 +4727,14 @@ apiRouter.put('/milestones/:id', async (req, res) => {
   // Phase G: validate the milestone `date` when supplied (ISO).
   const dateErr = validateDateFields(body as Record<string, unknown>, ['date']);
   if (dateErr) { res.status(400).json({ error: dateErr }); return; }
+  if (body.projectId !== undefined && !(await existsRepo(repos.projects, body.projectId))) {
+    res.status(400).json({ error: 'projectId must reference an existing project' });
+    return;
+  }
+  // Any string used to land on the column, rendering as a chip with none of the
+  // three status classes and matching no consumer's status test.
+  const statusErr = milestoneStatusError(body.status);
+  if (statusErr) { res.status(400).json({ error: statusErr }); return; }
   // SERVER-PINNED APPROVAL RECORD, never the body's (see MILESTONE_FIELDS).
   const approvalPatch = milestoneApprovalPatch(
     previousStatus,
@@ -4623,13 +4771,27 @@ apiRouter.put('/milestones/:id', async (req, res) => {
   res.json(updated);
 });
 apiRouter.delete('/milestones/:id', async (req, res) => {
+  // No read, no 404, no child guard: a DELETE of an id that never existed answered
+  // 204 and appended a phantom audit entry (before/after both undefined), and
+  // deleting a milestone that a billing condition points at orphaned
+  // `billingPlanItems.milestoneId` — under Postgres the same request 409s, the
+  // parity break CLAUDE.md calls load-bearing.
+  const existing = await repos.milestones.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const linked = (await repos.billingPlanItems.list()).filter(item => item.milestoneId === req.params.id);
+  if (linked.length > 0) {
+    res.status(409).json({ error: `Cannot delete: ${linked.length} billing condition(s) are triggered by this milestone` });
+    return;
+  }
   await repos.milestones.remove(req.params.id);
   res.status(204).send();
 });
 
 // REFERENCE-DATA INTEGRITY (Phase F2): `category` -> cost-categories catalog (name).
-crud(apiRouter, 'project-financials', repos.projectFinancials, ['projectId', 'category', 'budget', 'actual'], ['budget', 'actual'], data =>
-  validateCatalogValue(data['category'], 'category', costCategoryNames, 'cost category (catalog name)'));
+crud(apiRouter, 'project-financials', repos.projectFinancials, ['projectId', 'category', 'budget', 'actual'], ['budget', 'actual'],
+  async data => await validateProjectReference(data['projectId'])
+    ?? await validateCatalogValue(data['category'], 'category', costCategoryNames, 'cost category (catalog name)'),
+  [], ['projectId', 'category', 'budget', 'actual']);
 
 // PROJECT COST CENTERS — bespoke handlers (the generic crud server-assigns the id;
 // here the project cost-center IS one of the configuration cost-centers, so the id is
@@ -4672,13 +4834,27 @@ apiRouter.delete('/project-cost-centers/:id', async (req, res) => {
 
 // PHASE D — task `assignee` is a person reference ('Unassigned' allowed).
 // Phase G — `dueDate` must be ISO when supplied.
+// `partnerId` is a NULLABLE FK the form sends as '' for every Internal task, which
+// is a 23503 under Postgres (no project_partners row has id '') reported as a
+// nonsensical "Cannot delete…" 409 — so every ordinary internal task was unsavable
+// in production while returning 200 in dev. Blanked here, and a NON-empty value is
+// now checked against the catalog instead of being handed straight to the column.
 crud(apiRouter, 'project-tasks', repos.projectTasks, ['projectId', 'name', 'assignee', 'assigneeType', 'partnerId', 'dueDate', 'status', 'priority'], [],
-  async data => validateDateFields(data, ['dueDate']) ?? await validatePersonRefs(data, ['assignee'], ['assignee']));
+  async data => await validateProjectReference(data['projectId'])
+    ?? (data['partnerId'] !== undefined && !(await existsRepo(repos.projectPartners, data['partnerId']))
+      ? 'partnerId must reference an existing project partner'
+      : null)
+    ?? validateDateFields(data, ['dueDate'])
+    ?? await validatePersonRefs(data, ['assignee'], ['assignee']),
+  [], ['projectId', 'name', 'assignee', 'dueDate', 'status', 'priority'], ['partnerId']);
 
 // PHASE D — issue `reportedBy` and `owner` are person references (optional).
 // Phase G — `dueDate` must be ISO when supplied.
 crud(apiRouter, 'project-issues', repos.projectIssues, ['projectId', 'title', 'type', 'severity', 'status', 'reportedBy', 'owner', 'dueDate', 'impact', 'actionPlan', 'escalated'], [],
-  async data => validateDateFields(data, ['dueDate']) ?? await validatePersonRefs(data, ['reportedBy', 'owner']));
+  async data => await validateProjectReference(data['projectId'])
+    ?? validateDateFields(data, ['dueDate'])
+    ?? await validatePersonRefs(data, ['reportedBy', 'owner']),
+  [], ['projectId', 'title', 'type', 'severity', 'status', 'reportedBy']);
 
 interface ChangeRequestEntry {
   id: string;
@@ -4716,6 +4892,16 @@ apiRouter.post('/change-requests', async (req, res) => {
   // resources catalog (requestedBy/decidedBy are server-pinned actor ids, not names).
   const personErr = await validatePersonRefs(body as unknown as Record<string, unknown>, ['owner']);
   if (personErr) { res.status(400).json({ error: personErr }); return; }
+  // Both impact figures are notNull double columns that no check ever touched, so
+  // '5000' as a STRING, null or an array landed on them — and an approved uplift is
+  // added straight into the project's effective budget, where a string concatenates
+  // instead of summing. Signed (a CR may reduce scope), but finite and numeric.
+  const numberErr = signedNumberFieldError(
+    body as unknown as Record<string, unknown>, ['impactBudget', 'impactScheduleDays'],
+  );
+  if (numberErr) { res.status(400).json({ error: numberErr }); return; }
+  const projectErr = await validateProjectReference((body as unknown as Record<string, unknown>)['projectId']);
+  if (projectErr) { res.status(400).json({ error: projectErr }); return; }
   // Provenance and initial state are pinned AFTER the untrusted body. A caller
   // cannot create an already-Approved request or forge the SoD creator/requester.
   const creator = actorId(req);
@@ -4733,6 +4919,12 @@ apiRouter.put('/change-requests/:id', async (req, res) => {
   // resources catalog. Omitted/empty owner passes (partial edits are not blocked).
   const personErr = await validatePersonRefs(body as unknown as Record<string, unknown>, ['owner']);
   if (personErr) { res.status(400).json({ error: personErr }); return; }
+  const numberErr = signedNumberFieldError(
+    body as unknown as Record<string, unknown>, ['impactBudget', 'impactScheduleDays'],
+  );
+  if (numberErr) { res.status(400).json({ error: numberErr }); return; }
+  const projectErr = await validateProjectReference((body as unknown as Record<string, unknown>)['projectId']);
+  if (projectErr) { res.status(400).json({ error: projectErr }); return; }
   const decider = actorId(req);
   const role = trustedRole(req);
   const changesDomainFields = CHANGE_REQUEST_MUTABLE_FIELDS.some(field => body[field] !== undefined);
@@ -4791,7 +4983,7 @@ apiRouter.delete('/change-requests/:id', async (req, res) => {
 // Configuration-level cost centers (B16)
 // PHASE D — `manager` is a person reference (optional).
 crud(apiRouter, 'cost-centers', repos.costCenters, ['name', 'manager', 'allocated', 'actual'], ['allocated', 'actual'],
-  data => validatePersonRefs(data, ['manager']));
+  data => validatePersonRefs(data, ['manager']), [], ['name', 'manager', 'allocated', 'actual']);
 
 // --- Commercial domain (ADR-0001): Customers, Contracts, Orders, OrderLines ---
 
@@ -4802,9 +4994,22 @@ crud(apiRouter, 'customers', repos.customers, ['name', 'industry', 'country'], [
   const indErr = await validateCatalogValue(data['industry'], 'industry', industryNames, 'industry (catalog name)');
   if (indErr) return indErr;
   return validateCatalogValue(data['country'], 'country', countryNames, 'country (catalog name)');
-}, ['name']);
+}, ['name'], ['name']);
 
 interface ContractEntry { id: string; customerId: string; name: string; type: string; totalValue: number; currency: string; status: string; startDate: string; endDate: string }
+
+/** Every collection that carries a `contractId`, counted for the DELETE guard. */
+async function contractChildBlockers(contractId: string): Promise<string | null> {
+  const [orders, billingItems, projects, negotiatedRates] = await Promise.all([
+    repos.orders.list(), repos.billingPlanItems.list(), repos.projects.list(), repos.negotiatedRates.list(),
+  ]);
+  return referencedChildMessage('contract', [
+    { collection: 'order(s)', count: orders.filter(row => row.contractId === contractId).length },
+    { collection: 'billing condition(s)', count: billingItems.filter(row => row.contractId === contractId).length },
+    { collection: 'project(s)', count: projects.filter(row => row.contractId === contractId).length },
+    { collection: 'negotiated rate(s)', count: negotiatedRates.filter(row => row.contractId === contractId).length },
+  ]);
+}
 
 interface OrderEntry { id: string; contractId: string; type: string; partnerId: string; amount: number; currency: string; status: string; orderDate: string; invoiceNumber?: string; invoiceDate?: string }
 
@@ -4879,6 +5084,17 @@ apiRouter.put('/contracts/:id', async (req, res) => {
   res.json(updated);
 });
 apiRouter.delete('/contracts/:id', async (req, res) => {
+  // A CONTRACT IS THE PARENT OF AN ISSUED INVOICE. With no read and no child guard
+  // this 204'd in dev and left orders (invoiceNumber and all), billing conditions,
+  // projects and negotiated rates pointing at a contract that no longer exists —
+  // bypassing `issuedOrderDeleteError` and `invoicedBillingItemDeleteError`
+  // wholesale one level up, and making every later PUT on those conditions 400 on
+  // 'contractId must reference an existing contract' with no way back. Under
+  // Postgres the same request answers 409.
+  const existing = await repos.contracts.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const blocking = await contractChildBlockers(req.params.id);
+  if (blocking) { res.status(409).json({ error: blocking }); return; }
   await repos.contracts.remove(req.params.id);
   res.status(204).send();
 });
@@ -4917,6 +5133,15 @@ apiRouter.post('/orders', async (req, res) => {
   const body = pick<OrderEntry>(req.body, ORDER_FIELDS);
   const bad = findInvalidNumericField(body, ['amount']);
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
+  // The PUT path validated `status` against the enum; CREATE did not, so
+  // `POST /orders {status:'Cancelled'}` (or the lowercase 'paid') persisted verbatim
+  // on both adapters — an order that matches no status filter anywhere: absent from
+  // invoiced and from Paid, still counted in customerRevenue by the unfiltered
+  // lineSum, and rendered as an unknown chip label.
+  if (body.status !== undefined && !(ORDER_STATUSES as readonly string[]).includes(body.status)) {
+    res.status(400).json({ error: `status must be one of: ${ORDER_STATUSES.join(', ')}` });
+    return;
+  }
   const fkError = await validateOrder(body);
   if (fkError) { res.status(400).json({ error: fkError }); return; }
   // Phase G: orderDate must be ISO when supplied.
@@ -5090,6 +5315,11 @@ apiRouter.post('/order-lines', async (req, res) => {
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
   if (!(await existsRepo(repos.orders, body.orderId))) { res.status(400).json({ error: 'orderId must reference an existing order' }); return; }
   if (!(await existsRepo(repos.projects, body.projectId))) { res.status(400).json({ error: 'projectId must reference an existing project' }); return; }
+  // ADDING a line to an issued order breaks the Σ-lines == order.amount invariant
+  // `assertGeneratedLineTotal` established when the invoice was generated.
+  const parent = await repos.orders.get(body.orderId as string);
+  const addErr = parent && issuedOrderLineStructureError(parent, 'add');
+  if (addErr) { res.status(409).json({ error: addErr }); return; }
   const item = { id: newId(), ...body } as OrderLineEntry;
   const created = await repos.orderLines.create(item as unknown as OrderLine);
   res.json(created);
@@ -5102,10 +5332,31 @@ apiRouter.put('/order-lines/:id', async (req, res) => {
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
   if (body.orderId !== undefined && !(await existsRepo(repos.orders, body.orderId))) { res.status(400).json({ error: 'orderId must reference an existing order' }); return; }
   if (body.projectId !== undefined && !(await existsRepo(repos.projects, body.projectId))) { res.status(400).json({ error: 'projectId must reference an existing project' }); return; }
+  // AN ISSUED INVOICE'S LINES ARE ITS MONEY. Both the CURRENT parent and any
+  // retargeting `body.orderId` are checked, so a line cannot be re-parented off an
+  // issued order to escape the lock (nor onto one to inflate it).
+  for (const orderId of new Set([existing.orderId, body.orderId].filter((id): id is string => typeof id === 'string'))) {
+    const order = await repos.orders.get(orderId);
+    const issuedErr = order && issuedOrderLineWriteError(
+      order,
+      existing as unknown as Record<string, unknown>,
+      body as Record<string, unknown>,
+    );
+    if (issuedErr) { res.status(409).json({ error: issuedErr }); return; }
+  }
   const updated = await repos.orderLines.update(req.params.id, body as Partial<OrderLine>);
   res.json(updated);
 });
 apiRouter.delete('/order-lines/:id', async (req, res) => {
+  // Was a bare remove() + 204: it removed the whole line amount from
+  // invoicedRevenue while the order header kept its legal invoice number (the
+  // e-invoice then silently falls back to the header amount), and it 204'd for an
+  // id that never existed, appending a phantom audit entry.
+  const existing = await repos.orderLines.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const parent = await repos.orders.get(existing.orderId);
+  const issuedErr = parent && issuedOrderLineStructureError(parent, 'remove');
+  if (issuedErr) { res.status(409).json({ error: issuedErr }); return; }
   await repos.orderLines.remove(req.params.id);
   res.status(204).send();
 });
@@ -5460,6 +5711,19 @@ apiRouter.post('/billing-plan-items', async (req, res) => {
   // phantom revenue with no invoice, no order and no payment behind it.
   const createStatusErr = billingPlanCreateStatusError(body.status);
   if (createStatusErr) { res.status(409).json({ error: createStatusErr }); return; }
+  // `orderId` IS THE LINK TO AN ISSUED DOCUMENT, so it is server-owned too.
+  // validateBillingPlanReferences only checks that the order exists and shares the
+  // contract, and generateBillingInvoice takes `item.orderId ?? billingInvoiceOrderId(item.id)`
+  // — so pre-linking a new condition to an already-invoiced customer order whose
+  // fields happen to satisfy sameGeneratedInvoice let a SECOND condition ride an
+  // invoice number already sent to the customer. The link is written by
+  // generate-invoice, never by the client.
+  if (body.orderId !== undefined) {
+    res.status(409).json({
+      error: 'orderId is assigned by POST /billing-plan-items/:id/generate-invoice and cannot be set on create',
+    });
+    return;
+  }
   const item = { id: newId(), ...body } as BillingPlanEntry;
   const validationErr = billingPlanValidationError(item as unknown as BillingPlanItem);
   if (validationErr) { res.status(400).json({ error: validationErr }); return; }
@@ -6131,6 +6395,32 @@ function monthTransitionAudit(req: Request, rowBefore: AssignmentMonth, rowAfter
     changedKeys: diffChangedKeys(before, after),
   };
   return entry as unknown as AuditLog;
+}
+
+/**
+ * Persist a month-row transition entry — best-effort, and ONLY when the row moved.
+ *
+ * Used by the paths that rewrite a governed month straight through the repository
+ * rather than through a decision endpoint: `PUT /assignments/:id/allocation` (whose
+ * auto-approve branch is an implicit self-approval) and the retarget branch of
+ * `PUT /assignments/:id` (which walks approved months back to 'Requested', i.e.
+ * un-approves work). Both were invisible in the trail: the middleware snapshots the
+ * ASSIGNMENT, which those operations may leave byte-identical.
+ *
+ * The empty-diff guard matters. An entry with `changedKeys: []` is worse than no
+ * entry — it is a positive claim that nothing changed — and the middleware already
+ * writes one for the HTTP request itself.
+ */
+async function appendMonthTransitionAudit(
+  req: Request,
+  before: AssignmentMonth | undefined,
+  after: AssignmentMonth | undefined,
+): Promise<void> {
+  if (before === undefined || after === undefined) return;
+  if (diffChangedKeys(cloneEntity(before), cloneEntity(after)).length === 0) return;
+  try {
+    await repos.auditLogs.create(monthTransitionAudit(req, before, after));
+  } catch { /* audit is best-effort; the transition itself already committed */ }
 }
 
 /** The SERVER-VERIFIED principal driving a decision. Never client-supplied: a
@@ -7121,11 +7411,24 @@ apiRouter.use((req, res) => {
  * Map it to 409 Conflict — a clean, adapter-independent "row is still
  * referenced" status — instead of leaking a 500. All other errors fall through
  * to the default handler unchanged.
+ *
+ * The 409 BODY is chosen by verb (`referentialViolationMessage`): the same SQLSTATE
+ * is raised by a CREATE whose reference does not exist, where "Cannot delete: the
+ * record is still referenced by other records" describes the opposite situation and
+ * sent developers looking for a cascade that was never involved.
+ *
+ * A not-null violation (23502) is mapped too, as a 400: it is a bad request body,
+ * and it used to surface as an opaque 500 on the Pg adapter while the same request
+ * returned 200 in memory.
  */
-apiRouter.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+apiRouter.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
   if (res.headersSent) { next(err); return; }
   if (isFkViolation(err)) {
-    res.status(409).json({ error: 'Cannot delete: the record is still referenced by other records' });
+    res.status(409).json({ error: referentialViolationMessage(req.method) });
+    return;
+  }
+  if (isNotNullViolation(err)) {
+    res.status(400).json({ error: 'A required field was missing or null' });
     return;
   }
   next(err);
