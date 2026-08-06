@@ -6717,6 +6717,249 @@ async function checkSearchableReads() {
   }
 }
 
+/**
+ * H2 — THE ESCALATION AMOUNT IS DERIVED FROM refId, NEVER DECLARED.
+ *
+ * THE DEFECT: `POST /approval-requests` allow-listed `amount` and handed it to
+ * `buildApprovalSteps`, which never reconciled it with `refId`. So the requester
+ * chose their own approval chain: declare `amount: 1` on the €120k order O3 and
+ * the request routed to the single 'finance' approver instead of the sequential
+ * 'delivery-executive' -> 'finance' chain the >50 000 control exists to force.
+ *
+ * WHY THE READ-BACK IS LOAD-BEARING: asserting only the POST response body would
+ * also pass if routing were fixed but the PERSISTED steps were not (they are
+ * built once at creation and never rebuilt, so the stored array is what every
+ * later decision walks). Every case below therefore re-reads the created row from
+ * `GET /approval-requests` and asserts the stored `steps` and `amount`.
+ *
+ * STATE: creates approval requests (additive — nothing asserts the collection's
+ * length) plus ONE change request, which it deletes again. Touches no seed row.
+ * Safe anywhere in the order.
+ */
+async function checkDerivedApprovalEscalation() {
+  // A requester who is NOT the admin identity the harness defaults to, so these
+  // rows stay decidable and look like a real submission. 'pm' is inside the
+  // /approval-requests mutation rule (pm/resource-manager/delivery-executive/
+  // finance/admin).
+  const PROPOSER = { 'X-User-Id': '3', 'X-User-Role': 'pm' };
+  const THRESHOLD = 50000;
+
+  /** POST an approval request and return { created, stored } (stored = re-read). */
+  async function open(body) {
+    const created = await req('POST', '/approval-requests', { headers: PROPOSER, body });
+    let stored;
+    if (created.status === 200 && typeof created.body?.id === 'string') {
+      const list = await req('GET', '/approval-requests', { headers: RBAC_HEADERS });
+      stored = Array.isArray(list.body) ? list.body.find((a) => a.id === created.body.id) : undefined;
+    }
+    return { created, stored };
+  }
+
+  /** The chain, as role names in order — the shape both halves are asserted on. */
+  const roles = (ar) => (Array.isArray(ar?.steps) ? ar.steps.map((s) => s.role) : undefined);
+
+  // --- FIXTURE ASSERTIONS ---------------------------------------------------
+  // Read the referenced rows FIRST and prove they straddle the threshold. A
+  // fixture that never enters the escalation branch would make every check below
+  // pass for the wrong reason — this repo has paid for that shape before.
+  const orders = await req('GET', '/orders', { headers: RBAC_HEADERS });
+  const bigOrder = Array.isArray(orders.body) ? orders.body.find((o) => o.id === 'O3') : undefined;
+  const smallOrder = Array.isArray(orders.body) ? orders.body.find((o) => o.id === 'O2') : undefined;
+  const fixturesOk = check(
+    `H2 fixture: order O3 is above the ${THRESHOLD} threshold and O2 is not (O3=${bigOrder?.amount}, O2=${smallOrder?.amount})`,
+    orders.status === 200 && typeof bigOrder?.amount === 'number' && bigOrder.amount > THRESHOLD
+    && typeof smallOrder?.amount === 'number' && smallOrder.amount <= THRESHOLD,
+    `status=${orders.status}`,
+  );
+  if (!fixturesOk) return;
+
+  // --- 1) THE LIE: declare 1 on a 120000 invoice ----------------------------
+  {
+    const { created, stored } = await open({ kind: 'Invoice', refId: 'O3', amount: 1 });
+    check(
+      "H2 POST /api/approval-requests {kind:'Invoice', refId:'O3', amount:1} -> 200 and routes to the TWO-signature chain, not the declared 1",
+      created.status === 200 && roles(created.body)?.length === 2
+      && roles(created.body)[0] === 'delivery-executive' && roles(created.body)[1] === 'finance',
+      `status=${created.status}, steps=${JSON.stringify(created.body?.steps)}`,
+    );
+    check(
+      "H2 the PERSISTED request has both steps in order ('delivery-executive' then 'finance') — the read-back, not just the response",
+      stored !== undefined && roles(stored)?.length === 2
+      && roles(stored)[0] === 'delivery-executive' && roles(stored)[1] === 'finance'
+      && stored.currentStep === 0 && stored.status === 'Pending',
+      `stored=${JSON.stringify(stored)}`,
+    );
+    check(
+      `H2 the recorded amount is the DERIVED order amount (${bigOrder.amount}), not the declared 1`,
+      stored !== undefined && stored.amount === bigOrder.amount,
+      `amount=${JSON.stringify(stored?.amount)}`,
+    );
+  }
+
+  // --- 2) THE ABSENCE TWIN: declare 999999 on a 50000 invoice --------------
+  // A rule that ALWAYS escalated would pass case 1 alone; a rule that still read
+  // the body would escalate here. One case catches both. O2 sits EXACTLY at the
+  // threshold, which is also the ">, not >=" boundary.
+  {
+    const { created, stored } = await open({ kind: 'Invoice', refId: 'O2', amount: 999999 });
+    check(
+      `H2 POST {kind:'Invoice', refId:'O2' (${smallOrder.amount}), amount:999999} -> 200 and keeps its SINGLE 'finance' approver`,
+      created.status === 200 && roles(created.body)?.length === 1 && roles(created.body)[0] === 'finance',
+      `status=${created.status}, steps=${JSON.stringify(created.body?.steps)}`,
+    );
+    check(
+      'H2 the PERSISTED small-invoice request has exactly ONE step, and its amount is the derived one (not 999999)',
+      stored !== undefined && roles(stored)?.length === 1 && roles(stored)[0] === 'finance'
+      && stored.amount === smallOrder.amount,
+      `stored=${JSON.stringify(stored)}`,
+    );
+  }
+
+  // --- 3) TimeEntry: no natural amount, so no escalation and no body value --
+  {
+    const { created, stored } = await open({ kind: 'TimeEntry', refId: 'TE3', amount: 999999 });
+    check(
+      "H2 POST {kind:'TimeEntry', refId:'TE3', amount:999999} -> 200, ONE 'resource-manager' step (a kind with no natural amount never escalates)",
+      created.status === 200 && roles(created.body)?.length === 1 && roles(created.body)[0] === 'resource-manager',
+      `status=${created.status}, steps=${JSON.stringify(created.body?.steps)}`,
+    );
+    check(
+      'H2 the PERSISTED TimeEntry request records NO amount — the declared 999999 is not stored as a fact either',
+      stored !== undefined && stored.amount === undefined && roles(stored)?.length === 1,
+      `stored=${JSON.stringify(stored)}`,
+    );
+  }
+
+  // --- 4) Milestone: the billing conditions it triggers ---------------------
+  {
+    const items = await req('GET', '/billing-plan-items', { headers: RBAC_HEADERS });
+    const triggered = (Array.isArray(items.body) ? items.body : []).filter((b) => b.milestoneId === 'M2');
+    const expected = triggered.reduce((sum, b) => sum + b.amount, 0);
+    const fixtureOk = check(
+      `H2 fixture: milestone M2 triggers billing conditions summing to ${expected}, above the threshold`,
+      items.status === 200 && triggered.length > 0 && expected > THRESHOLD,
+      `triggered=${JSON.stringify(triggered.map((b) => ({ id: b.id, amount: b.amount })))}`,
+    );
+    if (fixtureOk) {
+      const { created, stored } = await open({ kind: 'Milestone', refId: 'M2', amount: 1 });
+      check(
+        `H2 POST {kind:'Milestone', refId:'M2', amount:1} -> 200 and escalates on the ${expected} it releases`,
+        created.status === 200 && roles(created.body)?.length === 2
+        && roles(created.body)[0] === 'delivery-executive' && roles(created.body)[1] === 'finance',
+        `status=${created.status}, steps=${JSON.stringify(created.body?.steps)}`,
+      );
+      check(
+        'H2 the PERSISTED milestone request carries both steps and the summed amount',
+        stored !== undefined && roles(stored)?.length === 2 && stored.amount === expected,
+        `stored=${JSON.stringify(stored)}`,
+      );
+    }
+    // ABSENCE TWIN for the milestone rule: M1 triggers NO billing condition, so
+    // it releases nothing and keeps its single by-kind approver — a resolver that
+    // treated "no rows" as a failure would 400 it instead.
+    const m1Triggered = (Array.isArray(items.body) ? items.body : []).filter((b) => b.milestoneId === 'M1');
+    if (check('H2 fixture: milestone M1 triggers NO billing condition', m1Triggered.length === 0, JSON.stringify(m1Triggered))) {
+      const { created, stored } = await open({ kind: 'Milestone', refId: 'M1', amount: 999999 });
+      check(
+        "H2 POST {kind:'Milestone', refId:'M1' (no billing condition), amount:999999} -> 200, ONE 'delivery-executive' step and a derived 0",
+        created.status === 200 && roles(created.body)?.length === 1 && roles(created.body)[0] === 'delivery-executive'
+        && stored?.amount === 0,
+        `status=${created.status}, steps=${JSON.stringify(created.body?.steps)}, amount=${JSON.stringify(stored?.amount)}`,
+      );
+    }
+  }
+
+  // --- 5) A large NEGATIVE change request escalates on its MAGNITUDE -------
+  // The explicit product decision: -120000 removes as much scope as +120000 adds,
+  // so the threshold reads |impactBudget|. Needs a CR of its own (no seeded CR is
+  // large enough); it is deleted again below.
+  {
+    const cr = await req('POST', '/change-requests', {
+      headers: PROPOSER,
+      body: {
+        projectId: '1', title: 'H2 smoke: large descope', description: 'Removes a 120k work package.',
+        owner: SMOKE_MANAGER, impactScope: 'Work package removed', impactBudget: -120000,
+        impactScheduleDays: -20, priority: 'High',
+      },
+    });
+    const crId = typeof cr.body?.id === 'string' ? cr.body.id : undefined;
+    const crOk = check(
+      'H2 setup: a change request with impactBudget -120000 is created',
+      cr.status === 200 && crId !== undefined && cr.body?.impactBudget === -120000,
+      `status=${cr.status}, body=${JSON.stringify(cr.body)}`,
+    );
+    if (crOk) {
+      const { created, stored } = await open({ kind: 'ChangeRequest', refId: crId, amount: 1 });
+      check(
+        "H2 POST {kind:'ChangeRequest'} on a -120000 CR -> 200 and escalates on the MAGNITUDE (two signatures)",
+        created.status === 200 && roles(created.body)?.length === 2
+        && roles(created.body)[0] === 'delivery-executive' && roles(created.body)[1] === 'finance',
+        `status=${created.status}, steps=${JSON.stringify(created.body?.steps)}`,
+      );
+      check(
+        'H2 the PERSISTED request keeps the SIGNED -120000 (the figure as it stands on the CR) with its two steps',
+        stored !== undefined && stored.amount === -120000 && roles(stored)?.length === 2,
+        `stored=${JSON.stringify(stored)}`,
+      );
+      // ABSENCE TWIN: the seeded CR1 (+12000) is genuinely small and must keep its
+      // single approver, so this is a magnitude rule and not "every CR escalates".
+      const crs = await req('GET', '/change-requests', { headers: RBAC_HEADERS });
+      const small = Array.isArray(crs.body) ? crs.body.find((c) => c.id === 'CR1') : undefined;
+      if (check(
+        `H2 fixture: change request CR1 is genuinely small (impactBudget=${small?.impactBudget})`,
+        typeof small?.impactBudget === 'number' && Math.abs(small.impactBudget) <= THRESHOLD,
+        JSON.stringify(small),
+      )) {
+        const { created: smallAr, stored: smallStored } = await open({ kind: 'ChangeRequest', refId: 'CR1', amount: 999999 });
+        check(
+          "H2 POST {kind:'ChangeRequest', refId:'CR1', amount:999999} -> 200 and keeps ONE 'delivery-executive' step",
+          smallAr.status === 200 && roles(smallAr.body)?.length === 1 && roles(smallAr.body)[0] === 'delivery-executive'
+          && smallStored?.amount === small.impactBudget,
+          `status=${smallAr.status}, steps=${JSON.stringify(smallAr.body?.steps)}, amount=${JSON.stringify(smallStored?.amount)}`,
+        );
+      }
+      const del = await req('DELETE', `/change-requests/${crId}`, { headers: RBAC_HEADERS });
+      check('H2 cleanup: the smoke change request is removed -> 204', del.status === 204, `status=${del.status}`);
+    }
+  }
+
+  // --- 6) An unresolvable reference on a DERIVABLE kind is a 400 -----------
+  // Not a licence to route on the body instead.
+  {
+    const bogusInvoice = await req('POST', '/approval-requests', {
+      headers: PROPOSER,
+      body: { kind: 'Invoice', refId: 'H2-not-an-order', amount: 1 },
+    });
+    check(
+      "H2 POST {kind:'Invoice', refId:'H2-not-an-order'} -> 400 (an unresolvable reference cannot be routed)",
+      bogusInvoice.status === 400 && /order/i.test(String(bogusInvoice.body?.error)),
+      `status=${bogusInvoice.status}, error=${JSON.stringify(bogusInvoice.body?.error)}`,
+    );
+    const bogusMilestone = await req('POST', '/approval-requests', {
+      headers: PROPOSER,
+      body: { kind: 'Milestone', refId: 'H2-not-a-milestone' },
+    });
+    check(
+      "H2 POST {kind:'Milestone', refId:'H2-not-a-milestone'} -> 400",
+      bogusMilestone.status === 400 && /milestone/i.test(String(bogusMilestone.body?.error)),
+      `status=${bogusMilestone.status}, error=${JSON.stringify(bogusMilestone.body?.error)}`,
+    );
+    // ABSENCE TWIN for the refusal: a kind with NO derivable amount must still be
+    // openable on a refId that resolves to nothing — a guard that refused every
+    // unresolvable refId would pass both cases above and break the TimeEntry and
+    // Expense queues entirely (the D5 section relies on exactly this).
+    const timeEntry = await req('POST', '/approval-requests', {
+      headers: PROPOSER,
+      body: { kind: 'Expense', refId: 'H2-resolves-to-nothing' },
+    });
+    check(
+      "H2 POST {kind:'Expense', refId:'H2-resolves-to-nothing'} -> 200 — the refusal binds only the kinds whose amount IS derivable",
+      timeEntry.status === 200 && roles(timeEntry.body)?.length === 1 && roles(timeEntry.body)[0] === 'resource-manager',
+      `status=${timeEntry.status}, body=${JSON.stringify(timeEntry.body)}`,
+    );
+  }
+}
+
 async function main() {
   console.log(`Smoke test target: ${API}${CREATE_ONLY ? '  (SMOKE_CREATE_ONLY)' : ''}`);
   console.log('---------------------------------------------------------------');
@@ -6993,6 +7236,17 @@ async function main() {
     await checkRateCardInheritance();
   } catch (err) {
     console.log(`FAIL  rate-card inheritance flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the H2 derived-escalation
+  // flow never masks or blocks any of the prior section results. Safe anywhere in
+  // the order: it only ADDS approval requests (nothing asserts that collection's
+  // length) and creates then deletes one change request of its own.
+  try {
+    await checkDerivedApprovalEscalation();
+  } catch (err) {
+    console.log(`FAIL  derived approval escalation amount — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 
