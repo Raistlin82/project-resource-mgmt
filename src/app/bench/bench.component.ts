@@ -1,11 +1,16 @@
-import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
-import { DecimalPipe } from '@angular/common';
-import { forkJoin, map } from 'rxjs';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { DecimalPipe, NgTemplateOutlet } from '@angular/common';
+import { rxResource } from '@angular/core/rxjs-interop';
+import { forkJoin, map, of } from 'rxjs';
+import { MatIconModule } from '@angular/material/icon';
 import { ApiService } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { authGatedResource } from '../services/auth-gated-resource.util';
 import { fteOf, standardMonthlyHours } from '../services/capacity.util';
-import { EMPTY_BENCH_ROLLUP, type AvailabilityDate, type BenchRollup, type BenchRow } from '../services/bench.util';
+import {
+  EMPTY_BENCH_ROLLUP,
+  type AvailabilityDate, type BenchRollup, type BenchRow, type UnallocatedHistory,
+} from '../services/bench.util';
 import { todayLocalIso } from '../services/local-date.util';
 import { ListStateComponent } from '../shared/list-state.component';
 
@@ -35,7 +40,7 @@ interface BenchPageData {
 @Component({
   selector: 'app-bench',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [DecimalPipe, ListStateComponent],
+  imports: [DecimalPipe, NgTemplateOutlet, MatIconModule, ListStateComponent],
   template: `
     <div class="command-page space-y-6">
       <header class="command-header">
@@ -66,6 +71,7 @@ interface BenchPageData {
                     <tr>
                       <th scope="col">Resource</th>
                       <th scope="col">Status</th>
+                      <th scope="col" class="num">Unallocated</th>
                       <th scope="col">Freeing up</th>
                       <th scope="col">Available</th>
                     </tr>
@@ -73,13 +79,17 @@ interface BenchPageData {
                   <tbody>
                     @for (row of internalRows(); track row.resourceId) {
                       <tr>
-                        <td class="font-semibold text-[var(--cc-ink)]">{{ row.resourceName }}</td>
+                        <td><ng-container [ngTemplateOutlet]="nameCell" [ngTemplateOutletContext]="{ row }" /></td>
                         <td><span class="command-status" [class.red]="cellState(row) === 'BENCH'" [class.amber]="cellState(row) === 'PARTIAL'" [class.green]="cellState(row) === 'ALLOCATED'">{{ cellState(row) }}{{ agingSuffix(row) }}</span></td>
+                        <td class="num"><ng-container [ngTemplateOutlet]="unallocatedCell" [ngTemplateOutletContext]="{ row }" /></td>
                         <td>@if (isFreeingUp(row)) { <span class="command-status amber">Freeing up next month</span> }</td>
                         <td class="font-mono tabular-nums">{{ availabilityLabel(row.availabilityDate) }}</td>
                       </tr>
+                      @if (isHistoryOpen(row.resourceId)) {
+                        <tr><td colspan="5" class="bg-[var(--cc-surface-muted)]"><ng-container [ngTemplateOutlet]="historyPanel" /></td></tr>
+                      }
                     } @empty {
-                      <tr><td colspan="4" class="text-center text-[var(--cc-muted)]">No internal resources in the shown window.</td></tr>
+                      <tr><td colspan="5" class="text-center text-[var(--cc-muted)]">No internal resources in the shown window.</td></tr>
                     }
                   </tbody>
                 </table>
@@ -100,6 +110,7 @@ interface BenchPageData {
                     <tr>
                       <th scope="col">Resource</th>
                       <th scope="col">Status</th>
+                      <th scope="col" class="num">Unallocated</th>
                       <th scope="col">Freeing up</th>
                       <th scope="col">Available</th>
                     </tr>
@@ -107,13 +118,17 @@ interface BenchPageData {
                   <tbody>
                     @for (row of subcoRows(); track row.resourceId) {
                       <tr>
-                        <td class="font-semibold text-[var(--cc-ink)]">{{ row.resourceName }}</td>
+                        <td><ng-container [ngTemplateOutlet]="nameCell" [ngTemplateOutletContext]="{ row }" /></td>
                         <td><span class="command-status" [class.red]="cellState(row) === 'BENCH'" [class.amber]="cellState(row) === 'PARTIAL'" [class.green]="cellState(row) === 'ALLOCATED'">{{ cellState(row) }}{{ agingSuffix(row) }}</span></td>
+                        <td class="num"><ng-container [ngTemplateOutlet]="unallocatedCell" [ngTemplateOutletContext]="{ row }" /></td>
                         <td>@if (isFreeingUp(row)) { <span class="command-status amber">Freeing up next month</span> }</td>
                         <td class="font-mono tabular-nums">{{ availabilityLabel(row.availabilityDate) }}</td>
                       </tr>
+                      @if (isHistoryOpen(row.resourceId)) {
+                        <tr><td colspan="5" class="bg-[var(--cc-surface-muted)]"><ng-container [ngTemplateOutlet]="historyPanel" /></td></tr>
+                      }
                     } @empty {
-                      <tr><td colspan="4" class="text-center text-[var(--cc-muted)]">No subcontractors in the shown window.</td></tr>
+                      <tr><td colspan="5" class="text-center text-[var(--cc-muted)]">No subcontractors in the shown window.</td></tr>
                     }
                   </tbody>
                 </table>
@@ -153,6 +168,81 @@ interface BenchPageData {
           </section>
         </ng-template>
       </app-list-state>
+
+      <!-- Shared row fragments, defined once and used by BOTH sections so the
+           Internal and Subcontractor tables cannot drift apart in how they
+           present the same three facts. -->
+      <ng-template #nameCell let-row="row">
+        <button type="button"
+                class="flex items-center gap-1 text-left font-semibold text-[var(--cc-ink)] hover:underline"
+                (click)="toggleHistory(row.resourceId)"
+                [attr.aria-expanded]="isHistoryOpen(row.resourceId)"
+                [attr.aria-label]="(isHistoryOpen(row.resourceId) ? 'Hide' : 'Show') + ' monthly unallocated history for ' + row.resourceName"
+                [attr.data-test]="'history-toggle-' + row.resourceId">
+          <mat-icon class="text-[18px] w-[18px] h-[18px] shrink-0 text-[var(--cc-muted)]">{{ isHistoryOpen(row.resourceId) ? 'expand_more' : 'chevron_right' }}</mat-icon>
+          {{ row.resourceName }}
+        </button>
+      </ng-template>
+
+      <!-- An ABSENT percentage is rendered as "n/a", never as 0%: the value is
+           absent exactly when the resource has no contracted target for the
+           month, and "0% unallocated" would claim they are fully allocated. -->
+      <ng-template #unallocatedCell let-row="row">
+        @if (unallocatedPctOf(row) !== undefined) {
+          <span class="font-mono tabular-nums" [attr.data-test]="'unallocated-pct-' + row.resourceId">{{ unallocatedPctOf(row) | number:'1.0-2' }}%</span>
+        } @else {
+          <span class="text-[var(--cc-muted)]" [attr.data-test]="'unallocated-pct-' + row.resourceId"
+                title="No contracted target for this month, so the unallocated share cannot be computed.">n/a</span>
+        }
+      </ng-template>
+
+      <!-- The four history states are kept apart on purpose: loading, failed,
+           tracked-but-empty and populated all read differently. Collapsing any
+           pair is the defect this codebase keeps re-fixing — an empty history
+           must never stand in for a failed read, and neither may pass for
+           "allocated the whole time". The error branch precedes any read of
+           historyCells(), which is what keeps a failed read from being
+           silently rewritten as an empty one. -->
+      <ng-template #historyPanel>
+        @if (historyLoading()) {
+          <p class="flex items-center gap-1.5 py-2 text-sm text-[var(--cc-muted)]" role="status" aria-busy="true" data-test="history-loading">
+            <mat-icon class="text-[16px] w-[16px] h-[16px] shrink-0">schedule</mat-icon>
+            Loading monthly history&hellip;
+          </p>
+        } @else if (historyError()) {
+          <p class="flex flex-wrap items-center gap-2 py-2 text-sm text-critical-text" role="alert" data-test="history-error">
+            <mat-icon class="text-[16px] w-[16px] h-[16px] shrink-0">warning_amber</mat-icon>
+            Couldn't load the monthly unallocated history.
+            <button type="button" class="command-button secondary" (click)="reloadHistory()" data-test="history-retry">Retry</button>
+          </p>
+        } @else if (historyCells().length === 0) {
+          <p class="py-2 text-sm text-[var(--cc-muted)]" data-test="history-untracked">
+            No tracked months in the last {{ historyMonths }} months for this resource.
+          </p>
+        } @else {
+          <table class="command-data-table" data-test="history-table">
+            <caption class="sr-only">Monthly unallocated history for the last {{ historyMonths }} months</caption>
+            <thead>
+              <tr>
+                <th scope="col">Month</th>
+                <th scope="col">Status</th>
+                <th scope="col" class="num">Unallocated days</th>
+                <th scope="col" class="num">Unallocated</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (cell of historyCells(); track cell.month) {
+                <tr [attr.data-test]="'history-row-' + cell.month">
+                  <td class="font-mono tabular-nums">{{ monthLabel(cell.month) }}</td>
+                  <td><span class="command-status" [class.red]="cell.state === 'BENCH'" [class.amber]="cell.state === 'PARTIAL'" [class.green]="cell.state === 'ALLOCATED'">{{ cell.state }}{{ cell.agingBucket ? ' (' + cell.agingBucket + ')' : '' }}</span></td>
+                  <td class="num font-mono tabular-nums">{{ cell.unallocatedDays !== undefined ? (cell.unallocatedDays | number:'1.0-2') : 'n/a' }}</td>
+                  <td class="num font-mono tabular-nums">{{ cell.unallocatedPct !== undefined ? (cell.unallocatedPct | number:'1.0-2') + '%' : 'n/a' }}</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        }
+      </ng-template>
     </div>
   `,
 })
@@ -221,8 +311,61 @@ export class BenchComponent {
       + `does not include the current month (${this.monthLabel(todayLocalIso().slice(0, 7))}), so no current status is shown.`;
   });
 
-  private monthLabel(month: string): string {
+  monthLabel(month: string): string {
     return BenchComponent.MONTH_FMT.format(new Date(month + '-01T00:00:00Z'));
+  }
+
+  // --- Monthly unallocated history (RPT comparison row 51) -------------------
+
+  /**
+   * How many months of history to ask for. Sent EXPLICITLY rather than relying on
+   * the server's own default, so the "No tracked months in the last N months" copy
+   * names the span actually requested instead of a number duplicated on both sides
+   * that could silently drift apart. The server refuses anything above 24.
+   */
+  readonly historyMonths = 12;
+
+  /** The one expanded row, or '' for none — an accordion, so expanding a row cannot
+   *  leave a dozen per-resource reads in flight at once. */
+  private readonly openHistoryFor = signal('');
+
+  isHistoryOpen(resourceId: string): boolean { return this.openHistoryFor() === resourceId; }
+  toggleHistory(resourceId: string): void {
+    this.openHistoryFor.update(open => (open === resourceId ? '' : resourceId));
+  }
+
+  private static readonly EMPTY_HISTORY: UnallocatedHistory = { resourceId: '', resourceName: '', cells: [] };
+
+  /**
+   * Keyed on `authReady` AND the expanded row (the house `rxResource` shape, cf.
+   * `integrations.component.ts`'s outbox): a principal-gated read must not fire
+   * before OIDC bootstrap settles, and with no row open the stream resolves to the
+   * empty default synchronously rather than calling the API at all.
+   */
+  private readonly historyRes = rxResource<UnallocatedHistory, { ready: boolean; resourceId: string }>({
+    params: () => ({ ready: this.auth.authReady(), resourceId: this.openHistoryFor() }),
+    stream: ({ params }) => (params.ready && params.resourceId !== ''
+      ? this.api.getUnallocatedHistory(params.resourceId, this.historyMonths)
+      : of(BenchComponent.EMPTY_HISTORY)),
+    defaultValue: BenchComponent.EMPTY_HISTORY,
+  });
+
+  readonly historyLoading = computed(() => this.historyRes.isLoading());
+  readonly historyError = computed(() => this.historyRes.status() === 'error');
+  /** Only ever read from the template's LAST branch, after `historyError()` has been
+   *  ruled out — an errored resource's `value()` throws, and turning that throw into
+   *  an empty list is exactly how a failed read starts looking like good news. */
+  readonly historyCells = computed(() => this.historyRes.value().cells);
+  reloadHistory(): void { this.historyRes.reload(); }
+
+  /**
+   * The current month's unallocated share for a row, or `undefined` when the rollup
+   * has no answer (no contracted target that month) — NOT 0, which would read as
+   * "fully allocated". Also undefined when the row has no cell for the current
+   * month at all, the same case {@link cellState} renders as blank.
+   */
+  unallocatedPctOf(row: BenchRow): number | undefined {
+    return row.monthly[this.currentMonth()]?.unallocatedPct;
   }
 
   readonly internalRows = computed<BenchRow[]>(() => this.rollup().internalRows);
