@@ -433,7 +433,16 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
 
     <!-- CREATE / EDIT MODAL -->
     @if (showForm()) {
-      <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+      <!-- SCROLL-SAFE OVERLAY, identical to the invoice overlay below. items-center on
+           a position:fixed box with no overflow splits any surplus height ABOVE and
+           BELOW the viewport at once: on a 320x460 visual viewport this form's header
+           (carrying Close) goes off the top while the Create/Save row goes off the
+           bottom, and a fixed box cannot be scrolled by the page — so the condition
+           could be filled in and never submitted. overflow-y-auto gives the overlay
+           its own scroller, and items-start on the short-viewport branch anchors the
+           panel at the top so nothing is cut off above; the panel's max-h-[90vh] and
+           its own scrolling body (below) keep the footer reachable. -->
+      <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
            appModal ariaLabelledby="billingModalTitle" (dismiss)="closeForm()">
         <div class="command-card w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
           <div class="command-card-header">
@@ -1309,9 +1318,35 @@ export class Billing {
     return new Date(ms + terms * 86_400_000).toISOString().slice(0, 10);
   }
 
+  /**
+   * The Trigger column's date formatter (and the invoice line-item note's) —
+   * UTC-PINNED, and pinned to one locale.
+   *
+   * `new Date('2026-06-15').toLocaleDateString()`, what this was, parses the civil
+   * date as UTC midnight and then re-reads that INSTANT in the viewer's zone, so the
+   * cell named a different day than the string it was handed: "6/14/2026" in every
+   * UTC-negative zone — beside a Due cell in the same row reading "Jun 15, 2026"
+   * (Angular's DatePipe treats a date-only string as a LOCAL date, deliberately) and
+   * an edit form that pre-fills `expectedDate.slice(0, 10)`. One row answering "which
+   * day?" three ways. The mirror error hits UTC-POSITIVE zones for a stored value
+   * that carries a time: 2026-06-15T23:30:00Z is already the 16th in Europe/Rome, and
+   * `expectedDate` can carry one — the server's date backstop admits anything
+   * `Date.parse` accepts (`isIsoDateString`, src/server.ts:154-155) in spite of its
+   * "must be an ISO date string (YYYY-MM-DD)" message, and that backstop exists
+   * precisely for direct API / integration callers.
+   *
+   * Static formatter on the class, the pattern already in capacity.component.ts:566
+   * and bench.component.ts:160. The shape deliberately matches the Due column's
+   * `| date: 'mediumDate'` two cells over, so a row's two date columns read alike.
+   */
+  private static readonly TRIGGER_DATE_FMT = new Intl.DateTimeFormat('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+  });
+
+  /** The day the stored string names, in every zone. Unparseable input is echoed back. */
   private formatDate(iso: string): string {
-    const d = new Date(iso);
-    return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString();
+    const ms = Date.parse(iso);
+    return Number.isFinite(ms) ? Billing.TRIGGER_DATE_FMT.format(ms) : iso;
   }
 
   // --- modal lifecycle ---
