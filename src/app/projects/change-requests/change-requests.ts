@@ -278,13 +278,18 @@ export class ChangeRequests {
    *    withdrew its uplift from budget/burn/VAC while this tile went on showing
    *    it. The two agree today, but a duplicated predicate is what let them
    *    disagree in the first place; one import is what stops it recurring.
-   *  - CONCATENATION. POST/PUT /change-requests does not yet check that
-   *    impactBudget is a number (src/server.ts:4712, still open), so a stored
-   *    string makes `s + c.impactBudget` STRING-concatenate: two CRs of "50000"
-   *    render as EUR 5,000,050,000 through `currency`, while the engine — which
-   *    already sums through its own finite() — reports exactly 0. Guarding here
-   *    makes the tile agree with the engine on the arithmetic as well as on the
-   *    status set, whatever the API stored.
+   *  - CONCATENATION. A stored non-numeric impactBudget makes
+   *    `s + c.impactBudget` STRING-concatenate: two CRs of "50000" render as
+   *    EUR 5,000,050,000 through `currency`, while the engine — which already
+   *    sums through its own finite() — reports exactly 0.
+   *    The API hole that allowed such a row is now CLOSED: POST and PUT
+   *    /change-requests both validate impactBudget as a finite signed number and
+   *    impactScheduleDays as a signed WHOLE number, through the shared
+   *    `changeRequestFieldError` in src/server/operational-integrity.util.ts.
+   *    This guard nevertheless STAYS, deliberately: it is defence in depth for
+   *    rows written before that validation existed, and it is what makes the tile
+   *    agree with the engine on the arithmetic as well as on the status set,
+   *    whatever the store happens to hold.
    */
   private static finite(v: number): number {
     return Number.isFinite(v) ? v : 0;
