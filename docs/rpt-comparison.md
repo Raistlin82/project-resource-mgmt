@@ -1,7 +1,7 @@
 # Lutech RPT vs Delivery Control — comparativa side by side
 
 _Fonte lato RPT: **Manuale Utente Resource Planning Tool (RPT), v04 del 07/07/2026**, 49 pagine, letto integralmente._
-_Fonte lato nostro: **il codice su `main`**, verificato riga per riga il 2026-08-06 e riverificato dopo la prima wave di chiusura il 2026-08-07 — 45 tabelle, 19 migrazioni, 48 rotte, **2026 test unitari** su 108 file, 732 check smoke API. Non la roadmap, non la memoria di sessione (che su due punti si è rivelata già superata)._
+_Fonte lato nostro: **il codice su `main`**, verificato riga per riga il 2026-08-06 e riverificato dopo la prima wave di chiusura il 2026-08-07 — 45 tabelle, 19 migrazioni, 48 rotte, **2072 test unitari** su 109 file, 732 check smoke API. Non la roadmap, non la memoria di sessione (che su due punti si è rivelata già superata)._
 
 ---
 
@@ -104,8 +104,8 @@ Quindi la domanda "chi è meglio" ha **tre risposte diverse** a seconda di cosa 
 | 47 | filtri Capability / Practice / Competence / People Manager; torta cliccabile che filtra la tabella | filtri e stato per mese in `/bench` | PARI |
 | 48 | colonna Skill con hover sulle **3 skill a proficiency più alta, estratte da MIO CV in People Portal** | `resources.skills` con livelli + catalogo skill + proficiency set — dato interno, non da People Portal | PARZIALE |
 | 49 | **Data Disponibilità** (mese-anno) da cui la risorsa è libera | `AvailabilityDate` con variante esplicita `beyond-horizon` | **AVANTI** — dichiara "oltre l'orizzonte" invece di produrre una data che non sa |
-| 50 | **Percentuale Disallocazione mese corrente**: 25% / 50% / 75% / 100% | `BenchCell` ha 3 stati (BENCH/PARTIAL/ALLOCATED) e **nessuna percentuale** | **MANCA** |
-| 51 | storico disallocazione per mese, per risorsa (`2025-03 · disallocato 21 gg · 100%`) | assente come vista storica per risorsa | **MANCA** |
+| 50 | **Percentuale Disallocazione mese corrente**: 25% / 50% / 75% / 100% | `unallocatedPct` e `unallocatedDays` per risorsa-mese, sul target **proprio** della risorsa (giorni lavorabili festività-aware × ore di contratto), non su un mese standard | **AVANTI** — RPT quantizza a quattro scalini; noi diamo la percentuale reale e, quando il target del mese è 0, i due campi sono **assenti** invece di valere 0: una quota di nessuna capacità non è 0% di inattività, è una domanda senza risposta, e riportare 0 direbbe che la persona è pienamente allocata |
+| 51 | storico disallocazione per mese, per risorsa (`2025-03 · disallocato 21 gg · 100%`) | `GET /bench/history/:resourceId?months=N` (default 12, rifiutato oltre 24) espandibile dalla riga, con giorni e percentuale per mese | PARI — letto a parte e non allargando la finestra di `/bench/monthly`: quella è fissata a 6 per spec, e `/staffing` disegna **un pallino per mese** di quella finestra, quindi allargarla trasformerebbe in silenzio un semaforo a 6 in uno a N |
 | 52 | costo giornaliero standard e tariffa in tabella | `cost_rate` / `bill_rate` + rate card + **tariffe di vendita negoziate per progetto** + FX multi-valuta | **AVANTI** |
 | 53 | Report Unchargeable → **.xlsx a 4 fogli, uno per categoria**, con struttura organizzativa, responsabili, codice risorsa, nominativo, job role, 3 technical skill con proficiency, standard cost rate, tariffa, disponibilità | il writer multi-foglio esiste e regge già 4 fogli; **manca il builder** `unchargeableSheets(...)` e il pulsante su `/bench` | PARZIALE |
 
@@ -153,16 +153,16 @@ Su **56 capacità di RPT** valutate una per una contro il codice:
 
 | Stato | Righe | Quota | vs. prima wave |
 |---:|---:|---|---|
-| **PARI** | 22 | 39% | +2 |
-| **AVANTI** | 13 | 23% | +2 |
+| **PARI** | 23 | 41% | +3 |
+| **AVANTI** | 14 | 25% | +3 |
 | **PARZIALE** | 11 | 20% | −1 |
-| **MANCA** | 10 | 18% | **−3** |
+| **MANCA** | 8 | 14% | **−5** |
 
-**35 su 56 (63%) coperte o superate. 11 parziali. 10 mancanti.** Più 14 aree che RPT non ha affatto.
+**37 su 56 (66%) coperte o superate. 11 parziali. 8 mancanti.** Più 14 aree che RPT non ha affatto.
 
-_Aggiornato il 2026-08-07, dopo la prima wave di chiusura: XLSX Pianificazione e Allocazione (righe 24 e 44) da MANCA a PARI, Unchargeable (53) da MANCA a PARZIALE, strip disponibilità sulla card (13) e auto-avanzamento dell'approvazione multipla (40) da PARZIALE ad AVANTI. Le faccette (11) restano PARZIALE con due esclusioni motivate._
+_Aggiornato il 2026-08-07, dopo la prima wave di chiusura: XLSX Pianificazione e Allocazione (righe 24 e 44) da MANCA a PARI, Unchargeable (53) da MANCA a PARZIALE, strip disponibilità sulla card (13) e auto-avanzamento dell'approvazione multipla (40) da PARZIALE ad AVANTI, percentuale di disallocazione (50) da MANCA ad AVANTI e storico mensile per risorsa (51) da MANCA a PARI. Le faccette (11) restano PARZIALE con due esclusioni motivate._
 
-I 10 gap residui, in chiaro:
+Gli 8 gap residui, in chiaro:
 
 | Gap | Peso |
 |---|---|
@@ -171,13 +171,11 @@ I 10 gap residui, in chiaro:
 | **integrazioni live** con Zucchetti / PCP / InforLN / People Portal / ServiceNow | **bloccante** — dipende da terzi, non solo da noi |
 | ServiceNow hiring demand + linkage del codice RES sul dummy | alto |
 | i18n **IT/EN** a runtime | alto |
-| % di disallocazione del mese corrente | medio |
-| storico mensile di disallocazione per risorsa | medio |
 | notifiche email | medio |
 | codici risorsa leggibili e digitabili | medio — è una colonna `code` additiva, **non** un cambio di id: `resources.id` è referenziato per FK da assignment, time entry e mesi di allocazione, e compare nei path dell'audit trail |
 | schermata Storico sull'audit trail che **già abbiamo** | basso — è solo una vista |
 
-Dei 10, **due sono progetti veri** (BASKET/non fatturabile con le assenze; deleghe con act-as e provisioning), **uno dipende da terzi** (le 5 integrazioni), **sette sono piccoli e ben delimitati** — e di questi, uno (Storico) è solo una superficie su dati che già abbiamo.
+Degli 8, **due sono progetti veri** (BASKET/non fatturabile con le assenze; deleghe con act-as e provisioning), **uno dipende da terzi** (le 5 integrazioni), **cinque sono piccoli e ben delimitati** — e di questi, uno (Storico dell'audit trail) è solo una superficie su dati che già abbiamo.
 
 ---
 
