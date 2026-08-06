@@ -41,17 +41,33 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
               </select>
             }
           </div>
-          <div class="flex flex-wrap gap-3">
-            <button (click)="openMilestoneForm()" class="command-button secondary">
-              <mat-icon class="text-sm">flag</mat-icon> Add Milestone
-            </button>
-            <button (click)="openWpForm()" class="command-button">
-              <mat-icon class="text-sm">add</mat-icon> Add Work Package
-            </button>
+          <!-- P2-18: both controls have the same precondition, so they share ONE
+               accessible description rather than repeating the same sentence
+               twice — two hints reading "Select a project first." would make a
+               screen reader announce it once per button. The row keeps its own
+               wrapping; the hint sits under it. -->
+          <div class="flex flex-col items-start gap-1">
+            <div class="flex flex-wrap gap-3">
+              <button (click)="openMilestoneForm()" [disabled]="!activeProjectId()"
+                      [attr.aria-describedby]="activeProjectId() ? null : 'projectPlansHint'"
+                      data-test="add-milestone"
+                      class="command-button secondary disabled:opacity-50 disabled:cursor-not-allowed">
+                <mat-icon class="text-sm">flag</mat-icon> Add Milestone
+              </button>
+              <button (click)="openWpForm()" [disabled]="!activeProjectId()"
+                      [attr.aria-describedby]="activeProjectId() ? null : 'projectPlansHint'"
+                      data-test="add-work-package"
+                      class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                <mat-icon class="text-sm">add</mat-icon> Add Work Package
+              </button>
+            </div>
+            @if (!activeProjectId()) {
+              <p id="projectPlansHint" class="text-xs text-[var(--cc-muted)]" data-test="project-plans-hint">Select a project first.</p>
+            }
           </div>
         </div>
 
-        @if (!(projectId() || selectedProjectId())) {
+        @if (!activeProjectId()) {
           <div class="command-card p-12 text-center">
             <mat-icon class="text-ink-muted mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
             <h3 class="text-lg font-medium text-[var(--cc-ink)] mt-4">No Project Selected</h3>
@@ -470,6 +486,18 @@ export class ProjectPlans {
   projects = computed(() => this.projectsRes.value());
   selectedProjectId = signal<string>('');
 
+  /**
+   * The project in scope: the routed one when this panel is embedded in
+   * project-details, else the one picked in the standalone page's selector.
+   * Empty means none, which is what disables the create control (P2-18).
+   *
+   * Declared right after its own dependency, and the SINGLE source of truth for
+   * the question — the inline `projectId() || selectedProjectId()` it replaces
+   * appeared in the template, in the filtered list and in every save handler,
+   * so the disabled state and the empty state could drift apart.
+   */
+  activeProjectId = computed(() => this.projectId() || this.selectedProjectId());
+
   // Work-package assignee is a PERSON reference bound to the resources (people) catalog
   // by name (Phase D). /resources is a principal-gated read, so key the load on authReady
   // to avoid a 401 race that would latch the option list empty.
@@ -526,13 +554,13 @@ export class ProjectPlans {
   milestones = this.milestoneRes.value;
 
   filteredWorkPackages = computed(() => {
-    const pId = this.projectId() || this.selectedProjectId();
+    const pId = this.activeProjectId();
     if (!pId) return [];
     return this.workPackages().filter(wp => wp.projectId === pId);
   });
 
   filteredMilestones = computed(() => {
-    const pId = this.projectId() || this.selectedProjectId();
+    const pId = this.activeProjectId();
     if (!pId) return [];
     return this.milestones().filter(m => m.projectId === pId);
   });
@@ -541,11 +569,6 @@ export class ProjectPlans {
   achievedMilestonesCount = computed(() => this.filteredMilestones().filter(m => m.status === 'Achieved').length);
 
   openMilestoneForm() {
-    const pId = this.projectId() || this.selectedProjectId();
-    if (!pId) {
-      this.notificationService.show('Please select a project first', 'info');
-      return;
-    }
     this.showMilestoneForm.set(true);
   }
 
@@ -571,7 +594,7 @@ export class ProjectPlans {
 
   saveMilestone() {
     if (this.milestoneForm.invalid) return;
-    const pId = this.projectId() || this.selectedProjectId();
+    const pId = this.activeProjectId();
     if (!pId) return;
 
     this.saveError.set(null);
@@ -596,11 +619,6 @@ export class ProjectPlans {
   }
 
   openWpForm() {
-    const pId = this.projectId() || this.selectedProjectId();
-    if (!pId) {
-      this.notificationService.show('Please select a project first', 'info');
-      return;
-    }
     this.showWpForm.set(true);
   }
 
@@ -612,7 +630,7 @@ export class ProjectPlans {
 
   saveWp() {
     if (this.wpForm.invalid) return;
-    const pId = this.projectId() || this.selectedProjectId();
+    const pId = this.activeProjectId();
     if (!pId) return;
 
     this.saveError.set(null);

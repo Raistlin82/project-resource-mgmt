@@ -43,12 +43,25 @@ function initialsOf(name: string): string {
               </select>
             }
           </div>
-          <button (click)="openForm()" class="command-button self-start sm:self-auto">
-            <mat-icon class="text-sm">note_add</mat-icon> Add Document Entry
-          </button>
+          <!-- P2-18: a control whose only possible outcome without a project is a
+               toast is disabled instead, with the reason stated beside it so it is
+               readable BEFORE the click and reaches a screen reader through
+               aria-describedby. The hint is the accessible description, so it is
+               referenced only while the control is actually disabled. -->
+          <div class="flex flex-col items-start gap-1">
+            <button (click)="openForm()" [disabled]="!activeProjectId()"
+                    [attr.aria-describedby]="activeProjectId() ? null : 'addDocumentHint'"
+                    data-test="add-document"
+                    class="command-button self-start sm:self-auto disabled:opacity-50 disabled:cursor-not-allowed">
+              <mat-icon class="text-sm">note_add</mat-icon> Add Document Entry
+            </button>
+            @if (!activeProjectId()) {
+              <p id="addDocumentHint" class="text-xs text-[var(--cc-muted)]" data-test="add-document-hint">Select a project first.</p>
+            }
+          </div>
         </div>
 
-        @if (!(projectId() || selectedProjectId())) {
+        @if (!activeProjectId()) {
           <div class="command-card p-12 text-center">
             <mat-icon class="text-ink-muted mb-2" style="font-size: 48px; width: 48px; height: 48px;">folder_open</mat-icon>
             <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] mt-4">No Project Selected</h3>
@@ -201,6 +214,18 @@ export class ProjectDocuments {
   private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   projects = computed(() => this.projectsRes.value());
   selectedProjectId = signal<string>('');
+
+  /**
+   * The project in scope: the routed one when this panel is embedded in
+   * project-details, else the one picked in the standalone page's selector.
+   * Empty means none, which is what disables the create control (P2-18).
+   *
+   * Declared right after its own dependency, and the SINGLE source of truth for
+   * the question — the inline `projectId() || selectedProjectId()` it replaces
+   * appeared in the template, in the filtered list and in every save handler,
+   * so the disabled state and the empty state could drift apart.
+   */
+  activeProjectId = computed(() => this.projectId() || this.selectedProjectId());
   showForm = signal(false);
   
   docForm = new FormGroup({
@@ -212,17 +237,12 @@ export class ProjectDocuments {
   documents = this.documentsRes.value;
 
   filteredDocuments = computed(() => {
-    const pId = this.projectId() || this.selectedProjectId();
+    const pId = this.activeProjectId();
     if (!pId) return [];
     return this.documents().filter(d => d.projectId === pId);
   });
 
   openForm() {
-    const pId = this.projectId() || this.selectedProjectId();
-    if (!pId) {
-      this.notificationService.show('Please select a project first', 'info');
-      return;
-    }
     this.showForm.set(true);
   }
 
@@ -266,7 +286,7 @@ export class ProjectDocuments {
 
   saveDocument() {
     if (this.docForm.invalid) return;
-    const pId = this.projectId() || this.selectedProjectId();
+    const pId = this.activeProjectId();
     if (!pId) return;
 
     // ACTOR FIELD (Phase D): the document author is the signed-in user, derived from
