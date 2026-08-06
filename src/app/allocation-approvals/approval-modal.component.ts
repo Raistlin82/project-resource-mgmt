@@ -341,17 +341,22 @@ interface Line {
 
       <div class="p-6 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
         <button type="button" (click)="closed.emit()" class="command-button secondary">Close</button>
-        <button type="button" data-test="reject-month" (click)="reject()" [disabled]="checked().size === 0"
+        <!-- deciding() joins every decision action's [disabled] — the visible
+             half of the in-flight guard (the load-bearing half is the early
+             return in decide(); see the signal's own note). "Close" is
+             deliberately NOT gated: dismissing the panel must stay possible
+             even mid-flight, since a batch decision cannot be cancelled. -->
+        <button type="button" data-test="reject-month" (click)="reject()" [disabled]="checked().size === 0 || deciding()"
                 class="command-button secondary disabled:opacity-50 disabled:cursor-not-allowed">
           <mat-icon class="text-[18px] w-[18px] h-[18px]">close</mat-icon> Reject month
         </button>
         @if (multi()) {
-          <button type="button" data-test="approve-continue" (click)="approve()" [disabled]="checked().size === 0"
+          <button type="button" data-test="approve-continue" (click)="approve()" [disabled]="checked().size === 0 || deciding()"
                   class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
             <mat-icon class="text-[18px] w-[18px] h-[18px]">check</mat-icon> Approve & Continue
           </button>
         } @else {
-          <button type="button" data-test="approve-month" (click)="approve()" [disabled]="checked().size === 0"
+          <button type="button" data-test="approve-month" (click)="approve()" [disabled]="checked().size === 0 || deciding()"
                   class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
             <mat-icon class="text-[18px] w-[18px] h-[18px]">check</mat-icon> Approve month
           </button>
@@ -428,16 +433,58 @@ export class ApprovalModalComponent {
   }));
 
   /**
-   * Public: the spec asserts on it directly. Checked assignmentMonthIds,
-   * defaulting to every DECIDABLE line of the selected month — a linkedSignal
-   * so it rebuilds that default whenever the selected month, the underlying
-   * rows (e.g. after a reload) OR the principal (auth settling after a
-   * deep-link) changes, while still allowing the user to freely check/uncheck
-   * within the current month.
+   * The selected month's DECIDABLE line ids — the default check set. Derived,
+   * so it keeps following everything `decidable()` consults: the selected
+   * month, the rows (e.g. after the host's post-decision reload), the principal
+   * (auth settling after a deep-link) and the two catalogue reads below. A line
+   * the org tree turns out to refuse therefore LEAVES the set the moment the
+   * tree lands, instead of staying pre-checked for a decision the server
+   * would reject.
    */
-  checked = linkedSignal<{ lines: Line[]; principal: unknown }, Set<string>>({
-    source: () => ({ lines: this.lines(), principal: this.principal() }),
-    computation: ({ lines }) => new Set(lines.filter(l => this.decidable(l)).map(l => l.item.assignmentMonthId)),
+  private decidableIds = computed<string[]>(() =>
+    this.lines().filter(line => this.decidable(line)).map(line => line.item.assignmentMonthId));
+
+  /**
+   * The lines the approver has EXPLICITLY un-checked, by assignmentMonthId.
+   *
+   * WHY THE EDIT IS MODELLED AS AN EXCLUSION rather than as the whole set.
+   * `checked` used to be a `linkedSignal` whose computation called
+   * `decidable()`, which reads `resources()` and `orgNodes()` — so both
+   * catalogue reads were among its producers. The approver could un-check a
+   * line inside the mount-time window while either was still in flight (two
+   * round trips), and the arriving response rebuilt the default and silently
+   * RE-CHECKED it: the footer count jumped back with no explanation and
+   * `decide()` posted months the approver had deliberately excluded. There is
+   * no undo on this screen. An explicit exclusion cannot be reverted by ANY
+   * recompute, and the default above stays honest instead of being frozen.
+   *
+   * WHY NOT `untracked()` AROUND THE DECIDABLE WALK, the obvious one-line
+   * alternative: it protects the edit by freezing the whole set at whatever
+   * answer `decidable()` gave BEFORE the catalogue landed, and that answer is
+   * wrong in both directions. Measured — with the walk untracked, two
+   * pre-existing D scope cases in this file's spec go red: an out-of-scope
+   * resource-manager keeps an ENABLED "Approve month" over a line the server
+   * refuses (the `roleFallback` window never closes), and the accountable
+   * Capability Leader, the only non-admin who can clear that month, is left
+   * with it permanently DISABLED. Freezing also lets a line render
+   * checkbox-disabled and still checked, i.e. still sendable. Splitting the
+   * edit out is what makes the default free to stay reactive.
+   *
+   * Keyed by assignmentMonthId, which embeds the month, so an exclusion can
+   * never leak onto another month's line and nothing needs clearing when
+   * `selectedMonth` advances.
+   */
+  private excluded = signal<ReadonlySet<string>>(new Set());
+
+  /**
+   * Public: the spec asserts on it directly. Every decidable line of the
+   * selected month minus the approver's exclusions. Intersecting with
+   * `decidableIds` is deliberate and not merely tidy: a line that is not
+   * decidable must never be sendable, whatever `excluded` happens to hold.
+   */
+  checked = computed<ReadonlySet<string>>(() => {
+    const excluded = this.excluded();
+    return new Set(this.decidableIds().filter(id => !excluded.has(id)));
   });
 
   /** In-flight approver-note edits, keyed by assignmentMonthId, before a decision is sent. */
@@ -515,16 +562,24 @@ export class ApprovalModalComponent {
     if (row.managerId !== undefined && row.managerId === resourceId) return true;
     const resources = this.resources();
     // NOTE on the not-yet-loaded state, and why there is deliberately no
-    // `resources.length === 0 -> true` shortcut here: `checked` is a
-    // linkedSignal seeded from `decidable()` on FIRST render, and the catalogue
-    // resolves after it. A blanket permissive answer would therefore PRE-CHECK
-    // lines the server refuses and never un-check them (the resource list
-    // arriving does not change `lines()`, so the linkedSignal does not
-    // recompute). The empty-list case is handled where it belongs instead: the
-    // org-chart walk resolves managers THROUGH this list, so an empty list
-    // yields an empty approver set and `roleFallback` — permissive for the
-    // 'resource-manager' path (the one that would otherwise flicker a refusal),
-    // fail-closed for every other role, which is exactly what the server does.
+    // `resources.length === 0 -> true` shortcut here. The empty-list case is
+    // handled where it belongs instead: the org-chart walk resolves managers
+    // THROUGH this list, so an empty list yields an empty approver set and
+    // `roleFallback` — permissive for the 'resource-manager' path (the one that
+    // would otherwise flicker a refusal), fail-closed for every other role,
+    // which is exactly what the server does. A blanket permissive answer here
+    // would instead pre-check lines the server refuses for EVERY role.
+    //
+    // (This note used to argue the shortcut was unsafe because `checked` was a
+    // linkedSignal seeded once from `decidable()` and the catalogue resolved
+    // after it, so a permissive first answer could never be un-checked. That
+    // reasoning is gone: `checked` is now derived from `decidableIds()`, which
+    // re-derives when either catalogue read lands, and the approver's own edits
+    // are held separately in `excluded`. The rule above stands on its own —
+    // it mirrors the server — and must not be relaxed on the strength of the
+    // set now being reactive. Equally, this function must stay TRACKED: the
+    // scope suite below pins that the answer changes once the catalogue lands,
+    // in both directions. See `excluded` for the measurement.)
     //
     // The scope target is the real resource when the catalogue has it; the row's
     // own fields are the fallback shape. `organization` is carried on the feed
@@ -559,8 +614,11 @@ export class ApprovalModalComponent {
     return item.projectName ?? item.requestId;
   }
 
+  /** Toggling a line RECORDS or CLEARS an explicit exclusion — see `excluded`.
+   *  For a decidable line `checked` is exactly `!excluded`, so this reads the
+   *  same to the user as toggling the set itself did. */
   protected toggleChecked(id: string): void {
-    this.checked.update(set => {
+    this.excluded.update(set => {
       const next = new Set(set);
       if (!next.delete(id)) next.add(id);
       return next;
@@ -601,6 +659,23 @@ export class ApprovalModalComponent {
     this.selectedMonth.set((event.target as HTMLSelectElement).value);
   }
 
+  /**
+   * True while ONE batch decision is in flight. Bound to `[disabled]` on all
+   * three DECISION actions (reject-month, and whichever of approve-continue /
+   * approve-month the mode renders — never on Close) AND checked at the top of
+   * `decide()`.
+   *
+   * BOTH halves are needed, and the source-level guard is the load-bearing one:
+   * a real double-click delivers two click events with no change-detection pass
+   * between them, so the `[disabled]` binding has not been applied yet when the
+   * second handler runs. Before this, in multi mode, response 1 advanced the
+   * modal to the next month and response 2 then advanced it AGAIN from there —
+   * a month nobody had been shown was walked past and the modal closed as if the
+   * whole batch had been reviewed. Cleared in both the next and error callbacks
+   * (never as a one-shot latch) so the following month stays decidable.
+   */
+  protected deciding = signal(false);
+
   protected approve(): void {
     this.decide('Approved');
   }
@@ -630,6 +705,11 @@ export class ApprovalModalComponent {
    *    rather than waiting on the host's async reload to feed back new rows.
    */
   private decide(decision: 'Approved' | 'Rejected'): void {
+    // The in-flight guard, checked HERE and not merely bound to [disabled] — a
+    // real double-click delivers both click events inside one task, so the
+    // disabled property has not been written yet when the second handler runs.
+    // See `deciding` for what the second call used to do to `selectedMonth`.
+    if (this.deciding()) return;
     const ids = [...this.checked()];
     if (ids.length === 0) return;
     const drafts = this.approverNoteDrafts();
@@ -638,10 +718,14 @@ export class ApprovalModalComponent {
       decision,
       note: drafts[id],
     }));
+    this.deciding.set(true);
     this.api.decideAllocationMonths(items)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (res) => {
+          // Released BEFORE the advance/close below, so the next month arrives
+          // with a live footer rather than one the guard has stranded.
+          this.deciding.set(false);
           const failures = res.results.filter(r => r.status === 'Error');
           if (failures.length > 0) {
             const first = failures[0].error ?? `Could not decide ${failures[0].assignmentMonthId}.`;
@@ -660,7 +744,12 @@ export class ApprovalModalComponent {
           const decidedIds = new Set(res.results.filter(r => r.status !== 'Error').map(r => r.assignmentMonthId));
           if (this.nothingLeftAfter(decidedIds)) this.closed.emit();
         },
-        // Network/5xx failures are already toasted by the global error interceptor.
+        // Network/5xx failures are already toasted by the global error
+        // interceptor, so this handler exists only to RELEASE the guard: a
+        // failed batch must leave the footer live for the retry, never latch it
+        // dead. (That is also why `deciding` is cleared in both callbacks
+        // rather than being a one-shot latch set once and never reset.)
+        error: () => this.deciding.set(false),
       });
   }
 
@@ -674,8 +763,10 @@ export class ApprovalModalComponent {
 
   /** Multi-mode advance rule: move to the next month in `months()`, or emit
    *  `closed` once the current month is the last one. `checked()` re-derives
-   *  its default from the new month's lines automatically (it is a
-   *  `linkedSignal` sourced off `lines()`, which recomputes off `selectedMonth`). */
+   *  for the new month automatically — it is a `computed` over `decidableIds()`,
+   *  which walks `lines()`, which recomputes off `selectedMonth`. The approver's
+   *  `excluded` ids survive the move, but they are keyed by assignmentMonthId
+   *  (month included), so none of them can match a line of the NEXT month. */
   private advanceOrClose(): void {
     const months = this.months();
     const idx = months.indexOf(this.selectedMonth());
