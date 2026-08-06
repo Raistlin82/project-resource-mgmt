@@ -12,6 +12,7 @@ import { scopeOf } from '../services/org-scope.util';
 import { kindOf, countsTowardInternalCapacity } from '../services/resource-kind.util';
 import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
 import { ListStateComponent } from '../shared/list-state.component';
+import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 
 interface UtilizationData {
   resources: Resource[];
@@ -25,7 +26,7 @@ interface UtilizationData {
 @Component({
   selector: 'app-utilization',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DecimalPipe, ReactiveFormsModule, ListStateComponent],
+  imports: [MatIconModule, DecimalPipe, ReactiveFormsModule, ListStateComponent, ModalDialogDirective],
   template: `
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -114,11 +115,22 @@ interface UtilizationData {
             <app-list-state [loading]="loading()" [error]="hasError()" skeleton="cards" [rows]="4" label="team utilization" (retry)="dataResource.reload()">
               <ng-template>
                 @for (res of managedResources(); track res.id) {
+                  <!-- role="button" below makes this card a COMPOSITE: ARIA prunes
+                       every descendant from the accessibility tree, so the
+                       utilization % and the BENCH/PARTIAL/ALLOCATED badge rendered
+                       inside it are never announced — the two facts this list
+                       exists to compare. The accessible NAME is therefore their
+                       only carrier. Number pipe, not raw interpolation: the
+                       ≤2-decimals rule governs the spoken string exactly as it
+                       governs the visible one. benchBadgeSuffix() rather than
+                       benchBadge() inline, so the ", <state>" separator travels
+                       WITH the value and an absent bench row cannot leave the
+                       name ending in a dangling comma. -->
                   <div class="p-6 hover:bg-surface-muted transition-all cursor-pointer group relative"
                        [class.bg-accent-tint]="selectedResource()?.id === res.id"
                        role="button"
                        tabindex="0"
-                       [attr.aria-label]="'Select ' + res.name + ' utilization details'"
+                       [attr.aria-label]="'Select ' + res.name + ', utilization ' + (res.utilization | number:'1.0-0') + '%' + benchBadgeSuffix(res)"
                        [attr.aria-pressed]="selectedResource()?.id === res.id"
                        (keydown.enter)="selectResource(res)"
                        (keydown.space)="selectResource(res); $event.preventDefault()"
@@ -207,19 +219,30 @@ interface UtilizationData {
                 <div class="command-card overflow-hidden flex-1 flex flex-col">
                   <div class="p-6 border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                     <h3 class="font-display text-xl font-bold text-[var(--cc-ink)]">Assignments</h3>
-                    <div class="flex flex-wrap gap-3">
-                      @if (copiedAssignment()) {
-                        <button (click)="pasteAssignment()" class="command-button secondary flex-1 sm:flex-none">
-                          <mat-icon class="text-[18px] w-[18px] h-[18px]">content_paste</mat-icon> Paste
+                    <!-- /utilization's route guard is canReadStaffing(), which admits
+                         'finance' — but /assignments mutations are canManageStaffing
+                         only, so an unconditional Create/Paste/Edit/Delete cluster
+                         offered finance four affordances the server answers with 403
+                         and an error toast (the row never moves). The capability is
+                         read LIVE through the signal, never snapshot, so a role that
+                         resolves after the OIDC bootstrap settles gets the right
+                         controls rather than the anonymous default's. The gate is UX
+                         only — src/server.ts remains the boundary. -->
+                    @if (canManageStaffing()) {
+                      <div class="flex flex-wrap gap-3">
+                        @if (copiedAssignment()) {
+                          <button (click)="pasteAssignment()" class="command-button secondary flex-1 sm:flex-none">
+                            <mat-icon class="text-[18px] w-[18px] h-[18px]">content_paste</mat-icon> Paste
+                          </button>
+                        }
+                        <button (click)="openCreateForm()" class="command-button flex-1 sm:flex-none">
+                          <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create
                         </button>
-                      }
-                      <button (click)="openCreateForm()" class="command-button flex-1 sm:flex-none">
-                        <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create
-                      </button>
-                    </div>
+                      </div>
+                    }
                   </div>
 
-                  @if (showForm()) {
+                  @if (showForm() && canManageStaffing()) {
                     <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)]">
                       <h4 class="font-display font-bold text-[var(--cc-ink)] text-lg mb-6">{{ editingAssignmentId() ? 'Edit Assignment' : 'New Assignment' }}</h4>
                       <form [formGroup]="assignmentForm" (ngSubmit)="saveAssignment()" class="space-y-6">
@@ -258,17 +281,29 @@ interface UtilizationData {
                             </span>
                           </div>
                         </div>
-                        <div class="flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-                          <button (click)="copyAssignment(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Copy assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Copy assignment for ' + getRequestName(assignment.requestId)">
-                            <mat-icon class="text-[20px] w-[20px] h-[20px]">content_copy</mat-icon>
-                          </button>
-                          <button (click)="openEditForm(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Edit assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Edit assignment for ' + getRequestName(assignment.requestId)">
-                            <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
-                          </button>
-                          <button (click)="deleteAssignment(assignment.id)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Delete assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Delete assignment for ' + getRequestName(assignment.requestId)">
-                            <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
-                          </button>
-                        </div>
+                        @if (canManageStaffing()) {
+                          <!-- focus-within:opacity-100 is load-bearing, not cosmetic.
+                               From the sm breakpoint up this cluster is opacity-0
+                               until hover, so a keyboard user Tabbing into it moved
+                               the caret onto three consecutive INVISIBLE stops —
+                               including Delete, whose focus ring rendered as nothing
+                               — and Enter fired on a control they could not see. The
+                               mouse path is unaffected, which is why click-through
+                               testing never surfaced it. Revealing the cluster
+                               whenever focus is anywhere inside it is the same
+                               one-word fix projects.ts:99 already carries. -->
+                          <div class="flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                            <button (click)="copyAssignment(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Copy assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Copy assignment for ' + getRequestName(assignment.requestId)">
+                              <mat-icon class="text-[20px] w-[20px] h-[20px]">content_copy</mat-icon>
+                            </button>
+                            <button (click)="openEditForm(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Edit assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Edit assignment for ' + getRequestName(assignment.requestId)">
+                              <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
+                            </button>
+                            <button (click)="askDeleteAssignment(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Delete assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Delete assignment for ' + getRequestName(assignment.requestId)">
+                              <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
+                            </button>
+                          </div>
+                        }
                       </div>
                     }
                     @if (resourceAssignments().length === 0) {
@@ -276,6 +311,46 @@ interface UtilizationData {
                     }
                   </div>
                 </div>
+
+                <!-- pendingDelete carries the project and resource NAMES captured
+                     at arm time rather than the row, and that is what keeps this
+                     dialog safe: re-deriving the project name here would call
+                     getRequestName() -> allRequests() -> dataResource.value(),
+                     which THROWS while status() === 'error' (see the hasError()
+                     guard around the Team Average tile above), and a
+                     dialog is exactly the kind of markup that outlives the read
+                     that armed it. Kept inside @if (selectedResource()) so it
+                     shares the lifetime of the pane whose row armed it — a
+                     stranded overlay over an error state has no Cancel context. -->
+                @if (pendingDelete(); as pending) {
+                  <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+                       appModal ariaLabelledby="assignmentDeleteTitle" (dismiss)="cancelDeleteAssignment()">
+                    <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col">
+                      <div class="p-6 text-center">
+                        <div class="w-16 h-16 bg-critical-tint ring-1 ring-critical rounded-full flex items-center justify-center mx-auto mb-4">
+                          <mat-icon class="text-critical-text text-3xl">warning</mat-icon>
+                        </div>
+                        <h3 id="assignmentDeleteTitle" class="font-display text-lg font-bold text-[var(--cc-ink)] mb-2">Delete assignment on {{ pending.project }}</h3>
+                        <!-- Name the DERIVED effects, not just the row: the server
+                             recomputes the request's staffed effort and this
+                             resource's utilization under a lock as a side effect of
+                             the DELETE, so the numbers on /staffing, /bench and this
+                             very screen move for reasons the deleted row no longer
+                             explains. Neither this screen nor any other can put the
+                             assignment back. -->
+                        <p class="text-[var(--cc-muted)] text-sm">
+                          Removing {{ pending.resource }} from {{ pending.project }} re-opens that share of the
+                          request: the server recomputes the request's staffed effort and this resource's
+                          utilization. This cannot be undone from this screen.
+                        </p>
+                      </div>
+                      <div class="p-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
+                        <button type="button" (click)="cancelDeleteAssignment()" class="command-button secondary">Cancel</button>
+                        <button type="button" (click)="confirmDeleteAssignment()" class="px-4 py-2 bg-critical text-white rounded-lg text-sm font-medium hover:bg-critical-strong transition-colors shadow-sm">Delete assignment</button>
+                      </div>
+                    </div>
+                  </div>
+                }
 
                 <div class="command-card overflow-hidden">
                   <div class="command-card-header">
@@ -339,6 +414,16 @@ export class UtilizationComponent {
   // Read LIVE, never snapshot at field-init (see auth.service note): a captured
   // value freezes the anonymous default and scopes the wrong manager on reload.
   private get currentManagerId(): string { return this.auth.userId(); }
+
+  /**
+   * This route's guard is `canReadStaffing()`, which admits 'finance' — but every
+   * /assignments mutation is `canManageStaffing()`. Exposed as the signal itself
+   * (never `this.auth.canManageStaffing()` snapshotted at field-init), so it is
+   * re-read on each CD pass and a role resolved after the OIDC bootstrap settles
+   * gets the right controls instead of the anonymous default's. UX only: the
+   * handlers below re-check it, and src/server.ts is the actual boundary.
+   */
+  protected readonly canManageStaffing = this.auth.canManageStaffing;
 
   // resources and time-entries are principal-gated server-side: key the forkJoin
   // on auth readiness so it fires only AFTER the OAuth bootstrap has settled and
@@ -424,6 +509,18 @@ export class UtilizationComponent {
     return row?.monthly[this.currentBenchMonth()]?.state ?? '';
   }
 
+  /**
+   * The bench state as it appears in the row's accessible name: ', BENCH' or ''.
+   * The separator belongs WITH the value — benchBadge() legitimately returns ''
+   * for a real resource with no row in this month's rollup (see above), and
+   * concatenating a bare ', ' + '' in the template would end the spoken name in
+   * a dangling comma on exactly those rows.
+   */
+  protected benchBadgeSuffix(res: Resource): string {
+    const badge = this.benchBadge(res);
+    return badge ? `, ${badge}` : '';
+  }
+
   private selectedResourceId = signal<string | null>(null);
   // Derived from the loaded resources so it always reflects the latest data after a reload.
   selectedResource = computed<Resource | null>(() => {
@@ -500,13 +597,19 @@ export class UtilizationComponent {
   }
 
   // --- Form Handling ---
+  // Every write entry point re-checks canManageStaffing(). The template already
+  // hides these controls, but a template gate alone is one refactor away from
+  // being the only gate: these guards keep a programmatic call (or a leftover
+  // armed state) from issuing a request the server will only answer with 403.
   openCreateForm() {
+    if (!this.canManageStaffing()) return;
     this.editingAssignmentId.set(null);
     this.assignmentForm.reset({ requestId: '' });
     this.showForm.set(true);
   }
 
   openEditForm(assignment: Assignment) {
+    if (!this.canManageStaffing()) return;
     this.editingAssignmentId.set(assignment.id);
     this.assignmentForm.patchValue({
       requestId: assignment.requestId,
@@ -521,6 +624,7 @@ export class UtilizationComponent {
   }
 
   saveAssignment() {
+    if (!this.canManageStaffing()) return;
     if (this.assignmentForm.valid && this.selectedResource()) {
       const val = this.assignmentForm.value;
       const requestId = val.requestId || '';
@@ -560,6 +664,7 @@ export class UtilizationComponent {
   }
 
   pasteAssignment() {
+    if (!this.canManageStaffing()) return;
     const copied = this.copiedAssignment();
     const resId = this.selectedResource()?.id;
     if (copied && resId) {
@@ -583,9 +688,53 @@ export class UtilizationComponent {
     }
   }
 
-  deleteAssignment(id: string) {
-    this.api.deleteAssignment(id).subscribe(() => {
-      this.dataResource.reload();
+  /**
+   * Armed delete. Holds the resource and project NAMES captured at arm time
+   * rather than the row: the confirmation copy must not re-derive them through
+   * getRequestName()/selectedResource(), which read dataResource.value() — a
+   * value that THROWS in the error state (see the hasError() guard around the
+   * Team Average tile) — and the row can also vanish under a concurrent reload
+   * while the dialog is open.
+   */
+  protected pendingDelete = signal<{ id: string; project: string; resource: string } | null>(null);
+
+  /**
+   * Deleting an assignment is money-adjacent and had NO confirmation: one click
+   * on a (until now invisible under keyboard focus) trash icon issued the DELETE,
+   * and the server then recomputes the request's staffedEffort and the resource's
+   * utilization under a lock. Nothing on this screen, or any other, can put the
+   * assignment back — so the click only ARMS the dialog.
+   */
+  protected askDeleteAssignment(assignment: Assignment) {
+    if (!this.canManageStaffing()) return;
+    this.pendingDelete.set({
+      id: assignment.id,
+      project: this.getRequestName(assignment.requestId),
+      resource: this.selectedResource()?.name ?? 'this resource',
+    });
+  }
+
+  protected cancelDeleteAssignment() {
+    this.pendingDelete.set(null);
+  }
+
+  protected confirmDeleteAssignment() {
+    const pending = this.pendingDelete();
+    if (!pending || !this.canManageStaffing()) return;
+    this.api.deleteAssignment(pending.id).subscribe({
+      next: () => {
+        this.pendingDelete.set(null);
+        this.dataResource.reload();
+        // The handler had no feedback at all. Name the derived effects, since
+        // they are what actually moved: the row is gone, but so are the
+        // request's staffing % and this resource's utilization.
+        this.notifications.success(
+          `Assignment on ${pending.project} deleted — staffed effort and utilization recomputed.`,
+        );
+      },
+      // Keep the dialog open on failure: the row is still there, so dismissing
+      // would report a delete that did not happen.
+      error: () => this.notifications.error('Failed to delete assignment.'),
     });
   }
 
