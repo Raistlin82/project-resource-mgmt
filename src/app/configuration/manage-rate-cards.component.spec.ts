@@ -182,6 +182,85 @@ describe('ManageRateCardsComponent', () => {
   });
 });
 
+describe('ManageRateCardsComponent form overlay — STRUCTURAL contract only (jsdom performs no layout)', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  /**
+   * The scroll-safety predicate, evaluated on TOKENS rather than on the raw class
+   * string. 'items-center' is a substring of 'sm:items-center', so a
+   * `className.includes()` check would be satisfied by the very class that has to
+   * go — the class-string form of the trap where toContain('0%') matches '100%'.
+   */
+  function scrollSafety(overlay: HTMLElement, panel: HTMLElement) {
+    const overlayTokens = overlay.className.split(/\s+/);
+    const body = panel.querySelector<HTMLElement>('form > div');
+    return {
+      overlayScrolls: overlayTokens.includes('overflow-y-auto'),
+      anchoredOnShortViewports: overlayTokens.includes('items-start') && !overlayTokens.includes('items-center'),
+      panelBounded: /max-h-\[/.test(panel.className),
+      bodyScrolls: !!body && body.className.split(/\s+/).includes('overflow-y-auto'),
+    };
+  }
+
+  it('declares its own scroller, a top anchor and a bounded panel whose body scrolls', async () => {
+    // THE DEFECT: this panel needs ~508px and a 320x568 phone leaves ~460px of
+    // visual viewport. `flex items-center` on a POSITION:FIXED overlay split the
+    // ~48px surplus above and below the centre, so the header went above y=0 and
+    // the "Save Rate Card" footer below the fold — and a fixed box cannot be
+    // scrolled by the page, nor did the overlay have a scroller of its own. The
+    // admin could fill the card in and never save it.
+    //
+    // jsdom CAN prove these class tokens sit on the right elements. It CANNOT prove
+    // the clipping: it performs no layout, offsetHeight is 0 and there is no
+    // viewport. The height arithmetic above is only demonstrable in a real browser
+    // (320x460, submit button's getBoundingClientRect().bottom <= innerHeight), and
+    // this repo has no browser runner.
+    const { fixture } = setup();
+    await flush(fixture);
+
+    fixture.componentInstance.openForm();
+    fixture.detectChanges();
+
+    const overlay = (fixture.nativeElement as HTMLElement).querySelector<HTMLElement>('[data-test="rate-card-form-overlay"]')!;
+    const panel = (fixture.nativeElement as HTMLElement).querySelector<HTMLElement>('[data-test="rate-card-form-panel"]')!;
+    expect(scrollSafety(overlay, panel)).toStrictEqual({
+      overlayScrolls: true,
+      anchoredOnShortViewports: true,
+      panelBounded: true,
+      bodyScrolls: true,
+    });
+    // Spelled out separately from the object comparison, because 'sm:items-center'
+    // is the half that keeps the panel centred on a normal viewport — dropping it
+    // would leave every desktop dialog stuck to the top edge.
+    expect(overlay.className.split(/\s+/)).toContain('sm:items-center');
+  });
+
+  it('rejects a plain centred overlay — the negative control that keeps the predicate honest', async () => {
+    // NON-VACUOUSNESS. The predicate above must discriminate a scroll-safe overlay
+    // from a clipping one, or it is a class-string tautology. The control is a REAL
+    // element rendered by this very component: the delete confirmation, a short
+    // warning dialog (icon + title + two lines + footer) that fits the ~460px a
+    // 320x568 phone leaves and therefore deliberately keeps the plain centred
+    // overlay. Its className is exactly what the FORM overlay carried before the
+    // fix — `fixed inset-0 ... flex items-center justify-center z-50 p-4` — so a
+    // predicate that passed it would pass the defect.
+    const { fixture } = setup(ORG_NODES, [
+      { id: 'RC1', role: 'Developer', organization: '', currency: 'EUR', costRate: 600, billRate: 1120 },
+    ]);
+    await flush(fixture);
+
+    fixture.componentInstance.deleteItem('RC1');
+    fixture.detectChanges();
+
+    const control = (fixture.nativeElement as HTMLElement).querySelector<HTMLElement>('[data-test="rate-card-delete-overlay"]')!;
+    const panel = control.querySelector<HTMLElement>('.command-card')!;
+    const verdict = scrollSafety(control, panel);
+    expect(verdict.overlayScrolls).toBe(false);
+    expect(verdict.anchoredOnShortViewports).toBe(false);
+    expect(verdict.panelBounded).toBe(false);
+  });
+});
+
 describe('ManageRateCardsComponent working-hours-per-day field', () => {
   afterEach(() => TestBed.resetTestingModule());
 

@@ -70,38 +70,50 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
       </div>
 
       @if (showForm()) {
-        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+        <!-- SCROLL-SAFE OVERLAY (the shape billing.ts's overlays use). A
+             fixed items-center overlay centres a panel taller than the viewport,
+             which pushes the header above y=0 and the Save row below the fold —
+             and a fixed box cannot be scrolled by the page, so the form could be
+             filled in and never submitted. overflow-y-auto gives the overlay its
+             own scroller, items-start anchors the panel at the top on short
+             viewports, and the panel's max-h-[90vh] plus the scrolling body
+             below keep the footer reachable. -->
+        <div data-test="vendor-form-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
              appModal ariaLabelledby="vendorModalTitle" (dismiss)="closeForm()">
-          <div class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col">
+          <div data-test="vendor-form-panel" class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="vendorModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Vendor' : 'Add Vendor' }}</h2>
               <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
-            <form [formGroup]="form" (ngSubmit)="save()" class="p-6 space-y-4">
-              <div>
-                <label for="name" class="block text-sm font-medium text-ink-secondary mb-1">Name</label>
-                <input id="name" type="text" formControlName="name" class="command-input" placeholder="e.g. TechCorp Inc.">
+            <!-- The <form> stays the submit boundary (so Enter still submits) and
+                 becomes a column: fields scroll, the footer is pinned. -->
+            <form [formGroup]="form" (ngSubmit)="save()" class="flex flex-col flex-1 min-h-0 overflow-hidden">
+              <div class="p-6 space-y-4 overflow-y-auto flex-1 min-h-0">
+                <div>
+                  <label for="name" class="block text-sm font-medium text-ink-secondary mb-1">Name</label>
+                  <input id="name" type="text" formControlName="name" class="command-input" placeholder="e.g. TechCorp Inc.">
+                </div>
+                <div>
+                  <label for="vatId" class="block text-sm font-medium text-ink-secondary mb-1">VAT ID</label>
+                  <input id="vatId" type="text" formControlName="vatId" class="command-input font-mono" placeholder="e.g. IT-1234567890">
+                </div>
+                <div>
+                  <label for="country" class="block text-sm font-medium text-ink-secondary mb-1">Country</label>
+                  <!-- Country is a config FK to the countries catalog (store = ISO-2 code). -->
+                  <select id="country" formControlName="country" class="command-select">
+                    <option value="">— None —</option>
+                    @for (c of countryOptions(); track c.code) {
+                      <option [value]="c.code">{{ c.name }} ({{ c.code }})</option>
+                    }
+                    @if (orphanCountry(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
+                </div>
               </div>
-              <div>
-                <label for="vatId" class="block text-sm font-medium text-ink-secondary mb-1">VAT ID</label>
-                <input id="vatId" type="text" formControlName="vatId" class="command-input font-mono" placeholder="e.g. IT-1234567890">
-              </div>
-              <div>
-                <label for="country" class="block text-sm font-medium text-ink-secondary mb-1">Country</label>
-                <!-- Country is a config FK to the countries catalog (store = ISO-2 code). -->
-                <select id="country" formControlName="country" class="command-select">
-                  <option value="">— None —</option>
-                  @for (c of countryOptions(); track c.code) {
-                    <option [value]="c.code">{{ c.name }} ({{ c.code }})</option>
-                  }
-                  @if (orphanCountry(); as orphan) {
-                    <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
-                  }
-                </select>
-              </div>
-              <div class="pt-4 flex justify-end gap-3">
+              <div class="px-6 py-4 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
                 <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
                 <button type="submit" [disabled]="!form.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save Vendor</button>
               </div>
@@ -110,8 +122,8 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
         </div>
       }
 
-      @if (deletingId()) {
-        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+      @if (deletingVendor(); as victim) {
+        <div data-test="vendor-delete-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
              appModal ariaLabelledby="vendorDeleteTitle" (dismiss)="cancelDelete()">
           <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col">
             <div class="p-6 text-center">
@@ -119,7 +131,18 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
                 <mat-icon class="text-critical-text text-3xl">warning</mat-icon>
               </div>
               <h3 id="vendorDeleteTitle" class="font-display text-lg font-bold text-[var(--cc-ink)] mb-2">Delete Vendor</h3>
-              <p class="text-[var(--cc-muted)] text-sm">Are you sure you want to delete this vendor? This action cannot be undone.</p>
+              <!-- NAMES THE OBJECT AND THE CONSEQUENCE, like its sibling config
+                   screens (manage-resource-organizations, manage-rate-cards). The
+                   old copy said only "this vendor ... cannot be undone", so an
+                   admin could not tell which vendor was about to go, nor that
+                   vendorId is a REQUIRED control on every subco resource
+                   (resources.component.ts): those resources keep a raw id in the
+                   vendor field and cannot be saved again until re-pointed.
+                   The copy deliberately does NOT promise a refusal — the API has
+                   no reference check on this DELETE today (it only 409s under
+                   Postgres, via the FK), so promising one would describe
+                   behaviour that does not exist. -->
+              <p class="text-[var(--cc-muted)] text-sm">Delete <strong class="text-[var(--cc-ink)]">{{ victim.name }}</strong>? Any subco resource pointing at this vendor keeps a raw id in its vendor field and cannot be saved again until it is re-pointed. This cannot be undone.</p>
             </div>
             <div class="p-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
               <button (click)="cancelDelete()" class="command-button secondary">Cancel</button>
@@ -152,6 +175,18 @@ export class ManageVendorsComponent {
   showForm = signal(false);
   editingId = signal<string | null>(null);
   deletingId = signal<string | null>(null);
+
+  /**
+   * The vendor the confirmation is about, resolved from the armed id so the copy
+   * can name it. Gating the dialog on this (rather than on `deletingId` alone)
+   * fails safe: if the list were to change underneath the armed id, no dialog is
+   * shown and no DELETE can be issued — `confirmDelete()` is reachable only from
+   * this dialog's own button.
+   */
+  deletingVendor = computed<Vendor | null>(() => {
+    const id = this.deletingId();
+    return id ? this.items().find(v => v.id === id) ?? null : null;
+  });
 
   form = new FormGroup({
     name: new FormControl('', Validators.required),
@@ -210,10 +245,22 @@ export class ManageVendorsComponent {
   confirmDelete() {
     const id = this.deletingId();
     if (!id) return;
-    this.api.deleteVendor(id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => {
-      this.itemsRes.reload();
-      this.deletingId.set(null);
-      this.notifications.show('Vendor deleted.', 'success');
+    this.api.deleteVendor(id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {
+        this.itemsRes.reload();
+        this.deletingId.set(null);
+        this.notifications.show('Vendor deleted.', 'success');
+      },
+      // A REFUSAL MUST BE VISIBLE. Under Postgres this DELETE hits the
+      // `resources.vendor_id` FK and the API maps SQLSTATE 23503 to 409; with no
+      // error arm the dialog simply stayed open forever and the admin was told
+      // nothing, so a refusal read as a dead button. Surface the server's own
+      // reason and keep the dialog open so the message has something to sit next
+      // to (dismissing it is the admin's decision, not ours).
+      error: (e) => this.notifications.show(
+        (e as { error?: { error?: string } })?.error?.error || 'Could not delete this vendor. It may still be referenced by a resource.',
+        'error',
+      ),
     });
   }
 
