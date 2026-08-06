@@ -5985,6 +5985,209 @@ async function checkServerOwnedWrites() {
 }
 
 /**
+ * G1 — the WIRING of the change-request typed-field guards, the `/requests`
+ * notNull-array default and the two referential delete guards.
+ *
+ * Every rule exercised here is unit-tested as a pure function in
+ * src/server/operational-integrity.util.spec.ts. This section exists because those
+ * unit tests cannot see the CALL SITE: `markBillingInvoicePaid` shipped with three
+ * green unit tests and no import (the note at src/server.ts's billing handler), so
+ * a guard is only real once an HTTP request has been refused by it.
+ *
+ * Self-contained: creates its own change request, resource requests, assignment and
+ * time entry, and removes all of them — the removal being itself the proof that
+ * each guard RELEASES once the last child is gone.
+ */
+async function checkServerValidationGuards() {
+  const ACTOR = { 'X-User-Id': '1', 'X-User-Role': 'admin' };
+  const OWNER = SMOKE_MANAGER; // 'Julie Armstrong' — a real resources-catalog name
+
+  // --- 1. POST/PUT /change-requests typed fields ----------------------------
+  {
+    const BASE = {
+      projectId: '1', title: 'G1 smoke CR', description: 'typed-field guard fixture',
+      owner: OWNER, impactScope: 'Scope', impactBudget: 1000, impactScheduleDays: 5, priority: 'Medium',
+    };
+    // Baseline count, re-read rather than assumed: the read-back below is what proves
+    // the refusal happened BEFORE create(), and it needs a number to compare against.
+    const before = await req('GET', '/change-requests', { headers: ACTOR });
+    const countBefore = (before.body || []).length;
+    check('GET /api/change-requests -> 200 (the reject table has a baseline to compare)',
+      before.status === 200 && Array.isArray(before.body), `status=${before.status}`);
+
+    // Each value is asserted SEPARATELY because they fail through DIFFERENT guards
+    // (the finite check, the integer check, the enum check) — one green assertion
+    // must not be creditable to another.
+    const REJECTED = [
+      ['impactBudget "50000" (a string)', { impactBudget: '50000' }],
+      ['impactBudget {"a":1}', { impactBudget: { a: 1 } }],
+      ['impactBudget null', { impactBudget: null }],
+      ['impactScheduleDays 1.5 (an integer column)', { impactScheduleDays: 1.5 }],
+      ['impactScheduleDays "7"', { impactScheduleDays: '7' }],
+      ['priority "Nope"', { priority: 'Nope' }],
+    ];
+    for (const [label, patch] of REJECTED) {
+      const bad = await req('POST', '/change-requests', { headers: ACTOR, body: { ...BASE, ...patch } });
+      check(`POST /api/change-requests ${label} -> 400`, bad.status === 400, `status=${bad.status} error=${bad.body?.error ?? ''}`);
+      // THE ASSERTION OF ABSENCE: a validator placed AFTER create() would answer 400
+      // and still leave the corrupt row, which a status-only table cannot see.
+      const after = await req('GET', '/change-requests', { headers: ACTOR });
+      check(`…and no change-request row was created by the refused ${label}`,
+        (after.body || []).length === countBefore, `count=${(after.body || []).length} expected=${countBefore}`);
+    }
+
+    // NON-VACUITY, and the documented behaviour a non-negative guard would delete: a
+    // change request may REDUCE budget and pull a date IN, so both negatives must be
+    // ACCEPTED and stored as the numbers sent. A reject-everything handler fails here.
+    const reduction = await req('POST', '/change-requests', {
+      headers: ACTOR, body: { ...BASE, title: 'G1 smoke scope reduction', impactBudget: -50000, impactScheduleDays: -7 },
+    });
+    check('POST /api/change-requests impactBudget -50000 / impactScheduleDays -7 -> 200 (a CR may REDUCE scope)',
+      reduction.status === 200 && reduction.body?.impactBudget === -50000 && reduction.body?.impactScheduleDays === -7,
+      `status=${reduction.status} impactBudget=${reduction.body?.impactBudget} impactScheduleDays=${reduction.body?.impactScheduleDays}`);
+    const crId = reduction.body?.id;
+
+    if (crId) {
+      // THE PUT HALF. The edit form re-sends every impact field, so a verb hardened on
+      // one side only leaves the corrupt value one PUT away — and this row now has a
+      // stored value the read-back can hold the handler to.
+      for (const [label, patch] of REJECTED) {
+        const bad = await req('PUT', `/change-requests/${crId}`, { headers: ACTOR, body: patch });
+        check(`PUT /api/change-requests ${label} -> 400`, bad.status === 400, `status=${bad.status} error=${bad.body?.error ?? ''}`);
+        const stored = ((await req('GET', '/change-requests', { headers: ACTOR })).body || []).find(cr => cr.id === crId);
+        check(`…and the stored impact figures survive the refused ${label}`,
+          stored?.impactBudget === -50000 && stored?.impactScheduleDays === -7,
+          `impactBudget=${stored?.impactBudget} impactScheduleDays=${stored?.impactScheduleDays}`);
+      }
+
+      // ABSENCE TWIN for the enum: all four declared priorities must still be settable,
+      // or the guard is a permanent refusal of the field.
+      for (const priority of ['Low', 'Medium', 'High', 'Critical']) {
+        const ok = await req('PUT', `/change-requests/${crId}`, { headers: ACTOR, body: { priority } });
+        check(`PUT /api/change-requests priority '${priority}' -> 200 (a declared value is still settable)`,
+          ok.status === 200 && ok.body?.priority === priority, `status=${ok.status} priority=${ok.body?.priority}`);
+      }
+      // …and a whole number of days, positive or negative, still writes.
+      const whole = await req('PUT', `/change-requests/${crId}`, { headers: ACTOR, body: { impactScheduleDays: 12 } });
+      check('PUT /api/change-requests impactScheduleDays 12 -> 200 (a whole number still writes)',
+        whole.status === 200 && whole.body?.impactScheduleDays === 12, `status=${whole.status} days=${whole.body?.impactScheduleDays}`);
+
+      await req('DELETE', `/change-requests/${crId}`, { headers: ACTOR });
+    }
+  }
+
+  // --- 2. POST /requests defaults its notNull `skills` array -----------------
+  // Created FIRST and reused as the childless subject of the DELETE guard below.
+  const bare = await req('POST', '/requests', {
+    headers: ACTOR,
+    body: { name: 'G1 smoke skill-less request', requiredRole: 'Developer', requiredEffort: 8, projectId: '1' },
+  });
+  check('POST /api/requests with NO skills -> 200 (parity: Postgres raised an unmapped 23502)',
+    bare.status === 200, `status=${bare.status} error=${bare.body?.error ?? ''}`);
+  check('…and the stored row carries skills: [] — the key is PRESENT, not merely undefined',
+    Array.isArray(bare.body?.skills) && bare.body.skills.length === 0
+      && Object.prototype.hasOwnProperty.call(bare.body ?? {}, 'skills'),
+    `skills=${JSON.stringify(bare.body?.skills)} hasKey=${Object.prototype.hasOwnProperty.call(bare.body ?? {}, 'skills')}`);
+  // ABSENCE TWIN: a SUPPLIED array must survive, or the default was written after the
+  // spread and every request created with skills is silently blanked.
+  const withSkills = await req('POST', '/requests', {
+    headers: ACTOR,
+    body: { name: 'G1 smoke skilled request', requiredRole: 'Developer', requiredEffort: 8, projectId: '1', skills: ['Java'] },
+  });
+  check('POST /api/requests WITH skills:[\'Java\'] keeps them (the default is not unconditional)',
+    withSkills.status === 200 && JSON.stringify(withSkills.body?.skills) === JSON.stringify(['Java']),
+    `status=${withSkills.status} skills=${JSON.stringify(withSkills.body?.skills)}`);
+  if (withSkills.body?.id) await req('DELETE', `/requests/${withSkills.body.id}`, { headers: ACTOR });
+
+  // --- 3. DELETE /requests + DELETE /assignments referential guards ---------
+  {
+    // A missing id is a 404, never "still referenced" — the two refusals must not be
+    // confused, or a typo'd id reads as a live dependency.
+    const missing = await req('DELETE', '/requests/NO-SUCH-REQUEST', { headers: ACTOR });
+    check('DELETE /api/requests/NO-SUCH-REQUEST -> 404', missing.status === 404, `status=${missing.status}`);
+
+    // THE CASE THAT MUST STILL BE ALLOWED: an unstaffed draft. A blanket 409 would
+    // pass every refusal below while stranding every unstaffed request forever.
+    if (bare.body?.id) {
+      const unstaffed = await req('DELETE', `/requests/${bare.body.id}`, { headers: ACTOR });
+      check('DELETE /api/requests/:id with no assignments and no time entries -> 204',
+        unstaffed.status === 204, `status=${unstaffed.status} error=${unstaffed.body?.error ?? ''}`);
+    }
+
+    const staffed = await req('POST', '/requests', {
+      headers: ACTOR,
+      body: { name: 'G1 smoke staffed request', requiredRole: 'Developer', requiredEffort: 8, projectId: '1', skills: [] },
+    });
+    const requestId = staffed.body?.id;
+    if (check('G1 setup: the staffed fixture request was created', Boolean(requestId), `status=${staffed.status}`)) {
+      const assignment = await req('POST', '/assignments', { headers: ACTOR, body: { requestId, resourceId: '2' } });
+      const assignmentId = assignment.body?.id;
+      // THE PRECONDITION, ASSERTED. A fixture whose assignment carries some OTHER
+      // requestId leaves the guard inert and every 409 below unreachable — the
+      // fixture-lies-about-identity failure this project has already paid for once.
+      check('G1 setup: the assignment really carries requestId === the fixture request id',
+        Boolean(assignmentId) && assignment.body?.requestId === requestId,
+        `assignmentRequestId=${assignment.body?.requestId} requestId=${requestId}`);
+
+      if (assignmentId && assignment.body?.requestId === requestId) {
+        const refused = await req('DELETE', `/requests/${requestId}`, { headers: ACTOR });
+        check('DELETE /api/requests/:id while an assignment references it -> 409',
+          refused.status === 409, `status=${refused.status}`);
+        check('…and the refusal NAMES the blocking collection', /assignment/.test(refused.body?.error ?? ''), `error=${refused.body?.error ?? ''}`);
+        // READ-BACK, both sides: the request must survive AND the assignment must still
+        // point at it. A 409 that removed the row anyway passes a status-only check.
+        const stillThere = ((await req('GET', '/requests', { headers: ACTOR })).body || []).some(r => r.id === requestId);
+        check('…and the request row survives the refusal', stillThere, `found=${stillThere}`);
+        const child = ((await req('GET', '/assignments', { headers: ACTOR })).body || []).find(a => a.id === assignmentId);
+        check('…and the assignment\'s requestId is unchanged (never orphaned)',
+          child?.requestId === requestId, `requestId=${child?.requestId}`);
+
+        // Now log an actual on that assignment: the time entry blocks BOTH deletes.
+        const entry = await req('POST', '/time-entries', {
+          headers: ACTOR, body: { assignmentId, date: '2026-06-17', hours: 4, notes: 'G1 smoke actual' },
+        });
+        const entryId = entry.body?.id;
+        check('G1 setup: a time entry was logged against the fixture assignment',
+          Boolean(entryId) && entry.body?.assignmentId === assignmentId && entry.body?.requestId === requestId,
+          `status=${entry.status} assignmentId=${entry.body?.assignmentId} requestId=${entry.body?.requestId} error=${entry.body?.error ?? ''}`);
+
+        if (entryId) {
+          // THE SIBLING LEAK: DELETE /assignments clears day and month rows but never
+          // time_entries.assignment_id, an equally notNull FK — 204 in memory, 409 on
+          // Postgres, and the orphaned actual can never be approved again.
+          const assigRefused = await req('DELETE', `/assignments/${assignmentId}`, { headers: ACTOR });
+          check('DELETE /api/assignments/:id while a time entry references it -> 409',
+            assigRefused.status === 409, `status=${assigRefused.status}`);
+          check('…and the refusal names the time entries', /time entry/.test(assigRefused.body?.error ?? ''), `error=${assigRefused.body?.error ?? ''}`);
+          const assigStillThere = ((await req('GET', '/assignments', { headers: ACTOR })).body || []).some(a => a.id === assignmentId);
+          check('…and the assignment survives the refusal (the guard runs BEFORE the day/month cleanup)',
+            assigStillThere, `found=${assigStillThere}`);
+
+          const bothRefused = await req('DELETE', `/requests/${requestId}`, { headers: ACTOR });
+          check('DELETE /api/requests/:id names BOTH blocking collections when each has rows',
+            bothRefused.status === 409
+              && /assignment\(s\)/.test(bothRefused.body?.error ?? '')
+              && /time entry\(ies\)/.test(bothRefused.body?.error ?? ''),
+            `status=${bothRefused.status} error=${bothRefused.body?.error ?? ''}`);
+
+          const entryGone = await req('DELETE', `/time-entries/${entryId}`, { headers: ACTOR });
+          check('DELETE /api/time-entries/:id (Draft) -> 204', entryGone.status === 204, `status=${entryGone.status}`);
+        }
+
+        // THE GUARDS MUST RELEASE once the last child is gone, or they are permanent
+        // refusals dressed as referential checks.
+        const assigAllowed = await req('DELETE', `/assignments/${assignmentId}`, { headers: ACTOR });
+        check('DELETE /api/assignments/:id after its last time entry is gone -> 204',
+          assigAllowed.status === 204, `status=${assigAllowed.status} error=${assigAllowed.body?.error ?? ''}`);
+        const reqAllowed = await req('DELETE', `/requests/${requestId}`, { headers: ACTOR });
+        check('DELETE /api/requests/:id after its last child is gone -> 204',
+          reqAllowed.status === 204, `status=${reqAllowed.status} error=${reqAllowed.body?.error ?? ''}`);
+      }
+    }
+  }
+}
+
+/**
  * D task 4 — refuse a `Resource.managerId` assignment that would close a
  * cycle in the ORG CHART (distinct from the ORG TREE cycle guard exercised
  * above — see org-scope.util's module doc for the two axes). Uses
@@ -6754,6 +6957,18 @@ async function main() {
     await checkServerOwnedWrites();
   } catch (err) {
     console.log(`FAIL  server-owned writes flow — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the G1 server-validation flow
+  // never masks or blocks any of the prior section results. Safe anywhere in the
+  // order: it creates and removes its own change request, resource requests,
+  // assignment and time entry, and alters no seed row. Placed BEFORE the
+  // resource-manager-cycle flow, which must stay last.
+  try {
+    await checkServerValidationGuards();
+  } catch (err) {
+    console.log(`FAIL  server validation + referential delete guards — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

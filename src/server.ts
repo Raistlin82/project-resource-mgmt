@@ -84,6 +84,7 @@ import {
   type AllocationMonthDecisionCommit,
 } from './server/allocation-lifecycle.util';
 import {
+  assignmentDeleteBlockError,
   assignmentRetargetError,
   assignmentServerOwnedFieldError,
   auditRegistryGaps,
@@ -92,6 +93,8 @@ import {
   bookingWindowOutsideEmploymentError,
   buildMilestoneCreate,
   buildProjectWrite,
+  buildRequestCreate,
+  changeRequestPriorityError,
   contractHoursPerDayError,
   deleteOrgNodeWrite,
   documentProvenance,
@@ -103,9 +106,11 @@ import {
   percentFieldError,
   referencedChildMessage,
   referentialViolationMessage,
+  requestDeleteBlockError,
   requiredFieldError,
   resourceRequestUpdateError,
   retargetDailyCapacityError,
+  signedIntegerFieldError,
   signedNumberFieldError,
   stripBlankForeignKeys,
   writeResourceOrganizationBinding,
@@ -2371,7 +2376,10 @@ apiRouter.post('/requests', async (req, res) => {
   // Phase G: startDate/endDate must be ISO (they feed schedule conflict detection).
   const dateErr = validateDateFields(body as Record<string, unknown>, ['startDate', 'endDate'], { from: 'startDate', to: 'endDate' });
   if (dateErr) { res.status(400).json({ error: dateErr }); return; }
-  const newReq = { id: newId(), staffedEffort: 0, ...body, status: 'Not Published' } as ResourceRequest;
+  // `skills` is a notNull jsonb column and this was the one create handler that did
+  // not seed its array (every sibling does — see `buildRequestCreate`), so a POST
+  // without it stored a row with no key in dev and 23502'd on Postgres.
+  const newReq = { id: newId(), ...buildRequestCreate(body) } as ResourceRequest;
   const created = await repos.requests.create(newReq);
   res.json(created);
 });
@@ -2400,6 +2408,17 @@ apiRouter.put('/requests/:id', async (req, res) => {
   res.json(updated);
 });
 apiRouter.delete('/requests/:id', async (req, res) => {
+  // READ FIRST, so a missing id is a 404 and never reported as "still referenced" —
+  // the shape DELETE /contracts and DELETE /vendors already use.
+  const existing = await repos.requests.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  // REFERENTIAL INTEGRITY: assignments and time entries both carry a notNull
+  // request_id FK. Deleting through them left the children pointing at nothing, and
+  // an orphaned assignment's Submitted time entries can never be approved again (the
+  // approval path resolves the request) — real worked hours that are never billed.
+  const [assignments, timeEntries] = await Promise.all([repos.assignments.list(), repos.timeEntries.list()]);
+  const blocking = requestDeleteBlockError(req.params.id, { assignments, timeEntries });
+  if (blocking) { res.status(409).json({ error: blocking }); return; }
   const removed = await repos.requests.remove(req.params.id);
   if (!removed) { res.status(404).json({ error: 'Not found' }); return; }
   res.status(204).send();
@@ -2670,6 +2689,13 @@ apiRouter.put('/assignments/:id', async (req, res) => {
 apiRouter.delete('/assignments/:id', async (req, res) => {
   const oldAssig = await repos.assignments.get(req.params.id);
   if (oldAssig === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  // REFERENTIAL INTEGRITY, checked BEFORE any of the destructive work below: this
+  // handler clears the day rows and the month rows (both `no action` FKs) but never
+  // `time_entries.assignment_id`, which is equally notNull — so the same request
+  // orphaned the logged actuals in memory and 409'd under Postgres. The guard sits
+  // above the approval withdrawal and the give-back so a refusal writes nothing.
+  const blockingEntries = assignmentDeleteBlockError(req.params.id, await repos.timeEntries.list());
+  if (blockingEntries) { res.status(409).json({ error: blockingEntries }); return; }
   // Supersede any pending approval BEFORE removing the assignment (outside the
   // res:/req: locks) so a deleted assignment never leaves an orphaned approval.
   await withdrawAllocationApproval(oldAssig.approvalId, 'assignment deleted');
@@ -5022,6 +5048,17 @@ const CHANGE_REQUEST_MUTABLE_FIELDS = [
   'impactBudget', 'impactScheduleDays', 'priority',
 ] as const;
 const CHANGE_REQUEST_PUT_FIELDS = [...CHANGE_REQUEST_MUTABLE_FIELDS, 'status'] as const;
+/**
+ * The typed-field rules BOTH change-request verbs must apply, declared once so they
+ * cannot diverge: `impactBudget` is a signed double, `impactScheduleDays` a signed
+ * INTEGER (schema.ts:726 — the finite check alone still admits 1.5), and `priority`
+ * is a four-value union the allow-list used to forward unchecked.
+ */
+function changeRequestFieldError(body: Record<string, unknown>): string | null {
+  return signedNumberFieldError(body, ['impactBudget'])
+    ?? signedIntegerFieldError(body, ['impactScheduleDays'])
+    ?? changeRequestPriorityError(body['priority']);
+}
 apiRouter.get('/change-requests', async (_req, res) => { res.json(await repos.changeRequests.list()); });
 apiRouter.post('/change-requests', async (req, res) => {
   const body = pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_MUTABLE_FIELDS);
@@ -5029,13 +5066,12 @@ apiRouter.post('/change-requests', async (req, res) => {
   // resources catalog (requestedBy/decidedBy are server-pinned actor ids, not names).
   const personErr = await validatePersonRefs(body as unknown as Record<string, unknown>, ['owner']);
   if (personErr) { res.status(400).json({ error: personErr }); return; }
-  // Both impact figures are notNull double columns that no check ever touched, so
-  // '5000' as a STRING, null or an array landed on them — and an approved uplift is
-  // added straight into the project's effective budget, where a string concatenates
-  // instead of summing. Signed (a CR may reduce scope), but finite and numeric.
-  const numberErr = signedNumberFieldError(
-    body as unknown as Record<string, unknown>, ['impactBudget', 'impactScheduleDays'],
-  );
+  // Both impact figures are notNull columns that no check ever touched, so '5000' as
+  // a STRING, null or an array landed on them — and an approved uplift is added
+  // straight into the project's effective budget, where a string concatenates instead
+  // of summing. Signed (a CR may reduce scope), but finite and numeric — and
+  // `impactScheduleDays` is an integer() column, so it takes the stricter guard.
+  const numberErr = changeRequestFieldError(body as unknown as Record<string, unknown>);
   if (numberErr) { res.status(400).json({ error: numberErr }); return; }
   const projectErr = await validateProjectReference((body as unknown as Record<string, unknown>)['projectId']);
   if (projectErr) { res.status(400).json({ error: projectErr }); return; }
@@ -5056,9 +5092,9 @@ apiRouter.put('/change-requests/:id', async (req, res) => {
   // resources catalog. Omitted/empty owner passes (partial edits are not blocked).
   const personErr = await validatePersonRefs(body as unknown as Record<string, unknown>, ['owner']);
   if (personErr) { res.status(400).json({ error: personErr }); return; }
-  const numberErr = signedNumberFieldError(
-    body as unknown as Record<string, unknown>, ['impactBudget', 'impactScheduleDays'],
-  );
+  // The SAME check as the POST: the edit form re-sends every impact field, so a verb
+  // hardened on one side only leaves the corrupt value one PUT away.
+  const numberErr = changeRequestFieldError(body as unknown as Record<string, unknown>);
   if (numberErr) { res.status(400).json({ error: numberErr }); return; }
   const projectErr = await validateProjectReference((body as unknown as Record<string, unknown>)['projectId']);
   if (projectErr) { res.status(400).json({ error: projectErr }); return; }

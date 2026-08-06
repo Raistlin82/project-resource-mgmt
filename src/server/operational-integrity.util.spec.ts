@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { Assignment, Order, ResourceRequest } from '../app/services/api.service';
 import { createCriticalSectionRunner } from './critical-section.util';
 import {
+  CHANGE_REQUEST_PRIORITIES,
   MONEY_DEFINING_AUDIT_SEGMENTS,
+  assignmentDeleteBlockError,
   assignmentRetargetError,
   assignmentServerOwnedFieldError,
   auditRegistryGaps,
@@ -10,6 +12,8 @@ import {
   bookingOutsideEmploymentError,
   buildMilestoneCreate,
   buildProjectWrite,
+  buildRequestCreate,
+  changeRequestPriorityError,
   contractHoursPerDayError,
   deleteOrgNodeWrite,
   documentProvenance,
@@ -21,9 +25,11 @@ import {
   percentFieldError,
   referencedChildMessage,
   referentialViolationMessage,
+  requestDeleteBlockError,
   requiredFieldError,
   resourceRequestUpdateError,
   retargetDailyCapacityError,
+  signedIntegerFieldError,
   signedNumberFieldError,
   writeResourceOrganizationBinding,
   type OrgBoundResourceRow,
@@ -371,6 +377,66 @@ describe('bounded numeric fields', () => {
     expect(signedNumberFieldError({ impactBudget: 0, impactScheduleDays: 14 }, ['impactBudget', 'impactScheduleDays']))
       .toBeNull();
   });
+
+  it('requires the schedule impact to be a WHOLE number of days, sign included', () => {
+    // `impact_schedule_days` is an integer() column, and the finite check above still
+    // admits 1.5 — which the in-memory adapter stores verbatim while Postgres does not.
+    expect(signedIntegerFieldError({ impactScheduleDays: 1.5 }, ['impactScheduleDays']))
+      .toContain('whole number of days');
+    expect(signedIntegerFieldError({ impactScheduleDays: '7' }, ['impactScheduleDays'])).not.toBeNull();
+    expect(signedIntegerFieldError({ impactScheduleDays: null }, ['impactScheduleDays'])).not.toBeNull();
+    expect(signedIntegerFieldError({ impactScheduleDays: Number.NaN }, ['impactScheduleDays'])).not.toBeNull();
+    // ABSENCE TWIN: a change request may pull a date IN, so a NEGATIVE whole number is
+    // legal, as is 0 and an untouched field — a stricter guard would delete the
+    // documented ability to book a schedule reduction.
+    expect(signedIntegerFieldError({ impactScheduleDays: -7 }, ['impactScheduleDays'])).toBeNull();
+    expect(signedIntegerFieldError({ impactScheduleDays: 0 }, ['impactScheduleDays'])).toBeNull();
+    expect(signedIntegerFieldError({}, ['impactScheduleDays'])).toBeNull();
+  });
+
+  it('confines change-request priority to its declared union', () => {
+    // `priority: "Nope"` was stored verbatim against a 'Low'|'Medium'|'High'|'Critical'
+    // union, and the list chip keys its colour class off those four values.
+    expect(changeRequestPriorityError('Nope')).toContain('priority must be one of');
+    expect(changeRequestPriorityError('low')).not.toBeNull(); // case-sensitive, like every sibling catalog check
+    expect(changeRequestPriorityError(3)).not.toBeNull();
+    expect(changeRequestPriorityError(null)).not.toBeNull();
+    // ABSENCE TWIN: all four declared values must still pass, and an omitted priority
+    // is an ordinary partial edit — a guard that refused everything would pass the
+    // rejections above while making the field unsettable.
+    for (const priority of CHANGE_REQUEST_PRIORITIES) {
+      expect(changeRequestPriorityError(priority)).toBeNull();
+    }
+    expect(changeRequestPriorityError(undefined)).toBeNull();
+  });
+});
+
+describe('request create defaults', () => {
+  it('seeds the notNull skills array when the body omits it', () => {
+    // RED before: the handler spread the body over `{id, staffedEffort}` only, so the
+    // stored row had NO skills key — `scoreResource` throws "request.skills is not
+    // iterable" on it, and Postgres raised an unmapped 23502.
+    const built = buildRequestCreate({ name: 'Backend engineer', requiredRole: 'Developer', requiredEffort: 80 });
+    expect(built.skills).toEqual([]);
+    // Not `toEqual({skills: undefined})`-shaped: the key must genuinely be present,
+    // since an own key holding undefined is what reaches the adapter as a missing column.
+    expect(Object.prototype.hasOwnProperty.call(built, 'skills')).toBe(true);
+  });
+
+  it('leaves a supplied skills array authoritative', () => {
+    // ASSERTION OF ABSENCE: a default written AFTER the spread would blank every
+    // request created with skills, and would pass the case above.
+    expect(buildRequestCreate({ name: 'R', skills: ['Java', 'SAP CAP'] }).skills).toEqual(['Java', 'SAP CAP']);
+    expect(buildRequestCreate({ name: 'R', skills: [] }).skills).toEqual([]);
+  });
+
+  it('keeps status server-pinned and staffedEffort at zero (the spread ordering)', () => {
+    // `status` is pinned AFTER the body, so a client cannot create an already-Published
+    // request; `staffedEffort` is a derived aggregate that starts at 0.
+    const built = buildRequestCreate({ name: 'R', status: 'Published' });
+    expect(built.status).toBe('Not Published');
+    expect(built.staffedEffort).toBe(0);
+  });
 });
 
 describe('referential delete guards', () => {
@@ -394,6 +460,52 @@ describe('referential delete guards', () => {
       { collection: 'billing condition(s)', count: 0 },
     ])).toBeNull();
     expect(referencedChildMessage('contract', [])).toBeNull();
+  });
+
+  it('refuses a request delete while an assignment or a time entry names it', () => {
+    // THE FIXTURE IDENTITY IS THE PRECONDITION, asserted rather than assumed: a child
+    // row carrying some OTHER requestId leaves this guard inert and every expectation
+    // below green — the exact fixture-lies-about-identity failure this project paid for.
+    const ownAssignment = { requestId: 'REQ1' };
+    const ownEntry = { requestId: 'REQ1' };
+    expect(ownAssignment.requestId).toBe('REQ1');
+    expect(ownEntry.requestId).toBe('REQ1');
+
+    const both = requestDeleteBlockError('REQ1', { assignments: [ownAssignment], timeEntries: [ownEntry, ownEntry] });
+    expect(both).toContain('1 assignment(s)');
+    expect(both).toContain('2 time entry(ies)');
+
+    // Each collection blocks ON ITS OWN, and the message names only the one that does.
+    const assignmentsOnly = requestDeleteBlockError('REQ1', { assignments: [ownAssignment], timeEntries: [] });
+    expect(assignmentsOnly).toContain('assignment(s)');
+    expect(assignmentsOnly).not.toContain('time entry(ies)');
+    const entriesOnly = requestDeleteBlockError('REQ1', { assignments: [], timeEntries: [ownEntry] });
+    expect(entriesOnly).toContain('time entry(ies)');
+    expect(entriesOnly).not.toContain('assignment(s)');
+  });
+
+  it('still deletes an unstaffed request, and ignores another request\'s children', () => {
+    // ABSENCE TWIN, both halves. (1) A draft nobody staffed must still delete —
+    // a blanket 409 would pass every expectation above while stranding it. (2) The
+    // filter must key on THIS request's id: children of REQ2 are not a reason to
+    // refuse REQ1, which is what a guard that merely counted rows would get wrong.
+    expect(requestDeleteBlockError('REQ1', { assignments: [], timeEntries: [] })).toBeNull();
+    expect(requestDeleteBlockError('REQ1', {
+      assignments: [{ requestId: 'REQ2' }],
+      timeEntries: [{ requestId: 'REQ2' }],
+    })).toBeNull();
+  });
+
+  it('refuses an assignment delete while a time entry names it, and allows one with none', () => {
+    // The sibling leak: the handler clears day and month rows but never time entries,
+    // whose assignment_id is an equally notNull FK.
+    const blocked = assignmentDeleteBlockError('A1', [{ assignmentId: 'A1' }, { assignmentId: 'A1' }]);
+    expect(blocked).toContain('2 time entry(ies)');
+    // ABSENCE TWIN: an assignment with no logged actuals must still delete (the smoke
+    // suite's own throwaway assignments depend on it), and another assignment's entries
+    // are not a reason to refuse this one.
+    expect(assignmentDeleteBlockError('A1', [])).toBeNull();
+    expect(assignmentDeleteBlockError('A1', [{ assignmentId: 'A2' }])).toBeNull();
   });
 });
 
