@@ -242,9 +242,13 @@ import { forkJoin, of } from 'rxjs';
             }
 
             <div class="space-y-4">
-              @for (exp of profile()?.externalExperience; track exp.projectName) {
+              <!-- track $index, NOT exp.projectName: the same project name can legitimately
+                   appear twice (two stints at different companies), and a duplicate track
+                   key is both an Angular @for hazard and what let removeExtExp() delete by
+                   name and wipe the sibling the user never touched. -->
+              @for (exp of profile()?.externalExperience; track $index; let i = $index) {
                 <div class="command-card-muted p-4 relative group">
-                  <button type="button" (click)="removeExtExp(exp)" [attr.aria-label]="'Remove ' + exp.projectName" [attr.title]="'Remove ' + exp.projectName" class="absolute top-4 right-4 text-ink-muted hover:text-critical-text opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100">
+                  <button type="button" (click)="removeExtExp(i)" [attr.aria-label]="'Remove ' + exp.projectName + ' at ' + exp.company" [attr.title]="'Remove ' + exp.projectName + ' at ' + exp.company" class="absolute top-4 right-4 text-ink-muted hover:text-critical-text opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100">
                     <mat-icon>delete</mat-icon>
                   </button>
                   <h4 class="font-medium text-[var(--cc-ink)]">{{ exp.projectName }}</h4>
@@ -521,12 +525,23 @@ export class MyProfileComponent {
       });
     }
   }
-  removeExtExp(exp: { projectName: string }) {
-    if (this.profile()) {
-      const currentProfile = this.profile()!;
-      const updatedExp = currentProfile.externalExperience.filter(e => e.projectName !== exp.projectName);
-      this.api.updateMyProfile({ externalExperience: updatedExp }).subscribe(() => this.dataRes.reload());
-    }
+  /**
+   * Remove one external-experience entry BY POSITION.
+   *
+   * It used to filter on `projectName`, which is not a key: two real stints can
+   * share a project name at different companies ('Atlas' at Accenture in 2019 and
+   * at Deloitte in 2022). Deleting either card wiped BOTH, and since the PUT sends
+   * the whole array there is nothing on the server to restore the untouched one
+   * from. There is no id on these entries, so the index — paired with `track $index`
+   * in the template so the rendered order is the stored order — is the key.
+   */
+  removeExtExp(index: number) {
+    const currentProfile = this.profile();
+    if (!currentProfile) return;
+    const current = currentProfile.externalExperience ?? [];
+    if (!Number.isInteger(index) || index < 0 || index >= current.length) return;
+    const updatedExp = current.filter((_, i) => i !== index);
+    this.api.updateMyProfile({ externalExperience: updatedExp }).subscribe(() => this.dataRes.reload());
   }
 
   // --- File Uploads ---
