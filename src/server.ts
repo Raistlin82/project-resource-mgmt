@@ -20,18 +20,21 @@ import { searchPage, clampSearchPage } from './app/services/search.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, plannedCostSchedule, type FinanceData } from './app/services/finance.util';
 import { negotiatedRateCurrencyError, sellRateFor } from './app/services/sell-rate.util';
 import { pickRateCard } from './app/services/rate-card.util';
-import { billingPlanValidationError } from './app/services/billing-validation.util';
+import { billingPlanValidationError, customerFacingBillingAmount } from './app/services/billing-validation.util';
 import type { FxRate, RateCard } from './app/services/api.service';
 import { isResourceKind, RESOURCE_KINDS, kindOf, dailyCapFor } from './app/services/resource-kind.util';
 import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, scopeOf, accountableApproversOf, nodeManagersAbove, isTerminatedAsOf, type OrgLevel, type OrgNode } from './app/services/org-scope.util';
 import { maxIdSeq } from './server/id-seq.util';
 import { isUuidV4, newEntityId } from './server/entity-id.util';
 import { isFkViolation } from './server/fk-violation.util';
+import { createCriticalSectionRunner } from './server/critical-section.util';
+import { clientCreatableApprovalKindError, crossStepSoDError, milestoneApprovalPatch } from './server/approval-policy.util';
 import {
   applicationRoles,
   authorizeRead,
   hasAnyAllowedRole,
   isPublicReadPath,
+  normalizeApiPath,
   primaryRole,
 } from './server/authz-policy.util';
 import { resourceIdFromOidcClaims } from './app/services/access-policy.util';
@@ -42,6 +45,7 @@ import {
   hasGlobalTimeEntryCollectionAccess,
   pinnedChangeRequestCreateFields,
   changeRequestMutationError,
+  changeRequestDeleteError,
   type GlobalTimeEntryAction,
   type TimeEntryPolicyContext,
 } from './server/route-policy.util';
@@ -51,6 +55,11 @@ import {
   generateBillingInvoice as generateBillingInvoiceWrite,
   markBillingInvoicePaid as markBillingInvoicePaidWrite,
   billingPlanStatusTransitionError,
+  billingPlanInvoicedFieldLockError,
+  invoicedBillingItemDeleteError,
+  issuedOrderDeleteError,
+  issuedOrderFieldLockError,
+  billingPlanCreateStatusError,
   isValidCommercialIdempotencyKey,
   type BillingInvoiceResult,
   type BillingPaymentResult,
@@ -217,17 +226,13 @@ function clampUtil(v: number): number {
  * different keys still run in parallel. Sufficient for the single-process Node
  * server; a multi-process deployment would additionally need a DB-level lock.
  */
-const criticalSections = new Map<string, Promise<unknown>>();
-function withLock<R>(key: string, fn: () => Promise<R>): Promise<R> {
-  const prev = criticalSections.get(key) ?? Promise.resolve();
-  // Run `fn` only after any in-flight work on this key settles (success OR
-  // failure), so one rejected section never wedges the key.
-  const run = prev.then(fn, fn);
-  // The stored tail must never reject (an unhandled rejection here would crash
-  // the process and the next waiter would inherit it); swallow settlement state.
-  criticalSections.set(key, run.then(() => undefined, () => undefined));
-  return run;
-}
+// The implementation lives in `./server/critical-section.util` so it can be
+// unit-tested (this module cannot be imported by Vitest — it instantiates the
+// Angular SSR engine at load time). The registry there EVICTS a key once its own
+// work has settled: keys are per-entity (`res:<id>`, `approval:<id>`, …) over a
+// UUID id space, so the previous never-evicted Map grew for the lifetime of the
+// process.
+const withLock = createCriticalSectionRunner();
 
 /**
  * S6: minimal in-memory fixed-window rate limiter (no external dependency).
@@ -371,10 +376,18 @@ const auditRepoBySegment = new Map<string, AuditReadable>([
 async function findAuditEntity(path: string): Promise<Entity | undefined> {
   const segments = path.split('/').filter(Boolean);
   if (segments.length < 2) return undefined;
-  if (segments[0] === 'assignments' && segments[2] === 'months' && segments.length >= 4) {
+  // The COLLECTION segments are matched case-insensitively, for the same reason
+  // roleGate normalises its path: Express routes case-insensitively, so
+  // `PUT /api/Resources/<id>` reaches the handler, and this map is lowercase-keyed.
+  // The lookup used to miss, so the mutation was audited with `changedKeys: []` —
+  // an audit entry that records that something happened but not what.
+  // segments[1] and segments[3] are NOT lowercased: they are an entity id and a
+  // month key, and ids here are case-sensitive (UUIDs, and the TE/AL/AR/OB prefixes).
+  const collection = segments[0].toLowerCase();
+  if (collection === 'assignments' && segments[2]?.toLowerCase() === 'months' && segments.length >= 4) {
     return repos.assignmentMonths.get(monthRowId(segments[1], segments[3]));
   }
-  const repo = auditRepoBySegment.get(segments[0]);
+  const repo = auditRepoBySegment.get(collection);
   return repo ? repo.get(segments[1]) : undefined;
 }
 
@@ -625,7 +638,13 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
     return;
   }
 
-  const path = req.path;
+  // NORMALISED, never `req.path` raw. Express routes case-insensitively (this app
+  // does not enable `case sensitive routing`), while every literal in READ_RULES
+  // and in the mutation `rules` table below is lowercase — so `GET /api/Audit-Logs`
+  // used to reach the handler with NO rule matching it, handing the audit trail to
+  // an `employee`, and `POST /api/Resources` with no bearer at all created a
+  // resource with client-chosen rates. See `normalizeApiPath`.
+  const path = normalizeApiPath(req.path);
   const role = trustedRole(req);
   const roles = trustedRoles(req);
 
@@ -3982,13 +4001,6 @@ apiRouter.put('/time-entries/:id', async (req, res) => {
     sendGlobalTimeEntryDenied(res, policy, 'write');
     return;
   }
-  // There is no explicit reopen/correction workflow. Treat the accounting input
-  // as immutable once approved rather than allowing a status-omitting PUT to
-  // rewrite hours/FKs while retaining the approval.
-  if (existing.status === 'Approved') {
-    res.status(409).json({ error: 'Approved time entries are immutable; an explicit correction workflow is required' });
-    return;
-  }
   // Clients cannot rewrite ownership/FKs directly. `assignmentId` is the only
   // accepted link; the coherent request/resource/project chain is derived below,
   // and both the previous and resulting owner/project must pass object scope.
@@ -4001,48 +4013,71 @@ apiRouter.put('/time-entries/:id', async (req, res) => {
     res.status(400).json({ error: 'date must be an ISO date string' });
     return;
   }
-  // B-TIME-ENTRY: enforce the allowed status-transition whitelist. A status that
-  // is present must be a permitted move from the current status (a no-op
-  // transition is allowed); any other move (e.g. Approved->Draft, or jumping
-  // straight to Approved from Draft) is rejected.
-  if (body.status !== undefined && !isAllowedTimeEntryTransition(existing.status, body.status)) {
-    res.status(400).json({ error: `Illegal time-entry transition: ${existing.status} -> ${body.status}` });
-    return;
-  }
-  const deciding = (body.status === 'Approved' || body.status === 'Rejected') && body.status !== existing.status;
-  if (deciding && Object.keys(body).some(key => key !== 'status')) {
-    res.status(409).json({ error: 'A time-entry decision cannot modify hours, assignment, date, or notes in the same request' });
-    return;
-  }
 
-  const assignmentId = body.assignmentId ?? existing.assignmentId;
-  const assignment = await repos.assignments.get(assignmentId);
-  const request = assignment ? await repos.requests.get(assignment.requestId) : undefined;
-  const links = assignment && request ? deriveTimeEntryLinks(assignment, request) : undefined;
-  if (!links) {
-    res.status(400).json({ error: 'assignmentId must resolve to an assignment with a project-linked request' });
-    return;
-  }
-  const policyAction: GlobalTimeEntryAction = deciding ? 'decide' : 'write';
-  if (!canAccessGlobalTimeEntry(policy, existing, policyAction)
-      || !canAccessGlobalTimeEntry(policy, links, policyAction)) {
-    sendGlobalTimeEntryDenied(res, policy, policyAction);
-    return;
-  }
+  // B-CONCURRENCY: the immutability guard, the transition whitelist and the write
+  // must see ONE state. They used to run against the pre-handler snapshot with no
+  // lock at all, so two concurrent PUTs on the same entry — one approving it, one
+  // rewriting its hours — both read 'Submitted', both passed, and the hours write
+  // landed AFTER the approval: an Approved entry with rewritten hours, which is
+  // exactly what "Approved time entries are immutable" exists to prevent, and it
+  // feeds accrued T&M. Re-read INSIDE the section and decide from `fresh`.
+  //
+  // `res` is never touched inside the lock (a denial is returned as a marker and
+  // sent after it is released), so the critical section holds no HTTP state.
+  const result = await withLock(`time-entry:${req.params.id}`, async (): Promise<
+    { denied: GlobalTimeEntryAction } | { status: number; body: unknown }
+  > => {
+    const fresh = await repos.timeEntries.get(req.params.id);
+    if (fresh === undefined) return { status: 404, body: { error: 'Not found' } };
+    // There is no explicit reopen/correction workflow. Treat the accounting input
+    // as immutable once approved rather than allowing a status-omitting PUT to
+    // rewrite hours/FKs while retaining the approval.
+    if (fresh.status === 'Approved') {
+      return { status: 409, body: { error: 'Approved time entries are immutable; an explicit correction workflow is required' } };
+    }
+    // B-TIME-ENTRY: enforce the allowed status-transition whitelist. A status that
+    // is present must be a permitted move from the current status (a no-op
+    // transition is allowed); any other move (e.g. Approved->Draft, or jumping
+    // straight to Approved from Draft) is rejected.
+    if (body.status !== undefined && !isAllowedTimeEntryTransition(fresh.status, body.status)) {
+      return { status: 400, body: { error: `Illegal time-entry transition: ${fresh.status} -> ${body.status}` } };
+    }
+    const deciding = (body.status === 'Approved' || body.status === 'Rejected') && body.status !== fresh.status;
+    if (deciding && Object.keys(body).some(key => key !== 'status')) {
+      return { status: 409, body: { error: 'A time-entry decision cannot modify hours, assignment, date, or notes in the same request' } };
+    }
 
-  const patch: Partial<TimeEntry> = { ...body, ...links };
-  if (body.status === 'Approved') {
-    // SEGREGATION OF DUTIES: the approver is the TRUSTED actor (never a
-    // client-supplied approvedBy) and must differ from the entry's owner
-    // (its resourceId) so a resource cannot approve their own time and inflate
-    // accrued T&M. The actor is a USER identity, so resolve it to the user's
-    // RESOURCE id before comparing — comparing the raw username/sub against a
-    // resourceId is always false under real JWT auth and silently disables SoD.
-    patch.approvedBy = actorId(req);
-    patch.approvedAt = new Date().toISOString();
+    const assignmentId = body.assignmentId ?? fresh.assignmentId;
+    const assignment = await repos.assignments.get(assignmentId);
+    const request = assignment ? await repos.requests.get(assignment.requestId) : undefined;
+    const links = assignment && request ? deriveTimeEntryLinks(assignment, request) : undefined;
+    if (!links) {
+      return { status: 400, body: { error: 'assignmentId must resolve to an assignment with a project-linked request' } };
+    }
+    const policyAction: GlobalTimeEntryAction = deciding ? 'decide' : 'write';
+    if (!canAccessGlobalTimeEntry(policy, fresh, policyAction)
+        || !canAccessGlobalTimeEntry(policy, links, policyAction)) {
+      return { denied: policyAction };
+    }
+
+    const patch: Partial<TimeEntry> = { ...body, ...links };
+    if (body.status === 'Approved') {
+      // SEGREGATION OF DUTIES: the approver is the TRUSTED actor (never a
+      // client-supplied approvedBy) and must differ from the entry's owner
+      // (its resourceId) so a resource cannot approve their own time and inflate
+      // accrued T&M. The actor is a USER identity, so resolve it to the user's
+      // RESOURCE id before comparing — comparing the raw username/sub against a
+      // resourceId is always false under real JWT auth and silently disables SoD.
+      patch.approvedBy = actorId(req);
+      patch.approvedAt = new Date().toISOString();
+    }
+    return { status: 200, body: await repos.timeEntries.update(req.params.id, patch) };
+  });
+  if ('denied' in result) {
+    sendGlobalTimeEntryDenied(res, policy, result.denied);
+    return;
   }
-  const updated = await repos.timeEntries.update(req.params.id, patch);
-  res.json(updated);
+  res.status(result.status).json(result.body);
 });
 apiRouter.delete('/time-entries/:id', async (req, res) => {
   const existing = await repos.timeEntries.get(req.params.id);
@@ -4528,7 +4563,13 @@ crud(apiRouter, 'work-packages', repos.workPackages, ['projectId', 'name', 'star
     ?? await validatePersonRefs(data, ['assignee'], ['assignee']));
 
 interface MilestoneEntry { id: string; projectId: string; name: string; date: string; status: 'Pending' | 'Achieved'; approvedBy?: string; approvedAt?: string }
-const MILESTONE_FIELDS = ['projectId', 'name', 'date', 'status', 'approvedBy', 'approvedAt'] as const;
+// `approvedBy` / `approvedAt` are deliberately ABSENT from this allow-list: they
+// are the approval record on a document that RELEASES MONEY (reaching 'Achieved'
+// flips every linked fixed-price billing condition to 'Ready', i.e. billable), so
+// they are pinned to the verified principal by `milestoneApprovalPatch` on the
+// transition itself. While they sat here, any actor allowed to write a milestone
+// could name someone else as the approver and back-date the approval.
+const MILESTONE_FIELDS = ['projectId', 'name', 'date', 'status'] as const;
 apiRouter.get('/milestones', async (_req, res) => { res.json(await repos.milestones.list()); });
 apiRouter.post('/milestones', async (req, res) => {
   const body = pick<MilestoneEntry>(req.body, MILESTONE_FIELDS);
@@ -4546,15 +4587,31 @@ apiRouter.put('/milestones/:id', async (req, res) => {
   // Phase G: validate the milestone `date` when supplied (ISO).
   const dateErr = validateDateFields(body as Record<string, unknown>, ['date']);
   if (dateErr) { res.status(400).json({ error: dateErr }); return; }
-  const updated = await repos.milestones.update(req.params.id, body) as MilestoneEntry;
-  // MILESTONE TRIGGER (SAL): when a milestone first transitions to 'Achieved',
-  // make its fixed-price billing item billable by flipping every linked
-  // BillingPlanItem still in 'Planned' to 'Ready'.
+  // SERVER-PINNED APPROVAL RECORD, never the body's (see MILESTONE_FIELDS).
+  const approvalPatch = milestoneApprovalPatch(
+    previousStatus,
+    (body.status ?? previousStatus) as string,
+    actorId(req),
+    new Date().toISOString(),
+  );
+  const updated = await repos.milestones.update(req.params.id, { ...body, ...approvalPatch }) as MilestoneEntry;
+  // MILESTONE TRIGGER (SAL): a milestone in 'Achieved' makes its fixed-price
+  // billing item billable — every linked BillingPlanItem still in 'Planned' is
+  // flipped to 'Ready'.
   // B-CONCURRENCY: serialize per billing item against the billing-plan-item PUT
   // (which writes the whole merged item) so this targeted status flip and a
   // concurrent PUT can't clobber each other. Re-read INSIDE the lock and re-check
   // the 'Planned' precondition against the freshest state.
-  if (updated.status === 'Achieved' && previousStatus !== 'Achieved') {
+  //
+  // IDEMPOTENT BY CURRENT STATE, not by transition. This used to require
+  // `previousStatus !== 'Achieved'`, so the flip happened on exactly one request:
+  // if that response was lost, or the process died part-way through the loop, the
+  // client's retry found the milestone ALREADY 'Achieved', skipped the trigger,
+  // and left the condition stranded in 'Planned' with no product path to invoice
+  // it. Firing on the current state is safe because the per-item re-read inside
+  // the lock only touches an item still in 'Planned' — for Ready/Blocked/Invoiced/
+  // Paid it is a no-op.
+  if (updated.status === 'Achieved') {
     for (const bp of await repos.billingPlanItems.list()) {
       if (bp.milestoneId !== updated.id) continue;
       await withLock(`billing:${bp.id}`, async () => {
@@ -4671,45 +4728,62 @@ apiRouter.post('/change-requests', async (req, res) => {
   res.json(await repos.changeRequests.create(item));
 });
 apiRouter.put('/change-requests/:id', async (req, res) => {
-  const stored = await repos.changeRequests.get(req.params.id);
-  if (stored === undefined) { res.status(404).json({ error: 'Not found' }); return; }
-  // The api.service `ChangeRequest` interface predates the server-only
-  // `createdBy` SoD field; the persisted row carries it (schema + create pin), so
-  // read it through the richer server-side `ChangeRequestEntry` view.
-  const existing = stored as unknown as ChangeRequestEntry;
   const body = pick<ChangeRequestEntry>(req.body, CHANGE_REQUEST_PUT_FIELDS);
   // REFERENCE-DATA INTEGRITY (Phase D): validate any supplied `owner` against the
   // resources catalog. Omitted/empty owner passes (partial edits are not blocked).
   const personErr = await validatePersonRefs(body as unknown as Record<string, unknown>, ['owner']);
   if (personErr) { res.status(400).json({ error: personErr }); return; }
   const decider = actorId(req);
-  const creator = existing.createdBy ?? existing.requestedBy;
+  const role = trustedRole(req);
   const changesDomainFields = CHANGE_REQUEST_MUTABLE_FIELDS.some(field => body[field] !== undefined);
-  const policyError = changeRequestMutationError({
-    currentStatus: existing.status,
-    requestedStatus: body.status,
-    role: trustedRole(req),
-    actorId: decider,
-    creatorId: creator,
-    changesDomainFields,
+
+  // B-CONCURRENCY: this handler writes a FULL merged object built from a snapshot
+  // it read before its own policy checks, with no lock — so a concurrent
+  // Draft->Submitted transition was silently reverted to Draft by an edit that had
+  // read the pre-transition row, and the state machine in
+  // `changeRequestMutationError` was evaluated against a status that had already
+  // moved. Read, decide and write inside one section.
+  const result = await withLock(`change-request:${req.params.id}`, async (): Promise<{ status: number; body: unknown }> => {
+    const stored = await repos.changeRequests.get(req.params.id);
+    if (stored === undefined) return { status: 404, body: { error: 'Not found' } };
+    // The api.service `ChangeRequest` interface predates the server-only
+    // `createdBy` SoD field; the persisted row carries it (schema + create pin), so
+    // read it through the richer server-side `ChangeRequestEntry` view.
+    const existing = stored as unknown as ChangeRequestEntry;
+    const creator = existing.createdBy ?? existing.requestedBy;
+    const policyError = changeRequestMutationError({
+      currentStatus: existing.status,
+      requestedStatus: body.status,
+      role,
+      actorId: decider,
+      creatorId: creator,
+      changesDomainFields,
+    });
+    if (policyError) return { status: policyError.status, body: { error: policyError.error } };
+    const merged = { ...existing, ...body } as ChangeRequestEntry;
+    // CR DECISION: when a CR reaches a terminal decision, stamp who/when (server
+    // side, from the verified actor) if not already recorded. decidedBy/decidedAt
+    // are not client-settable fields, so they cannot be forged via the body.
+    const transitioned = body.status !== undefined && body.status !== existing.status;
+    if (transitioned && (merged.status === 'Approved' || merged.status === 'Rejected')) {
+      merged.decidedAt = new Date().toISOString();
+      merged.decidedBy = decider;
+    }
+    return { status: 200, body: await repos.changeRequests.update(req.params.id, merged) };
   });
-  if (policyError) {
-    res.status(policyError.status).json({ error: policyError.error });
-    return;
-  }
-  const merged = { ...existing, ...body } as ChangeRequestEntry;
-  // CR DECISION: when a CR reaches a terminal decision, stamp who/when (server
-  // side, from the verified actor) if not already recorded. decidedBy/decidedAt
-  // are not client-settable fields, so they cannot be forged via the body.
-  const transitioned = body.status !== undefined && body.status !== existing.status;
-  if (transitioned && (merged.status === 'Approved' || merged.status === 'Rejected')) {
-    merged.decidedAt = new Date().toISOString();
-    merged.decidedBy = decider;
-  }
-  const updated = await repos.changeRequests.update(req.params.id, merged);
-  res.json(updated);
+  res.status(result.status).json(result.body);
 });
 apiRouter.delete('/change-requests/:id', async (req, res) => {
+  // STATE GUARD, or every rule in `changeRequestMutationError` is bypassable by
+  // deleting the row instead of transitioning it: a pm who cannot move an
+  // Approved CR (terminal transitions need delivery-executive/admin, and SoD
+  // forbids the creator deciding) could otherwise erase the delivery-executive's
+  // decision, and with it the CR's contribution to the project's effective
+  // budget. The handler also had no read at all, so it 204'd on a missing id.
+  const existing = await repos.changeRequests.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const deleteError = changeRequestDeleteError(existing.status);
+  if (deleteError) { res.status(deleteError.status).json({ error: deleteError.error }); return; }
   await repos.changeRequests.remove(req.params.id);
   res.status(204).send();
 });
@@ -4810,6 +4884,8 @@ apiRouter.delete('/contracts/:id', async (req, res) => {
 });
 
 const ORDER_FIELDS = ['contractId', 'type', 'partnerId', 'amount', 'currency', 'status', 'orderDate'] as const;
+/** The order lifecycle. Picked from the body, so it must be validated against this. */
+const ORDER_STATUSES: readonly Order['status'][] = ['Open', 'Confirmed', 'Invoiced', 'Paid'];
 
 /** Validate an order's contract FK and the Purchase/Customer partner rules. Returns an error string or null. */
 async function validateOrder(body: Partial<OrderEntry>, current?: OrderEntry): Promise<string | null> {
@@ -4860,11 +4936,27 @@ apiRouter.put('/orders/:id', async (req, res) => {
   const body = pick<OrderEntry>(req.body, ORDER_FIELDS);
   const bad = findInvalidNumericField(body, ['amount']);
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
+  // `status` is picked from the body but was never checked against the enum, so any
+  // string landed on the column — including one no consumer matches, which silently
+  // drops the order out of every status-keyed rollup.
+  if (body.status !== undefined && !(ORDER_STATUSES as readonly string[]).includes(body.status)) {
+    res.status(400).json({ error: `status must be one of: ${ORDER_STATUSES.join(', ')}` });
+    return;
+  }
   const fkError = await validateOrder(body, existing as unknown as OrderEntry);
   if (fkError) { res.status(400).json({ error: fkError }); return; }
   // Phase G: orderDate must be ISO when supplied.
   const dateErr = validateDateFields(body as Record<string, unknown>, ['orderDate']);
   if (dateErr) { res.status(400).json({ error: dateErr }); return; }
+  // AN ISSUED DOCUMENT'S MONEY IS NOT CLIENT-SETTABLE. Checked here for a fast
+  // 409, and AGAIN inside the transaction below against the freshest row, because
+  // that is where the write happens — a guard that only runs before the
+  // read-modify-write can be raced by a concurrent invoice assignment.
+  const issuedErr = issuedOrderFieldLockError(
+    existing as unknown as Pick<Order, 'invoiceNumber' | 'status'> & Record<string, unknown>,
+    body as Record<string, unknown>,
+  );
+  if (issuedErr) { res.status(409).json({ error: issuedErr }); return; }
   // INVOICE NUMBERING: assign a sequential number/date on transition to
   // 'Invoiced'. invoiceNumber/invoiceDate are not in ORDER_FIELDS, so the
   // client can never set them; they are strictly server-assigned.
@@ -4872,15 +4964,33 @@ apiRouter.put('/orders/:id', async (req, res) => {
   // transaction. A second worker sees the first worker's committed number and
   // therefore keeps it instead of allocating another.
   const invoiceDate = new Date().toISOString();
-  const updated = await invoiceNumbers.run(invoiceDate, async (transactionRepos, invoiceNumber) => {
+  const result = await invoiceNumbers.run(invoiceDate, async (transactionRepos, invoiceNumber) => {
     const current = (await transactionRepos.orders.get(req.params.id)) as OrderEntry | undefined;
-    const merged = { ...(current ?? (existing as unknown as OrderEntry)), ...body };
+    const authoritative = current ?? (existing as unknown as OrderEntry);
+    // Re-checked against the row we are about to write, not the pre-transaction
+    // snapshot: between the two, another request may have moved this order to
+    // 'Invoiced' and assigned it a number.
+    const freshIssuedErr = issuedOrderFieldLockError(
+      authoritative as unknown as Pick<Order, 'invoiceNumber' | 'status'> & Record<string, unknown>,
+      body as Record<string, unknown>,
+    );
+    if (freshIssuedErr) return { status: 409, body: { error: freshIssuedErr } };
+    const merged = { ...authoritative, ...body };
     applyInvoiceNumbering(merged, invoiceNumber, invoiceDate);
-    return transactionRepos.orders.update(req.params.id, merged as Partial<Order>);
+    return { status: 200, body: await transactionRepos.orders.update(req.params.id, merged as Partial<Order>) };
   });
-  res.json(updated);
+  res.status(result.status).json(result.body);
 });
 apiRouter.delete('/orders/:id', async (req, res) => {
+  // AN ISSUED DOCUMENT IS NOT DELETABLE. Invoice numbers are assigned as
+  // max(existing) + 1, so they are derived from the rows that still exist:
+  // deleting the order holding the highest number released that legal number for
+  // reuse, and the next invoice went out under a number a customer already had.
+  // The handler also had no read, so it 204'd on a missing id.
+  const existing = await repos.orders.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const issuedErr = issuedOrderDeleteError(existing as unknown as Pick<Order, 'invoiceNumber' | 'status'>);
+  if (issuedErr) { res.status(409).json({ error: issuedErr }); return; }
   await repos.orders.remove(req.params.id);
   res.status(204).send();
 });
@@ -5177,8 +5287,14 @@ async function enforceCappedBilling(
   const cap = merged.capAmount as number;
   // (1) amount must never exceed the cap (raw, same-currency comparison: both
   //     `amount` and `capAmount` are in the item's own currency).
-  if (Number.isFinite(merged.amount) && merged.amount > cap) {
-    return { error: `amount ${merged.amount} exceeds capAmount ${cap} (not-to-exceed)` };
+  // The CUSTOMER-FACING amount is what the cap constrains: a not-to-exceed ceiling
+  // is a promise about what the customer will be billed. On an Expense condition the
+  // stored `amount` excludes markupPct, so a 3200 expense with 5% markup bills 3360
+  // and used to slip under a 3300 cap unflagged — the same raw-vs-customer-facing
+  // confusion that made /billing under-bill the printed invoice.
+  const customerFacing = customerFacingBillingAmount(merged as unknown as BillingPlanItem);
+  if (Number.isFinite(customerFacing) && customerFacing > cap) {
+    return { error: `amount ${customerFacing} exceeds capAmount ${cap} (not-to-exceed)` };
   }
   const hasFlag = (merged.notes ?? '').includes(CAP_EXCEEDED_FLAG);
   // (2) accrued T&M must stay within the cap; flag (don't reject) when it breaks.
@@ -5336,6 +5452,14 @@ apiRouter.post('/billing-plan-items', async (req, res) => {
   // Phase G: every billing date (expected/issued/due/paid) must be ISO when supplied.
   const dateErr = validateDateFields(body as Record<string, unknown>, ['expectedDate', 'issuedDate', 'dueDate', 'paidDate']);
   if (dateErr) { res.status(400).json({ error: dateErr }); return; }
+  // TERMINAL STATUSES ARE NOT CLIENT-SETTABLE ON CREATE either. The PUT path is
+  // guarded by billingPlanStatusTransitionError, but the CREATE path pinned nothing
+  // and billingPlanValidationError only checks enum membership — an enum that
+  // includes 'Invoiced' and 'Paid'. A POST could therefore mint a condition already
+  // 'Paid' with any amount, which BILLED_STATUSES counts as billed and collected:
+  // phantom revenue with no invoice, no order and no payment behind it.
+  const createStatusErr = billingPlanCreateStatusError(body.status);
+  if (createStatusErr) { res.status(409).json({ error: createStatusErr }); return; }
   const item = { id: newId(), ...body } as BillingPlanEntry;
   const validationErr = billingPlanValidationError(item as unknown as BillingPlanItem);
   if (validationErr) { res.status(400).json({ error: validationErr }); return; }
@@ -5397,6 +5521,21 @@ apiRouter.put('/billing-plan-items/:id', async (req, res) => {
     const statusTransitionErr = billingPlanStatusTransitionError(prev.status, body.status);
     if (statusTransitionErr) return { status: 409, body: { error: statusTransitionErr } };
 
+    // ...AND, once Invoiced/Paid, WHAT WAS BILLED IS NO LONGER CLIENT-SETTABLE.
+    // The guard above only stops a client REACHING those statuses; it returns
+    // null whenever `body.status` is absent or unchanged, so a plain
+    // `PUT {amount: 999999}` on an already-Invoiced condition used to rewrite the
+    // amount while the linked order — already carrying a server-assigned
+    // invoiceNumber — kept the old one. Same invoice number, two different
+    // totals, and the finance KPIs derived from this row diverge from the
+    // document the customer received. Re-PUTting unchanged values still passes,
+    // so the edit form's full-object update of an Invoiced row keeps working.
+    const invoicedFieldErr = billingPlanInvoicedFieldLockError(
+      prev as unknown as Pick<BillingPlanItem, 'status'> & Record<string, unknown>,
+      body as Record<string, unknown>,
+    );
+    if (invoicedFieldErr) return { status: 409, body: { error: invoicedFieldErr } };
+
     // #14 CAPPED not-to-exceed: reject an overcap amount; otherwise apply any
     // accrued-T&M cap-breach flag (or clear a stale one) onto the merged item.
     const capResult = await enforceCappedBilling(merged);
@@ -5411,6 +5550,15 @@ apiRouter.put('/billing-plan-items/:id', async (req, res) => {
   res.status(result.status).json(result.body);
 });
 apiRouter.delete('/billing-plan-items/:id', async (req, res) => {
+  // Counterpart of `billingPlanInvoicedFieldLockError` above: that guard stops a
+  // client rewriting what was billed, this one stops it being deleted instead —
+  // otherwise the field lock is bypassable by removing the row, which also
+  // orphans the linked customer order and drops the billed amount out of every
+  // finance figure derived from the plan.
+  const existing = await repos.billingPlanItems.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const deleteErr = invoicedBillingItemDeleteError(existing);
+  if (deleteErr) { res.status(409).json({ error: deleteErr }); return; }
   await repos.billingPlanItems.remove(req.params.id);
   res.status(204).send();
 });
@@ -5772,10 +5920,21 @@ apiRouter.put('/fx-rates/:currency', async (req, res) => {
   // UPSERT keyed by currency: the natural-key adapter addresses rows by the
   // `currency` column (its synthetic `id` mirrors `currency`). update() returns
   // undefined when the row is absent, so add it via create() in that case.
-  const existing = await repos.fxRates.get(currency);
-  const row = existing === undefined
-    ? await repos.fxRates.create({ id: currency, currency, rateToBase: body.rateToBase } as FxRateRow)
-    : await repos.fxRates.update(currency, { rateToBase: body.rateToBase } as Partial<FxRateRow>);
+  //
+  // B-CONCURRENCY: get-then-create is a read-modify-write on a PRIMARY-KEYED row
+  // and was unserialized. Two concurrent PUTs for a currency that does not exist
+  // yet both saw `undefined` and both called create(): a duplicate row under the
+  // in-memory adapter, and a primary-key violation surfacing as an unmapped 500
+  // under Postgres — with the later (correct) rate silently discarded. An FX rate
+  // multiplies every converted amount in the portfolio, so a stale one is a wrong
+  // number everywhere. Re-read inside the section so the branch is taken against
+  // the freshest state.
+  const row = await withLock(`fx-rate:${currency}`, async () => {
+    const existing = await repos.fxRates.get(currency);
+    return existing === undefined
+      ? await repos.fxRates.create({ id: currency, currency, rateToBase: body.rateToBase } as FxRateRow)
+      : await repos.fxRates.update(currency, { rateToBase: body.rateToBase } as Partial<FxRateRow>);
+  });
   // Echo the exact legacy shape ({ currency, rateToBase }); drop the synthetic id.
   if (row) {
     res.json({ currency: row.currency, rateToBase: row.rateToBase });
@@ -5856,6 +6015,16 @@ apiRouter.post('/approval-requests', async (req, res) => {
     res.status(400).json({ error: `kind must be one of: ${APPROVAL_KINDS.join(', ')}` });
     return;
   }
+  // ALLOCATION APPROVALS ARE NOT CLIENT-CREATABLE. They are opened only by the
+  // server's own month lifecycle (`createAllocationApprovalEntry`), which pins
+  // `refId` to a composite `<assignmentId>:<YYYY-MM>` so one decision governs one
+  // month. The `refId` check below only demands a non-empty string, so a forged
+  // `kind:'Allocation'` carrying a BARE assignment id was treated downstream by
+  // `applyAllocationDecision` as a legacy gap-A approval and applied to the
+  // assignment AND every non-Draft month row beneath it — one decision flipping
+  // every month and bypassing the per-month manager approval entirely.
+  const kindErr = clientCreatableApprovalKindError(body.kind as string);
+  if (kindErr) { res.status(400).json({ error: kindErr }); return; }
   if (typeof body.refId !== 'string' || body.refId.length === 0) {
     res.status(400).json({ error: 'refId is required' });
     return;
@@ -6034,6 +6203,17 @@ async function decideOneApprovalInRepositories(
     if (by === ar.requestedBy) {
       return { status: 403, body: { error: 'Segregation of duties: the requester cannot decide their own approval request' } };
     }
+    // SoD, SECOND RULE: no actor may decide TWO steps of the same chain.
+    // The requester check above was the only SoD rule, and it says nothing about
+    // a MULTI-STEP chain. `buildApprovalSteps` escalates anything above
+    // APPROVAL_HIGH_VALUE_THRESHOLD to a sequential
+    // ['delivery-executive', 'finance'] chain precisely so two different people
+    // sign off — but `roleMatch` below is true for `admin` on EVERY step, so one
+    // admin decided step 0, the chain advanced, and the same admin decided step 1.
+    // A €120k invoice cleared by one person through a two-person control.
+    // `admin` is deliberately NOT exempt: the exemption would restore the hole.
+    const crossStepErr = crossStepSoDError(ar.steps, by);
+    if (crossStepErr) return { status: 403, body: { error: crossStepErr } };
     const step = ar.steps[ar.currentStep];
     if (!step) return { status: 400, body: { error: 'No pending step to decide' } };
     // STEP ENFORCEMENT — D (design spec §3.4). Supersedes the gap-A role

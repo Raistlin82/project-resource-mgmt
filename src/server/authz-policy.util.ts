@@ -48,10 +48,51 @@ export function hasAnyAllowedRole(
   return roles.some(role => allowed.has(role));
 }
 
+/**
+ * Canonical form of an `/api` sub-path for AUTHORIZATION purposes.
+ *
+ * WHY THIS EXISTS — it closes a total auth bypass.
+ *
+ * `roleGate` used `req.path` verbatim and compared it against rule tables whose
+ * literals are all lowercase (`p.startsWith('/audit-logs')`, `'/resources'`, …).
+ * `req.path` preserves whatever case the client sent, but EXPRESS ROUTES
+ * CASE-INSENSITIVELY unless `case sensitive routing` is enabled — and this app
+ * never enables it. So `GET /api/Audit-Logs` reached the handler while
+ * `startsWith('/audit-logs')` was false: no READ_RULE matched, `authorizeRead`
+ * saw `allowedRoles: undefined`, and an `employee` read the append-only audit
+ * trail that is reserved to admin/delivery-executive. On the mutation side it was
+ * worse: no rule matched `/Resources`, so `POST /api/Resources` with NO
+ * Authorization header at all created a resource row with client-chosen
+ * cost/bill rates. Reproduced against this repo's own express 5.2.1.
+ *
+ * Normalising HERE rather than relying on `app.set('case sensitive routing')` is
+ * deliberate: the gate is the security boundary and must not depend on a router
+ * setting that a later refactor could drop while every test still passes.
+ *
+ * Two vectors were probed and are deliberately NOT handled, because handling
+ * them would add risk without closing anything:
+ *   - percent-encoding: `GET /api/%41udit-logs` 404s — the router does not match
+ *     it either, so gate and router miss together. Adding `decodeURIComponent`
+ *     would introduce a double-decoding hazard to fix a non-issue.
+ *   - dot segments: `/api/./audit-logs` arrives already collapsed, and a form the
+ *     router would not match is a form no rule needs to match.
+ *
+ * INVARIANT: every literal in `READ_RULES` and in the mutation `rules` table must
+ * be lowercase. This function's output is always lowercase, so an uppercase
+ * literal there would silently never match.
+ */
+export function normalizeApiPath(rawPath: string): string {
+  const lower = rawPath.toLowerCase();
+  if (lower.length <= 1) return lower;
+  const trimmed = lower.replace(/\/+$/, '');
+  return trimmed.length === 0 ? '/' : trimmed;
+}
+
 // `storage-status` is the SPA's pre-auth OIDC bootstrap configuration. `/health`
 // is reserved for deployment probes. Prefix matching is deliberately forbidden.
 const PUBLIC_READ_PATHS = new Set(['/health', '/storage-status']);
 
+/** Expects an already-normalised path (see `normalizeApiPath`). */
 export function isPublicReadPath(path: string): boolean {
   return PUBLIC_READ_PATHS.has(path);
 }

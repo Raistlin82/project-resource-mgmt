@@ -158,3 +158,30 @@ export function changeRequestMutationError(
   }
   return null;
 }
+
+/**
+ * State backstop for change-request DELETEs — the counterpart of
+ * `changeRequestMutationError`, which guarded the PUT alone.
+ *
+ * DELETE had no read, no 404 and no state check: `repos.changeRequests.remove(id)`
+ * then 204. So every rule above could be bypassed by DELETING the row instead of
+ * transitioning it. A pm who could not move an Approved CR (terminal transitions
+ * need delivery-executive/admin, and SoD forbids the creator deciding) could
+ * simply erase the delivery-executive's Approved decision — and with it the
+ * change request's contribution to the project's effective budget — leaving only
+ * an audit entry to explain a figure that silently dropped.
+ *
+ * Draft stays deletable: it is the author's own un-submitted working copy and
+ * carries no decision. Everything from Submitted onward has entered the workflow
+ * and must be walked back through it, not deleted.
+ */
+export function changeRequestDeleteError(
+  currentStatus: ChangeRequest['status'],
+): ChangeRequestPolicyError | null {
+  if (currentStatus === 'Draft') return null;
+  return {
+    status: 409,
+    error: `Change request ${currentStatus} cannot be deleted: it carries a workflow decision. `
+      + 'Return it to Draft through the workflow first, or leave the record in place',
+  };
+}

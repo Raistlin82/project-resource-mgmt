@@ -1205,6 +1205,61 @@ async function checkCapacityMonthly() {
     );
   }
 
+  // 3b) RBAC CASE-FOLDING — the check above cannot see the bypass it is meant to
+  // guard. Express routes case-insensitively (this app does not enable
+  // `case sensitive routing`), while every rule literal is lowercase, so
+  // `/Capacity/monthly` used to reach the handler with NO rule matching it: the
+  // employee got 200 on the very read the lowercase spelling refuses. Same for
+  // `/Audit-Logs`, which READ_RULES reserves to admin/delivery-executive.
+  //
+  // Each variant is paired with the SAME capitalised path as admin: that control is
+  // what distinguishes an authorization refusal (403) from a routing miss (404). If
+  // a future change enables case-sensitive routing, the admin control turns 404 and
+  // this pair must be updated together — deliberately, not silently.
+  {
+    const CAPITALISED = '/Capacity/monthly?from=2026-05&to=2026-07';
+    const asEmployee = await req('GET', CAPITALISED, { headers: EMPLOYEE_HEADERS });
+    const asAdmin = await req('GET', CAPITALISED);
+    check(
+      `GET /api${CAPITALISED} as 'employee' -> 403 (case-folded rule match)`,
+      asEmployee.status === 403,
+      `status=${asEmployee.status}, body=${JSON.stringify(asEmployee.body)}`,
+    );
+    check(
+      `GET /api${CAPITALISED} as admin -> 200 (proves the route is reachable, so the 403 is authorization)`,
+      asAdmin.status === 200,
+      `status=${asAdmin.status}`,
+    );
+  }
+  {
+    const asEmployee = await req('GET', '/Audit-Logs?limit=1', { headers: EMPLOYEE_HEADERS });
+    const asAdmin = await req('GET', '/Audit-Logs?limit=1');
+    check(
+      "GET /api/Audit-Logs as 'employee' -> 403 (audit trail is admin/delivery-executive only)",
+      asEmployee.status === 403,
+      `status=${asEmployee.status}, body=${JSON.stringify(asEmployee.body)}`,
+    );
+    check(
+      'GET /api/Audit-Logs as admin -> 200 (route reachable under the capitalised spelling)',
+      asAdmin.status === 200,
+      `status=${asAdmin.status}`,
+    );
+  }
+  {
+    // The mutation half, and the worst of the three: no rule matched '/Resources',
+    // so this POST ran with NO Authorization header at all and created a resource
+    // row carrying client-chosen cost/bill rates.
+    const { status, body } = await req('POST', '/Resources', {
+      body: { name: 'case-bypass probe', capacity: 1, role: 'Developer', billRateOverride: 9999 },
+      headers: { 'X-User-Id': '', 'X-User-Role': '' },
+    });
+    check(
+      'POST /api/Resources with no application role -> 403 (was: 200, anonymous create)',
+      status === 403,
+      `status=${status}, body=${JSON.stringify(body)}`,
+    );
+  }
+
   // 4) DEFAULT RANGE — no from/to -> 200 and at least one month.
   {
     const { status, body } = await req('GET', '/capacity/monthly');
@@ -2100,15 +2155,37 @@ async function checkLegacyAllocationApproval() {
     typeof confirmedBefore === 'number', `staffedEffort=${JSON.stringify(confirmedBefore)}`);
 
   // The legacy-shaped approval: kind 'Allocation', refId a BARE assignment id.
+  //
+  // THIS FIXTURE CAN NO LONGER BE BUILT THROUGH THE API, BY DESIGN. Allocation
+  // approvals are opened only by the server's own month lifecycle
+  // (`createAllocationApprovalEntry`), which pins refId to a composite
+  // `<assignmentId>:<YYYY-MM>`. `POST /approval-requests` used to accept
+  // kind:'Allocation' with any non-empty refId, so a requester could forge a
+  // BARE-refId approval; one decision on it then swept EVERY non-Draft month of
+  // the assignment, bypassing the per-month manager approval — the approver saw
+  // one row and decided many. `clientCreatableApprovalKindError` now refuses it.
+  //
+  // The legacy BRANCH in `applyAllocationDecision` is deliberately still there:
+  // rows created before B3 and backfilled by a migration are exactly what it
+  // exists for. But nothing in this suite can construct one any more, so the
+  // checks below are SKIPPED rather than deleted or quietly turned green.
+  //
+  // COVERAGE LOST, stated plainly: the legacy bare-refId decision path — moving
+  // the stranded month while leaving a sibling month's live approval untouched —
+  // now has NO automated coverage. Closing that needs the branch extracted from
+  // src/server.ts into a repository-level unit test; it is recorded as a
+  // follow-up in docs/audits/2026-08-05-full-audit.md.
   const legacyAr = await req('POST', '/approval-requests', {
     headers: REQUESTER_HEADERS,
     body: { kind: 'Allocation', refId: assignmentId, note: 'pre-B3 approval still in flight' },
   });
-  const arOk = check('B3 legacy: POST /api/approval-requests opens a bare-refId Allocation approval',
-    legacyAr.status === 200 && typeof legacyAr.body?.id === 'string' && legacyAr.body?.refId === assignmentId &&
-    legacyAr.body?.status === 'Pending' && legacyAr.body?.requestedBy === '3',
+  check('B3 legacy: POST /api/approval-requests REFUSES a client-created Allocation approval (forged bare refId)',
+    legacyAr.status === 400 && String(legacyAr.body?.error ?? '').includes('allocation workflow'),
     `status=${legacyAr.status} body=${JSON.stringify(legacyAr.body)}`);
-  if (!arOk) return;
+  skip('B3 legacy: the bare-refId decision path (stranded month moves, live sibling untouched)',
+    'the fixture required POST /approval-requests to accept kind:\'Allocation\' with a bare refId, which is now refused as a governance bypass. The legacy branch in applyAllocationDecision is still live for migrated rows but has no automated coverage — see docs/audits/2026-08-05-full-audit.md');
+  return;
+  // eslint-disable-next-line no-unreachable
   const legacyApprovalId = legacyAr.body.id;
 
   // Decide it as the default admin '1' — not the requester ('3'), so SoD passes.

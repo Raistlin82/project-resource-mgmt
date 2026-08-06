@@ -1,6 +1,7 @@
 import type { Assignment, ResourceRequest } from '../app/services/api.service';
 import {
   canAccessGlobalTimeEntry,
+  changeRequestDeleteError,
   changeRequestMutationError,
   deriveTimeEntryLinks,
   hasGlobalTimeEntryCollectionAccess,
@@ -126,5 +127,40 @@ describe('change-request policy', () => {
       currentStatus: 'Approved', role: 'admin',
       actorId: 'admin', creatorId: 'alice', changesDomainFields: true,
     })?.status).toBe(409);
+  });
+});
+
+describe('changeRequestDeleteError', () => {
+  it('refuses to delete a change request that carries a decision', () => {
+    // THE DEFECT. DELETE /change-requests/:id had no read, no 404 and no state
+    // check, so every rule in changeRequestMutationError was bypassable by
+    // deleting the row instead of transitioning it: a pm forbidden from moving an
+    // Approved CR could erase the delivery-executive's Approved decision, and with
+    // it the CR's contribution to the project's effective budget.
+    for (const status of ['Submitted', 'Approved', 'Rejected', 'Implemented'] as const) {
+      const err = changeRequestDeleteError(status);
+      expect(err?.status).toBe(409);
+      expect(err?.error).toContain(status);
+    }
+  });
+
+  it('still allows deleting a Draft', () => {
+    // ASSERTION OF ABSENCE. A blanket refusal passes the test above and strands
+    // every abandoned draft in the list forever. A Draft is the author's own
+    // un-submitted working copy and carries no decision.
+    expect(changeRequestDeleteError('Draft')).toBeNull();
+  });
+
+  it('agrees with the PUT policy about which states are locked', () => {
+    // The two guards must not drift: any status the PUT locks against domain
+    // edits must also be undeletable, or the lock has a second door.
+    for (const status of ['Submitted', 'Approved', 'Rejected', 'Implemented'] as const) {
+      const putLocked = changeRequestMutationError({
+        currentStatus: status, role: 'admin', actorId: 'admin',
+        creatorId: 'alice', changesDomainFields: true,
+      });
+      expect(putLocked?.status).toBe(409);
+      expect(changeRequestDeleteError(status)?.status).toBe(409);
+    }
   });
 });
