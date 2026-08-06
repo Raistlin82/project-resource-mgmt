@@ -218,3 +218,70 @@ describe('ProjectDetailsComponent — Baseline vs Planned card (design spec, blo
     expect(host(pmFixture).textContent).not.toContain('Freeze baseline');
   });
 });
+
+/**
+ * The finance envelope this screen hands to `computeProjectFinancials`.
+ *
+ * `finance.util.ts` computes `effectiveBudgetForProject = budgetForProject +
+ * approvedChangeBudgetForProject`, and the approved-CR term is `(d.changeRequests
+ * ?? [])` — so an envelope MISSING the key silently scores every approved change
+ * request as zero. project-details built a seven-key envelope without it while
+ * already loading the data for its own "open changes" count, so this page's Budget,
+ * Budget Burn and VAC disagreed with /reporting, whose envelope carries it.
+ */
+describe('ProjectDetailsComponent — approved change requests move the effective budget', () => {
+  const FINANCIALS = [{ id: 'F1', projectId: 'P1', category: 'Labor', budget: 10_000, actual: 0 }];
+  const cr = (status: string, impactBudget: number, id = 'CR1') => ({
+    id, projectId: 'P1', title: 'Scope cut', description: '', requestedBy: 'u1', owner: 'u1',
+    status, impactScope: 'reduced', impactBudget, impactScheduleDays: 0, priority: 'Medium',
+    createdAt: '2026-03-01T00:00:00.000Z',
+  });
+
+  const budgetOf = (fixture: ComponentFixture<ProjectDetailsComponent>) =>
+    (fixture.componentInstance as unknown as { financials: () => { budget: number } }).financials().budget;
+
+  it('subtracts an APPROVED change request from the plan budget', async () => {
+    // RED before the fix: 10000, because the envelope had no changeRequests key.
+    const { fixture } = await render('finance', {
+      getProjectFinancials: () => of(FINANCIALS),
+      getChangeRequests: () => of([cr('Approved', -5000)]),
+    });
+    expect(budgetOf(fixture)).toBe(5000);
+  });
+
+  it('ignores a change request that has NOT been approved', async () => {
+    // ASSERTION OF ABSENCE #1: this is what kills a fix that sums every CR
+    // regardless of status — which would pass the test above and quietly move the
+    // budget on a draft nobody has decided.
+    for (const status of ['Draft', 'Submitted', 'Rejected']) {
+      TestBed.resetTestingModule();
+      const { fixture } = await render('finance', {
+        getProjectFinancials: () => of(FINANCIALS),
+        getChangeRequests: () => of([cr(status, -5000)]),
+      });
+      expect(budgetOf(fixture), `${status} must not move the budget`).toBe(10_000);
+    }
+  });
+
+  it('ignores an approved change request belonging to ANOTHER project', async () => {
+    // ASSERTION OF ABSENCE #2: the term is filtered by projectId, and a fix that
+    // summed the whole table would pass both tests above.
+    const { fixture } = await render('finance', {
+      getProjectFinancials: () => of(FINANCIALS),
+      getChangeRequests: () => of([{ ...cr('Approved', -5000), projectId: 'P-OTHER' }]),
+    });
+    expect(budgetOf(fixture)).toBe(10_000);
+  });
+
+  it('still shows no budget at all to a role that may not read financials', async () => {
+    // ASSERTION OF ABSENCE #3: adding an envelope key must not un-gate a read.
+    // `pm` has canApproveFinancials false, so financialsRes never loads and the
+    // budget stays 0 whatever the change requests say.
+    const { fixture, api } = await render('pm', {
+      getProjectFinancials: () => of(FINANCIALS),
+      getChangeRequests: () => of([cr('Approved', -5000)]),
+    });
+    expect(budgetOf(fixture)).toBe(0);
+    expect(api.getProjectFinancials).not.toHaveBeenCalled();
+  });
+});

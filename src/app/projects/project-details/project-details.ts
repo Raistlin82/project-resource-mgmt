@@ -400,6 +400,25 @@ export class ProjectDetailsComponent {
     orderLines: this.orderLinesRes.value(),
     financials: this.financialsRes.value(),
     timeEntries: this.timeEntriesRes.value(),
+    // changeRequests is REQUIRED here, not optional enrichment. `finance.util.ts`
+    // computes `effectiveBudgetForProject = budgetForProject + approvedChangeBudget`,
+    // and its approved-CR term returns 0 when `d.changeRequests` is undefined — so
+    // omitting the key silently dropped every APPROVED change request from this
+    // screen's Budget, Budget Burn and VAC while /reporting, whose envelope carries
+    // it, used the effective figure. On seeded project 2 (financial plan 10,000 and
+    // CR2 Approved at impactBudget -5,000) this page showed Budget EUR 10,000 and a
+    // burn of actualCost/10,000 against /reporting's 5,000 — exactly double, with a
+    // EUR 5,000 VAC gap that can also flip `deliveryHealth()` from red to green.
+    //
+    // GATED ON THE SAME CAPABILITY AS THE BUDGET IT ADJUSTS. `changesRes` is only
+    // principal-gated, because the open-change COUNT is a delivery figure a pm may
+    // see; but inside this envelope the rows have exactly one job — adjusting the
+    // budget — and `financialsRes` is gated on canApproveFinancials. Passing them
+    // ungated made a pm's Budget read −5,000: the plan budget was withheld (0) while
+    // the approved CR was still subtracted, fabricating a negative budget out of a
+    // read that role never made. A withheld budget must stay withheld, not become
+    // the CR adjustment on its own.
+    changeRequests: this.auth.canApproveFinancials() ? this.changesRes.value() : [],
   }));
   financials = computed(() => computeProjectFinancials(this.id(), this.financeData()));
 
