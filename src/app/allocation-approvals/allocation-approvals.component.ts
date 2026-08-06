@@ -300,8 +300,20 @@ function shiftMonth(month: string, delta: number): string {
                         <td class="px-2 py-2 align-top">
                           <div class="rounded-lg ring-1 p-2 text-center {{ c.meta.cell }} {{ c.meta.ring }}"
                                [attr.data-test]="'cell-' + row.resourceId + '-' + c.month"
-                               [attr.data-band]="c.tracksSaturation ? c.band : null"
-                               [attr.aria-label]="c.aria">
+                               [attr.data-band]="c.tracksSaturation ? c.band : null">
+                            <!-- A11Y: the composed name lives in a visually-hidden SPAN,
+                                 never in an aria-label on this div. The div has no role,
+                                 and ARIA forbids naming a role=generic element — so the
+                                 attribute sat in the DOM while no screen reader ever
+                                 surfaced it, and the approver deciding month rows heard
+                                 only the cell's own fragments ("88 / 176 Under"): no
+                                 resource, no month, and not the percentage that makes the
+                                 band judgement checkable.
+                                 An aria-label on the enclosing td would expose the name but
+                                 REPLACE that visible reading; an sr-only child ADDS to it
+                                 (same device as capacity.component.ts and
+                                 list-state.component.ts:58). -->
+                            <span class="sr-only">{{ c.aria }}</span>
                             <div class="text-sm font-bold font-mono tabular-nums {{ c.meta.text }}">
                               {{ c.total | number:'1.0-1' }} <span class="text-ink-muted font-normal">/ {{ c.target | number:'1.0-1' }}</span>
                             </div>

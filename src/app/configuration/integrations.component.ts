@@ -16,6 +16,7 @@ import {
 } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
+import { ListStateComponent } from '../shared/list-state.component';
 
 interface IntegrationsPageData {
   info: IntegrationsInfo | null;
@@ -34,7 +35,7 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
 @Component({
   selector: 'app-integrations',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DatePipe, DecimalPipe],
+  imports: [MatIconModule, DatePipe, DecimalPipe, ListStateComponent],
   template: `
     <div class="command-page space-y-6">
       <header class="command-header">
@@ -48,6 +49,24 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
         </div>
       </header>
 
+      @if (accessNotice(); as notice) {
+        <div class="command-card-muted p-4 flex items-start gap-3" role="alert">
+          <mat-icon class="text-[20px] w-[20px] h-[20px] text-[var(--cc-amber-text)] shrink-0">lock</mat-icon>
+          <p class="text-sm font-medium text-[var(--cc-ink)]">{{ notice }}</p>
+        </div>
+      }
+
+      <!-- The whole card grid lives inside the wrapper, not beside it. Every card
+           dereferences the guarded envelopes (descriptors, activeKey, the order
+           list, the outbox table), and each one also offers a DOWNLOAD button for
+           an artifact built from the very data that failed to load — a CSV export
+           of a ledger this page could not read is not an affordance, it is a
+           second failure. ListState's ng-template is what keeps the deferral
+           honest: Angular evaluates ordinary projected bindings even inside a
+           hidden @if branch. -->
+      <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="cards" [rows]="4"
+                      label="integration adapters" (retry)="reload()">
+        <ng-template>
       <div class="grid grid-cols-1 xl:grid-cols-2 gap-5">
         <!-- ERP / General ledger -->
         <section class="command-card overflow-hidden">
@@ -245,6 +264,8 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
           </div>
         </section>
       </div>
+        </ng-template>
+      </app-list-state>
     </div>
   `,
 })
@@ -279,8 +300,91 @@ export class IntegrationsComponent {
     defaultValue: [],
   });
 
-  private data = this.dataRes.value;
-  readonly outbox = this.outboxRes.value;
+  /**
+   * READ-FAILURE GUARD — the ONE place `dataRes.value()` is dereferenced.
+   *
+   * `rxResource.value()` THROWS ResourceValueError while its status is 'error',
+   * and this envelope used to be the bare `.value` accessor read from bindings
+   * in all four cards: `erpDescriptor()` is evaluated by the very first heading
+   * on the page. A throw there aborts the whole change-detection pass and every
+   * later one at the same expression, so a 401/403/500 on either leg left the
+   * page frozen — and this screen had no error affordance of its own to be made
+   * unreachable, which is worse than the /capacity case, not better: there was
+   * never a message or a Retry to reach.
+   *
+   * This is NOT the banned `status()==='error' ? [] : value()`: emptiness is
+   * never this screen's ANSWER about the data. `dataError()` gates the entire
+   * card grid, ListState replaces it with the error panel plus Retry, and
+   * `accessNotice()` says why — the empty envelope exists only so the signal
+   * graph can settle while those surfaces are what the user sees.
+   *
+   * Honest about what carries the fix: the ListState wrapper alone is what a user
+   * hits, because its `ng-template` is never instantiated in the error state, so
+   * this guard is REDUNDANT today — neutralising it leaves every rendering test
+   * green (the spec says so, and pins the guard with its own direct-accessor
+   * case). It stays because template placement protects a template and nothing
+   * else: the moment a binding, an effect or an export handler reads one of these
+   * signals from OUTSIDE that view — which is exactly the shape that took
+   * /capacity down — the reordering is worth nothing and this short-circuit is
+   * the whole defence.
+   */
+  private data = computed<IntegrationsPageData>(() =>
+    this.dataRes.status() === 'error' ? IntegrationsComponent.EMPTY_DATA : this.dataRes.value(),
+  );
+
+  /** Same guard for the outbox, which is an INDEPENDENTLY failing read: the CRM
+   *  card's table dereferences it, so /integrations+/orders succeeding while
+   *  /crm-outbox 500s is on its own enough to freeze the page. `pageState()`
+   *  therefore covers BOTH legs and Retry reloads both. */
+  readonly outbox = computed<CrmOutboxEntry[]>(() =>
+    this.outboxRes.status() === 'error' ? [] : this.outboxRes.value(),
+  );
+
+  /** Every read the card grid derives from — one shared list, so the gate, the
+   *  skeleton and the Retry cannot drift from what feeds them. */
+  private pageInputs() {
+    return [this.dataRes, this.outboxRes];
+  }
+
+  /**
+   * Tri-state for the card grid. `isLoading()` alone is NOT the question: both
+   * resources resolve their pre-auth defaults SYNCHRONOUSLY while `authReady()`
+   * is false, so isLoading() is false for the whole OIDC bootstrap window and in
+   * the SSR HTML — which is how the page came to state "No eligible customer
+   * invoices available." and an "Active adapter: —" as settled facts about reads
+   * that had not been made. Not-ready counts as loading, never ready-and-empty.
+   */
+  protected readonly pageState = computed<'error' | 'loading' | 'ready'>(() => {
+    const inputs = this.pageInputs();
+    if (inputs.some(r => r.status() === 'error')) return 'error';
+    if (!this.auth.authReady() || inputs.some(r => r.isLoading())) return 'loading';
+    return 'ready';
+  });
+
+  protected readonly dataError = computed(() => this.pageState() === 'error');
+  protected readonly dataLoading = computed(() => this.pageState() === 'loading');
+
+  /**
+   * ACCESS FEEDBACK: `GET /integrations` is gated to finance-grade readers
+   * (src/server.ts READ_RULES: finance, delivery-executive, admin — the same set
+   * the `financeGuard` on this route mirrors), so it 401s until signed in and
+   * 403s for every other role. Neither is toasted (the error interceptor
+   * suppresses transient 401s), so say WHY rather than showing an error panel
+   * with no cause. The roles are NAMED because a notice that misstates them
+   * sends the user to the wrong administrator.
+   */
+  protected readonly accessNotice = computed<string | null>(() => {
+    if (!this.dataError()) return null;
+    return this.auth.isAuthenticated()
+      ? 'Your role does not have access to the integration adapters. Finance, delivery executive and admin can view this page.'
+      : 'Sign in to view the integration adapters — they require an authenticated finance, delivery-executive or admin role.';
+  });
+
+  /** Retry target: reloads every leg `pageState()` watches, so one Retry can
+   *  never leave the other leg still failed. */
+  protected reload(): void {
+    for (const r of this.pageInputs()) r.reload();
+  }
 
   private descriptorFor(kind: IntegrationKind): IntegrationDescriptor | undefined {
     return this.data().info?.adapters.find(a => a.kind === kind);
