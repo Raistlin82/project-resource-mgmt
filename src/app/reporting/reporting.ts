@@ -7,7 +7,8 @@ import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, Orde
 import { AuthService } from '../services/auth.service';
 import { computeProjectFinancials, costBaselineComparison, FinanceData, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, realizationMetrics, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, recognitionSchedule, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity } from '../services/finance.util';
 import { NotificationService } from '../services/notification.service';
-import { toCsv, downloadCsv } from '../services/export.util';
+import { toCsv, downloadCsv, downloadXlsx, XlsxSheet } from '../services/export.util';
+import { allocationSheets, planningSheet, RptOpts, RptPlanData } from '../services/rpt-xlsx.util';
 import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
 import { DEFAULT_HOURS_PER_DAY } from '../services/sell-rate.util';
 import { CommandBarChartComponent, CommandTrendChartComponent, CommandDonutChartComponent, BarSeries, TrendSeries } from '../shared/charts';
@@ -80,6 +81,20 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           </select>
           <button type="button" (click)="exportReport()" class="command-button w-full sm:w-auto">
             <mat-icon class="text-[20px] w-[20px] h-[20px]">download</mat-icon> Export Report
+          </button>
+          <!-- RPT parity (docs/rpt-comparison.md rows 24 + 44): the two Excel
+               reports Lutech's planners expect, in the workbook SHAPE RPT uses —
+               Pianificazione is one sheet, Allocazione is two. Disabled on a failed
+               read: a workbook built from an errored envelope is a file of confident
+               zeros, which is worse than no file (same reasoning as the capacity
+               screen's export gate). -->
+          <button type="button" (click)="exportPlanningXlsx()" [disabled]="dataError()" data-test="export-planning-xlsx"
+                  class="command-button secondary w-full sm:w-auto disabled:opacity-40 disabled:cursor-not-allowed">
+            <mat-icon class="text-[20px] w-[20px] h-[20px]">table_view</mat-icon> Pianificazione
+          </button>
+          <button type="button" (click)="exportAllocationXlsx()" [disabled]="dataError()" data-test="export-allocation-xlsx"
+                  class="command-button secondary w-full sm:w-auto disabled:opacity-40 disabled:cursor-not-allowed">
+            <mat-icon class="text-[20px] w-[20px] h-[20px]">table_view</mat-icon> Allocazione
           </button>
         </div>
       </div>
@@ -1513,6 +1528,74 @@ export class Reporting {
     ]);
     downloadCsv('Customer_Profitability.csv', csv);
     this.notificationService.show('Customer profitability exported', 'success');
+  }
+
+  // --- RPT .xlsx reports (docs/rpt-comparison.md rows 24 + 44) ---------------
+  /**
+   * The plan slice the RPT report builders read. Structurally a subset of
+   * `ReportingData`, so it is a pass-through — never a second load. It lives here
+   * rather than in the builder because this component already holds every collection
+   * involved (resources, requests, assignments, assignment days/months, projects) in
+   * ONE authReady-gated forkJoin.
+   */
+  private rptPlanData = computed<RptPlanData>(() => {
+    const d = this.dataRes.value();
+    return {
+      projects: d.projects,
+      requests: d.requests,
+      assignments: d.assignments,
+      assignmentDays: d.assignmentDays,
+      assignmentMonths: d.assignmentMonths,
+      resources: d.resources,
+    };
+  });
+
+  /** Units/labels for the workbooks: base currency, and the configured hours-per-day divisor. */
+  private rptOpts = computed<RptOpts>(() => ({ currency: this.baseCurrency, hoursPerDay: this.dataRes.value().hoursPerDay }));
+
+  /**
+   * Report 1 — Pianificazione (PM): the ONE sheet, split out from the click handler so
+   * the exact rows/columns written are assertable without a DOM download (the pattern
+   * `capacity.component.ts`'s `buildCsv`/`buildJson` established).
+   *
+   * `marginRows()` is passed straight through as the financial detail, so the money in
+   * the workbook is BY CONSTRUCTION the money in the on-screen Margin & Variance table.
+   * It is filtered to commesse carrying revenue or cost, while this sheet's rows are
+   * the whole commessa master — a plan-only commessa therefore gets its plan and
+   * monthly costs with EMPTY financial cells, never fabricated zeros.
+   */
+  protected buildPlanningSheet(): XlsxSheet {
+    return planningSheet(this.rptPlanData(), this.marginRows(), this.rptOpts());
+  }
+
+  /** Report 2 — Allocazione (People Manager): the TWO sheets, Dettaglio then Testata. */
+  protected buildAllocationSheets(): XlsxSheet[] {
+    return allocationSheets(this.rptPlanData(), this.rptOpts());
+  }
+
+  async exportPlanningXlsx(): Promise<void> {
+    if (!isPlatformBrowser(this.platformId) || this.dataError()) return;
+    await this.writeWorkbook('Pianificazione.xlsx', this.buildPlanningSheet(), 'Pianificazione');
+  }
+
+  async exportAllocationXlsx(): Promise<void> {
+    if (!isPlatformBrowser(this.platformId) || this.dataError()) return;
+    await this.writeWorkbook('Allocazione.xlsx', this.buildAllocationSheets(), 'Allocazione');
+  }
+
+  /**
+   * Shared tail of the two XLSX exports. `downloadXlsx` is async because the ~260 kB
+   * (gzipped) spreadsheet writer is imported lazily on first use — a rejection here is
+   * a failed chunk fetch, which must surface as a toast rather than an unhandled
+   * promise rejection that leaves the user staring at a button that did nothing.
+   */
+  private async writeWorkbook(filename: string, sheets: XlsxSheet | XlsxSheet[], label: string): Promise<void> {
+    try {
+      await downloadXlsx(filename, Array.isArray(sheets) ? sheets : [sheets]);
+      this.notificationService.show(`${label} exported`, 'success');
+    } catch {
+      this.notificationService.show(`Could not build the ${label} workbook`, 'error');
+    }
   }
 
   /** Export the margin-compression alert list (project + customer) as CSV. */
