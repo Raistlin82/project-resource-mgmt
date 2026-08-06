@@ -66,9 +66,29 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
                   }
                 </td>
                 <td class="text-right">
-                  <button type="button" (click)="toggleRestrict(role)" class="w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-caution-text hover:border-caution hover:bg-caution-tint transition-all inline-flex items-center justify-center shadow-sm" [attr.aria-label]="(role.restricted ? 'Unrestrict ' : 'Restrict ') + role.name" [title]="role.restricted ? 'Unrestrict' : 'Restrict'">
-                    <mat-icon class="text-[20px] w-[20px] h-[20px]">{{ role.restricted ? 'lock_open' : 'block' }}</mat-icon>
-                  </button>
+                  <!-- ARMED STATE IS RENDERED IN THE ROW, not announced in a toast.
+                       The previous shape armed pendingRestrictId invisibly and never
+                       expired it, while its only warning was a toast that
+                       auto-dismisses after 5s. Ten minutes later a click on the same
+                       icon flipped the role's Restricted flag with no dialog and no
+                       undo — and the armed id survived a click on ANOTHER row, so
+                       nothing on screen said which role was armed. Confirm/Cancel
+                       live inside the armed row, so the armed object is always the
+                       object the admin can see. Same shape as
+                       manage-skills.component.ts.
+                       The armed label follows the ROW's direction, because this one
+                       control both restricts and unrestricts. -->
+                  @if (pendingRestrictId() === role.id) {
+                    <div class="inline-flex items-center gap-2">
+                      <span class="text-xs font-bold text-[var(--cc-muted)]">{{ role.restricted ? 'Unrestrict' : 'Restrict' }} {{ role.name }}?</span>
+                      <button type="button" (click)="confirmRestrict(role)" class="px-3 py-1.5 text-xs font-bold text-caution-text bg-caution-tint ring-1 ring-caution rounded-lg hover:bg-[color-mix(in_oklch,var(--color-caution)_16%,var(--color-surface))] transition-all shadow-sm">Confirm</button>
+                      <button type="button" (click)="cancelRestrict()" class="px-3 py-1.5 text-xs font-bold text-ink-secondary bg-surface border border-line rounded-lg hover:bg-surface-muted transition-all shadow-sm">Cancel</button>
+                    </div>
+                  } @else {
+                    <button type="button" (click)="requestRestrict(role)" class="w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-caution-text hover:border-caution hover:bg-caution-tint transition-all inline-flex items-center justify-center shadow-sm" [attr.aria-label]="(role.restricted ? 'Unrestrict ' : 'Restrict ') + role.name" [title]="role.restricted ? 'Unrestrict' : 'Restrict'">
+                      <mat-icon class="text-[20px] w-[20px] h-[20px]">{{ role.restricted ? 'lock_open' : 'block' }}</mat-icon>
+                    </button>
+                  }
                 </td>
               </tr>
             }
@@ -86,7 +106,8 @@ export class ManageProjectRolesComponent {
   private rolesRes = authGatedResource(() => this.api.getProjectRoles(), [] as ProjectRole[]);
   roles = computed(() => this.rolesRes.value());
   showForm = signal(false);
-  private pendingRestrictId = signal<string | null>(null);
+  /** Read by the template: the armed row renders its own Confirm/Cancel pair. */
+  protected pendingRestrictId = signal<string | null>(null);
 
   roleForm: FormGroup = this.fb.group({
     code: ['', [Validators.required, Validators.maxLength(4), Validators.pattern('^[a-zA-Z0-9 ]*$')]],
@@ -114,16 +135,37 @@ export class ManageProjectRolesComponent {
     }
   }
 
-  toggleRestrict(role: ProjectRole) {
-    const action = role.restricted ? 'unrestrict' : 'restrict';
-    if (this.pendingRestrictId() === role.id) {
+  /**
+   * Arms the row. Deliberately CANNOT write: the only path to the PUT is the
+   * Confirm control rendered inside the armed row, so a stale click on this icon —
+   * or on another row's — can never flip a role.
+   *
+   * The toast is corroboration, not the warning: it names the role and the
+   * direction. It deliberately does NOT promise that restricting takes the role out
+   * of staffing. NOTHING enforces the flag today: all seven consumers of
+   * /project-roles (manage-rate-cards, project-rates, resources, contract-details,
+   * my-profile, resource-requests and this screen) list every role, none filters on
+   * `restricted`, and the server only stores it. So the honest statement is that the
+   * catalog entry is marked — promising an enforcement that does not exist is the
+   * same defect the vendors dialog was corrected for.
+   */
+  requestRestrict(role: ProjectRole) {
+    this.pendingRestrictId.set(role.id);
+    const action = role.restricted ? 'unrestricting' : 'restricting';
+    this.notificationService.show(
+      `Confirm ${action} "${role.name}". This marks the catalog entry only: rate cards, requests and resumes that already name the role keep it.`,
+      'info',
+    );
+  }
+
+  cancelRestrict() {
+    this.pendingRestrictId.set(null);
+  }
+
+  confirmRestrict(role: ProjectRole) {
+    this.api.updateProjectRole(role.id, { restricted: !role.restricted }).subscribe(() => {
       this.pendingRestrictId.set(null);
-      this.api.updateProjectRole(role.id, { restricted: !role.restricted }).subscribe(() => {
-        this.rolesRes.reload();
-      });
-    } else {
-      this.pendingRestrictId.set(role.id);
-      this.notificationService.show(`Click again to confirm you want to ${action} this role`, 'info');
-    }
+      this.rolesRes.reload();
+    });
   }
 }

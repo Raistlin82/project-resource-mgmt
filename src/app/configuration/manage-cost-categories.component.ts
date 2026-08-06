@@ -66,21 +66,35 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
       </div>
 
       @if (showForm()) {
-        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+        <!-- SCROLL-SAFE OVERLAY (the shape manage-rate-cards and billing.ts use).
+             A fixed items-center overlay centres a panel taller than the viewport,
+             which pushes the header above y=0 and the "Save Cost Category" row below
+             the fold — and a fixed box cannot be scrolled by the page, so the form
+             could be filled in and never submitted. This panel is short today, but the
+             overlay's own scroller is what makes the footer reachable at 200% browser
+             zoom (which halves the effective viewport) and if the form ever grows.
+             overflow-y-auto gives the overlay its scroller, items-start anchors the
+             panel at the top on short viewports, and the panel's max-h-[90vh] plus the
+             scrolling body below keep the footer reachable. -->
+        <div data-test="cost-category-form-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
              appModal ariaLabelledby="costCategoryModalTitle" (dismiss)="closeForm()">
-          <div class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col">
+          <div data-test="cost-category-form-panel" class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="costCategoryModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Cost Category' : 'Add Cost Category' }}</h2>
               <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
-            <form [formGroup]="form" (ngSubmit)="save()" class="p-6 space-y-4">
-              <div>
-                <label for="name" class="block text-sm font-medium text-ink-secondary mb-1">Name</label>
-                <input id="name" type="text" formControlName="name" class="command-input" placeholder="e.g. Travel & Expenses">
+            <!-- The <form> stays the submit boundary (so Enter still submits) and
+                 becomes a column: the fields scroll, the footer is pinned. -->
+            <form [formGroup]="form" (ngSubmit)="save()" class="flex flex-col flex-1 min-h-0 overflow-hidden">
+              <div class="p-6 space-y-4 overflow-y-auto flex-1 min-h-0">
+                <div>
+                  <label for="name" class="block text-sm font-medium text-ink-secondary mb-1">Name</label>
+                  <input id="name" type="text" formControlName="name" class="command-input" placeholder="e.g. Travel & Expenses">
+                </div>
               </div>
-              <div class="pt-4 flex justify-end gap-3">
+              <div class="px-6 py-4 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
                 <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
                 <button type="submit" [disabled]="!form.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save Cost Category</button>
               </div>
@@ -90,7 +104,13 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
       }
 
       @if (deletingId()) {
-        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+        <!-- Short warning dialog (icon + title + two lines + footer): it fits the
+             ~460px a 320x568 phone leaves, so it deliberately keeps the plain centred
+             overlay. Its className is exactly what the FORM overlay carried before the
+             fix, which is what lets the spec use it as the negative control that keeps
+             the scroll-safety predicate from degenerating into a class-string
+             tautology. -->
+        <div data-test="cost-category-delete-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
              appModal ariaLabelledby="costCategoryDeleteTitle" (dismiss)="cancelDelete()">
           <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col">
             <div class="p-6 text-center">

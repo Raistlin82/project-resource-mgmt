@@ -132,17 +132,20 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
               </div>
               <h3 id="vendorDeleteTitle" class="font-display text-lg font-bold text-[var(--cc-ink)] mb-2">Delete Vendor</h3>
               <!-- NAMES THE OBJECT AND THE CONSEQUENCE, like its sibling config
-                   screens (manage-resource-organizations, manage-rate-cards). The
-                   old copy said only "this vendor ... cannot be undone", so an
-                   admin could not tell which vendor was about to go, nor that
-                   vendorId is a REQUIRED control on every subco resource
-                   (resources.component.ts): those resources keep a raw id in the
-                   vendor field and cannot be saved again until re-pointed.
-                   The copy deliberately does NOT promise a refusal — the API has
-                   no reference check on this DELETE today (it only 409s under
-                   Postgres, via the FK), so promising one would describe
-                   behaviour that does not exist. -->
-              <p class="text-[var(--cc-muted)] text-sm">Delete <strong class="text-[var(--cc-ink)]">{{ victim.name }}</strong>? Any subco resource pointing at this vendor keeps a raw id in its vendor field and cannot be saved again until it is re-pointed. This cannot be undone.</p>
+                   screens (manage-resource-organizations:214, manage-rate-cards).
+                   The original copy said only "this vendor ... cannot be undone",
+                   so an admin could not tell which vendor was about to go nor what
+                   pointed at it.
+                   The copy now PROMISES THE REFUSAL, because the server enforces
+                   it: DELETE /vendors/:id carries a reference guard
+                   (src/server.ts:4610-4616) that 409s while any resource still
+                   points at the vendor, in BOTH adapters. Until that guard landed
+                   the honest copy had to describe orphaning instead — dev 204'd and
+                   left subco resources holding a raw id — and that sentence is now
+                   removed, because the guard makes the outcome it described
+                   unreachable. The claim stays CONDITIONAL: an unreferenced vendor
+                   is still deleted, so this must not read as a blanket refusal. -->
+              <p class="text-[var(--cc-muted)] text-sm">Delete <strong class="text-[var(--cc-ink)]">{{ victim.name }}</strong>? A vendor that a resource still references will be refused — re-point those resources first. Otherwise this cannot be undone.</p>
             </div>
             <div class="p-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
               <button (click)="cancelDelete()" class="command-button secondary">Cancel</button>
@@ -251,12 +254,13 @@ export class ManageVendorsComponent {
         this.deletingId.set(null);
         this.notifications.show('Vendor deleted.', 'success');
       },
-      // A REFUSAL MUST BE VISIBLE. Under Postgres this DELETE hits the
-      // `resources.vendor_id` FK and the API maps SQLSTATE 23503 to 409; with no
-      // error arm the dialog simply stayed open forever and the admin was told
-      // nothing, so a refusal read as a dead button. Surface the server's own
-      // reason and keep the dialog open so the message has something to sit next
-      // to (dismissing it is the admin's decision, not ours).
+      // A REFUSAL MUST BE VISIBLE. The vendors DELETE carries a reference guard
+      // (src/server.ts:4610-4616) that 409s while any resource still points at the
+      // vendor, and under Postgres the `resources.vendor_id` FK maps SQLSTATE 23503
+      // to the same 409; with no error arm the dialog simply stayed open forever and
+      // the admin was told nothing, so a refusal read as a dead button. Surface the
+      // server's own reason and keep the dialog open so the message has something to
+      // sit next to (dismissing it is the admin's decision, not ours).
       error: (e) => this.notifications.show(
         (e as { error?: { error?: string } })?.error?.error || 'Could not delete this vendor. It may still be referenced by a resource.',
         'error',
