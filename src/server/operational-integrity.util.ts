@@ -253,6 +253,118 @@ export function signedNumberFieldError(
 }
 
 /**
+ * A finite WHOLE number, sign included — the guard for a signed `integer()` column.
+ *
+ * `impactScheduleDays` is `integer('impact_schedule_days').notNull()`
+ * (src/db/schema.ts), and the finite check one function up still admits 1.5: the
+ * in-memory adapter stores the fraction verbatim while Postgres truncates or
+ * rejects it, so the same change request slips a different schedule impact into the
+ * two backends. Negative stays legal for the same reason it does for the budget —
+ * a change request may pull a delivery date IN.
+ */
+export function signedIntegerFieldError(
+  body: Record<string, unknown>,
+  fields: readonly string[],
+): string | null {
+  for (const field of fields) {
+    if (!owns(body, field) || body[field] === undefined) continue;
+    const value = body[field];
+    if (typeof value !== 'number' || !Number.isInteger(value)) {
+      return `${field} must be a whole number of days`;
+    }
+  }
+  return null;
+}
+
+/** The four priorities the `ChangeRequest` union declares. */
+export const CHANGE_REQUEST_PRIORITIES = ['Low', 'Medium', 'High', 'Critical'] as const;
+
+/**
+ * `priority` sits in the change-request allow-list and was never checked against
+ * its declared union, so `priority: "Nope"` persisted verbatim — and the CR list
+ * chip, which keys its colour class off the four known values, rendered unstyled.
+ * Mirrors `milestoneStatusError` one enum over.
+ */
+export function changeRequestPriorityError(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (typeof value === 'string' && (CHANGE_REQUEST_PRIORITIES as readonly string[]).includes(value)) return null;
+  return `priority must be one of: ${CHANGE_REQUEST_PRIORITIES.join(', ')}`;
+}
+
+/**
+ * Server-owned initial state for `POST /requests`.
+ *
+ * `skills` is `jsonb('skills').notNull()` (src/db/schema.ts:157) and this was the
+ * ONE create handler in the file that did not seed its array column: every sibling
+ * does (`POST /resources` seeds skills/projectRoles/externalExperience,
+ * `/skill-catalogs` seeds skills, `/proficiency-sets` levels, `/skills` catalogs,
+ * `/resource-organizations` costCenters). A `POST /requests` without `skills`
+ * therefore stored a row with NO key in memory — `scoreResource` then throws
+ * "request.skills is not iterable" and the /staffing match panel renders nothing
+ * for it — while Postgres raised an unmapped 23502 and answered 500.
+ *
+ * The array is seeded BEFORE the spread so a supplied value stays authoritative,
+ * and `status` is pinned AFTER it so a client cannot create an already-Published
+ * request. Extracted (rather than inlined) because the detector has to exercise the
+ * code path the handler actually calls: a spec over a mirrored copy stays green
+ * while the call site drifts, which is how a green gate survives here.
+ */
+export function buildRequestCreate<T extends object>(
+  body: T,
+): T & { skills: unknown[]; staffedEffort: number; status: 'Not Published' } {
+  return { skills: [], staffedEffort: 0, ...body, status: 'Not Published' };
+}
+
+/**
+ * `DELETE /requests/:id` — refuse while anything still points at the request.
+ *
+ * `assignments.request_id` and `time_entries.request_id` are both
+ * `notNull().references(() => requests.id)`, so this delete was a 409 under
+ * Postgres and a 204 in memory that left the children pointing at nothing. The
+ * consequence is not cosmetic: `PUT /time-entries/:id` derives its links from
+ * assignment + request, so every Submitted entry under an orphaned assignment
+ * answers 400 'assignmentId must resolve to an assignment with a project-linked
+ * request' forever — worked hours that can never be approved, never enter the
+ * T&M cap accrual and are never billed, with no error surfaced to anyone.
+ *
+ * A 409 rather than an in-handler cascade: `DELETE /assignments/:id` already owns
+ * the correct child order (day rows, then month rows with approval withdrawal,
+ * then the parent, then the aggregate recomputes), and duplicating that chain here
+ * would fork it.
+ */
+export function requestDeleteBlockError(
+  requestId: string,
+  children: {
+    assignments: readonly { requestId: string }[];
+    timeEntries: readonly { requestId: string }[];
+  },
+): string | null {
+  return referencedChildMessage('resource request', [
+    { collection: 'assignment(s)', count: children.assignments.filter(row => row.requestId === requestId).length },
+    { collection: 'time entry(ies)', count: children.timeEntries.filter(row => row.requestId === requestId).length },
+  ]);
+}
+
+/**
+ * `DELETE /assignments/:id` — the sibling leak the guard above exposes.
+ *
+ * That handler clears day rows and month rows (both `no action` FKs) before the
+ * parent delete, but never `time_entries.assignment_id`, which is equally
+ * `notNull().references(() => assignments.id)`. So the same request removed the
+ * assignment and left the logged actuals dangling in memory while Postgres
+ * answered 409 — and a dangling actual is exactly the unapprovable, unbillable
+ * row described above.
+ */
+export function assignmentDeleteBlockError(
+  assignmentId: string,
+  timeEntries: readonly { assignmentId: string }[],
+): string | null {
+  return referencedChildMessage('assignment', [
+    { collection: 'time entry(ies)', count: timeEntries.filter(row => row.assignmentId === assignmentId).length },
+  ]);
+}
+
+/**
  * Narrow guard for a PostgreSQL not-null-violation (SQLSTATE 23502), walking the
  * `.cause` chain for the same reason `isFkViolation` does: drizzle-orm rethrows a
  * `DrizzleQueryError` that never copies `.code` onto the outer error, so a flat
