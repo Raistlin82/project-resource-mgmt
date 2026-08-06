@@ -110,7 +110,7 @@ describe('GenericLedgerExportAdapter', () => {
   // --- JSON happy path ---------------------------------------------------------
 
   describe('buildJournalExport — JSON', () => {
-    it('contains the entries verbatim plus the batch totals', () => {
+    it('contains the entries plus the batch totals', () => {
       const journal = balancedJournal();
       const artifact = adapter().buildJournalExport(journal, { format: 'json' });
 
@@ -228,6 +228,99 @@ describe('GenericLedgerExportAdapter', () => {
       const rows = adapter().buildJournalExport(journal).content.split('\r\n');
       expect(rows[1]).toBe('2026-01,reversal,Unbilled AR,-10,0');
       expect(rows[1]).not.toContain("'-10");
+    });
+  });
+
+  // --- 2-decimal emission boundary --------------------------------------------------
+  //
+  // A GL export is imported into an accounting system, so money must LEAVE this
+  // adapter at 2 decimals. The reachable source of >2-decimal money: an admin
+  // sets hours-per-day to 7.5, every rate card is divided by 7.5, and RC_DEV's
+  // 1120 EUR/day recognises 8 approved hours as 1194.6666666666667.
+
+  describe('money leaves the adapter at 2 decimals', () => {
+    /** A balanced entry whose amount carries 13 decimal places of float residue. */
+    const UNROUNDED = (1120 / 7.5) * 8; // 1194.6666666666667
+    function unroundedJournal(): JournalEntry[] {
+      return [
+        {
+          date: '2026-04',
+          memo: 'Revenue recognition 2026-04',
+          lines: [
+            { account: 'Unbilled AR', debit: UNROUNDED, credit: 0 },
+            { account: 'Revenue', debit: 0, credit: UNROUNDED },
+          ],
+        },
+      ];
+    }
+
+    it('the fixture really is unrounded (guards this whole block against a clean input)', () => {
+      // Without this, every assertion below would also pass on an input that
+      // never had a rounding problem — the test would prove nothing.
+      expect(UNROUNDED).toBe(1194.6666666666667);
+      expect(String(UNROUNDED)).toMatch(/\d+\.\d{3,}/);
+    });
+
+    it('CSV: writes the line amount as 1194.67 and leaves NO >2-decimal numeral anywhere', () => {
+      const artifact = adapter().buildJournalExport(unroundedJournal());
+      expect(artifact.content).toContain(',1194.67,0');
+      // The regex of ABSENCE is the load-bearing half: toContain('1194.67') alone
+      // also passes on the string '1194.6666666666667'. Safe to apply to the
+      // whole CSV because its only dates are 'YYYY-MM'.
+      expect(artifact.content).not.toMatch(/\d+\.\d{3,}/);
+    });
+
+    it('CSV: rounds the TOTALS row too, not just the line rows', () => {
+      const rows = adapter().buildJournalExport(unroundedJournal()).content.split('\r\n');
+      expect(rows[rows.length - 1]).toBe(`,,${GL_CSV_TOTALS_LABEL},1194.67,1194.67`);
+    });
+
+    it('JSON: rounds the entries and the totals (the rule cannot depend on format)', () => {
+      const parsed = JSON.parse(
+        adapter().buildJournalExport(unroundedJournal(), { format: 'json' }).content,
+      ) as { entries: JournalEntry[]; totals: { debit: number; credit: number } };
+
+      expect(parsed.entries[0].lines[0].debit).toBe(1194.67);
+      expect(parsed.entries[0].lines[1].credit).toBe(1194.67);
+      expect(parsed.totals.debit).toBe(1194.67);
+      expect(parsed.totals.credit).toBe(1194.67);
+    });
+
+    it('does not mutate the caller-supplied journal (rounding is emission-only)', () => {
+      const journal = unroundedJournal();
+      adapter().buildJournalExport(journal, { format: 'json' });
+      adapter().buildJournalExport(journal);
+      expect(journal[0].lines[0].debit).toBe(UNROUNDED);
+      expect(journal[0].lines[1].credit).toBe(UNROUNDED);
+    });
+
+    it('rejects an imbalance SMALLER than a cent — the balance check runs on the exact figures', () => {
+      // Rounding must not migrate upstream of the balance assertion: if it did,
+      // both sides would land on 1194.67 and this batch would be emitted as
+      // balanced. journalTotals' epsilon is 1e-6, so 0.001 is a real imbalance.
+      const nearlyBalanced: JournalEntry[] = [
+        {
+          date: '2026-04',
+          memo: 'Sub-cent imbalance',
+          lines: [
+            { account: 'Unbilled AR', debit: UNROUNDED, credit: 0 },
+            { account: 'Revenue', debit: 0, credit: UNROUNDED - 0.001 },
+          ],
+        },
+      ];
+      expect(() => adapter().buildJournalExport(nearlyBalanced)).toThrowError(UnbalancedJournalError);
+      expect(() => adapter().buildJournalExport(nearlyBalanced, { format: 'json' })).toThrowError(
+        UnbalancedJournalError,
+      );
+    });
+
+    it('leaves already-clean amounts, and integer amounts, byte-identical', () => {
+      // The absence twin for the rounding itself: a formatter that reformatted
+      // every number (e.g. toFixed(2)) would turn 1000 into '1000.00' and change
+      // every existing row.
+      const artifact = adapter().buildJournalExport(balancedJournal());
+      expect(artifact.content).toContain('2026-01,Revenue recognition 2026-01,Unbilled AR,1000,0');
+      expect(artifact.content).not.toContain('1000.00');
     });
   });
 
