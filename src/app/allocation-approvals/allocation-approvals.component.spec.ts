@@ -521,4 +521,124 @@ describe('AllocationApprovalsComponent', () => {
       expect(host.querySelectorAll('[data-test="approval-row"]').length).toBe(2);
     });
   });
+
+  describe('band-cell accessible name (must sit on a namable host, not a role-less div)', () => {
+    /**
+     * The name as an AT would actually resolve it: from the `<td>`'s own
+     * aria-label if one exists, otherwise from the visually-hidden child. Written
+     * to accept EITHER host so the test states the requirement (the name must be
+     * exposed) rather than the mechanism — the absence assertions below are what
+     * pin which host, and they rule the `<td>` out because an aria-label there
+     * REPLACES the cell's visible reading instead of adding to it.
+     */
+    function exposedName(cell: HTMLElement): string {
+      return cell.closest('td')?.getAttribute('aria-label') ?? cell.querySelector('.sr-only')?.textContent ?? '';
+    }
+
+    /** A dummy row alongside the internal ones, for the no-saturation branch.
+     *  Local to this describe on purpose: FEED is asserted by index elsewhere. */
+    const FEED_WITH_DUMMY: AllocationApprovalFeed = {
+      months: ['2026-09'],
+      rows: [
+        ...FEED.rows,
+        {
+          resourceId: 'd1', resourceName: 'Dummy SAP', managerId: 'm1', kind: 'dummy', contractHoursPerDay: 8,
+          targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 320 },
+          items: [{ assignmentMonthId: 'A3:2026-09', assignmentId: 'A3', month: '2026-09', status: 'Allocated', requestId: '3', projectName: 'Zeus', hours: 320 }],
+        },
+      ],
+    };
+
+    it('exposes resource, month, hours, target and band on an internal band cell', async () => {
+      const { fixture } = setup(true);
+      await flush(fixture);
+
+      const host = fixture.nativeElement as HTMLElement;
+      const cell = host.querySelector('[data-test="cell-r1-2026-09"]') as HTMLElement;
+      expect(cell).not.toBeNull();
+
+      // Everything the visible fragments cannot supply: WHO, WHEN, and the
+      // 88h-of-176h detail that makes the band judgement checkable.
+      const name = exposedName(cell);
+      expect(name).toContain('Ada');
+      expect(name).toMatch(/September 2026/);
+      expect(name).toMatch(/88h of 176h target/);
+      expect(name).toMatch(/\(50%\)/);
+      expect(name).toMatch(/band: Under/i);
+
+      // ABSENCE 1: the prohibited attribute is GONE from the role-less div, so
+      // "leave it and also add a span" does not count and the old attribute-only
+      // assertion cannot be resurrected.
+      expect(cell.hasAttribute('aria-label')).toBe(false);
+      // ABSENCE 2: and it did not simply migrate to the <td> — that would expose
+      // the name while REPLACING the visible reading for AT.
+      expect(cell.closest('td')!.hasAttribute('aria-label')).toBe(false);
+      // ...which is the reading that must survive: hours, target and band label.
+      expect(cell.textContent).toContain('88');
+      expect(cell.textContent).toContain('176');
+      expect(cell.textContent).toContain('Under');
+    });
+
+    it('names the OTHER row\'s cell with its own figures, never with the first row\'s', async () => {
+      // Stops a shared or hard-coded name string from passing: Bob is 176/176,
+      // i.e. Healthy, and none of Ada's numbers may appear in his cell's name.
+      const { fixture } = setup(true);
+      await flush(fixture);
+
+      const host = fixture.nativeElement as HTMLElement;
+      const cell = host.querySelector('[data-test="cell-r2-2026-09"]') as HTMLElement;
+      const name = exposedName(cell);
+
+      expect(name).toContain('Bob');
+      expect(name).toMatch(/176h of 176h target/);
+      expect(name).toMatch(/\(100%\)/);
+      expect(name).toMatch(/band: Healthy/i);
+
+      expect(name).not.toContain('Ada');
+      // Anchored: a bare toContain('88') would also match the '88' inside a
+      // hypothetical '188', and /\(50%\)/ is the band figure Ada's cell states.
+      expect(name).not.toMatch(/88h of/);
+      expect(name).not.toMatch(/\(50%\)/);
+      expect(cell.hasAttribute('aria-label')).toBe(false);
+    });
+
+    it('exposes resource, month and hours on a dummy cell, and still claims NO band', async () => {
+      const { fixture } = setup(true, { feed: FEED_WITH_DUMMY });
+      await flush(fixture);
+
+      const host = fixture.nativeElement as HTMLElement;
+      const cell = host.querySelector('[data-test="cell-d1-2026-09"]') as HTMLElement;
+      expect(cell).not.toBeNull();
+
+      const name = exposedName(cell);
+      expect(name).toContain('Dummy SAP');
+      expect(name).toMatch(/September 2026/);
+      expect(name).toMatch(/320h booked/);
+      // A dummy has no capacity to saturate (C1 / manual §4.3): the name must not
+      // smuggle back the saturation judgement the visible cell deliberately omits.
+      expect(name).not.toMatch(/Utilisation band:/);
+      expect(cell.hasAttribute('aria-label')).toBe(false);
+    });
+
+    it('leaves no aria-label on any role-less div or span in the rendered grid', async () => {
+      // The local form of the register's repo-wide scan, and the absence twin the
+      // three anchored cases need: each of those pins ONE cell, so a sibling
+      // branch could regress while all three stayed green.
+      const { fixture } = setup(true, { feed: FEED_WITH_DUMMY });
+      await flush(fixture);
+
+      const host = fixture.nativeElement as HTMLElement;
+      const offenders = [...host.querySelectorAll('div[aria-label], span[aria-label]')]
+        .filter(el => !el.hasAttribute('role'))
+        .map(el => el.getAttribute('data-test') ?? el.className);
+      expect(offenders).toEqual([]);
+
+      // And the scan is not vacuous: the elements it WOULD have caught are on the
+      // page (3 rows × 1 month), they just carry a named child now. Without this
+      // guard a selector typo yields an empty set and a green pass — the exact
+      // shape of blind gate this project keeps paying for.
+      expect(host.querySelectorAll('[data-test^="cell-"]').length).toBe(3);
+      expect(host.querySelectorAll('[data-test^="cell-"] .sr-only').length).toBe(3);
+    });
+  });
 });
