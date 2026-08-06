@@ -59,8 +59,8 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
             </thead>
             <tbody>
               @for (issue of filteredIssues(); track issue.id) {
-                <tr>
-                  <td class="font-medium">{{ issue.title }}</td>
+                <tr data-test="issue-row">
+                  <td class="font-medium" data-test="issue-title">{{ issue.title }}</td>
                   <td class="text-[var(--cc-muted)]">{{ issue.type }}</td>
                   <td>
                     <span class="command-status"
@@ -72,12 +72,12 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
                   </td>
                   <td>
                     <div class="flex items-center gap-2">
-                      <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ring-1"
+                      <span data-test="issue-status-chip" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ring-1"
                             [class.bg-accent-tint]="issue.status === 'Open'" [class.text-accent-text]="issue.status === 'Open'" [class.ring-accent]="issue.status === 'Open'"
                             [class.bg-surface-muted]="issue.status === 'Mitigated' || issue.status === 'Closed'" [class.text-ink-secondary]="issue.status === 'Mitigated' || issue.status === 'Closed'" [class.ring-line]="issue.status === 'Mitigated' || issue.status === 'Closed'">
                         {{ issue.status }}
                       </span>
-                      <select [ngModel]="issue.status" (ngModelChange)="updateStatus(issue, $event)" [attr.aria-label]="'Update status for issue ' + issue.title" class="rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-1.5 text-xs text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
+                      <select #statusSelect data-test="issue-status" [ngModel]="issue.status" (ngModelChange)="updateStatus(issue, $event, statusSelect)" [attr.aria-label]="'Update status for issue ' + issue.title" class="rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-1.5 text-xs text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
                         <option value="Open">Open</option>
                         <option value="Mitigated">Mitigated</option>
                         <option value="Closed">Closed</option>
@@ -280,10 +280,25 @@ export class ProjectIssues {
     this.showForm.set(true);
   }
 
-  updateStatus(issue: Issue, status: string) {
+  /**
+   * @param control The row's own <select>. The binding is one-way (`[ngModel]`),
+   *   so when the server refuses the PUT the model never moves and Angular has
+   *   nothing to re-render: the control keeps displaying the status the server
+   *   rejected, for the rest of the session, while the chip beside it and the
+   *   list behind it still hold the old value. Snap the element back by hand.
+   *   Same shape as project-tasks.ts's updateStatus().
+   */
+  updateStatus(issue: Issue, status: string, control: HTMLSelectElement) {
     this.api.updateProjectIssue(issue.id, { status })
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => this.issuesRes.reload());
+      .subscribe({
+        next: () => this.issuesRes.reload(),
+        // Revert to the value the SERVER still holds. errorInterceptor already
+        // raised the toast, so this only repairs the control — and it reverts on
+        // failure only, never unconditionally, or an accepted change would be
+        // undone on screen.
+        error: () => { control.value = issue.status; },
+      });
   }
 
   closeForm() {

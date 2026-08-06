@@ -5,6 +5,7 @@ import { HttpErrorResponse } from '@angular/common/http';
 import { SearchComponent } from './search.component';
 import { ApiService } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
+import { SEARCH_MAX_LIMIT } from '../services/search.util';
 
 function apiStub(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -123,7 +124,7 @@ describe('SearchComponent', () => {
       // Once the debounce elapses: fired, section renders.
       vi.advanceTimersByTime(1);
       await flush(fixture);
-      expect(getProjects).toHaveBeenCalledWith({ q: 'Alpha' });
+      expect(getProjects).toHaveBeenCalledWith({ q: 'Alpha', limit: SEARCH_MAX_LIMIT });
       expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="section-projects"]')!.textContent).toContain('Project Alpha');
     });
 
@@ -142,7 +143,7 @@ describe('SearchComponent', () => {
       // double that would trivially "pass" by never firing at all).
       (fixture.componentInstance as unknown as { submitNow(): void }).submitNow();
       await flush(fixture);
-      expect(getResources).toHaveBeenCalledWith({ q: 'Julie' });
+      expect(getResources).toHaveBeenCalledWith({ q: 'Julie', limit: SEARCH_MAX_LIMIT });
     });
 
     it('rapid keystrokes coalesce into ONE query, not one request per keystroke', async () => {
@@ -164,7 +165,7 @@ describe('SearchComponent', () => {
       await flush(fixture);
 
       expect(getProjects).toHaveBeenCalledTimes(1);
-      expect(getProjects).toHaveBeenCalledWith({ q: 'Julie' });
+      expect(getProjects).toHaveBeenCalledWith({ q: 'Julie', limit: SEARCH_MAX_LIMIT });
     });
 
     it('the debounce timer is browser-only: on the server, typing schedules nothing, however long fake time advances', async () => {
@@ -230,6 +231,80 @@ describe('SearchComponent', () => {
       await flush(fixture);
       expect(host.querySelector('[data-test="section-resources"]')!.textContent).toContain('John Smith');
       expect(host.querySelector('[data-test="section-customers"]')).toBeFalsy();
+    });
+  });
+
+  // --- Server-side truncation must be visible. These six reads are ALWAYS
+  // paginated by the server (clampSearchPage): sending no `limit` means 20 rows,
+  // not "everything", and the response is a bare array with no total. The screen
+  // used to render that page as the complete answer, so a query matching 400
+  // people looked like it matched 20 and the other 380 were unreachable. ---
+
+  describe('the page the server actually returned is disclosed as a page', () => {
+    /** `n` resources whose names are all distinct, so `track r.id` is stable. */
+    function resourcePage(n: number) {
+      return Array.from({ length: n }, (_, i) => ({
+        id: `R-${i}`, name: `Julie Match ${i}`, role: 'Developer', kind: 'internal',
+      }));
+    }
+
+    function hintIn(fixture: { nativeElement: unknown }, section: string): HTMLElement | null {
+      const host = fixture.nativeElement as HTMLElement;
+      // Scoped to the section: an unscoped query would be satisfied by ANY
+      // section's hint, so a per-section bug would hide behind a sibling.
+      return host.querySelector<HTMLElement>(`[data-test="section-${section}"] [data-test="truncation-hint"]`);
+    }
+
+    it('asks each collection for the server maximum, not the silent default of 20', async () => {
+      const calls: Record<string, unknown> = {};
+      const record = (key: string) => vi.fn((opts: unknown) => { calls[key] = opts; return of([]); });
+      const getResources = record('resources');
+      const getRequests = record('requests');
+      const getProjects = record('projects');
+      const getCustomers = record('customers');
+      const getContracts = record('contracts');
+      const getOrders = record('orders');
+      await setupAndSubmit({ getResources, getRequests, getProjects, getCustomers, getContracts, getOrders });
+
+      // All six legs, not just the one that happens to be asserted elsewhere:
+      // a limit added to five of six leaves the sixth silently truncating.
+      for (const key of ['resources', 'requests', 'projects', 'customers', 'contracts', 'orders']) {
+        expect(calls[key], `the ${key} leg must have been called`).toStrictEqual({ q: 'Julie', limit: SEARCH_MAX_LIMIT });
+      }
+    });
+
+    it('a full page carries the "first N matches" hint', async () => {
+      const fixture = await setupAndSubmit({ getResources: () => of(resourcePage(SEARCH_MAX_LIMIT)) });
+      const hint = hintIn(fixture, 'resources');
+      expect(hint).toBeTruthy();
+      expect(hint!.textContent).toContain(`first ${SEARCH_MAX_LIMIT} matches`);
+    });
+
+    it('a page ONE row short of the limit carries no hint (the absence twin)', async () => {
+      // Without this case a banner hard-coded into the template would satisfy the
+      // presence half above, and every search would claim to be truncated.
+      const fixture = await setupAndSubmit({ getResources: () => of(resourcePage(SEARCH_MAX_LIMIT - 1)) });
+      expect(hintIn(fixture, 'resources')).toBeFalsy();
+      // ...and the section itself DID render its rows, so the absence above is
+      // "no hint", not "no section".
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.querySelector('[data-test="section-resources"]')!.textContent).toContain('Julie Match 0');
+    });
+
+    it('an empty result set carries no hint either', async () => {
+      const fixture = await setupAndSubmit({ getResources: () => of([]) });
+      expect(hintIn(fixture, 'resources')).toBeFalsy();
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.querySelector('[data-test="section-resources"]')!.textContent).toContain('No results');
+    });
+
+    it('the hint is per-section: a full Resources page does not stamp one onto Projects', async () => {
+      const fixture = await setupAndSubmit({
+        getResources: () => of(resourcePage(SEARCH_MAX_LIMIT)),
+        getProjects: () => of([{ id: '1', name: 'Project Alpha', location: 'Berlin' }]),
+      });
+      expect(hintIn(fixture, 'resources')).toBeTruthy();
+      expect(hintIn(fixture, 'projects')).toBeFalsy();
     });
   });
 });
