@@ -6,24 +6,47 @@ import { AuthService } from '../services/auth.service';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { DecimalPipe } from '@angular/common';
 import { NotificationService } from '../services/notification.service';
+import { ListStateComponent } from '../shared/list-state.component';
+import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 import { forkJoin, of } from 'rxjs';
 
 @Component({
   selector: 'app-my-profile',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, ReactiveFormsModule, DecimalPipe],
+  imports: [MatIconModule, ReactiveFormsModule, DecimalPipe, ListStateComponent, ModalDialogDirective],
   template: `
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">My Project Experience</h1>
-        <div class="command-card flex items-center gap-3 px-5 py-2.5">
-          <span class="text-sm font-semibold text-[var(--cc-muted)] uppercase tracking-wider">Average Utilization:</span>
-          <span class="text-lg font-bold font-mono tabular-nums" [class]="getUtilizationColorText(profile()?.utilization || 0)">
-            {{ profile()?.utilization | number:'1.0-0' }}%
-          </span>
-        </div>
+        <!-- The utilization card sits ABOVE the app-list-state below, so it is gated
+             on its own resolved check rather than on the wrapper. Two reasons, both
+             load-bearing: (1) profile() dereferences dataRes.value(), which THROWS
+             while the read is in its error state — an unguarded binding here aborts
+             the change-detection pass and makes the error panel and its Retry
+             unreachable code; (2) ungated, it printed a bare "Average Utilization: %"
+             with no number at all while loading and for an identity with no resource
+             record, which reads as a real measurement of nothing. -->
+        @if (utilizationReady()) {
+          <div class="command-card flex items-center gap-3 px-5 py-2.5">
+            <span class="text-sm font-semibold text-[var(--cc-muted)] uppercase tracking-wider">Average Utilization:</span>
+            <span class="text-lg font-bold font-mono tabular-nums" [class]="getUtilizationColorText(profile()!.utilization || 0)">
+              {{ profile()!.utilization | number:'1.0-0' }}%
+            </span>
+          </div>
+        }
       </div>
 
+      <!-- One wrapper owns loading / error / retry for the whole page. A lone
+           "@if (profile())" conflated three different facts — not yet loaded,
+           identity not linked to a resource record, and the read failed — into
+           the same blank page.
+           The ng-template form is required, not stylistic: list-state.component.ts
+           documents that projected non-template content is evaluated eagerly even
+           inside a hidden @if branch, so a plain <ng-content> body would still throw
+           out of profile() before the error panel could render. -->
+      <app-list-state [loading]="loading()" [error]="loadFailed()" label="your profile"
+                      skeleton="cards" [rows]="3" (retry)="dataRes.reload()">
+        <ng-template>
       @if (profile()) {
         <!-- Profile Details -->
         <div class="command-card overflow-hidden">
@@ -37,7 +60,7 @@ import { forkJoin, of } from 'rxjs';
                 }
               </div>
               <label class="absolute inset-0 bg-ink/40 backdrop-blur-sm rounded-full flex items-center justify-center opacity-100 transition-all duration-300 text-white cursor-pointer scale-100 sm:opacity-0 sm:scale-95 sm:group-hover:opacity-100 sm:group-hover:scale-100 sm:group-focus-within:opacity-100 sm:group-focus-within:scale-100" aria-label="Upload profile picture">
-                <input type="file" class="sr-only" accept="image/*" aria-label="Upload profile picture" (change)="onProfilePictureSelected($event)">
+                <input type="file" class="sr-only" accept="image/*" aria-label="Upload profile picture" [disabled]="busy()" (change)="onProfilePictureSelected($event)">
                 <mat-icon class="text-[28px] w-[28px] h-[28px]">photo_camera</mat-icon>
               </label>
             </div>
@@ -127,7 +150,7 @@ import { forkJoin, of } from 'rxjs';
                     <option [ngValue]="lvl.level">{{ lvl.name }} ({{ lvl.level }})</option>
                   }
                 </select>
-                <button type="submit" [disabled]="!skillForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                <button type="submit" [disabled]="!skillForm.valid || busy()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
                   Save
                 </button>
               </form>
@@ -144,7 +167,7 @@ import { forkJoin, of } from 'rxjs';
                       </div>
                     }
                   </div>
-                  <button type="button" (click)="removeSkill(skill.name)" [attr.aria-label]="'Remove ' + skill.name" [attr.title]="'Remove ' + skill.name" class="ml-2 text-ink-muted hover:text-critical-text opacity-100 transition-all sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100">
+                  <button type="button" (click)="removeSkill(skill.name)" [disabled]="busy()" [attr.aria-label]="'Remove ' + skill.name" [attr.title]="'Remove ' + skill.name" class="ml-2 text-ink-muted hover:text-critical-text opacity-100 transition-all sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 disabled:opacity-50 disabled:cursor-not-allowed">
                     <mat-icon class="text-[16px] w-[16px] h-[16px]">close</mat-icon>
                   </button>
                 </div>
@@ -176,14 +199,14 @@ import { forkJoin, of } from 'rxjs';
                     <option [value]="role.name">{{ role.name }}</option>
                   }
                 </select>
-                <button (click)="addRole()" [disabled]="!roleInput.value" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save</button>
+                <button (click)="addRole()" [disabled]="!roleInput.value || busy()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save</button>
               </div>
             }
             <div class="flex flex-wrap gap-3">
               @for (role of profile()?.projectRoles; track role) {
                 <div class="flex items-center gap-2 px-3 py-1.5 bg-surface-muted rounded-lg border border-line">
                   <span class="font-medium text-ink-secondary text-sm">{{ role }}</span>
-                  <button type="button" (click)="removeRole(role)" [attr.aria-label]="'Remove ' + role" [attr.title]="'Remove ' + role" class="text-ink-muted hover:text-critical-text transition-colors ml-1">
+                  <button type="button" (click)="removeRole(role)" [disabled]="busy()" [attr.aria-label]="'Remove ' + role" [attr.title]="'Remove ' + role" class="text-ink-muted hover:text-critical-text transition-colors ml-1 disabled:opacity-50 disabled:cursor-not-allowed">
                     <mat-icon class="text-[16px] w-[16px] h-[16px]">close</mat-icon>
                   </button>
                 </div>
@@ -236,7 +259,7 @@ import { forkJoin, of } from 'rxjs';
                 </div>
                 <div class="flex justify-end gap-2">
                   <button type="button" (click)="toggleAddExtExp()" class="command-button secondary">Cancel</button>
-                  <button type="submit" [disabled]="!extExpForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save</button>
+                  <button type="submit" [disabled]="!extExpForm.valid || busy()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save</button>
                 </div>
               </form>
             }
@@ -248,7 +271,7 @@ import { forkJoin, of } from 'rxjs';
                    name and wipe the sibling the user never touched. -->
               @for (exp of profile()?.externalExperience; track $index; let i = $index) {
                 <div class="command-card-muted p-4 relative group">
-                  <button type="button" (click)="removeExtExp(i)" [attr.aria-label]="'Remove ' + exp.projectName + ' at ' + exp.company" [attr.title]="'Remove ' + exp.projectName + ' at ' + exp.company" class="absolute top-4 right-4 text-ink-muted hover:text-critical-text opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100">
+                  <button type="button" (click)="removeExtExp(i)" [disabled]="busy()" [attr.aria-label]="'Remove ' + exp.projectName + ' at ' + exp.company" [attr.title]="'Remove ' + exp.projectName + ' at ' + exp.company" class="absolute top-4 right-4 text-ink-muted hover:text-critical-text opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 disabled:cursor-not-allowed">
                     <mat-icon>delete</mat-icon>
                   </button>
                   <h4 class="font-medium text-[var(--cc-ink)]">{{ exp.projectName }}</h4>
@@ -310,14 +333,14 @@ import { forkJoin, of } from 'rxjs';
                   <a [href]="profile()?.resume" download="Resume" aria-label="Download resume" title="Download resume" class="text-ink-muted hover:text-accent-text transition-colors">
                     <mat-icon>download</mat-icon>
                   </a>
-                  <button type="button" (click)="removeResume()" aria-label="Remove resume" title="Remove resume" class="text-ink-muted hover:text-critical-text transition-colors">
+                  <button type="button" (click)="removeResume()" [disabled]="busy()" aria-label="Remove resume" title="Remove resume" class="text-ink-muted hover:text-critical-text transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
                     <mat-icon>delete</mat-icon>
                   </button>
                 </div>
               </div>
             } @else {
               <label class="block border-2 border-dashed border-line-strong rounded-xl p-8 text-center hover:bg-surface-muted transition-colors cursor-pointer">
-                <input type="file" class="hidden" accept=".pdf,.doc,.docx" aria-label="Upload resume" (change)="onResumeSelected($event)">
+                <input type="file" class="hidden" accept=".pdf,.doc,.docx" aria-label="Upload resume" [disabled]="busy()" (change)="onResumeSelected($event)">
                 <mat-icon class="text-ink-muted mb-2">cloud_upload</mat-icon>
                 <p class="text-sm font-medium text-ink-secondary">Click to upload resume</p>
                 <p class="text-xs text-ink-muted mt-1">PDF or DOCX up to 2MB</p>
@@ -326,6 +349,59 @@ import { forkJoin, of } from 'rxjs';
           </div>
         </div>
 
+      } @else if (notLinked()) {
+        <!-- The read RESOLVED and there is simply no resource record behind this
+             principal. Previously indistinguishable from "still loading" and from
+             "the request failed", so nothing on screen led to understanding it. -->
+        <div class="command-card p-10 text-center flex flex-col items-center gap-4">
+          <div class="w-16 h-16 bg-caution-tint ring-1 ring-caution rounded-full flex items-center justify-center">
+            <mat-icon class="text-caution-text text-3xl">link_off</mat-icon>
+          </div>
+          <div>
+            <h3 class="font-display text-lg font-bold text-[var(--cc-ink)]">Your account is not linked to a resource record</h3>
+            <p class="text-[var(--cc-muted)] text-sm mt-1 max-w-prose">
+              Skills, availability and project experience are held on a resource record, and your
+              sign-in has none attached. Ask an administrator to link your user to a resource; nothing
+              on this page can be filled in until they do.
+            </p>
+          </div>
+        </div>
+      } @else {
+        <!-- Linked identity, successful read, but the server returned no record. -->
+        <div class="command-card p-10 text-center flex flex-col items-center gap-4">
+          <div class="w-16 h-16 bg-surface-muted ring-1 ring-line rounded-full flex items-center justify-center">
+            <mat-icon class="text-ink-muted text-3xl">person_off</mat-icon>
+          </div>
+          <div>
+            <h3 class="font-display text-lg font-bold text-[var(--cc-ink)]">No profile record found</h3>
+            <p class="text-[var(--cc-muted)] text-sm mt-1">Your resource record came back empty. Ask an administrator to check it.</p>
+          </div>
+        </div>
+      }
+        </ng-template>
+      </app-list-state>
+
+      @if (confirmingResumeRemoval()) {
+        <!-- Removing the resume is a destructive write with no undo: the file lives
+             only in this record (a base64 data URL), the API has no version history
+             and nothing on this screen can put it back. A single mis-click on a
+             hover-revealed icon used to be the whole interaction. -->
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+             appModal ariaLabelledby="resumeRemoveTitle" (dismiss)="cancelRemoveResume()">
+          <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col">
+            <div class="p-6 text-center">
+              <div class="w-16 h-16 bg-critical-tint ring-1 ring-critical rounded-full flex items-center justify-center mx-auto mb-4">
+                <mat-icon class="text-critical-text text-3xl">warning</mat-icon>
+              </div>
+              <h3 id="resumeRemoveTitle" class="font-display text-lg font-bold text-[var(--cc-ink)] mb-2">Remove your resume</h3>
+              <p class="text-[var(--cc-muted)] text-sm">This deletes the only stored copy of your CV. Download it first if you want to keep it — this cannot be undone.</p>
+            </div>
+            <div class="p-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
+              <button type="button" (click)="cancelRemoveResume()" class="command-button secondary">Cancel</button>
+              <button type="button" (click)="confirmRemoveResume()" [disabled]="busy()" class="px-4 py-2 bg-critical text-white rounded-lg text-sm font-medium hover:bg-critical-strong transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">Remove resume</button>
+            </div>
+          </div>
+        </div>
       }
     </div>
   `
@@ -338,7 +414,7 @@ export class MyProfileComponent {
   // /self derives the resource id from the verified OIDC principal server-side.
   // Do not issue a request until the principal is both restored and linked; an
   // unmapped identity must render empty instead of querying an arbitrary person.
-  private dataRes = rxResource<{ profile: Resource | null; assignments: Assignment[]; requests: ResourceRequest[] }, boolean>({
+  protected dataRes = rxResource<{ profile: Resource | null; assignments: Assignment[]; requests: ResourceRequest[] }, boolean>({
     params: () => this.auth.authReady() && this.auth.hasResourceIdentity(),
     stream: ({ params: canLoad }) => canLoad
       ? forkJoin({
@@ -387,6 +463,54 @@ export class MyProfileComponent {
 
   profile = computed(() => this.dataRes.value().profile);
 
+  /**
+   * Page-level read state, kept as three separate facts because collapsing any
+   * two of them is the defect this replaced.
+   *
+   * `loading` folds authReady: until the OIDC bootstrap settles the resource's
+   * params are false and it sits RESOLVED on its empty default, which is not the
+   * same as "you have no profile". `loadFailed` is the only thing allowed to
+   * gate a value dereference — dataRes.value() throws while erroring, so every
+   * accessor below it is reached only through a short-circuit.
+   */
+  protected readonly loading = computed(() => !this.auth.authReady() || this.dataRes.isLoading());
+  protected readonly loadFailed = computed(() => this.dataRes.status() === 'error');
+  /** Authenticated, but the principal carries no resource_id mapping. */
+  protected readonly notLinked = computed(() => this.auth.authReady() && !this.auth.hasResourceIdentity());
+  /**
+   * Guard for the utilization card, which renders OUTSIDE the list-state wrapper.
+   * Order matters: loadFailed() is tested before profile(), so the throwing
+   * value() is never reached during an error.
+   */
+  protected readonly utilizationReady = computed(
+    () => !this.loading() && !this.loadFailed() && this.profile() != null,
+  );
+
+  /** True while the PUT itself is in flight. */
+  private savingProfile = signal(false);
+  /**
+   * Write lock over the profile document.
+   *
+   * Every mutating handler here is a read-modify-write of a WHOLE array (skills,
+   * projectRoles, externalExperience) rebuilt from `profile()`, and `profile()`
+   * does not change until the reload lands. Two clicks inside that window both
+   * derive from the same stale array, so the second PUT re-sends the member the
+   * first one removed: remove Java then Python ~250 ms apart and Java comes back,
+   * because the server keeps the last write.
+   *
+   * The lock therefore has to span the RELOAD too, not just the PUT — which is
+   * why isLoading() is folded in and not decoration. `dataRes.reload()` bumps the
+   * resource's request, and ResourceImpl's state recomputes to 'loading' off that
+   * request, so isLoading() is already true by the time anything can read this
+   * guard again. Handlers hand the lock over: savingProfile drops in the PUT
+   * callback immediately before reload(), and isLoading() carries it from there
+   * until fresh arrays are on screen.
+   */
+  protected readonly busy = computed(() => this.savingProfile() || this.dataRes.isLoading());
+
+  /** Armed only by the resume remove button; the PUT is issued by the dialog. */
+  protected readonly confirmingResumeRemoval = signal(false);
+
   // Roles still available to add: every catalog role not already on the profile.
   // (Existing projectRoles outside the catalog stay visible as chips and are simply
   // not re-offered here; this is the choose-then-add list, not an edit-in-place.)
@@ -430,17 +554,28 @@ export class MyProfileComponent {
 
   nextSixMonths: { name: string, index: number }[] = this.generateMonths();
 
+  /**
+   * The next six months, each built from a FRESH Date constructor anchored on
+   * day 1 of the month.
+   *
+   * It used to mutate one Date with setMonth(getMonth() + 1). On the 29th-31st
+   * that asks for a day the target month does not have — from 31 August,
+   * setMonth(8) means 31 September, which JS normalises forward to 1 October —
+   * so September vanished from a table headed "Next 6 Months" and the strip
+   * silently spanned seven months. `new Date(y, m + i, 1)` normalises the month
+   * index instead of the day, including across the year boundary, which is the
+   * same shape reporting.ts's recentPeriods and capacity.component.ts's
+   * shiftMonth already use.
+   */
   private generateMonths(): { name: string, index: number }[] {
-    const months: { name: string, index: number }[] = [];
-    const d = new Date();
-    for (let i = 0; i < 6; i++) {
-      months.push({
+    const now = new Date();
+    return Array.from({ length: 6 }, (_, i) => {
+      const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+      return {
         name: d.toLocaleString('default', { month: 'short', year: 'numeric' }),
-        index: d.getMonth()
-      });
-      d.setMonth(d.getMonth() + 1);
-    }
-    return months;
+        index: d.getMonth(),
+      };
+    });
   }
 
   getRequestName(id: string): string {
@@ -468,58 +603,82 @@ export class MyProfileComponent {
     return 'amber';
   }
 
+  /**
+   * The ONE path every profile mutation takes.
+   *
+   * Takes the write lock before the request leaves and hands it to the reload on
+   * the way out: the `set(false)` must stay immediately BEFORE `reload()`, since
+   * the two together are what keep `busy()` continuously true from the click
+   * until fresh arrays are on screen. On failure the lock is dropped outright —
+   * the arrays on screen are still the server's, so the controls have to come
+   * back or the page is dead until a reload.
+   */
+  private writeProfile(patch: Partial<Resource>, onSuccess?: () => void): void {
+    this.savingProfile.set(true);
+    this.api.updateMyProfile(patch).subscribe({
+      next: () => {
+        this.savingProfile.set(false);
+        this.dataRes.reload();
+        onSuccess?.();
+      },
+      error: () => this.savingProfile.set(false),
+    });
+  }
+
   // --- Skills ---
   toggleAddSkill() { this.showAddSkill.update(v => !v); }
   addSkill() {
+    if (this.busy()) return;
     if (this.skillForm.valid && this.profile()) {
       const currentProfile = this.profile()!;
       const newSkill = { name: this.skillForm.value.name!, level: Number(this.skillForm.value.level!) };
       const updatedSkills = [...currentProfile.skills, newSkill];
-      this.api.updateMyProfile({ skills: updatedSkills }).subscribe(() => {
-        this.dataRes.reload();
+      this.writeProfile({ skills: updatedSkills }, () => {
         this.skillForm.reset({ name: '', level: null });
         this.showAddSkill.set(false);
       });
     }
   }
   removeSkill(skillName: string) {
+    if (this.busy()) return;
     if (this.profile()) {
       const currentProfile = this.profile()!;
       const updatedSkills = currentProfile.skills.filter(s => s.name !== skillName);
-      this.api.updateMyProfile({ skills: updatedSkills }).subscribe(() => this.dataRes.reload());
+      this.writeProfile({ skills: updatedSkills });
     }
   }
 
   // --- Roles ---
   toggleAddRole() { this.showAddRole.update(v => !v); }
   addRole() {
+    if (this.busy()) return;
     if (this.roleInput.valid && this.profile()) {
       const currentProfile = this.profile()!;
       const updatedRoles = [...(currentProfile.projectRoles || []), this.roleInput.value!];
-      this.api.updateMyProfile({ projectRoles: updatedRoles }).subscribe(() => {
-        this.dataRes.reload();
+      this.writeProfile({ projectRoles: updatedRoles }, () => {
         this.roleInput.reset();
         this.showAddRole.set(false);
       });
     }
   }
   removeRole(roleName: string) {
+    if (this.busy()) return;
     if (this.profile()) {
       const currentProfile = this.profile()!;
       const updatedRoles = currentProfile.projectRoles.filter(r => r !== roleName);
-      this.api.updateMyProfile({ projectRoles: updatedRoles }).subscribe(() => this.dataRes.reload());
+      this.writeProfile({ projectRoles: updatedRoles });
     }
   }
 
   // --- External Experience ---
   toggleAddExtExp() { this.showAddExtExp.update(v => !v); }
   addExtExp() {
+    if (this.busy()) return;
     if (this.extExpForm.valid && this.profile()) {
       const currentProfile = this.profile()!;
       const newExp = this.extExpForm.value as { projectName: string; company: string; role: string; startDate: string; endDate: string; comment?: string };
       const updatedExp = [...(currentProfile.externalExperience || []), newExp];
-      this.api.updateMyProfile({ externalExperience: updatedExp }).subscribe(() => {
-        this.dataRes.reload();
+      this.writeProfile({ externalExperience: updatedExp }, () => {
         this.extExpForm.reset();
         this.showAddExtExp.set(false);
       });
@@ -536,18 +695,20 @@ export class MyProfileComponent {
    * in the template so the rendered order is the stored order — is the key.
    */
   removeExtExp(index: number) {
+    if (this.busy()) return;
     const currentProfile = this.profile();
     if (!currentProfile) return;
     const current = currentProfile.externalExperience ?? [];
     if (!Number.isInteger(index) || index < 0 || index >= current.length) return;
     const updatedExp = current.filter((_, i) => i !== index);
-    this.api.updateMyProfile({ externalExperience: updatedExp }).subscribe(() => this.dataRes.reload());
+    this.writeProfile({ externalExperience: updatedExp });
   }
 
   // --- File Uploads ---
   private static readonly MAX_UPLOAD_BYTES = 2 * 1024 * 1024; // 2MB
 
   onProfilePictureSelected(event: Event) {
+    if (this.busy()) return;
     const file = (event.target as HTMLInputElement).files?.[0];
     if (file && this.profile()) {
       if (file.size > MyProfileComponent.MAX_UPLOAD_BYTES) {
@@ -557,13 +718,14 @@ export class MyProfileComponent {
       const reader = new FileReader();
       reader.onload = () => {
         const base64 = reader.result as string;
-        this.api.updateMyProfile({ profilePicture: base64 }).subscribe(() => this.dataRes.reload());
+        this.writeProfile({ profilePicture: base64 });
       };
       reader.readAsDataURL(file);
     }
   }
 
   onResumeSelected(event: Event) {
+    if (this.busy()) return;
     const file = (event.target as HTMLInputElement).files?.[0];
     if (file && this.profile()) {
       if (file.size > MyProfileComponent.MAX_UPLOAD_BYTES) {
@@ -573,15 +735,34 @@ export class MyProfileComponent {
       const reader = new FileReader();
       reader.onload = () => {
         const base64 = reader.result as string;
-        this.api.updateMyProfile({ resume: base64 }).subscribe(() => this.dataRes.reload());
+        this.writeProfile({ resume: base64 });
       };
       reader.readAsDataURL(file);
     }
   }
 
+  /**
+   * ARMS the confirmation dialog; it does not write.
+   *
+   * The resume is stored inline on the record as a base64 data URL — this record
+   * is the only copy, the API keeps no version history, and nothing on this
+   * screen can restore it. Sending the wipe straight from a hover-revealed icon
+   * made one mis-click unrecoverable, so the destructive PUT now lives behind
+   * {@link confirmRemoveResume} and the dialog states the consequence.
+   */
   removeResume() {
-    if (this.profile()) {
-      this.api.updateMyProfile({ resume: '' }).subscribe(() => this.dataRes.reload());
-    }
+    if (this.busy()) return;
+    if (!this.profile()?.resume) return;
+    this.confirmingResumeRemoval.set(true);
+  }
+
+  cancelRemoveResume() { this.confirmingResumeRemoval.set(false); }
+
+  /** The only place the resume wipe is issued. */
+  confirmRemoveResume() {
+    if (this.busy()) return;
+    if (!this.profile()) return;
+    this.confirmingResumeRemoval.set(false);
+    this.writeProfile({ resume: '' }, () => this.notify.success('Resume removed.'));
   }
 }
