@@ -40,12 +40,15 @@ const ORG_RESOURCES: Resource[] = [
 
 
 function setup(
-  resources: Resource[] = RESOURCES,
+  // `resources` accepts an Observable as well as an array: the read-failure
+  // specs below have to hand it a throwError(...), and an array-only parameter
+  // makes that test literally unwritable.
+  resources: Resource[] | Observable<Resource[]> = RESOURCES,
   orgNodes: ResourceOrganization[] | Observable<ResourceOrganization[]> = [],
   rateCards: RateCard[] | Observable<RateCard[]> = [],
   assignments$: Observable<Assignment[]> = of([]),
 ) {
-  const getResources = vi.fn(() => of(resources));
+  const getResources = vi.fn(() => (Array.isArray(resources) ? of(resources) : resources));
   const getProjectRoles = vi.fn(() => of([]));
   const getResourceOrganizations = vi.fn(() => (Array.isArray(orgNodes) ? of(orgNodes) : orgNodes));
   const getCountries = vi.fn(() => of([]));
@@ -72,7 +75,39 @@ function setup(
   });
 
   const fixture = TestBed.createComponent(ResourcesComponent);
-  return { fixture, getResources, getVendors, createResource, updateResource, notifyStub };
+  return { fixture, getResources, getResourceOrganizations, getVendors, createResource, updateResource, notifyStub };
+}
+
+/**
+ * `resourcesRes`/`orgsRes` are protected template-only members (the file's own
+ * convention for its rxResources). The read-failure specs need their status as a
+ * POSITIVE CONTROL — without it a test can pass because the read it meant to
+ * break quietly succeeded — so read it through one narrow, named accessor rather
+ * than widening the component's surface for the tests' convenience.
+ */
+function statusOf(component: ResourcesComponent, key: 'resourcesRes' | 'orgsRes'): string {
+  return (component as unknown as Record<string, { status: () => string }>)[key].status();
+}
+
+/** The Retry control inside app-list-state's error panel, or null. */
+function retryButton(host: HTMLElement): HTMLButtonElement | null {
+  return [...host.querySelectorAll<HTMLButtonElement>('[role="alert"] button')]
+    .find(b => b.textContent?.includes('Retry')) ?? null;
+}
+
+/**
+ * Walk outward from `el` to the nearest ancestor that CLIPS (`overflow-hidden`)
+ * and report whether anything on that path opts into horizontal panning
+ * (`overflow-x-auto`). Returns false when the clipper is reached first — that is
+ * the shape in which content wider than the card is unreachable: no scrollbar,
+ * no touch pan, no wheel pan.
+ */
+function hasHorizontalPanPort(el: Element): boolean {
+  for (let node: Element | null = el; node; node = node.parentElement) {
+    if (node.classList.contains('overflow-x-auto')) return true;
+    if (node.classList.contains('overflow-hidden')) return false;
+  }
+  return false;
 }
 
 async function flush(fixture: { detectChanges: () => void; whenStable: () => Promise<unknown> }) {
@@ -671,6 +706,143 @@ describe('ResourcesComponent', () => {
       fixture.detectChanges();
 
       expect(fixture.componentInstance.activeOnly()).toBe(true);
+    });
+  });
+
+  // A failed read must reach the ONE error affordance this screen has. The facet
+  // bar renders ABOVE the app-list-state and dereferences both reads through
+  // filterFacets(); an rxResource `.value()` THROWS while its status is 'error',
+  // and a throw during change detection aborts the pass, so the panel written
+  // for the failure was unreachable code and Retry could never be clicked.
+  //
+  // Every other spec in this file stubs BOTH reads with a synchronous of(...) —
+  // which is exactly how this stayed green — so each case below carries a
+  // positive control asserting the read it meant to break really did fail.
+  describe('a failed list read reaches the error panel and its Retry', () => {
+    it('renders the panel and Retry without throwing when the org tree fails and /resources succeeds', async () => {
+      const { fixture } = setup(RESOURCES, throwError(() => new Error('500 Internal Server Error')));
+      // The pre-fix throw happens INSIDE the render, so it surfaces here as a
+      // rejected promise rather than as a failed expectation further down.
+      await expect(flush(fixture)).resolves.toBeUndefined();
+
+      expect(statusOf(fixture.componentInstance, 'orgsRes')).toBe('error');
+      expect(statusOf(fixture.componentInstance, 'resourcesRes')).toBe('resolved');
+      // ...and every SUBSEQUENT pass must stay clean, not just the first.
+      expect(() => fixture.detectChanges()).not.toThrow();
+
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.textContent).toContain("Couldn't load resources");
+      expect(retryButton(host)).not.toBeNull();
+    });
+
+    it('renders the panel and Retry, and KEEPS the filter bar, when /resources itself fails', async () => {
+      const { fixture } = setup(throwError(() => new Error('401 Unauthorized')), ORG_NODES);
+      await expect(flush(fixture)).resolves.toBeUndefined();
+
+      expect(statusOf(fixture.componentInstance, 'resourcesRes')).toBe('error');
+      expect(() => fixture.detectChanges()).not.toThrow();
+
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.textContent).toContain("Couldn't load resources");
+      expect(retryButton(host)).not.toBeNull();
+
+      // The filter bar must survive the failure rather than be moved inside the
+      // wrapper: the query and the facet selections are the USER's own component
+      // state, and blanking them on a failed reload would discard input the read
+      // never owned. This is why the fix is a defensive accessor, not a move.
+      const query = host.querySelector<HTMLInputElement>('[data-test="filter-bar-query"]');
+      expect(query).not.toBeNull();
+      fixture.componentInstance.search.set('Alice');
+      fixture.detectChanges();
+      expect(host.querySelector<HTMLInputElement>('[data-test="filter-bar-query"]')!.value).toBe('Alice');
+    });
+
+    it('shows NO error panel and the real rows/facets when both reads succeed', async () => {
+      // The must-still-be-ALLOWED case. Without it, a guard that reported
+      // failure unconditionally — or a template that always rendered the panel —
+      // would satisfy both cases above.
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      expect(statusOf(fixture.componentInstance, 'resourcesRes')).toBe('resolved');
+      expect(statusOf(fixture.componentInstance, 'orgsRes')).toBe('resolved');
+      expect(host.textContent).not.toContain("Couldn't load resources");
+      expect(retryButton(host)).toBeNull();
+
+      const names = [...host.querySelectorAll('[data-test="resource-name"]')].map(e => e.textContent?.trim());
+      expect(names).toContain('Jane Doe');
+      // The facet options are the very bindings the guard short-circuits, so
+      // assert they are genuinely populated in the success case — an accessor
+      // stuck at [] would pass the two failure cases above and fail here.
+      const capabilities = [...host.querySelectorAll<HTMLOptionElement>('[data-test="filter-bar-facet-capability"] option')]
+        .map(o => o.value);
+      expect(capabilities).toEqual(['', 'Engineering', 'Consulting']);
+    });
+
+    it('Retry reloads BOTH the resource list and the org tree, not only the resources', async () => {
+      const { fixture, getResources, getResourceOrganizations } =
+        setup(RESOURCES, throwError(() => new Error('500 Internal Server Error')));
+      await expect(flush(fixture)).resolves.toBeUndefined();
+      expect(getResources).toHaveBeenCalledTimes(1);
+      expect(getResourceOrganizations).toHaveBeenCalledTimes(1);
+
+      const host = fixture.nativeElement as HTMLElement;
+      retryButton(host)!.click();
+      await flush(fixture);
+
+      // The failing leg is the org tree: a Retry wired to resourcesRes alone
+      // leaves the very read that broke the page still broken.
+      expect(getResourceOrganizations).toHaveBeenCalledTimes(2);
+      expect(getResources).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // The 8-column table lays out at ~750px inside a card whose content box is
+  // ~288px at a 320px viewport. The card clips with overflow-hidden (for its
+  // rounded corners), so without an interposed pan port the Status column and
+  // the whole Actions cell — Edit and Terminate, the only logical-deletion path
+  // in the app — are simply unreachable: no scrollbar, no touch pan, no wheel pan.
+  describe('the resources table can be panned horizontally', () => {
+    it('interposes a pan port between the table and the clipping card — jsdom performs NO layout, so this proves the structural precondition ONLY, never reachability at 320px', async () => {
+      // What jsdom cannot do: clientWidth/scrollWidth are both 0 here and no
+      // grid/table tracks are computed, so the clipping itself is unassertable.
+      // Proving the user can actually reach the Actions cell needs a real
+      // browser at 320px (`table.scrollWidth > card.clientWidth` with
+      // `card.scrollLeft` immovable) and there is no Playwright in this repo.
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      const table = host.querySelector('table.command-data-table');
+      expect(table).not.toBeNull();
+      // There must genuinely be something to escape from — if the card ever
+      // stopped clipping, a green result below would mean nothing.
+      expect(table!.closest('.overflow-hidden')).not.toBeNull();
+      expect(hasHorizontalPanPort(table!)).toBe(true);
+      // A width floor, so the port engages deterministically instead of relying
+      // on the table's min-content exceeding the card.
+      expect(table!.className).toMatch(/min-w-\[/);
+    });
+
+    it('the pan-port walk reports false for the pre-fix shape, so the green above is not a vacuous query', () => {
+      // The register pairs this with a GREEN run of the same walk against
+      // approvals.ts, which already gets this right — that file is outside this
+      // change's ownership, so the discrimination is proved here instead, on the
+      // two shapes themselves: table straight inside the clipper (unreachable)
+      // vs. the same table behind a port (reachable).
+      const card = document.createElement('div');
+      card.className = 'command-card overflow-hidden';
+      const table = document.createElement('table');
+      table.className = 'command-data-table';
+      card.appendChild(table);
+      expect(hasHorizontalPanPort(table)).toBe(false);
+
+      const port = document.createElement('div');
+      port.className = 'overflow-x-auto';
+      card.appendChild(port);
+      port.appendChild(table);
+      expect(hasHorizontalPanPort(table)).toBe(true);
     });
   });
 });

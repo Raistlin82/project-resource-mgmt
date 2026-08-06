@@ -83,12 +83,21 @@ const REMOTE_LOCATION = 'Remote';
 
         <app-list-state
           [loading]="resourcesRes.isLoading()"
-          [error]="resourcesRes.status() === 'error'"
+          [error]="listReadFailed()"
           skeleton="table-rows" [rows]="6" [columns]="6"
           label="resources"
-          (retry)="resourcesRes.reload()">
+          (retry)="reloadListInputs()">
           <ng-template>
-          <table class="command-data-table">
+          <!-- The card above clips with overflow-hidden (for its rounded
+               corners), and this 8-column table's min-content is ~750px — well
+               past the ~288px content box at a 320px viewport. Without this
+               pan port the Status column and the whole Actions cell (Edit and
+               Terminate, the ONLY logical-deletion path in the app) are clipped
+               with no scrollbar, no touch pan and no wheel pan. Same shape as
+               approvals.ts and bench.component.ts; min-w keeps the port
+               engaging deterministically instead of relying on min-content. -->
+          <div class="overflow-x-auto">
+          <table class="command-data-table min-w-[900px]">
             <thead>
               <tr>
                 <th>Name</th>
@@ -147,6 +156,7 @@ const REMOTE_LOCATION = 'Remote';
               }
             </tbody>
           </table>
+          </div>
           </ng-template>
         </app-list-state>
       </div>
@@ -403,7 +413,25 @@ export class ResourcesComponent {
     stream: ({ params: ready }) => (ready ? this.api.getResources() : of<Resource[]>([])),
     defaultValue: [] as Resource[],
   });
-  resources = this.resourcesRes.value;
+  /**
+   * READ-FAILURE GUARD. `resourcesRes.value()` THROWS ResourceValueError while
+   * the read is in its error state, and this signal is dereferenced from
+   * bindings that sit ABOVE the app-list-state below (the facet bar's People
+   * Manager option list, via managerFilterOptions -> filterFacets) as well as
+   * from the form modal beside it. An unguarded throw there aborts the whole
+   * change-detection pass, so the "Couldn't load resources" panel and its Retry
+   * — the only recovery short of a browser reload — could never render.
+   *
+   * This is NOT the banned `status()==='error' ? [] : value()`: that form is
+   * banned because it makes emptiness the screen's ANSWER about the data. Here
+   * emptiness is never an answer — `listReadFailed()` puts the list region into
+   * the error panel in exactly the same state, and the spec pins that pairing
+   * (a failing read must render the panel, never "No resources match"). The two
+   * halves are one fix; weakening either re-creates the defect.
+   */
+  resources = computed<Resource[]>(() =>
+    this.resourcesRes.status() === 'error' ? [] : this.resourcesRes.value(),
+  );
 
   // Role option source: the canonical /project-roles catalog. Stored value = name
   // (see reference-data-integrity plan, Phase A). Keyed on authReady
@@ -445,7 +473,47 @@ export class ResourcesComponent {
     stream: ({ params: ready }) => (ready ? this.api.getResourceOrganizations() : of<ResourceOrganization[]>([])),
     defaultValue: [] as ResourceOrganization[],
   });
-  orgOptions = this.orgsRes.value;
+  /**
+   * READ-FAILURE GUARD, same contract as `resources` above and for the same
+   * reason — the org tree is a SECOND, independently failing read whose
+   * `.value()` throws at the very same facet-bar binding (capability/practice/
+   * competence options), and is read again from the form's Organization select,
+   * which lives outside every list-state on this screen. /resources succeeding
+   * while /resource-organizations 500s is therefore enough on its own to freeze
+   * the page, which is why `listReadFailed()` covers BOTH legs and Retry
+   * reloads BOTH.
+   */
+  orgOptions = computed<ResourceOrganization[]>(() =>
+    this.orgsRes.status() === 'error' ? [] : this.orgsRes.value(),
+  );
+
+  /** Every read the LIST region (table + facet option lists) derives from —
+   *  one shared list, so the gate below cannot drift from what feeds it. */
+  private listInputs() {
+    return [this.resourcesRes, this.orgsRes];
+  }
+
+  /**
+   * Whether EITHER leg of the list region failed. Bound to the app-list-state's
+   * [error] so the panel is what renders whenever the guards above have nothing
+   * truthful to show — keying it on `resourcesRes` alone would leave an org-tree
+   * failure as a silently facet-less filter bar with no panel at all.
+   *
+   * `loading` deliberately stays keyed on `resourcesRes` alone: the facet bar
+   * renders ABOVE this wrapper (its query and selections are component state,
+   * not resource state, so it must survive a failed reload rather than be
+   * blanked), so a skeleton here would not cover the loading facets anyway —
+   * it would only hide rows that are already fetched and displayable.
+   */
+  protected readonly listReadFailed = computed<boolean>(() =>
+    this.listInputs().some(r => r.status() === 'error'),
+  );
+
+  /** Retry target for the list region: reloads every leg listReadFailed()
+   *  watches, so one Retry can never leave the other leg still failed. */
+  protected reloadListInputs(): void {
+    for (const r of this.listInputs()) r.reload();
+  }
 
   // RATE CARDS (Phase E): the role's default cost/bill rates. The cost/bill inputs
   // are per-resource OVERRIDES — empty inherits the matching card. We surface the
