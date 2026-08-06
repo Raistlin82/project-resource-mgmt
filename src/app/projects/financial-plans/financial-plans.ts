@@ -49,7 +49,15 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
                         skeleton="table-rows" [rows]="5" [columns]="4" label="financial plans"
                         (retry)="financialsRes.reload()">
           <ng-template>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6" aria-label="Financial plan metrics">
+        <!--
+          The role is what makes the aria-label PERMITTED. An aria-label on a
+          role-less div is ignored by the accessible-name computation, so this
+          region had no name at all and its three tiles were announced as loose,
+          unassociated text; with a role the name applies and the tiles read as one
+          labelled group. Same treatment as the other labelled wrappers in this
+          codebase (register: "no aria-label on a role-less div/span").
+        -->
+        <div role="group" class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6" aria-label="Financial plan metrics">
           <div class="command-kpi">
             <h3 class="command-kpi-label">Total Budget</h3>
             <p class="command-kpi-value">{{ totalBudget() | currency:baseCurrency:'symbol':'1.0-0' }}</p>
@@ -89,7 +97,7 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
                       <button type="button" (click)="editPlan(item)" class="text-ink-muted hover:text-accent-text hover:bg-accent-tint p-1.5 rounded-lg transition-colors" aria-label="Edit financial plan">
                         <mat-icon class="text-sm">edit</mat-icon>
                       </button>
-                      <button type="button" (click)="deletePlan(item)" class="text-ink-muted hover:text-critical-text hover:bg-critical-tint p-1.5 rounded-lg transition-colors" aria-label="Delete financial plan">
+                      <button type="button" (click)="requestDelete(item)" class="text-ink-muted hover:text-critical-text hover:bg-critical-tint p-1.5 rounded-lg transition-colors" [attr.aria-label]="'Delete the ' + item.category + ' budget line'">
                         <mat-icon class="text-sm">delete</mat-icon>
                       </button>
                     </div>
@@ -108,6 +116,49 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
         </app-list-state>
         }
       </div>
+
+      <!--
+        DELETE CONFIRMATION — a budget line IS the project's budget. The DELETE used
+        to go out on the first click of a 24px icon, and the figure is recoverable
+        from nowhere in the UI afterwards. What it moves, in one click:
+        budgetForProject sums these rows (finance.util.ts), so the effective budget
+        drops by this line's budget and with it Burn % (actualCost/budget), VAC
+        (budget minus EAC) and deliveryHealth(), which turns the project header pill
+        red on VAC below zero — plus /reporting's Margin and Variance row and the
+        eacOverBudget portfolio alert for the same project.
+
+        Same shape as project-rates.ts's landed confirm (and projects.ts's markup):
+        the row control ARMS the dialog, only the dialog's own control writes.
+      -->
+      @if (pendingDelete(); as pending) {
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+             appModal ariaLabelledby="financialPlanDeleteTitle" (dismiss)="cancelDelete()">
+          <div class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col" data-test="financial-plan-delete-confirm">
+            <div class="p-6 sm:p-8 text-center">
+              <div class="w-16 h-16 bg-critical-tint ring-1 ring-critical rounded-full flex items-center justify-center mx-auto mb-4">
+                <mat-icon class="text-critical-text text-3xl">warning</mat-icon>
+              </div>
+              <h3 id="financialPlanDeleteTitle" class="font-display text-lg font-bold text-[var(--cc-ink)] mb-2">
+                Delete the {{ pending.category }} budget line?
+              </h3>
+              <p class="text-[var(--cc-muted)] text-sm">
+                Removes <strong class="text-[var(--cc-ink)]">{{ pending.budget | currency:baseCurrency:'symbol':'1.0-2' }}</strong>
+                of budget for <strong class="text-[var(--cc-ink)]">{{ pending.category }}</strong>, so this project's total budget
+                falls to <strong class="text-[var(--cc-ink)]">{{ budgetAfterDelete() | currency:baseCurrency:'symbol':'1.0-2' }}</strong>.
+                Budget Burn %, Variance at Completion and the project's delivery-health pill all recompute on the lower figure,
+                and the {{ pending.actual | currency:baseCurrency:'symbol':'1.0-2' }} already recorded as spent against it is dropped too.
+                This cannot be undone from this screen.
+              </p>
+            </div>
+            <div class="p-4 sm:p-5 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
+              <button type="button" (click)="cancelDelete()" class="command-button secondary">Cancel</button>
+              <button type="button" (click)="confirmDelete()" data-test="financial-plan-delete-confirm-action" class="px-4 py-2 bg-critical text-white rounded-lg text-sm font-semibold hover:bg-critical-strong transition-colors shadow-sm">
+                Delete budget line
+              </button>
+            </div>
+          </div>
+        </div>
+      }
 
       <!-- Create Financial Plan Modal -->
       @if (showForm()) {
@@ -240,10 +291,47 @@ export class FinancialPlans {
     this.showForm.set(true);
   }
 
-  deletePlan(item: FinancialItem) {
+  /**
+   * The budget line awaiting confirmation. Holds the WHOLE row so the dialog can
+   * quote the category and both figures without re-finding a row the list may have
+   * reloaded underneath it.
+   */
+  pendingDelete = signal<FinancialItem | null>(null);
+
+  /**
+   * The project's total budget once the pending line is gone — the consequence
+   * stated as a number rather than as a warning. Computed from the rows on screen,
+   * which is the same set `totalBudget()` sums.
+   */
+  budgetAfterDelete = computed(() => {
+    const pending = this.pendingDelete();
+    if (!pending) return this.totalBudget();
+    return this.filteredFinancials()
+      .filter(item => item.id !== pending.id)
+      .reduce((sum, item) => sum + item.budget, 0);
+  });
+
+  /** First click: arm the confirm ONLY. No DELETE goes out from here. */
+  requestDelete(item: FinancialItem) {
+    this.pendingDelete.set(item);
+  }
+
+  cancelDelete() {
+    this.pendingDelete.set(null);
+  }
+
+  confirmDelete() {
+    const item = this.pendingDelete();
+    if (!item) return;
+    // Cleared BEFORE the request so a double-click cannot issue two DELETEs.
+    this.pendingDelete.set(null);
+    this.deletePlan(item);
+  }
+
+  private deletePlan(item: FinancialItem) {
     this.api.deleteProjectFinancial(item.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => {
       this.financialsRes.reload();
-      this.notificationService.show('Financial plan deleted', 'success');
+      this.notificationService.show(`${item.category} budget line deleted — this project's budget is now lower.`, 'success');
     });
   }
 

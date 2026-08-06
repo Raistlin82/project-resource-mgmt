@@ -103,9 +103,16 @@ describe('availabilityDateFor (design spec §7 — three branches, in order)', (
 
 import { resources, assignments, assignmentDays, assignmentMonths, holidays } from '../../db/seed';
 import { benchRollup, hiringDemandByMonth, EMPTY_BENCH_ROLLUP, notFullyAllocatedAt, type BenchRollupInput } from './bench.util';
-import { hoursByResourceMonth } from './capacity.util';
+import { hoursByResourceMonth, rollupMonthly, standardMonthlyHours } from './capacity.util';
 
 const HOURS_PER_DAY = 8;
+/**
+ * The seed's real holiday table, used by the seed-integration describe below
+ * because that is what /bench actually renders for the shipped seed. It is NOT
+ * holiday COVERAGE: every entry falls outside FETCH_MONTHS (see the tripwire in
+ * the "threads `holidays`" describe), so this set cannot make the argument red at
+ * any hop. Those hops have their own fixtures further down.
+ */
 const HOLIDAY_SET = new Set(holidays.map(h => h.id));
 const FETCH_MONTHS = ['2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10'];
 const DISPLAY_MONTHS = ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09'];
@@ -311,19 +318,208 @@ describe('benchRollup — resource active for only part of the display window (h
   const out = benchRollup(input, TODAY);
   const row = out.internalRows.find(r => r.resourceId === 'x1')!;
 
-  it('is active for only the back half of the 6 display months: the earlier ones are genuinely ABSENT keys, not zeroed cells', () => {
+  it('is active from the HIRE MONTH onward, not from the month after it: the months before are genuinely ABSENT keys, not zeroed cells', () => {
     expect(row).toBeDefined();
-    // hireDate 2026-06-15: inactive for Apr/May/Jun (isActiveInMonth requires
-    // hireDate <= monthStart), active from Jul onward.
+    // hireDate 2026-06-15. THE MOVED NUMBER: '2026-06' used to be ABSENT here,
+    // because the old gate (`isActiveInMonth`) compared hireDate with the month's
+    // START — so /bench dropped the hire month outright while /capacity, already on
+    // the day-granular gate, kept it. June 2026 has 12 working days on or after the
+    // 15th, so she IS employed in June and the cell belongs to her.
+    expect(row.monthly['2026-06']).toBeDefined();
+    expect(Object.keys(row.monthly)).toEqual(['2026-06', '2026-07', '2026-08', '2026-09']);
+    // ABSENCE TWIN, and the reason `return true` cannot pass: April and May contain
+    // NO working day she was employed on, so those keys must still be missing.
     expect(row.monthly['2026-04']).toBeUndefined();
     expect(row.monthly['2026-05']).toBeUndefined();
-    expect(row.monthly['2026-06']).toBeUndefined();
-    expect(Object.keys(row.monthly)).toEqual(['2026-07', '2026-08', '2026-09']);
   });
-  it('the present months classify correctly once active: BENCH throughout (no bookings), aging B/C/D counted from the hire month forward, never from the inactive months before it', () => {
-    expect(row.monthly['2026-07']).toMatchObject({ state: 'BENCH', agingBucket: 'B' });
-    expect(row.monthly['2026-08']).toMatchObject({ state: 'BENCH', agingBucket: 'C' });
+  it('the present months classify correctly once active: BENCH throughout (no bookings), aging B/C/D counted from the HIRE month forward, never from the inactive months before it', () => {
+    // THE MOVED NUMBERS: the aging ladder starts one month earlier now, because the
+    // hire month is no longer discarded. B/C/D used to sit on Jul/Aug/Sep.
+    expect(row.monthly['2026-06']).toMatchObject({ state: 'BENCH', agingBucket: 'B' });
+    expect(row.monthly['2026-07']).toMatchObject({ state: 'BENCH', agingBucket: 'C' });
+    expect(row.monthly['2026-08']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
     expect(row.monthly['2026-09']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
+    // The look-back truncation still holds: June is bucket B, NOT D — the months
+    // before the hire must not read as "idle since forever".
+    expect(row.monthly['2026-06'].agingBucket).not.toBe('D');
+  });
+});
+
+/**
+ * /bench and /capacity are two renderings of the SAME employment fact, and they
+ * used to answer it with two different predicates: `benchRollup` asked the coarse
+ * `isActiveInMonth` (hireDate vs the month's START) while `rollupMonthly` asked
+ * `employedWorkingDays` (the month's working days actually employed). A hire
+ * landing on the 15th therefore HAD a /capacity cell carrying her booked hours and
+ * NO /bench row at all — the same person, present on one screen and absent on the
+ * other, over one endpoint's data.
+ *
+ * These cases pin the agreement itself rather than either screen's numbers, so the
+ * two cannot drift apart again without something going red.
+ */
+describe('benchRollup agrees with rollupMonthly about WHICH months a person is employed in', () => {
+  const MONTHS = ['2026-05', '2026-06', '2026-07'];
+  const NO_HOL = new Set<string>();
+  interface Employment { hireDate?: string; terminationDate?: string }
+  interface Day { assignmentId: string; date: string; hours: number }
+
+  function benchOf(employment: Employment, assignmentDays: Day[] = []) {
+    const input: BenchRollupInput = {
+      resources: [{ id: 'j', name: 'Joiner', role: 'Developer', kind: 'internal', contractHoursPerDay: 8, ...employment }],
+      assignments: [{ id: 'a1', resourceId: 'j' }],
+      assignmentMonths: MONTHS.map(m => ({ assignmentId: 'a1', month: m, status: 'Allocated' })),
+      assignmentDays,
+      months: MONTHS, displayMonths: MONTHS, hoursPerDay: 8, holidays: NO_HOL,
+    };
+    return benchRollup(input, '2026-06-20');
+  }
+
+  /** The months `benchRollup` gave this resource a cell for. */
+  function benchMonths(employment: Employment, assignmentDays: Day[] = []): string[] {
+    const roll = benchOf(employment, assignmentDays);
+    const row = [...roll.internalRows, ...roll.subcoRows].find(r => r.resourceId === 'j');
+    return row ? Object.keys(row.monthly) : [];
+  }
+
+  /** The months `rollupMonthly` (the /capacity grid) gave the same resource a cell for. */
+  function capacityMonths(employment: Employment, assignmentDays: Day[] = []): string[] {
+    const roll = rollupMonthly({
+      resources: [{ id: 'j', name: 'Joiner', contractHoursPerDay: 8, ...employment }],
+      assignments: [{ id: 'a1', resourceId: 'j' }],
+      assignmentMonths: MONTHS.map(m => ({ assignmentId: 'a1', month: m, status: 'Allocated' })),
+      assignmentDays,
+      months: MONTHS, hoursPerDay: 8, holidays: NO_HOL,
+    });
+    const row = roll.rows.find(r => r.resourceId === 'j');
+    return row ? Object.keys(row.monthly) : [];
+  }
+
+  it('keeps a mid-month joiner’s HIRE MONTH on /bench, exactly as /capacity already did — and her booked hours decide the state', () => {
+    // 2026-06-16 is a Tuesday; 8h booked on it, so June is a real, if tiny, booking.
+    const hire: Employment = { hireDate: '2026-06-16' };
+    const days: Day[] = [{ assignmentId: 'a1', date: '2026-06-16', hours: 8 }];
+    expect(capacityMonths(hire, days)).toEqual(['2026-06', '2026-07']); // guard: the reference screen
+    expect(benchMonths(hire, days)).toEqual(['2026-06', '2026-07']);
+    expect(benchMonths(hire, days)).toEqual(capacityMonths(hire, days));
+    // The row must exist AND the hire month must not be misread as idle: 8h of 176
+    // is PARTIAL, never BENCH — a dropped row could not say either.
+    const cell = benchOf(hire, days).internalRows[0].monthly['2026-06'];
+    expect(cell.state).toBe('PARTIAL');
+    expect(cell.state).not.toBe('BENCH');
+  });
+
+  it('still EXCLUDES the months on either side of employment, on both screens (so the fix is not "always active")', () => {
+    // ABSENCE TWIN #1 — a hire after the window: no month at all, on either screen.
+    expect(benchMonths({ hireDate: '2026-09-01' })).toEqual([]);
+    expect(capacityMonths({ hireDate: '2026-09-01' })).toEqual([]);
+    // ABSENCE TWIN #2 — terminated before the window: likewise none.
+    expect(benchMonths({ terminationDate: '2026-04-30' })).toEqual([]);
+    expect(capacityMonths({ terminationDate: '2026-04-30' })).toEqual([]);
+    // ABSENCE TWIN #3 — a mid-window LEAVER keeps the termination month and loses
+    // the ones after it, identically on both screens.
+    expect(benchMonths({ terminationDate: '2026-06-16' })).toEqual(['2026-05', '2026-06']);
+    expect(capacityMonths({ terminationDate: '2026-06-16' })).toEqual(['2026-05', '2026-06']);
+  });
+});
+
+/**
+ * THE `holidays` ARGUMENT WAS INERT IN THIS WHOLE FILE. `HOLIDAY_SET` is built from
+ * the seed, whose only two holidays are 2026-01-01 and 2026-12-25 — both outside
+ * FETCH_MONTHS — so every case above passes a set that can never remove a working
+ * day from a month under test. Deleting `holidays` from either hop in
+ * `benchRollup` left this file, capacity.util.spec.ts and bench.component.spec.ts
+ * all GREEN while every /bench state and FTE figure silently ignored public
+ * holidays.
+ *
+ * `benchRollup` threads `holidays` through TWO independent hops, so there is one
+ * case per hop and each is red ONLY for its own hop — the shape
+ * capacity.util.spec.ts landed for the same defect:
+ *
+ *   hop 1  `standardMonthlyHours(m, hoursPerDay, holidays)` → targetByMonth →
+ *          `benchStateFor(planned, target)`: the PARTIAL/ALLOCATED boundary.
+ *   hop 2  `employedWorkingDays(r, m, holidays)`: whether the person counts as
+ *          employed in the month at all.
+ *
+ * Plus a WEEKEND-holiday twin, so no case can be satisfied by a blanket "subtract
+ * 8 hours per listed holiday" that ignores which day it falls on.
+ *
+ * May 2026 arithmetic, all verified: 2026-05-01 is a Friday, so the month has 21
+ * working days (168h at 8h/day); 2026-05-04 is a MONDAY (a real working day) and
+ * 2026-05-03 a SUNDAY (already excluded); 2026-05-29 is the LAST working day of
+ * the month (the 30th is a Saturday).
+ */
+describe('benchRollup threads `holidays` through BOTH of its hops (the seed set above is inert)', () => {
+  const MONTH = '2026-05';
+  const WORKDAY_HOLIDAY = new Set([`${MONTH}-04`]);   // Monday
+  const WEEKEND_HOLIDAY = new Set([`${MONTH}-03`]);   // Sunday
+  const NO_HOL = new Set<string>();
+
+  it('the seed HOLIDAY_SET used above really is inert for the fetch window (a tripwire, not a claim about /bench)', () => {
+    // If a seeded holiday ever lands inside FETCH_MONTHS this goes red — and the
+    // §11 fixture expectations above, which are stated against a holiday-free
+    // window, have to be revisited rather than silently shifted.
+    expect([...HOLIDAY_SET].some(d => FETCH_MONTHS.includes(d.slice(0, 7)))).toBe(false);
+    // And the month the hop cases below use is genuinely holiday-free in the seed,
+    // so their 168h baseline is the seed's own arithmetic too.
+    expect(HOLIDAY_SET.has(`${MONTH}-04`)).toBe(false);
+  });
+
+  function stateWith(holidaySet: ReadonlySet<string>, plannedHours: number) {
+    const input: BenchRollupInput = {
+      resources: [{ id: 'r', name: 'Booked', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 }],
+      assignments: [{ id: 'a1', resourceId: 'r' }],
+      assignmentMonths: [{ assignmentId: 'a1', month: MONTH, status: 'Allocated' }],
+      assignmentDays: [{ assignmentId: 'a1', date: `${MONTH}-05`, hours: plannedHours }],
+      months: [MONTH], displayMonths: [MONTH], hoursPerDay: 8, holidays: holidaySet,
+    };
+    return benchRollup(input, `${MONTH}-10`).internalRows[0].monthly[MONTH].state;
+  }
+
+  it('HOP 1 — a working-day holiday lowers the month target, so the same booked hours read ALLOCATED instead of PARTIAL', () => {
+    // 160h booked. Derived from the OTHER input, never from the implementation's
+    // own formula: 168h without the holiday, 160h with it.
+    const noHolTarget = standardMonthlyHours(MONTH, 8, NO_HOL);
+    const withHolTarget = standardMonthlyHours(MONTH, 8, WORKDAY_HOLIDAY);
+    expect(noHolTarget).toBe(168);
+    expect(withHolTarget).toBe(160);
+
+    expect(stateWith(WORKDAY_HOLIDAY, 160)).toBe('ALLOCATED');
+    // ABSENCE TWIN: PARTIAL is exactly what a dropped `holidays` at this hop
+    // produces — a person who is fully booked for every day the company is open,
+    // presented as having spare capacity.
+    expect(stateWith(WORKDAY_HOLIDAY, 160)).not.toBe('PARTIAL');
+    expect(stateWith(NO_HOL, 160)).toBe('PARTIAL'); // the no-holiday control
+  });
+
+  it('HOP 1, weekend twin — a holiday falling on a Sunday moves nothing (no working day to remove)', () => {
+    // The direction that stops HOP 1 from being satisfied by "subtract 8 per
+    // listed holiday" regardless of the day it lands on.
+    expect(standardMonthlyHours(MONTH, 8, WEEKEND_HOLIDAY)).toBe(standardMonthlyHours(MONTH, 8, NO_HOL));
+    expect(stateWith(WEEKEND_HOLIDAY, 160)).toBe('PARTIAL');
+    expect(stateWith(WEEKEND_HOLIDAY, 160)).not.toBe('ALLOCATED');
+  });
+
+  function rowsWith(holidaySet: ReadonlySet<string>) {
+    const input: BenchRollupInput = {
+      // Hired on the month's LAST working day, so her whole employment inside the
+      // month is that single day — and a holiday on it leaves her employed on none.
+      resources: [{ id: 'late', name: 'Last-Day Hire', role: 'Developer', kind: 'internal', contractHoursPerDay: 8, hireDate: `${MONTH}-29` }],
+      assignments: [], assignmentMonths: [], assignmentDays: [],
+      months: [MONTH], displayMonths: [MONTH], hoursPerDay: 8, holidays: holidaySet,
+    };
+    return benchRollup(input, `${MONTH}-10`).internalRows.map(r => r.resourceId);
+  }
+
+  it('HOP 2 — a holiday on the only working day a person was employed removes the row (employedWorkingDays sees the same calendar)', () => {
+    // The server refuses a booking on a holiday, so a row asserting the person is
+    // "on bench" for a month she could not have worked at all is a phantom.
+    expect(rowsWith(new Set([`${MONTH}-29`]))).toEqual([]);
+    // ABSENCE TWIN: without the holiday she IS employed that day and must keep her
+    // row — so the fix cannot be "drop anyone hired late in the month".
+    expect(rowsWith(NO_HOL)).toEqual(['late']);
+    // And this hop is independent of hop 1: a holiday elsewhere in the month lowers
+    // the target but leaves her own employed day intact.
+    expect(rowsWith(WORKDAY_HOLIDAY)).toEqual(['late']);
   });
 });
 

@@ -9,6 +9,7 @@ import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { authGatedResource } from '../../services/auth-gated-resource.util';
+import { countsTowardEffectiveBudget } from '../../services/finance.util';
 
 @Component({
   selector: 'app-change-requests',
@@ -265,8 +266,35 @@ export class ChangeRequests {
   });
 
   openCount = computed(() => this.filteredChanges().filter(c => c.status === 'Draft' || c.status === 'Submitted').length);
-  approvedBudgetImpact = computed(() => this.filteredChanges().filter(c => c.status === 'Approved' || c.status === 'Implemented').reduce((s, c) => s + c.impactBudget, 0));
-  approvedScheduleImpact = computed(() => this.filteredChanges().filter(c => c.status === 'Approved' || c.status === 'Implemented').reduce((s, c) => s + c.impactScheduleDays, 0));
+
+  /**
+   * Both impact tiles sum through `countsTowardEffectiveBudget` (finance.util.ts)
+   * rather than restating "Approved or Implemented" inline, and through `finite()`
+   * rather than `+` on an unvalidated field. Two separate defects met here:
+   *
+   *  - DRIFT (CR-IMPL-01). These two lines used to spell the status set out
+   *    themselves while `approvedChangeBudgetForProject` matched 'Approved' ONLY,
+   *    so marking a change request Implemented — the normal end of its life —
+   *    withdrew its uplift from budget/burn/VAC while this tile went on showing
+   *    it. The two agree today, but a duplicated predicate is what let them
+   *    disagree in the first place; one import is what stops it recurring.
+   *  - CONCATENATION. POST/PUT /change-requests does not yet check that
+   *    impactBudget is a number (src/server.ts:4712, still open), so a stored
+   *    string makes `s + c.impactBudget` STRING-concatenate: two CRs of "50000"
+   *    render as EUR 5,000,050,000 through `currency`, while the engine — which
+   *    already sums through its own finite() — reports exactly 0. Guarding here
+   *    makes the tile agree with the engine on the arithmetic as well as on the
+   *    status set, whatever the API stored.
+   */
+  private static finite(v: number): number {
+    return Number.isFinite(v) ? v : 0;
+  }
+  approvedBudgetImpact = computed(() => this.filteredChanges()
+    .filter(c => countsTowardEffectiveBudget(c.status))
+    .reduce((s, c) => s + ChangeRequests.finite(c.impactBudget), 0));
+  approvedScheduleImpact = computed(() => this.filteredChanges()
+    .filter(c => countsTowardEffectiveBudget(c.status))
+    .reduce((s, c) => s + ChangeRequests.finite(c.impactScheduleDays), 0));
   severeCount = computed(() => this.filteredChanges().filter(c => c.priority === 'High' || c.priority === 'Critical').length);
 
   form = new FormGroup({

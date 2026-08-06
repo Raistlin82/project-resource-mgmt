@@ -11,7 +11,7 @@
  * exclusive by construction, never merged into one bucket set (spec §5).
  */
 
-import { RollupInput, isActiveInMonth, standardMonthlyHours, hoursByResourceMonth } from './capacity.util';
+import { RollupInput, employedWorkingDays, standardMonthlyHours, hoursByResourceMonth } from './capacity.util';
 import { countsTowardDeliveryCapacity, kindOf } from './resource-kind.util';
 
 export type BenchState = 'BENCH' | 'PARTIAL' | 'ALLOCATED';
@@ -188,7 +188,16 @@ export function benchRollup(input: BenchRollupInput, today: string): BenchRollup
     const activeOf = new Map<string, boolean>();
     const stateOf = new Map<string, BenchState>();
     for (const m of months) {
-      const active = isActiveInMonth(r, m);
+      // Employment is measured in DAYS, not months — the same `employedWorkingDays`
+      // gate `rollupMonthly` uses, and the same granularity the server enforces a
+      // booking at (`bookingOutsideEmploymentError`). This used to be the coarse
+      // `isActiveInMonth`, which compares `hireDate` with the month's START: someone
+      // hired on the 15th was "not active" for the whole month, so /bench DROPPED
+      // her row while /capacity — already on the day-granular gate — kept it. Two
+      // screens over one endpoint's data disagreeing about whether a person exists
+      // this month is the defect; there is no bench-specific reason to answer the
+      // employment question differently from the capacity grid.
+      const active = employedWorkingDays(r, m, holidays).length > 0;
       activeOf.set(m, active);
       if (!active) continue;
       const cell = hoursByResMonth.get(r.id)?.get(m) ?? { confirmed: 0, planned: 0 };
