@@ -63,7 +63,8 @@ function initialsOf(name: string): string {
                      [class.bg-accent-tint]="doc.type === 'word'" [class.text-accent-text]="doc.type === 'word'" [class.ring-accent]="doc.type === 'word'">
                   <mat-icon>{{ doc.type === 'pdf' ? 'picture_as_pdf' : 'description' }}</mat-icon>
                 </div>
-                <button type="button" (click)="deleteDocument(doc)" [attr.aria-label]="'Delete ' + doc.name" class="text-[var(--cc-muted)] hover:text-critical-text opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100">
+                <!-- Arms the confirm below; nothing is destroyed from here. -->
+                <button type="button" (click)="askDelete(doc)" [attr.aria-label]="'Delete ' + doc.name" class="text-[var(--cc-muted)] hover:text-critical-text opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100">
                   <mat-icon class="text-sm">delete</mat-icon>
                 </button>
               </div>
@@ -101,6 +102,13 @@ function initialsOf(name: string): string {
             <div class="p-6 sm:p-8 overflow-y-auto flex-1">
               <form [formGroup]="docForm" (ngSubmit)="saveDocument()" class="space-y-6">
                 <p class="text-xs text-[var(--cc-muted)]">This records document metadata only. No file is uploaded.</p>
+                <!-- Rendered INLINE rather than left to the interceptor's toast, because
+                     error toasts in this app auto-dismiss: a dialog that stays open with a
+                     vanished toast is an unexplained refusal. Same shape as
+                     project-cost-centers.ts's saveError. -->
+                @if (saveError(); as err) {
+                  <p role="alert" data-test="document-save-error" class="text-xs text-critical-text">{{ err }}</p>
+                }
                 <div>
                   <label for="docName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Document Name *</label>
                   <input id="docName" type="text" formControlName="name" class="command-input" placeholder="e.g. Requirements_Spec.docx">
@@ -122,6 +130,43 @@ function initialsOf(name: string): string {
               <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
               <button type="button" (click)="saveDocument()" [disabled]="!docForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
                 Add Entry
+              </button>
+            </div>
+          </div>
+        </div>
+      }
+
+      <!--
+        DELETE CONFIRMATION. The trash icon is hover-revealed (sm:opacity-0) and sat
+        directly on the DELETE: one mis-click removed the register entry outright.
+        Nothing in this app can restore it — the row is the only record of the
+        document's name, size, filing date and author attribution, and the
+        append-only audit trail that holds the real actor is admin /
+        delivery-executive readable only, so a project-level reader has no way back.
+        Short dialog (icon + title + two lines + footer), so it deliberately keeps
+        the plain centred overlay: it fits the ~460px a 320x568 phone leaves, and it
+        is the negative control the scroll-safety predicate is measured against
+        (manage-rate-cards.component.spec.ts documents that pairing).
+      -->
+      @if (pendingDelete(); as doc) {
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+             appModal ariaLabelledby="documentDeleteTitle" (dismiss)="cancelDelete()">
+          <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col" data-test="document-delete-confirm">
+            <div class="p-6 text-center">
+              <div class="w-16 h-16 bg-critical-tint ring-1 ring-critical rounded-full flex items-center justify-center mx-auto mb-4">
+                <mat-icon class="text-critical-text text-3xl">warning</mat-icon>
+              </div>
+              <h3 id="documentDeleteTitle" class="font-display text-lg font-bold text-[var(--cc-ink)] mb-2">Delete document entry</h3>
+              <p class="text-[var(--cc-muted)] text-sm">
+                <strong class="text-ink">{{ doc.name }}</strong> is removed from this project's document register,
+                together with its filing date and its attribution to {{ doc.author }}.
+                This cannot be undone &mdash; the entry is not shown anywhere else once it is gone.
+              </p>
+            </div>
+            <div class="p-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
+              <button type="button" (click)="cancelDelete()" class="command-button secondary">Cancel</button>
+              <button type="button" (click)="confirmDelete()" data-test="document-delete-confirm-action" class="px-4 py-2 bg-critical text-white rounded-lg text-sm font-semibold hover:bg-critical-strong transition-colors shadow-sm">
+                Delete entry
               </button>
             </div>
           </div>
@@ -165,15 +210,41 @@ export class ProjectDocuments {
     this.showForm.set(true);
   }
 
-  deleteDocument(doc: ProjectDocument) {
+  /**
+   * The document awaiting confirmation. Holds the WHOLE record, not just an id: the
+   * dialog names the file and its author, and an id alone would force a second
+   * lookup that a concurrent reload could miss.
+   */
+  pendingDelete = signal<ProjectDocument | null>(null);
+
+  /** First click: arm the confirm ONLY. No DELETE goes out from here. */
+  askDelete(doc: ProjectDocument) {
+    this.pendingDelete.set(doc);
+  }
+
+  cancelDelete() {
+    this.pendingDelete.set(null);
+  }
+
+  /** The only place the DELETE is issued. */
+  confirmDelete() {
+    const doc = this.pendingDelete();
+    if (!doc) return;
+    // Cleared BEFORE the request so a double-click on the confirm control cannot
+    // fire two DELETEs for the same row.
+    this.pendingDelete.set(null);
     this.api.deleteProjectDocument(doc.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => {
       this.documentsRes.reload();
-      this.notificationService.show('Document entry removed', 'success');
+      this.notificationService.show(`Document entry "${doc.name}" removed`, 'success');
     });
   }
 
+  /** Server refusal text for the open dialog, or null. See the template comment. */
+  saveError = signal<string | null>(null);
+
   closeForm() {
     this.showForm.set(false);
+    this.saveError.set(null);
     this.docForm.reset({ type: 'pdf' });
   }
 
@@ -201,7 +272,25 @@ export class ProjectDocuments {
       authorInitials,
     };
 
-    this.api.createProjectDocument(payload).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.documentsRes.reload());
-    this.closeForm();
+    // CLOSE ONLY ONCE THE SERVER HAS ACCEPTED IT — same rule as
+    // project-cost-centers.ts's saveCostCenter(). `closeForm()` used to run
+    // unconditionally right after firing the POST, so `docForm.reset()` wiped the
+    // typed name while the request was still in flight; on a refusal (a pm's 403 on
+    // /project-documents, or a validation 400) the user got a toast over an empty
+    // screen and had to retype from scratch. Staying open on the error path is the
+    // whole fix: the interceptor's toast carries the server's message and the values
+    // survive for a corrected retry.
+    this.saveError.set(null);
+    this.api.createProjectDocument(payload).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {
+        this.documentsRes.reload();
+        this.closeForm();
+      },
+      error: (e: unknown) => {
+        this.saveError.set(
+          (e as { error?: { error?: string } })?.error?.error ?? 'Could not save the document entry.',
+        );
+      },
+    });
   }
 }

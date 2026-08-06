@@ -209,11 +209,21 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
         }
       </div>
 
-      <!-- Add Milestone Modal -->
+      <!--
+        SCROLL-SAFE OVERLAY (same shape as manage-rate-cards.component.ts:104-124 and
+        the billing create/edit overlay). A POSITION:FIXED box cannot be scrolled by
+        the page, so "flex items-center" on a panel taller than the visual viewport
+        pushed the header above y=0 AND the footer below the fold with no scroller
+        anywhere: the form could be filled in and never saved. These three plan forms
+        are the tallest in the app after billing's. The overlay now owns a scroller,
+        anchors to the top on short viewports ("items-start") and re-centres from the
+        "sm" breakpoint up; the panel stays bounded by max-h-[90vh] and its body
+        scrolls, which is what keeps the pinned footer reachable.
+      -->
       @if (showMilestoneForm()) {
-        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+        <div data-test="milestone-form-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
              appModal ariaLabelledby="milestoneModalTitle" (dismiss)="closeMilestoneForm()">
-          <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+          <div data-test="milestone-form-panel" class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="milestoneModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Add Milestone</h2>
               <button type="button" (click)="closeMilestoneForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
@@ -221,8 +231,15 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
               </button>
             </div>
 
-            <div class="p-6 sm:p-8 overflow-y-auto flex-1">
+            <div class="p-6 sm:p-8 overflow-y-auto flex-1 min-h-0">
               <form [formGroup]="milestoneForm" (ngSubmit)="saveMilestone()" class="space-y-6">
+                <!-- Rendered INLINE rather than left to the interceptor's toast, because
+                     error toasts in this app auto-dismiss: a dialog that stays open with a
+                     vanished toast is an unexplained refusal. Same shape as
+                     project-cost-centers.ts's saveError. -->
+                @if (saveError(); as err) {
+                  <p role="alert" data-test="plan-save-error" class="text-xs text-critical-text">{{ err }}</p>
+                }
                 <div>
                   <label for="milestoneName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Milestone Name *</label>
                   <input id="milestoneName" type="text" formControlName="name" class="command-input" placeholder="e.g. Phase 1 Completion">
@@ -245,11 +262,11 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
         </div>
       }
 
-      <!-- Add Work Package Modal -->
+      <!-- Add Work Package Modal — scroll-safe overlay, see the milestone form above. -->
       @if (showWpForm()) {
-        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+        <div data-test="wp-form-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
              appModal ariaLabelledby="wpModalTitle" (dismiss)="closeWpForm()">
-          <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+          <div data-test="wp-form-panel" class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="wpModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Add Work Package</h2>
               <button type="button" (click)="closeWpForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
@@ -257,8 +274,12 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
               </button>
             </div>
 
-            <div class="p-6 sm:p-8 overflow-y-auto flex-1">
+            <div class="p-6 sm:p-8 overflow-y-auto flex-1 min-h-0">
               <form [formGroup]="wpForm" (ngSubmit)="saveWp()" class="space-y-6">
+                <!-- Inline refusal text, see the milestone form above. -->
+                @if (saveError(); as err) {
+                  <p role="alert" data-test="plan-save-error" class="text-xs text-critical-text">{{ err }}</p>
+                }
                 <div>
                   <label for="wpName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Work Package Name *</label>
                   <input id="wpName" type="text" formControlName="name" class="command-input" placeholder="e.g. Requirements Analysis">
@@ -301,11 +322,12 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
         </div>
       }
 
-      <!-- Edit Work Package Modal -->
+      <!-- Edit Work Package Modal — the tallest of the three (two extra fields);
+           scroll-safe overlay, see the milestone form above. -->
       @if (showEditWpForm()) {
-        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+        <div data-test="edit-wp-form-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
              appModal ariaLabelledby="editWpModalTitle" (dismiss)="closeEditWpForm()">
-          <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+          <div data-test="edit-wp-form-panel" class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="editWpModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Edit Work Package</h2>
               <button type="button" (click)="closeEditWpForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
@@ -313,8 +335,12 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
               </button>
             </div>
 
-            <div class="p-6 sm:p-8 overflow-y-auto flex-1">
+            <div class="p-6 sm:p-8 overflow-y-auto flex-1 min-h-0">
               <form [formGroup]="editWpForm" (ngSubmit)="saveEditWp()" class="space-y-6">
+                <!-- Inline refusal text, see the milestone form above. -->
+                @if (saveError(); as err) {
+                  <p role="alert" data-test="plan-save-error" class="text-xs text-critical-text">{{ err }}</p>
+                }
                 <div>
                   <label for="editWpName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Work Package Name *</label>
                   <input id="editWpName" type="text" formControlName="name" class="command-input" placeholder="e.g. Requirements Analysis">
@@ -507,8 +533,23 @@ export class ProjectPlans {
     this.showMilestoneForm.set(true);
   }
 
+  /**
+   * Server refusal text for whichever plan dialog is open, or null. One signal is
+   * enough because the three dialogs are mutually exclusive, and each close handler
+   * clears it. See the milestone form's template comment.
+   */
+  saveError = signal<string | null>(null);
+
+  /** Turns a failed write into inline dialog text without closing the dialog. */
+  private planSaveError(fallback: string) {
+    return (e: unknown) => {
+      this.saveError.set((e as { error?: { error?: string } })?.error?.error ?? fallback);
+    };
+  }
+
   closeMilestoneForm() {
     this.showMilestoneForm.set(false);
+    this.saveError.set(null);
     this.milestoneForm.reset();
   }
 
@@ -517,14 +558,25 @@ export class ProjectPlans {
     const pId = this.projectId() || this.selectedProjectId();
     if (!pId) return;
 
+    this.saveError.set(null);
     const v = this.milestoneForm.getRawValue();
     this.api.createMilestone({
       projectId: pId,
       name: v.name ?? '',
       date: v.date ?? '',
       status: 'Pending',
-    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.milestoneRes.reload());
-    this.closeMilestoneForm();
+      // CLOSE ONLY ONCE THE SERVER HAS ACCEPTED IT — same rule as
+      // project-cost-centers.ts's saveCostCenter(). The close/reset used to run
+      // unconditionally right after firing the POST, so the typed values were wiped
+      // while the request was still in flight and a refusal left a toast over an
+      // empty screen.
+    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {
+        this.milestoneRes.reload();
+        this.closeMilestoneForm();
+      },
+      error: this.planSaveError('Could not save the milestone.'),
+    });
   }
 
   openWpForm() {
@@ -538,6 +590,7 @@ export class ProjectPlans {
 
   closeWpForm() {
     this.showWpForm.set(false);
+    this.saveError.set(null);
     this.wpForm.reset();
   }
 
@@ -546,6 +599,7 @@ export class ProjectPlans {
     const pId = this.projectId() || this.selectedProjectId();
     if (!pId) return;
 
+    this.saveError.set(null);
     const v = this.wpForm.getRawValue();
     this.api.createWorkPackage({
       projectId: pId,
@@ -555,8 +609,14 @@ export class ProjectPlans {
       status: 'Planned',
       progress: 0,
       assignee: v.assignee ?? '',
-    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.wpRes.reload());
-    this.closeWpForm();
+      // CLOSE ONLY ONCE THE SERVER HAS ACCEPTED IT — see saveMilestone() above.
+    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {
+        this.wpRes.reload();
+        this.closeWpForm();
+      },
+      error: this.planSaveError('Could not save the work package.'),
+    });
   }
 
   openEditWpForm(wp: WorkPackage) {
@@ -575,6 +635,7 @@ export class ProjectPlans {
   closeEditWpForm() {
     this.showEditWpForm.set(false);
     this.editingWpId.set(null);
+    this.saveError.set(null);
     this.editWpForm.reset();
   }
 
@@ -583,6 +644,7 @@ export class ProjectPlans {
     const id = this.editingWpId();
     if (!id) return;
 
+    this.saveError.set(null);
     const v = this.editWpForm.getRawValue();
     this.api.updateWorkPackage(id, {
       name: v.name ?? '',
@@ -591,8 +653,17 @@ export class ProjectPlans {
       assignee: v.assignee ?? '',
       status: v.status ?? 'Planned',
       progress: v.progress ?? 0,
-    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.wpRes.reload());
-    this.closeEditWpForm();
+      // CLOSE ONLY ONCE THE SERVER HAS ACCEPTED IT — see saveMilestone() above. This
+      // form is the worst case of the three: `closeEditWpForm()` also clears
+      // editingWpId, so a refusal both emptied the dialog AND lost which work package
+      // was being edited.
+    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {
+        this.wpRes.reload();
+        this.closeEditWpForm();
+      },
+      error: this.planSaveError('Could not save the work package.'),
+    });
   }
 
   /**

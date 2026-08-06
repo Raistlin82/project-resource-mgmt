@@ -346,3 +346,58 @@ describe('ProjectTasks — status select after a refused PUT', () => {
     expect(update).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('ProjectTasks — the Create Task dialog survives a refused POST', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('keeps the dialog open with the name, assignee, partner and due date intact when the POST is refused', async () => {
+    // THE DEFECT: closeForm() ran unconditionally right after firing the POST, so
+    // taskForm.reset() wiped every field while the request was still in flight. A
+    // resource-manager — who can READ this table but not write it — hit exactly that:
+    // a 403, a toast, and an empty form.
+    const { fixture } = await render('resource-manager', {
+      createProjectTask: () => throwError(() => new HttpErrorResponse({
+        status: 403, error: { error: 'Role resource-manager cannot modify /project-tasks' },
+      })),
+    });
+    const component = fixture.componentInstance;
+
+    component.showForm.set(true);
+    component.taskForm.setValue({
+      name: 'Design schema', assignee: 'Res One', assigneeType: 'Subcontractor',
+      partnerId: 'V-1', dueDate: '2026-11-30', priority: 'High', status: 'To Do',
+    });
+    component.saveTask();
+    await tick(fixture);
+
+    expect(component.showForm()).toBe(true);
+    expect(component.taskForm.getRawValue()).toStrictEqual({
+      name: 'Design schema', assignee: 'Res One', assigneeType: 'Subcontractor',
+      partnerId: 'V-1', dueDate: '2026-11-30', priority: 'High', status: 'To Do',
+    });
+    // Stated INLINE, because error toasts in this app auto-dismiss and a dialog left
+    // open with a vanished toast is an unexplained refusal.
+    expect(host(fixture).querySelector('[data-test="task-save-error"]')?.textContent)
+      .toContain('Role resource-manager cannot modify /project-tasks');
+  });
+
+  it('MUST STILL close and reset when the POST is accepted', async () => {
+    // The assertion of ABSENCE: "never close the dialog" passes the case above and
+    // fails here, so the two together pin the actual behaviour.
+    const { fixture } = await render('pm');
+    const component = fixture.componentInstance;
+
+    component.showForm.set(true);
+    component.taskForm.setValue({
+      name: 'Design schema', assignee: 'Res One', assigneeType: 'Internal',
+      partnerId: '', dueDate: '2026-11-30', priority: 'High', status: 'To Do',
+    });
+    component.saveTask();
+    await tick(fixture);
+
+    expect(component.showForm()).toBe(false);
+    expect(component.taskForm.controls.name.value).toBeNull();
+    expect(component.taskForm.controls.priority.value).toBe('Medium');
+    expect(host(fixture).querySelector('[data-test="task-save-error"]')).toBeNull();
+  });
+});

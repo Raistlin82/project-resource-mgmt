@@ -95,6 +95,13 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
 
             <div class="p-6 sm:p-8 overflow-y-auto flex-1">
               <form [formGroup]="partnerForm" (ngSubmit)="savePartner()" class="space-y-6">
+                <!-- Rendered INLINE rather than left to the interceptor's toast, because
+                     error toasts in this app auto-dismiss: a dialog that stays open with a
+                     vanished toast is an unexplained refusal. Same shape as
+                     project-cost-centers.ts's saveError. -->
+                @if (saveError(); as err) {
+                  <p role="alert" data-test="partner-save-error" class="text-xs text-critical-text">{{ err }}</p>
+                }
                 <div>
                   <label for="partnerCompany" class="block text-sm font-semibold text-ink-secondary mb-1.5">Company Name *</label>
                   <!-- Company is a config FK to the vendors catalog (store = company name). -->
@@ -140,21 +147,36 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
         </div>
       }
 
-      <!-- Remove Partner Confirmation Modal -->
+      <!--
+        REMOVE CONFIRMATION. The confirm step itself was already here; what was
+        missing is the CONSEQUENCE. "Are you sure … cannot be undone" tells the PM
+        nothing they could weigh: what leaves with the row is this project's only
+        record of the engagement (role and key contact), and every subcontractor task
+        still pointing at this partner keeps a partnerId that no longer resolves —
+        project-tasks.ts:409-411 then prints the raw id in place of the company name.
+        Short dialog, so the plain centred overlay is deliberate (see
+        manage-rate-cards.component.spec.ts's negative control).
+      -->
       @if (removing(); as partner) {
         <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
              appModal ariaLabelledby="partnerRemoveTitle" (dismiss)="cancelRemove()">
-          <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col">
+          <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col" data-test="partner-remove-confirm">
             <div class="p-6 text-center">
               <div class="w-16 h-16 bg-critical-tint ring-1 ring-critical rounded-full flex items-center justify-center mx-auto mb-4">
                 <mat-icon class="text-critical-text text-3xl">warning</mat-icon>
               </div>
               <h3 id="partnerRemoveTitle" class="font-display text-lg font-bold text-[var(--cc-ink)] mb-2">Remove Partner</h3>
-              <p class="text-[var(--cc-muted)] text-sm">Are you sure you want to remove <strong class="text-ink">{{ partner.company }}</strong> from this project? This action cannot be undone.</p>
+              <p class="text-[var(--cc-muted)] text-sm">
+                <strong class="text-ink">{{ partner.company }}</strong> leaves this project, and with it the
+                {{ partner.role || 'partner' }} role and the key contact {{ partner.contact || 'on record' }}.
+                Any subcontractor task still assigned to this partner keeps a reference that no longer resolves,
+                so its Assignment cell shows the raw partner id instead of the company name.
+                This cannot be undone from this screen.
+              </p>
             </div>
             <div class="p-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
               <button type="button" (click)="cancelRemove()" class="command-button secondary">Cancel</button>
-              <button type="button" (click)="confirmRemove()" class="px-4 py-2 bg-critical text-white rounded-lg text-sm font-medium hover:bg-critical-strong transition-colors shadow-sm">Remove</button>
+              <button type="button" (click)="confirmRemove()" data-test="partner-remove-confirm-action" class="px-4 py-2 bg-critical text-white rounded-lg text-sm font-medium hover:bg-critical-strong transition-colors shadow-sm">Remove</button>
             </div>
           </div>
         </div>
@@ -218,8 +240,12 @@ export class ProjectPartners {
     this.showForm.set(true);
   }
 
+  /** Server refusal text for the open dialog, or null. See the template comment. */
+  saveError = signal<string | null>(null);
+
   closeForm() {
     this.showForm.set(false);
+    this.saveError.set(null);
     this.partnerForm.reset();
   }
 
@@ -229,15 +255,28 @@ export class ProjectPartners {
     if (!pId) return;
 
     const v = this.partnerForm.getRawValue();
+    // CLOSE ONLY ONCE THE SERVER HAS ACCEPTED IT — same rule as
+    // project-cost-centers.ts's saveCostCenter(). `closeForm()` used to run
+    // unconditionally right after firing the POST, so `partnerForm.reset()` wiped the
+    // chosen vendor, role and key contact while the request was still in flight; on a
+    // refusal the user got a toast over an empty screen and had to re-pick all three.
     this.api.createProjectPartner({
       projectId: pId,
       company: v.company ?? '',
       role: v.role ?? '',
       contact: v.contact ?? '',
       status: 'Invited',
-    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.partnersRes.reload());
-
-    this.closeForm();
+    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {
+        this.partnersRes.reload();
+        this.closeForm();
+      },
+      error: (e: unknown) => {
+        this.saveError.set(
+          (e as { error?: { error?: string } })?.error?.error ?? 'Could not invite the partner.',
+        );
+      },
+    });
   }
 
   // Remove a partner behind a confirm step (parity with the other delete flows).

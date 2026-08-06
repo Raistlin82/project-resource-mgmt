@@ -1,6 +1,7 @@
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { HttpErrorResponse } from '@angular/common/http';
+import { of, throwError } from 'rxjs';
 import { ProjectPlans } from './project-plans';
 import { ApiService, Milestone, Project, WorkPackage } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
@@ -156,5 +157,242 @@ describe('ProjectPlans — achieving a milestone releases money, so it is confir
     expect(h.querySelector('[data-test="achieve-milestone"]')).toBeNull();
     expect(h.textContent).toContain('Approved by U-other');
     expect(api.updateMilestone).not.toHaveBeenCalled();
+  });
+});
+
+const PLAN_PROJECT: Project = {
+  id: 'P1', name: 'Project Alpha', location: 'Rome', startDate: '2026-01-01',
+  endDate: '2026-12-31', status: 'In Execution', ownerId: 'R1', contractId: 'CT1',
+};
+const PLAN_WP: WorkPackage = {
+  id: 'WP1', projectId: 'P1', name: 'Requirements Analysis', startDate: '2026-02-01',
+  endDate: '2026-03-31', status: 'In Progress', progress: 40, assignee: 'Anna Rossi',
+};
+const PENDING_MS: Milestone = {
+  id: 'MS1', projectId: 'P1', name: 'SAL 2', date: '2026-06-30', status: 'Pending',
+};
+
+async function setUpPlans(overrides: Record<string, unknown> = {}): Promise<ComponentFixture<ProjectPlans>> {
+  const api = {
+    getProjects: () => of([PLAN_PROJECT]),
+    getResources: () => of([]),
+    getWorkPackages: () => of([PLAN_WP]),
+    getMilestones: () => of([PENDING_MS]),
+    createMilestone: vi.fn(() => of(PENDING_MS)),
+    createWorkPackage: vi.fn(() => of(PLAN_WP)),
+    updateWorkPackage: vi.fn(() => of(PLAN_WP)),
+    updateMilestone: vi.fn(() => of(PENDING_MS)),
+    ...overrides,
+  } as unknown as ApiService;
+  TestBed.configureTestingModule({
+    imports: [ProjectPlans],
+    providers: [
+      { provide: ApiService, useValue: api },
+      // authReady() MUST be true, or every authGatedResource stays on its empty
+      // default and no plan row renders at all.
+      { provide: AuthService, useValue: { authReady: signal(true), userId: signal('U-actor') } as unknown as AuthService },
+      { provide: NotificationService, useValue: { show: vi.fn() } as unknown as NotificationService },
+    ],
+  });
+  await TestBed.compileComponents();
+  const fixture: ComponentFixture<ProjectPlans> = TestBed.createComponent(ProjectPlans);
+  fixture.componentRef.setInput('projectId', 'P1');
+  await tick(fixture);
+  return fixture;
+}
+
+/**
+ * jsdom performs NO layout: offsetHeight is 0, there is no viewport, and no
+ * stylesheet is loaded. These cases therefore assert the STRUCTURAL PRECONDITION of
+ * scroll-safety — which class tokens sit on which element — and nothing about
+ * reachability at 320px. The height arithmetic is only demonstrable in a real
+ * browser (320x460, the Save button's getBoundingClientRect().bottom <= innerHeight)
+ * and this repo has no browser runner. Same caveat, and the same predicate, as
+ * manage-rate-cards.component.spec.ts.
+ */
+describe('ProjectPlans form overlays — STRUCTURAL scroll-safety contract only (jsdom performs no layout)', () => {
+  /**
+   * Evaluated on TOKENS, not on the raw class string: 'items-center' is a substring
+   * of 'sm:items-center', so a className.includes() check would be satisfied by the
+   * very class that has to go — the class-string form of the trap where
+   * toContain('0%') matches '100%'.
+   */
+  function scrollSafety(overlay: HTMLElement, panel: HTMLElement) {
+    const overlayTokens = overlay.className.split(/\s+/);
+    const body = panel.querySelector<HTMLElement>('div.overflow-y-auto');
+    return {
+      overlayScrolls: overlayTokens.includes('overflow-y-auto'),
+      anchoredOnShortViewports: overlayTokens.includes('items-start') && !overlayTokens.includes('items-center'),
+      recentredOnWideViewports: overlayTokens.includes('sm:items-center'),
+      panelBounded: /max-h-\[/.test(panel.className),
+      bodyScrolls: !!body && body.className.split(/\s+/).includes('min-h-0'),
+    };
+  }
+
+  const SAFE = {
+    overlayScrolls: true,
+    anchoredOnShortViewports: true,
+    recentredOnWideViewports: true,
+    panelBounded: true,
+    bodyScrolls: true,
+  };
+
+  function region(h: HTMLElement, name: string): { overlay: HTMLElement; panel: HTMLElement } {
+    const overlay = h.querySelector<HTMLElement>(`[data-test="${name}-overlay"]`);
+    const panel = h.querySelector<HTMLElement>(`[data-test="${name}-panel"]`);
+    expect(overlay, `the ${name} overlay must be rendered`).toBeTruthy();
+    expect(panel, `the ${name} panel must be rendered`).toBeTruthy();
+    return { overlay: overlay!, panel: panel! };
+  }
+
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('the Add Milestone overlay declares its own scroller, a top anchor and a bounded panel whose body scrolls', async () => {
+    const fixture = await setUpPlans();
+    fixture.componentInstance.openMilestoneForm();
+    await tick(fixture);
+    const { overlay, panel } = region(host(fixture), 'milestone-form');
+    expect(scrollSafety(overlay, panel)).toStrictEqual(SAFE);
+  });
+
+  it('the Add Work Package overlay does the same', async () => {
+    const fixture = await setUpPlans();
+    fixture.componentInstance.openWpForm();
+    await tick(fixture);
+    const { overlay, panel } = region(host(fixture), 'wp-form');
+    expect(scrollSafety(overlay, panel)).toStrictEqual(SAFE);
+  });
+
+  it('the Edit Work Package overlay does the same — it is the tallest of the three', async () => {
+    const fixture = await setUpPlans();
+    fixture.componentInstance.openEditWpForm(PLAN_WP);
+    await tick(fixture);
+    const { overlay, panel } = region(host(fixture), 'edit-wp-form');
+    expect(scrollSafety(overlay, panel)).toStrictEqual(SAFE);
+  });
+
+  it('rejects the achieve confirmation overlay — the negative control that keeps the predicate honest', async () => {
+    // NON-VACUOUSNESS. The predicate must discriminate a scroll-safe overlay from a
+    // clipping one, or it is a class-string tautology. The control is a REAL element
+    // rendered by this very component: the achieve confirmation is a short dialog
+    // (icon + title + two lines + footer) that fits the ~460px a 320x568 phone
+    // leaves, so it deliberately keeps the plain centred overlay — whose className is
+    // exactly what the three FORM overlays carried before the fix. A predicate that
+    // passed it would pass the defect.
+    const fixture = await setUpPlans();
+    const h = host(fixture);
+    h.querySelector<HTMLButtonElement>('[data-test="achieve-milestone"]')!.click();
+    await tick(fixture);
+
+    const panel = h.querySelector<HTMLElement>('[data-test="achieve-milestone-confirm"]')!;
+    const overlay = panel.parentElement!;
+    const verdict = scrollSafety(overlay, panel);
+    expect(verdict.overlayScrolls).toBe(false);
+    expect(verdict.anchoredOnShortViewports).toBe(false);
+    expect(verdict).not.toStrictEqual(SAFE);
+  });
+});
+
+describe('ProjectPlans — the three plan dialogs survive a refused write', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('the Add Milestone dialog stays open with its typed values when the POST is refused', async () => {
+    // THE DEFECT: closeMilestoneForm() ran unconditionally right after firing the
+    // POST, so the reset wiped the name and date while the request was still in
+    // flight and a refusal left a toast over an empty screen.
+    const fixture = await setUpPlans({
+      createMilestone: () => throwError(() => new HttpErrorResponse({ status: 403 })),
+    });
+    const c = fixture.componentInstance;
+    c.openMilestoneForm();
+    c.milestoneForm.setValue({ name: 'SAL 3', date: '2026-09-30' });
+    c.saveMilestone();
+    await tick(fixture);
+
+    expect(c.showMilestoneForm()).toBe(true);
+    expect(c.milestoneForm.getRawValue()).toStrictEqual({ name: 'SAL 3', date: '2026-09-30' });
+    expect(host(fixture).querySelector('[data-test="plan-save-error"]')?.textContent)
+      .toContain('Could not save the milestone.');
+  });
+
+  it('MUST STILL close and reset the Add Milestone dialog when the POST is accepted', async () => {
+    // The assertion of ABSENCE: "never close the dialog" passes the case above and
+    // fails here.
+    const fixture = await setUpPlans();
+    const c = fixture.componentInstance;
+    c.openMilestoneForm();
+    c.milestoneForm.setValue({ name: 'SAL 3', date: '2026-09-30' });
+    c.saveMilestone();
+    await tick(fixture);
+
+    expect(c.showMilestoneForm()).toBe(false);
+    expect(c.milestoneForm.controls.name.value).toBeNull();
+    expect(host(fixture).querySelector('[data-test="plan-save-error"]')).toBeNull();
+  });
+
+  it('the Add Work Package dialog stays open with its typed values when the POST is refused', async () => {
+    // The third form. Covered on its own rather than assumed from the other two: a
+    // sweep whose red is observed at one site has proven one site.
+    const fixture = await setUpPlans({
+      createWorkPackage: () => throwError(() => new HttpErrorResponse({ status: 403 })),
+    });
+    const c = fixture.componentInstance;
+    c.openWpForm();
+    c.wpForm.setValue({
+      name: 'Data migration', startDate: '2026-04-01', endDate: '2026-05-31', assignee: 'Anna Rossi',
+    });
+    c.saveWp();
+    await tick(fixture);
+
+    expect(c.showWpForm()).toBe(true);
+    expect(c.wpForm.getRawValue()).toStrictEqual({
+      name: 'Data migration', startDate: '2026-04-01', endDate: '2026-05-31', assignee: 'Anna Rossi',
+    });
+    expect(host(fixture).querySelector('[data-test="plan-save-error"]')?.textContent)
+      .toContain('Could not save the work package.');
+  });
+
+  it('MUST STILL close and reset the Add Work Package dialog when the POST is accepted', async () => {
+    const fixture = await setUpPlans();
+    const c = fixture.componentInstance;
+    c.openWpForm();
+    c.wpForm.setValue({
+      name: 'Data migration', startDate: '2026-04-01', endDate: '2026-05-31', assignee: 'Anna Rossi',
+    });
+    c.saveWp();
+    await tick(fixture);
+
+    expect(c.showWpForm()).toBe(false);
+    expect(c.wpForm.controls.name.value).toBeNull();
+    expect(host(fixture).querySelector('[data-test="plan-save-error"]')).toBeNull();
+  });
+
+  it('the Edit Work Package dialog keeps BOTH its values and the id being edited when the PUT is refused', async () => {
+    // The worst case of the three: closeEditWpForm() also clears editingWpId, so a
+    // refusal used to lose which work package was being edited.
+    const fixture = await setUpPlans({
+      updateWorkPackage: () => throwError(() => new HttpErrorResponse({ status: 403 })),
+    });
+    const c = fixture.componentInstance;
+    c.openEditWpForm(PLAN_WP);
+    c.editWpForm.controls.progress.setValue(75);
+    c.saveEditWp();
+    await tick(fixture);
+
+    expect(c.showEditWpForm()).toBe(true);
+    expect(c.editingWpId()).toBe('WP1');
+    expect(c.editWpForm.controls.progress.value).toBe(75);
+  });
+
+  it('MUST STILL close the Edit Work Package dialog and clear the edited id when the PUT is accepted', async () => {
+    const fixture = await setUpPlans();
+    const c = fixture.componentInstance;
+    c.openEditWpForm(PLAN_WP);
+    c.editWpForm.controls.progress.setValue(75);
+    c.saveEditWp();
+    await tick(fixture);
+
+    expect(c.showEditWpForm()).toBe(false);
+    expect(c.editingWpId()).toBeNull();
   });
 });

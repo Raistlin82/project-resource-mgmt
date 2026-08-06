@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, inject, signal, computed } from '@angular/core';
-import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, ResourceRequest, Assignment, Resource, ProjectRole, Skill } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
@@ -28,8 +28,16 @@ interface RequestsData {
           <p class="text-sm text-[var(--cc-muted)] mt-1">Create and manage staffing requests for your projects.</p>
         </div>
         <div class="flex flex-col sm:flex-row items-center gap-4">
-          <div class="command-card-muted p-1 flex items-center">
-            <button (click)="currentView.set('requests')"
+          <!-- SEGMENTED CONTROL: which view is active was communicated by background
+               and text colour ONLY, so a screen-reader user heard two identical plain
+               buttons and could not tell which one they were already on.
+               aria-pressed is the toggle-button state; it must be present on BOTH
+               buttons (an attribute only on the active one is indistinguishable from
+               a control that is never pressed). -->
+          <div class="command-card-muted p-1 flex items-center" role="group" aria-label="Select view">
+            <button type="button" (click)="currentView.set('requests')"
+                    data-test="view-requests"
+                    [attr.aria-pressed]="currentView() === 'requests'"
                     [class.bg-surface]="currentView() === 'requests'"
                     [class.shadow-sm]="currentView() === 'requests'"
                     [class.text-ink]="currentView() === 'requests'"
@@ -37,7 +45,9 @@ interface RequestsData {
                     class="px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ease-out">
               Requests
             </button>
-            <button (click)="currentView.set('availability')"
+            <button type="button" (click)="currentView.set('availability')"
+                    data-test="view-availability"
+                    [attr.aria-pressed]="currentView() === 'availability'"
                     [class.bg-surface]="currentView() === 'availability'"
                     [class.shadow-sm]="currentView() === 'availability'"
                     [class.text-ink]="currentView() === 'availability'"
@@ -86,20 +96,55 @@ interface RequestsData {
                 </div>
                 <div class="space-y-1.5">
                   <label for="skills" class="block text-sm font-semibold text-ink-secondary">Required Skills</label>
-                  <!-- Skills are catalog values, never free text: a multi-select bound to
-                       the /skills catalog (stored value = skill NAME, the value match-scoring
-                       compares against). Hold Ctrl/Cmd to pick several. -->
-                  <select id="skills" formControlName="skills" multiple class="command-select min-h-[120px]">
-                    @for (skill of skillOptions(); track skill.id) {
-                      <option [value]="skill.name">{{ skill.name }}</option>
+                  <!--
+                    Skills are catalog values, never free text: the stored value is the
+                    skill NAME, which is what match-scoring compares against.
+
+                    This used to be a multiple-selection list box: picking more than one entry
+                    required Ctrl/Cmd-click, which does not exist on touch, so on a
+                    phone or tablet the field could hold exactly one skill and picking a
+                    second silently replaced the first. Replaced by the repo's existing
+                    choose-then-add + removable-chip pattern
+                    (my-profile.component.ts:132-178), which is operable with taps and
+                    with the keyboard alone.
+
+                    ORPHAN VALUES: the model is the RAW string[] and is never
+                    intersected with the option list — a stored skill absent from
+                    today's catalog (legacy free text) therefore renders as a chip like
+                    any other and stays removable. Filtering the model against
+                    skillOptions() anywhere here would silently drop saved values on
+                    the next save, which is the actual data-loss risk in this control.
+                  -->
+                  <div class="flex gap-2">
+                    <select #skillPicker id="skills" aria-label="Skill to add" class="command-select flex-1"
+                            (change)="skillToAdd.set(skillPicker.value)">
+                      <option value="">Select a skill...</option>
+                      @for (skill of addableSkillOptions(); track skill.id) {
+                        <option [value]="skill.name">{{ skill.name }}</option>
+                      }
+                    </select>
+                    <button type="button" data-test="add-skill" (click)="addSkill(skillPicker)" [disabled]="!skillToAdd()"
+                            class="command-button secondary disabled:opacity-50 disabled:cursor-not-allowed">
+                      <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Add
+                    </button>
+                  </div>
+                  <div class="flex flex-wrap gap-2 pt-1" data-test="selected-skills">
+                    @for (skill of selectedSkills(); track skill) {
+                      <span class="inline-flex items-center gap-1.5 rounded-md border border-line bg-surface-muted px-2 py-1 text-xs font-medium text-ink-secondary"
+                            data-test="selected-skill">
+                        <!-- The label is its own element so a test can read it without
+                             picking up the remove button's mat-icon ligature text. -->
+                        <span data-test="selected-skill-label">{{ skill }}@if (isOrphanSkill(skill)) {<span class="text-ink-muted italic"> (not in catalog)</span>}</span>
+                        <button type="button" (click)="removeSkill(skill)" [attr.aria-label]="'Remove ' + skill" [attr.title]="'Remove ' + skill"
+                                class="text-ink-muted hover:text-critical-text transition-colors">
+                          <mat-icon class="text-[14px] w-[14px] h-[14px]">close</mat-icon>
+                        </button>
+                      </span>
                     }
-                    <!-- ORPHAN VALUE: any stored skill name not in the catalog (legacy free
-                         text) stays selectable as a disabled option so editing never drops it. -->
-                    @for (orphan of orphanSkills(); track orphan) {
-                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    @if (!selectedSkills().length) {
+                      <p class="text-xs font-medium text-[var(--cc-muted)]">No skills required yet.</p>
                     }
-                  </select>
-                  <p class="text-xs font-medium text-[var(--cc-muted)] mt-2">Hold Ctrl/Cmd to select multiple skills.</p>
+                  </div>
                 </div>
                 <div class="space-y-1.5">
                   <label for="startDate" class="block text-sm font-semibold text-ink-secondary">Start Date</label>
@@ -202,7 +247,8 @@ interface RequestsData {
                         <button (click)="publishRequest(req)" class="p-2 text-ink-muted hover:text-positive-text hover:bg-positive-tint rounded-lg transition-all" [attr.aria-label]="'Publish request ' + req.name" [attr.title]="'Publish request ' + req.name">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">publish</mat-icon>
                         </button>
-                        <button (click)="deleteRequest(req)" class="p-2 text-ink-muted hover:text-critical-text hover:bg-critical-tint rounded-lg transition-all" [attr.aria-label]="'Delete request ' + req.name" [attr.title]="'Delete request ' + req.name">
+                        <!-- Arms the confirm below; nothing is deleted from here. -->
+                        <button type="button" (click)="askDeleteRequest(req)" class="p-2 text-ink-muted hover:text-critical-text hover:bg-critical-tint rounded-lg transition-all" [attr.aria-label]="'Delete request ' + req.name" [attr.title]="'Delete request ' + req.name">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                         </button>
                       }
@@ -418,6 +464,51 @@ interface RequestsData {
         </div>
       }
 
+      <!--
+        DELETE CONFIRMATION. The trash icon fired the DELETE on a single click; the
+        only comment in its handler read "In a real app, use a custom modal here
+        instead of window.confirm" — and there was no window.confirm either.
+        Delete is offered for 'Not Published' and 'Withdrawn' requests, and a
+        Withdrawn request has usually been STAFFED already, so the copy has to name
+        the request, its effort, and how many assignments are hanging off it: those
+        assignments are not deleted with it, and the request record that carries the
+        staffing history is not shown anywhere else once it is gone.
+        Short dialog, so the plain centred overlay is deliberate.
+      -->
+      @if (pendingDelete(); as pending) {
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+             appModal ariaLabelledby="requestDeleteTitle" (dismiss)="cancelDeleteRequest()">
+          <div class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col" data-test="request-delete-confirm">
+            <div class="p-6 text-center">
+              <div class="w-16 h-16 bg-critical-tint ring-1 ring-critical rounded-full flex items-center justify-center mx-auto mb-4">
+                <mat-icon class="text-critical-text text-3xl">warning</mat-icon>
+              </div>
+              <h3 id="requestDeleteTitle" class="font-display text-lg font-bold text-[var(--cc-ink)] mb-2">Delete resource request</h3>
+              <p class="text-[var(--cc-muted)] text-sm">
+                <strong class="text-ink">{{ pending.name }}</strong> &mdash;
+                {{ pending.requiredRole }}, {{ pending.requiredEffort | number:'1.0-2' }}h &mdash; is deleted,
+                together with its staffing record.
+                @if (pendingAssignmentCount() > 0) {
+                  <span data-test="request-delete-staffed">
+                    {{ pendingAssignmentCount() | number:'1.0-0' }} assignment(s) have already been made against it;
+                    they are NOT deleted with the request and are left pointing at a request that no longer exists.
+                  </span>
+                } @else {
+                  <span data-test="request-delete-unstaffed">Nothing is staffed against it yet.</span>
+                }
+                This cannot be undone.
+              </p>
+            </div>
+            <div class="p-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
+              <button type="button" (click)="cancelDeleteRequest()" class="command-button secondary">Cancel</button>
+              <button type="button" (click)="confirmDeleteRequest()" data-test="request-delete-confirm-action" class="px-4 py-2 bg-critical text-white rounded-lg text-sm font-semibold hover:bg-critical-strong transition-colors shadow-sm">
+                Delete request
+              </button>
+            </div>
+          </div>
+        </div>
+      }
+
       <!-- Time-phased allocation calendar (B1). Rendered as its own modal overlay;
            while it is open the tracking modal above is hidden so only one focus trap
            is active. The panel content lives in AllocationCalendarComponent. -->
@@ -491,15 +582,9 @@ export class ResourceRequestsComponent {
     defaultValue: [] as Skill[],
   });
   skillOptions = this.skillsRes.value;
-
-  // ORPHAN VALUES: any skill on the edited request whose name isn't in the catalog
-  // (legacy free text) is surfaced as a disabled option so editing never drops it.
-  orphanSkills = computed<string[]>(() => {
-    const names = new Set(this.skillOptions().map(s => s.name));
-    return this.editingSkills().filter(s => !names.has(s));
-  });
-  /** The skill names currently loaded into the form (drives orphan detection). */
-  private editingSkills = signal<string[]>([]);
+  // The skills chip model and its helpers live beside `requestForm` below: field
+  // initialisers run in declaration order, so anything reading
+  // requestForm.controls.skills has to be declared after it.
 
   showForm = signal(false);
   editingId = signal<string | null>(null);
@@ -568,6 +653,52 @@ export class ResourceRequestsComponent {
     // resourceRequestUpdateError server-side.
   }, { validators: endNotBeforeStart('startDate', 'endDate') });
 
+  /**
+   * The skills currently on the request, read straight off the form control — the
+   * RAW `string[]` that will be saved. Deliberately NOT intersected with
+   * `skillOptions()`: a stored skill absent from today's catalog must survive an
+   * edit, and an intersection here would silently drop it on the next save. That is
+   * the whole data risk in this control.
+   */
+  selectedSkills = toSignal(this.requestForm.controls.skills.valueChanges, {
+    initialValue: this.requestForm.controls.skills.value,
+  });
+
+  /** The catalog value highlighted in the "add a skill" picker, or '' for none. */
+  skillToAdd = signal<string>('');
+
+  /**
+   * Catalog entries not already on the request. This filters the OPTIONS, never the
+   * model, so it cannot lose data — a skill already chosen simply stops being
+   * offered a second time (same rule as my-profile's addableSkillOptions).
+   */
+  addableSkillOptions = computed(() => {
+    const chosen = new Set(this.selectedSkills());
+    return this.skillOptions().filter(s => !chosen.has(s.name));
+  });
+
+  /** True for a chip whose skill name is not (or no longer) in the /skills catalog. */
+  isOrphanSkill(name: string): boolean {
+    return !this.skillOptions().some(s => s.name === name);
+  }
+
+  addSkill(picker: HTMLSelectElement) {
+    const name = this.skillToAdd();
+    if (!name) return;
+    const current = this.selectedSkills();
+    if (!current.includes(name)) {
+      this.requestForm.controls.skills.setValue([...current, name]);
+    }
+    // Reset the picker so the just-added entry (now filtered out of the options)
+    // cannot leave the control showing a stale selection.
+    this.skillToAdd.set('');
+    picker.value = '';
+  }
+
+  removeSkill(name: string) {
+    this.requestForm.controls.skills.setValue(this.selectedSkills().filter(s => s !== name));
+  }
+
   trackRequest(req: ResourceRequest) {
     this.trackingRequestId.set(req.id);
   }
@@ -596,7 +727,7 @@ export class ResourceRequestsComponent {
   openCreateForm() {
     this.editingId.set(null);
     this.editingRole.set('');
-    this.editingSkills.set([]);
+    this.skillToAdd.set('');
     this.requestForm.reset({ requiredEffort: 0, skills: [] });
     this.showForm.set(true);
   }
@@ -604,7 +735,9 @@ export class ResourceRequestsComponent {
   openEditForm(req: ResourceRequest) {
     this.editingId.set(req.id);
     this.editingRole.set(req.requiredRole ?? '');
-    this.editingSkills.set([...(req.skills ?? [])]);
+    this.skillToAdd.set('');
+    // `skills` is patched below and `selectedSkills` reads the control, so the stored
+    // array — orphan values included — is what the chips render and what saves.
     this.requestForm.patchValue({
       name: req.name,
       requiredRole: req.requiredRole,
@@ -666,8 +799,37 @@ export class ResourceRequestsComponent {
     });
   }
 
-  deleteRequest(req: ResourceRequest) {
-    // In a real app, use a custom modal here instead of window.confirm
+  /**
+   * The request awaiting confirmation. Holds the WHOLE record, not just an id: the
+   * dialog quotes its name, role and effort, and an id alone would force a second
+   * lookup that a concurrent reload could miss.
+   */
+  pendingDelete = signal<ResourceRequest | null>(null);
+
+  /** How many assignments already hang off the armed request — the consequence the
+   *  dialog states. Derived from the same read the table uses, so it cannot drift. */
+  pendingAssignmentCount = computed(() => {
+    const pending = this.pendingDelete();
+    if (!pending) return 0;
+    return this.assignments().filter(a => a.requestId === pending.id).length;
+  });
+
+  /** First click: arm the confirm ONLY. No DELETE goes out from here. */
+  askDeleteRequest(req: ResourceRequest) {
+    this.pendingDelete.set(req);
+  }
+
+  cancelDeleteRequest() {
+    this.pendingDelete.set(null);
+  }
+
+  /** The only place the DELETE is issued. */
+  confirmDeleteRequest() {
+    const req = this.pendingDelete();
+    if (!req) return;
+    // Cleared BEFORE the request so a double-click on the confirm control cannot
+    // fire two DELETEs for the same row.
+    this.pendingDelete.set(null);
     this.api.deleteRequest(req.id).subscribe(() => {
       this.res.reload();
     });
