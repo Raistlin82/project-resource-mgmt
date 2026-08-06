@@ -6,6 +6,7 @@ import { catchError, forkJoin, map, of, type Observable } from 'rxjs';
 import { ApiService } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { ListStateComponent } from '../shared/list-state.component';
+import { SEARCH_MAX_LIMIT } from '../services/search.util';
 import type { Resource, ResourceRequest, Project, Customer, Contract, Order } from '../services/api.service';
 
 /** One collection's outcome for this search (design spec §5's four states, minus
@@ -47,6 +48,24 @@ const SEARCH_TIMING: Record<SectionKey, 'submit' | 'live'> = {
 /** How long a 'live' section waits after the last keystroke before firing
  *  (spec §6, Decision 4). */
 const LIVE_SEARCH_DEBOUNCE_MS = 300;
+
+/**
+ * How many rows this screen asks each collection for, per section.
+ *
+ * The server ALWAYS paginates these six reads (`clampSearchPage`,
+ * search.util.ts): omitting `limit` does not mean "everything", it means
+ * `SEARCH_DEFAULT_LIMIT` — 20 — with no total in the response body. This screen
+ * used to send no `limit` at all and render whatever came back as if it were the
+ * complete answer, so a search matching 400 people showed exactly 20 rows and
+ * looked exhaustive: a resource-manager could conclude nobody else matched and
+ * staff the wrong person.
+ *
+ * Two halves fix that, and both are needed. Ask for the server's own maximum
+ * (`clampSearchPage` caps at 100, so nothing above it is honoured anyway), AND
+ * tell the user when the page came back full — because a full page is the only
+ * signal available that the wire may have carried less than the whole match set.
+ */
+const SEARCH_PAGE_LIMIT = SEARCH_MAX_LIMIT;
 
 interface SearchResults {
   resources: SectionResult<Resource> | undefined; // undefined = not attempted (RBAC pre-filter, or no active query yet for this section's mode)
@@ -153,6 +172,7 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
                     @if (state.kind === 'ok') {
                       @for (r of state.rows; track r.id) { <div>{{ r.name }}</div> }
                       @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('resources') }}" in Resources.</p> }
+                      @if (isTruncated(state.rows)) { <p data-test="truncation-hint" class="mt-3 text-sm text-[var(--cc-muted)]">Showing the first {{ pageLimit }} matches — there may be more. Refine the query to narrow the results.</p> }
                     }
                   </ng-template>
                 </app-list-state>
@@ -171,6 +191,7 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
                     @if (state.kind === 'ok') {
                       @for (p of state.rows; track p.id) { <div>{{ p.name }}</div> }
                       @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('projects') }}" in Projects.</p> }
+                      @if (isTruncated(state.rows)) { <p data-test="truncation-hint" class="mt-3 text-sm text-[var(--cc-muted)]">Showing the first {{ pageLimit }} matches — there may be more. Refine the query to narrow the results.</p> }
                     }
                   </ng-template>
                 </app-list-state>
@@ -189,6 +210,7 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
                     @if (state.kind === 'ok') {
                       @for (r of state.rows; track r.id) { <div>{{ r.name }}</div> }
                       @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('requests') }}" in Requests.</p> }
+                      @if (isTruncated(state.rows)) { <p data-test="truncation-hint" class="mt-3 text-sm text-[var(--cc-muted)]">Showing the first {{ pageLimit }} matches — there may be more. Refine the query to narrow the results.</p> }
                     }
                   </ng-template>
                 </app-list-state>
@@ -207,6 +229,7 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
                     @if (state.kind === 'ok') {
                       @for (c of state.rows; track c.id) { <div>{{ c.name }}</div> }
                       @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('customers') }}" in Customers.</p> }
+                      @if (isTruncated(state.rows)) { <p data-test="truncation-hint" class="mt-3 text-sm text-[var(--cc-muted)]">Showing the first {{ pageLimit }} matches — there may be more. Refine the query to narrow the results.</p> }
                     }
                   </ng-template>
                 </app-list-state>
@@ -225,6 +248,7 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
                     @if (state.kind === 'ok') {
                       @for (c of state.rows; track c.id) { <div>{{ c.name }}</div> }
                       @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('contracts') }}" in Contracts.</p> }
+                      @if (isTruncated(state.rows)) { <p data-test="truncation-hint" class="mt-3 text-sm text-[var(--cc-muted)]">Showing the first {{ pageLimit }} matches — there may be more. Refine the query to narrow the results.</p> }
                     }
                   </ng-template>
                 </app-list-state>
@@ -243,6 +267,7 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
                     @if (state.kind === 'ok') {
                       @for (o of state.rows; track o.id) { <div>{{ o.invoiceNumber ?? o.id }}</div> }
                       @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('orders') }}" in Orders.</p> }
+                      @if (isTruncated(state.rows)) { <p data-test="truncation-hint" class="mt-3 text-sm text-[var(--cc-muted)]">Showing the first {{ pageLimit }} matches — there may be more. Refine the query to narrow the results.</p> }
                     }
                   </ng-template>
                 </app-list-state>
@@ -411,17 +436,22 @@ export class SearchComponent {
       if (!anyActive) return of(EMPTY_RESULTS);
       const canStaffing = this.auth.canReadStaffing();
       const canCommercial = this.auth.canReadCommercial();
+      // Every leg sends `limit` EXPLICITLY. Omitting it is not "no paging" —
+      // the server falls back to SEARCH_DEFAULT_LIMIT (20) and reports no
+      // total, which is how a 20-row page came to be rendered as a complete
+      // result set. See SEARCH_PAGE_LIMIT above.
+      const limit = SEARCH_PAGE_LIMIT;
       return forkJoin({
-        resources: canStaffing && params.resources ? sectionCall(this.api.getResources({ q: params.resources })) : of(undefined),
-        requests: canStaffing && params.requests ? sectionCall(this.api.getRequests({ q: params.requests })) : of(undefined),
+        resources: canStaffing && params.resources ? sectionCall(this.api.getResources({ q: params.resources, limit })) : of(undefined),
+        requests: canStaffing && params.requests ? sectionCall(this.api.getRequests({ q: params.requests, limit })) : of(undefined),
         // /projects has no RBAC pre-filter (open read, spec §4) -- fired
         // whenever its OWN (live) query is non-empty, exactly the same
         // shape as the other five now (sectionState() decides visibility;
         // no hard-coded always-ok fallback here anymore).
-        projects: params.projects ? sectionCall(this.api.getProjects({ q: params.projects })) : of(undefined),
-        customers: canCommercial && params.customers ? sectionCall(this.api.getCustomers({ q: params.customers })) : of(undefined),
-        contracts: canCommercial && params.contracts ? sectionCall(this.api.getContracts({ q: params.contracts })) : of(undefined),
-        orders: canCommercial && params.orders ? sectionCall(this.api.getOrders({ q: params.orders })) : of(undefined),
+        projects: params.projects ? sectionCall(this.api.getProjects({ q: params.projects, limit })) : of(undefined),
+        customers: canCommercial && params.customers ? sectionCall(this.api.getCustomers({ q: params.customers, limit })) : of(undefined),
+        contracts: canCommercial && params.contracts ? sectionCall(this.api.getContracts({ q: params.contracts, limit })) : of(undefined),
+        orders: canCommercial && params.orders ? sectionCall(this.api.getOrders({ q: params.orders, limit })) : of(undefined),
       }).pipe(
         // Only Projects gets translated here: it has no RBAC rule to
         // legitimately deny it (spec §4), so an actual 403 there is
@@ -452,5 +482,20 @@ export class SearchComponent {
   protected ordersState = computed(() => this.sectionState('orders', this.results().orders));
 
   protected hasActiveQuery = computed(() => !!this.submittedQuery().trim() || !!this.liveQuery().trim());
+
+  /** Exposed to the template so the number in the hint and the number actually
+   *  sent on the wire are the SAME constant — a hard-coded "100" in the copy
+   *  could drift away from the request and lie about what was fetched. */
+  protected readonly pageLimit = SEARCH_PAGE_LIMIT;
+
+  /**
+   * A page that came back exactly full is the ONLY truncation signal available:
+   * these responses are bare arrays with no total. So this errs toward saying
+   * "there may be more" on an exact-`limit` match set rather than presenting a
+   * possibly-cut list as complete — the copy claims only what is provable, that
+   * these are the first `pageLimit` matches.
+   */
+  protected isTruncated(rows: readonly unknown[]): boolean { return rows.length >= this.pageLimit; }
+
   protected reload(): void { this.searchRes.reload(); }
 }
