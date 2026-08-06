@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, DestroyRef, computed, effect, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, computed, effect, inject, signal, untracked } from '@angular/core';
 import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { DecimalPipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
@@ -37,10 +37,17 @@ const BASE_CURRENCY = 'EUR';
       <div class="command-card p-4 flex flex-wrap items-center gap-3">
         <mat-icon class="text-accent-text">schedule</mat-icon>
         <span class="text-sm text-ink-secondary">Rates are <strong>daily</strong>. 1 working day =</span>
+        <!-- Both controls stay inert until the persisted value has really been read:
+             editing or saving against the placeholder is how 8 used to overwrite a
+             configured 7.5. -->
         <input type="number" min="1" max="24" step="0.5" [ngModel]="hoursPerDay()" (ngModelChange)="hoursPerDay.set($event)"
+               [disabled]="!hoursPerDaySettled()"
                class="command-input text-center" style="width:5rem" aria-label="Working hours per day">
         <span class="text-sm text-ink-secondary">hours (used to convert €/day → €/hour in the margin calculations).</span>
-        <button type="button" (click)="saveHoursPerDay()" [disabled]="!validHoursPerDay()" class="command-button secondary text-sm disabled:opacity-50 disabled:cursor-not-allowed">Save</button>
+        <button type="button" (click)="saveHoursPerDay()" [disabled]="!hoursPerDaySettled() || !validHoursPerDay()" class="command-button secondary text-sm disabled:opacity-50 disabled:cursor-not-allowed">Save</button>
+        @if (!hoursPerDaySettled()) {
+          <span class="text-xs text-ink-muted" role="status" aria-live="polite">Loading the configured value…</span>
+        }
       </div>
 
       <div class="command-card overflow-hidden">
@@ -222,9 +229,52 @@ export class ManageRateCardsComponent {
   hoursPerDay = signal<number | null>(null);
   validHoursPerDay = computed(() => { const v = this.hoursPerDay(); return v != null && v > 0 && v <= 24; });
   private hpdRes = authGatedResource(() => this.api.getHoursPerDay(), { value: 8 });
+  /**
+   * True only once the persisted setting has actually been read. Until then the
+   * field must stay empty and Save must stay disabled.
+   *
+   * `authGatedResource` emits its `defaultValue` — here `{ value: 8 }` — while
+   * `authReady` is false, and that emission is a RESOLVED state, not a loading
+   * one. The seeding effect therefore ran against the placeholder on the first
+   * pass, set `hoursPerDay` to 8, and its own `hoursPerDay() == null` guard then
+   * blocked the REAL value from ever landing. An organisation configured at 7.5
+   * saw 8 on every visit, and pressing Save — including just to confirm what the
+   * screen appeared to say — wrote 8 over 7.5, shifting every €/day → €/hour
+   * conversion by 6.25% across billing, project margins and reporting.
+   */
+  hoursPerDaySettled = computed(() =>
+    this.auth.authReady() && !this.hpdRes.isLoading() && this.hpdRes.status() !== 'error');
+  /**
+   * One-shot latch for the seeding effect below. Deliberately a plain field, not a
+   * signal: it must not make the effect re-run.
+   */
+  private hoursPerDaySeeded = false;
   constructor() {
-    // Seed the editable field from the persisted setting once it loads.
-    effect(() => { const v = this.hpdRes.value()?.value; if (v != null && this.hoursPerDay() == null) this.hoursPerDay.set(v); });
+    // Seed the editable field from the persisted setting once it has really loaded.
+    //
+    // SEEDS EXACTLY ONCE, AND NEVER TRACKS THE FIELD IT WRITES. The previous version
+    // gated on `this.hoursPerDay() == null` read inside the effect's reactive scope,
+    // which made the effect a consumer of the signal it writes. The template binds
+    // the input one-way (`[ngModel]="hoursPerDay()"` + `(ngModelChange)`), and
+    // Angular's NumberValueAccessor emits null for an empty box — so backspacing the
+    // field to empty set the signal to null, re-triggered the effect, satisfied its
+    // own `== null` guard and wrote the stored value straight back. The field was
+    // literally un-clearable: an admin could not type a new number without knowing
+    // to select-all first, and Save then sat disabled with no inline reason.
+    //
+    // The latch expresses the real intent — "seed the initial value, once" — instead
+    // of inferring it from the field being empty, which is also a state the USER can
+    // legitimately produce.
+    effect(() => {
+      if (!this.hoursPerDaySettled()) return;
+      const v = this.hpdRes.value()?.value;
+      if (v == null) return;
+      untracked(() => {
+        if (this.hoursPerDaySeeded) return;
+        this.hoursPerDaySeeded = true;
+        this.hoursPerDay.set(v);
+      });
+    });
   }
   saveHoursPerDay() {
     const v = this.hoursPerDay();

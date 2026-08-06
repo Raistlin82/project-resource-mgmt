@@ -1,6 +1,6 @@
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { NEVER, Observable, of } from 'rxjs';
 import { ManageRateCardsComponent } from './manage-rate-cards.component';
 import { ApiService, RateCard, ProjectRole, ResourceOrganization, FxRate } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
@@ -179,5 +179,121 @@ describe('ManageRateCardsComponent', () => {
       expect(updateRateCard).toHaveBeenCalledWith('MOVE', expect.objectContaining({ organization: 'Platform' }));
       expect(notifyStub.show).not.toHaveBeenCalledWith(expect.anything(), 'info');
     });
+  });
+});
+
+describe('ManageRateCardsComponent working-hours-per-day field', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  /**
+   * Deliberately NOT reusing setup()'s `of({ value: 8 })`: 8 is also the
+   * rxResource defaultValue, so a stub emitting 8 cannot tell "the configured
+   * value arrived" from "the placeholder was latched". The fixture value must
+   * differ from the default or the test proves nothing.
+   */
+  function setupHpd(hoursPerDay: Observable<{ value: number }>) {
+    const getHoursPerDay = vi.fn(() => hoursPerDay);
+    const apiStub = {
+      getRateCards: vi.fn(() => of([] as RateCard[])),
+      getProjectRoles: vi.fn(() => of([] as ProjectRole[])),
+      getResourceOrganizations: vi.fn(() => of([] as ResourceOrganization[])),
+      getFxRates: vi.fn(() => of([] as FxRate[])),
+      getHoursPerDay,
+      setHoursPerDay: vi.fn(() => of({ value: 0 })),
+      createRateCard: vi.fn(() => of({} as RateCard)),
+      updateRateCard: vi.fn(() => of({} as RateCard)),
+      deleteRateCard: vi.fn(() => of(undefined)),
+    } as unknown as ApiService;
+    TestBed.configureTestingModule({
+      imports: [ManageRateCardsComponent],
+      providers: [
+        { provide: ApiService, useValue: apiStub },
+        { provide: AuthService, useValue: { authReady: signal(true), isAuthenticated: signal(true) } as unknown as AuthService },
+        { provide: NotificationService, useValue: { show: vi.fn() } as unknown as NotificationService },
+      ],
+    });
+    const fixture = TestBed.createComponent(ManageRateCardsComponent);
+    return { fixture, component: fixture.componentInstance };
+  }
+
+  const hpdInput = (fixture: { nativeElement: HTMLElement }) =>
+    fixture.nativeElement.querySelector('input[aria-label="Working hours per day"]') as HTMLInputElement;
+  const saveButton = (fixture: { nativeElement: HTMLElement }) =>
+    Array.from(fixture.nativeElement.querySelectorAll('button'))
+      .find(b => (b as HTMLElement).textContent?.trim() === 'Save') as HTMLButtonElement;
+
+  it('shows the CONFIGURED value, not the placeholder', async () => {
+    // THE DEFECT: authGatedResource emits its defaultValue {value: 8} while
+    // authReady is false, and that emission is RESOLVED, not loading. The seeding
+    // effect latched 8, and its own `hoursPerDay() == null` guard then blocked 7.5
+    // from ever landing. Pressing Save wrote 8 over 7.5 — a 6.25% shift on every
+    // €/day → €/hour conversion in billing, margins and reporting.
+    const { fixture, component } = setupHpd(of({ value: 7.5 }));
+    await flush(fixture);
+    expect(component.hoursPerDay()).toBe(7.5);
+    expect(hpdInput(fixture).value).toBe('7.5');
+  });
+
+  it('leaves the field empty and Save disabled until the read settles', async () => {
+    // ASSERTION OF ABSENCE. Without it, a fix that merely lets a later value
+    // overwrite the placeholder still shows 8 — and still lets the admin SAVE 8 —
+    // during the whole pre-settled window. Both halves matter: an implementation
+    // that blanks the field but leaves Save enabled writes null/8 on a click.
+    const { fixture, component } = setupHpd(NEVER);
+    // NOT flush(): whenStable() never resolves while a resource is still loading,
+    // which is the whole point of this case. Change detection alone is not enough
+    // either — `[disabled]` on an element carrying `ngModel` binds NgModel's OWN
+    // `disabled` input, and NgModel applies it through `control.disable()` on a
+    // resolved promise, so the DOM property lands one microtask later.
+    fixture.detectChanges();
+    await Promise.resolve();
+    fixture.detectChanges();
+    expect(component.hoursPerDay()).toBeNull();
+    expect(component.hoursPerDaySettled()).toBe(false);
+    expect(hpdInput(fixture).disabled).toBe(true);
+    expect(saveButton(fixture).disabled).toBe(true);
+  });
+
+  it('lets the admin CLEAR the field — the seeding effect must not write it back', async () => {
+    // A defect that survived the placeholder fix, on the adjacent lines. The effect
+    // read `hoursPerDay()` inside its own reactive scope, so it consumed the signal it
+    // writes; the input binds one-way and Angular's NumberValueAccessor emits null for
+    // an empty box, so backspacing the field to empty re-triggered the effect, satisfied
+    // its own `== null` guard and wrote 7.5 straight back. The field was un-clearable:
+    // an admin could not type a new number without knowing to select-all first.
+    const { fixture, component } = setupHpd(of({ value: 7.5 }));
+    await flush(fixture);
+    expect(component.hoursPerDay()).toBe(7.5);
+
+    // Exactly what the template does when the input goes empty.
+    component.hoursPerDay.set(null);
+    await flush(fixture);
+
+    expect(component.hoursPerDay()).toBeNull();
+    // The signal and the rendered value are written by different mechanisms, so the
+    // DOM read is the half that proves the USER sees an empty box.
+    expect(hpdInput(fixture).value).toBe('');
+    // Save must be disabled — but for the VALIDITY reason, not the readiness one.
+    expect(component.hoursPerDaySettled()).toBe(true);
+    expect(saveButton(fixture).disabled).toBe(true);
+  });
+
+  it('seeds once, so a later refetch does not overwrite an edit in progress', async () => {
+    // ASSERTION OF ABSENCE: the one-shot latch must not be satisfiable by simply
+    // never seeding again after ANY write — it must still seed the first time (proved
+    // above) and must not clobber a deliberate user value afterwards.
+    const { fixture, component } = setupHpd(of({ value: 7.5 }));
+    await flush(fixture);
+    component.hoursPerDay.set(6);
+    await flush(fixture);
+    expect(component.hoursPerDay()).toBe(6);
+  });
+
+  it('re-enables both controls once the value has arrived', async () => {
+    // The mirror of the case above: a permanently-disabled field would satisfy it.
+    const { fixture } = setupHpd(of({ value: 7.5 }));
+    await flush(fixture);
+    expect(hpdInput(fixture).disabled).toBe(false);
+    expect(saveButton(fixture).disabled).toBe(false);
   });
 });
