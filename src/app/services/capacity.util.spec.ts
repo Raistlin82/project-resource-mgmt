@@ -15,6 +15,31 @@ describe('fteOf', () => {
 describe('standardMonthlyHours', () => {
   it('aliases monthlyTargetHours = working days × hoursPerDay', () =>
     expect(standardMonthlyHours('2026-05', 8, NO_HOL)).toBe(workingDaysInMonth('2026-05', NO_HOL).length * 8));
+
+  it('passes `holidays` through: one holiday on a working day removes one day of target', () => {
+    // The `holidays` argument used to be inert in this whole file — every case
+    // passed NO_HOL — so replacing the pass-through with `new Set()` stayed green
+    // while every FTE denominator on /capacity and /bench silently ignored public
+    // holidays (December 2026 would target 184h instead of 176h, so a person
+    // booked the full 176h read 95.65% instead of 100.00%).
+    // 2026-05-01 is a Friday, so 2026-05-04 is a MONDAY — a real working day,
+    // which is what makes the holiday subtract anything at all.
+    const HOL = new Set(['2026-05-04']);
+    const noHol = standardMonthlyHours('2026-05', 8, NO_HOL);
+    // Derived from the OTHER input, never recomputed from the implementation's formula.
+    expect(standardMonthlyHours('2026-05', 8, HOL)).toBe(noHol - 8);
+    // ABSENCE TWIN: equality with the no-holiday figure is exactly what a dropped
+    // `holidays` argument produces, so that is the outcome to exclude by name.
+    expect(standardMonthlyHours('2026-05', 8, HOL)).not.toBe(noHol);
+  });
+
+  it('ignores a holiday that falls on a weekend (there is no working day to remove)', () => {
+    // The other direction, and the one that keeps the case above from being
+    // satisfied by a blanket "subtract 8 per listed holiday": 2026-05-03 is a
+    // Sunday, already excluded, so the target must not move at all.
+    expect(standardMonthlyHours('2026-05', 8, new Set(['2026-05-03'])))
+      .toBe(standardMonthlyHours('2026-05', 8, NO_HOL));
+  });
 });
 
 describe('semaphoreBand (lower-bound-inclusive: [0,50) idle, [50,85) under, [85,105] healthy, (105,∞) over)', () => {
@@ -86,9 +111,14 @@ describe('rollupMonthly', () => {
     { assignmentId: 'a2', month: '2026-05', status: 'Requested' },
     { assignmentId: 'a3', month: '2026-05', status: 'Allocated' },
   ];
+  // a2's 80h is load-bearing: it puts PLANNED and CONFIRMED in DIFFERENT bands.
+  // 2026-05 has 21 working days × 8h = 168h standard, so planned 180h = 107.14%
+  // ('over') while confirmed 100h = 59.52% ('under'). With the previous 40h both
+  // landed in 'under', and the band assertion below could not tell which input the
+  // implementation had used.
   const assignmentDays = [
     { assignmentId: 'a1', date: '2026-05-04', hours: 100 },
-    { assignmentId: 'a2', date: '2026-05-05', hours: 40 },
+    { assignmentId: 'a2', date: '2026-05-05', hours: 80 },
     { assignmentId: 'a3', date: '2026-05-04', hours: 84 },
   ];
 
@@ -97,18 +127,43 @@ describe('rollupMonthly', () => {
   it('splits confirmed vs planned per resource/month', () => {
     const r1 = out.rows.find(r => r.resourceId === 'r1')!.monthly['2026-05'];
     expect(r1.confirmedHours).toBe(100);
-    expect(r1.plannedHours).toBe(140);
+    expect(r1.plannedHours).toBe(180);
   });
-  it('band uses planned FTE', () => {
+  it('bands on PLANNED FTE, not confirmed', () => {
     const r1 = out.rows.find(r => r.resourceId === 'r1')!.monthly['2026-05'];
-    // ftePlanned = 140 / standardMonthlyHours('2026-05',8) → compute expected band from the real working-day count
-    const std = standardMonthlyHours('2026-05', 8, NO_HOL);
-    const expectedBand = semaphoreBand((140 / std) * 100);
-    expect(r1.band).toBe(expectedBand);
+    // LITERAL bands. The previous version derived its expectation with
+    // `semaphoreBand((140 / std) * 100)` — the source's own formula over the same
+    // input — so `band: semaphoreBand(fteConfirmed * 100)` returned exactly the
+    // expected value and this gate could never fail. Planned 180h/168h = 107%
+    // ('over'); confirmed 100h/168h = 60% ('under').
+    expect(r1.band).toBe('over');
+    // ABSENCE TWIN: 'under' is precisely the band a confirmed-derived computation
+    // yields for this cell, which is the mis-band that shipped green — a resource
+    // at 1.07 planned FTE tinted healthy while the text still read 107%.
+    expect(r1.band).not.toBe('under');
+    // And the fixture really does discriminate: the confirmed figure bands elsewhere.
+    expect(semaphoreBand(r1.fteConfirmed * 100)).toBe('under');
   });
   it('part-time capacity is 0.5 FTE; full is 1.0', () => {
+    // Derived from contractHoursPerDay, not from assignmentDays hours, so raising
+    // a2 to 80h above does not move either figure.
     expect(out.totals['2026-05'].capacityFte).toBeCloseTo(1.5);
     expect(out.totals['2026-05'].resourceCount).toBe(2);
+  });
+  it('threads `holidays` into every cell’s targetHours (the FTE denominator)', () => {
+    // The SECOND holiday hop. `standardMonthlyHours` could keep its pass-through
+    // while `rollupMonthly` built targetByMonth with an empty set, and the
+    // standardMonthlyHours assertion above would stay green — so that hop needs its
+    // own case. Same fixture, two holiday sets; 2026-05-04 is a Monday.
+    const withHol = rollupMonthly({
+      resources, assignments, assignmentDays, assignmentMonths, months, hoursPerDay,
+      holidays: new Set(['2026-05-04']),
+    });
+    const noHolTarget = out.rows.find(r => r.resourceId === 'r1')!.monthly['2026-05'].targetHours;
+    const withHolTarget = withHol.rows.find(r => r.resourceId === 'r1')!.monthly['2026-05'].targetHours;
+    expect(withHolTarget).toBe(noHolTarget - 8);
+    // ABSENCE TWIN: an ignored holiday set produces exactly the no-holiday target.
+    expect(withHolTarget).not.toBe(noHolTarget);
   });
   it('idle active resource still appears with a 0% cell', () => {
     const out2 = rollupMonthly({ resources: [{ id: 'r9', name: 'Idle', contractHoursPerDay: 8 }],
@@ -339,8 +394,10 @@ describe('employedWorkingDays / mid-month employment in rollupMonthly', () => {
   });
 
   it('honours holidays, which the pre-existing cases never exercised', () => {
-    // The `holidays` argument had no coverage anywhere in this file: every case
-    // passed NO_HOL, so a fix that ignored it entirely would have stayed green.
+    // The THIRD holiday hop, and the one this helper owns: the standardMonthlyHours
+    // and rollupMonthly/targetHours cases above pin the FTE denominator, this one
+    // pins the employed-day count. All three passed NO_HOL originally, so dropping
+    // `holidays` at any hop stayed green.
     const withHoliday = new Set(['2026-05-20']);
     const employed = employedWorkingDays({ hireDate: '2026-05-18' }, MONTH, withHoliday);
     expect(employed).not.toContain('2026-05-20');
