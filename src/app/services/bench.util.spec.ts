@@ -1,8 +1,82 @@
 import { describe, it, expect } from 'vitest';
 import {
   benchStateFor, monthsIdleAt, bucketForMonthsIdle, freeingUpNextMonth, availabilityDateFor,
+  unallocatedShare,
   type BenchState,
 } from './bench.util';
+
+describe('unallocatedShare (RPT comparison row 50 — the complement of allocation, on the resource’s OWN target)', () => {
+  // 20 employed working days × 8h = a 160h own target throughout, so every
+  // expectation below is arithmetic on ONE number the test states itself.
+  const DAYS = 20;
+  const HPD = 8;
+
+  it('nothing booked -> 100% unallocated, and every employed day unallocated', () =>
+    expect(unallocatedShare(0, HPD, DAYS)).toStrictEqual({ unallocatedPct: 100, unallocatedDays: 20 }));
+  it('booked exactly to target -> 0%, 0 days', () =>
+    expect(unallocatedShare(160, HPD, DAYS)).toStrictEqual({ unallocatedPct: 0, unallocatedDays: 0 }));
+
+  // 40 of 160 booked. DELIBERATELY not the midpoint: at 50% a complement
+  // inversion — returning the ALLOCATED share instead of the unallocated one —
+  // produces the identical number and the test cannot see it. Here allocation is
+  // 25% and disallocation 75%, so the two are distinguishable.
+  it('partially booked -> the COMPLEMENT of the allocated share, not the allocated share itself', () => {
+    expect(unallocatedShare(40, HPD, DAYS)).toStrictEqual({ unallocatedPct: 75, unallocatedDays: 15 });
+    // The absence twin, spelled out: 25 is what the inverted implementation returns.
+    expect(unallocatedShare(40, HPD, DAYS)?.unallocatedPct).not.toBe(25);
+  });
+
+  it('OVER-allocated -> 0%, never a negative percentage or negative days (spec: truncated to [0, 100])', () => {
+    expect(unallocatedShare(200, HPD, DAYS)).toStrictEqual({ unallocatedPct: 0, unallocatedDays: 0 });
+    const pct = unallocatedShare(200, HPD, DAYS)!.unallocatedPct;
+    expect(pct).toBeGreaterThanOrEqual(0);
+  });
+
+  it('the upper truncation holds too: a negative booking cannot push the share past 100%', () => {
+    // Not a value the API should ever store, which is the point — the clamp is
+    // what stops a corrupt row from rendering "137.5% unallocated" as a fact.
+    expect(unallocatedShare(-60, HPD, DAYS)).toStrictEqual({ unallocatedPct: 100, unallocatedDays: 20 });
+  });
+
+  // THE PART-TIME / MID-MONTH CASE, which is the whole reason the denominator is
+  // not the standard month: each of these would be wrong if the target were a
+  // fixed 22-day / full-time month.
+  it('a PART-TIMER fully booked on her own contract is 0% unallocated, not half-idle', () => {
+    // 4h/day × 20 days = an 80h own target, fully booked.
+    expect(unallocatedShare(80, 4, DAYS)).toStrictEqual({ unallocatedPct: 0, unallocatedDays: 0 });
+    // ABSENCE TWIN: 50% is exactly what a full-time (8h/day) denominator yields
+    // for the same booking — the figure that would tell a planner to go and fill
+    // half a week that does not exist.
+    expect(unallocatedShare(80, 4, DAYS)?.unallocatedPct).not.toBe(50);
+  });
+  it('a MID-MONTH joiner is measured against the days she was employed, not the whole month', () => {
+    // 10 employed days × 8h = 80h own target, 60h booked -> 20h idle = 25%, 2.5 days.
+    expect(unallocatedShare(60, HPD, 10)).toStrictEqual({ unallocatedPct: 25, unallocatedDays: 2.5 });
+    // ABSENCE TWIN: against a full 21-day May (168h) the same booking reads ~64%.
+    expect(unallocatedShare(60, HPD, 10)!.unallocatedPct).not.toBeCloseTo(((168 - 60) / 168) * 100, 5);
+  });
+
+  it('produces fractional days when the idle hours are not a whole number of days (raw, unrounded)', () =>
+    // 126h idle of a 168h target -> 15.75 days. The 2-decimal cap is a RENDERING
+    // step; this layer must not pre-round or the FTE-style figures lose precision.
+    expect(unallocatedShare(42, HPD, 21)).toStrictEqual({ unallocatedPct: 75, unallocatedDays: 15.75 }));
+
+  // The "unanswerable" branch. Absence here is a VALUE, and it is the reason the
+  // BenchCell fields are optional rather than required.
+  it('an own target of 0 -> undefined, NOT 0% (a share of no capacity is unanswerable, and 0% would read as "fully allocated")', () => {
+    expect(unallocatedShare(0, 0, DAYS)).toBeUndefined();   // no contracted hours per day
+    expect(unallocatedShare(0, HPD, 0)).toBeUndefined();    // employed on no working day
+    expect(unallocatedShare(0, -8, DAYS)).toBeUndefined();  // nonsense contract, still no answer
+  });
+  it('a non-finite input on EITHER side -> undefined, so no template can ever render "NaN%"', () => {
+    expect(unallocatedShare(0, Number.NaN, DAYS)).toBeUndefined();
+    expect(unallocatedShare(0, HPD, Number.NaN)).toBeUndefined();
+    // The booking side too — the guard `hoursByResourceMonth` already applies to
+    // its inputs, restated here so this function is safe on its own terms.
+    expect(unallocatedShare(Number.NaN, HPD, DAYS)).toBeUndefined();
+    expect(unallocatedShare(Number.POSITIVE_INFINITY, HPD, DAYS)).toBeUndefined();
+  });
+});
 
 describe('benchStateFor (design spec §3 — decided on RAW hours, never the rounded %)', () => {
   it('exactly 0 planned -> BENCH', () => expect(benchStateFor(0, 160)).toBe('BENCH'));
@@ -102,7 +176,7 @@ describe('availabilityDateFor (design spec §7 — three branches, in order)', (
 });
 
 import { resources, assignments, assignmentDays, assignmentMonths, holidays } from '../../db/seed';
-import { benchRollup, hiringDemandByMonth, EMPTY_BENCH_ROLLUP, notFullyAllocatedAt, type BenchRollupInput } from './bench.util';
+import { benchRollup, hiringDemandByMonth, EMPTY_BENCH_ROLLUP, notFullyAllocatedAt, unallocatedHistoryFor, type BenchRollupInput } from './bench.util';
 import { hoursByResourceMonth, rollupMonthly, standardMonthlyHours } from './capacity.util';
 
 const HOURS_PER_DAY = 8;
@@ -520,6 +594,207 @@ describe('benchRollup threads `holidays` through BOTH of its hops (the seed set 
     // And this hop is independent of hop 1: a holiday elsewhere in the month lowers
     // the target but leaves her own employed day intact.
     expect(rowsWith(WORKDAY_HOLIDAY)).toEqual(['late']);
+  });
+});
+
+/**
+ * `benchRollup` must actually PUT the share on the cell, with the pro-rated
+ * denominator — the hop between `unallocatedShare` (unit-tested above on numbers it
+ * is handed) and the wire shape a screen renders.
+ *
+ * The fixture deliberately spans all four outcomes at once, because a suite where
+ * every resource is idle (or every resource is booked) proves nothing about a
+ * percentage: one FULLY allocated (0%), one partial at a NON-trivial share that is
+ * not its own complement (75%, so an inversion reads 25% and goes red), one
+ * completely idle (100%), and one with no answer at all (absent, not 0).
+ *
+ * May 2026 arithmetic, matching the holiday describe above: 21 working days, so
+ * 168h at 8h/day and no seeded holiday in the month.
+ */
+describe('benchRollup puts the unallocated share on every cell, against the RESOURCE’s own target', () => {
+  const MONTH = '2026-05';
+  const NO_HOL = new Set<string>();
+  const WORKDAY = `${MONTH}-05`; // a Tuesday
+
+  const input: BenchRollupInput = {
+    resources: [
+      { id: 'full', name: 'Fully Booked', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
+      { id: 'part', name: 'Quarter Booked', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
+      { id: 'idle', name: 'Never Booked', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
+      // Part-timer, fully booked on HER OWN contract: 4h × 21 days = 84h.
+      { id: 'halftime', name: 'Half Time', role: 'Developer', kind: 'internal', contractHoursPerDay: 4 },
+      // No contracted hours at all -> no own target -> no answer.
+      { id: 'nocontract', name: 'No Contract Hours', role: 'Developer', kind: 'internal', contractHoursPerDay: 0 },
+    ],
+    assignments: [
+      { id: 'aFull', resourceId: 'full' },
+      { id: 'aPart', resourceId: 'part' },
+      { id: 'aHalf', resourceId: 'halftime' },
+    ],
+    assignmentMonths: [
+      { assignmentId: 'aFull', month: MONTH, status: 'Allocated' },
+      { assignmentId: 'aPart', month: MONTH, status: 'Allocated' },
+      { assignmentId: 'aHalf', month: MONTH, status: 'Allocated' },
+    ],
+    assignmentDays: [
+      { assignmentId: 'aFull', date: WORKDAY, hours: 168 },  // exactly the 168h month
+      { assignmentId: 'aPart', date: WORKDAY, hours: 42 },   // a quarter of it -> 75% unallocated
+      { assignmentId: 'aHalf', date: WORKDAY, hours: 84 },   // exactly HER 84h month
+    ],
+    months: [MONTH], displayMonths: [MONTH], hoursPerDay: 8, holidays: NO_HOL,
+  };
+  const rows = new Map(benchRollup(input, `${MONTH}-10`).internalRows.map(r => [r.resourceId, r]));
+  const cell = (id: string) => rows.get(id)!.monthly[MONTH];
+
+  it('the fixture itself spans a real range, so no assertion below can pass for lack of data', () => {
+    // Guard on the FIXTURE, not the implementation: 168h is the month, and the
+    // five rows really are all present.
+    expect(standardMonthlyHours(MONTH, 8, NO_HOL)).toBe(168);
+    expect([...rows.keys()].sort()).toStrictEqual(['full', 'halftime', 'idle', 'nocontract', 'part']);
+  });
+
+  it('a fully-booked resource is 0% unallocated with 0 days', () => {
+    expect(cell('full').unallocatedPct).toBe(0);
+    expect(cell('full').unallocatedDays).toBe(0);
+    expect(cell('full').state).toBe('ALLOCATED');
+  });
+
+  it('a quarter-booked resource is 75% unallocated (NOT the 25% an inverted complement gives), 15.75 days', () => {
+    expect(cell('part').unallocatedPct).toBe(75);
+    expect(cell('part').unallocatedDays).toBe(15.75);
+    expect(cell('part').unallocatedPct).not.toBe(25);
+    expect(cell('part').state).toBe('PARTIAL');
+  });
+
+  it('a never-booked resource is 100% unallocated across all 21 working days', () => {
+    expect(cell('idle').unallocatedPct).toBe(100);
+    expect(cell('idle').unallocatedDays).toBe(21);
+    expect(cell('idle').state).toBe('BENCH');
+  });
+
+  /**
+   * THE DIVERGENCE, pinned rather than left to be rediscovered as a bug: `state`
+   * is decided against the company STANDARD month while the share is decided
+   * against the resource's OWN target, so a fully-booked part-timer is legitimately
+   * 'PARTIAL' at 0% unallocated. Whoever changes either denominator has to come
+   * here and decide on purpose.
+   */
+  it('a fully-booked PART-TIMER: 0% unallocated even though her state is PARTIAL against the standard month', () => {
+    expect(cell('halftime').unallocatedPct).toBe(0);
+    expect(cell('halftime').unallocatedDays).toBe(0);
+    expect(cell('halftime').state).toBe('PARTIAL');
+    // ABSENCE TWIN: 50% is what the standard-month denominator produces here — the
+    // figure that sends a planner looking for half a week she is not contracted for.
+    expect(cell('halftime').unallocatedPct).not.toBe(50);
+  });
+
+  it('a resource with no contracted hours gets NO share keys at all — absent, never 0', () => {
+    // The row and the state still exist: this is "no answer to the share question",
+    // not "no data about the person".
+    expect(cell('nocontract').state).toBe('BENCH');
+    expect(cell('nocontract').unallocatedPct).toBeUndefined();
+    expect(cell('nocontract').unallocatedDays).toBeUndefined();
+    // ...and the keys are genuinely ABSENT, not present-and-undefined, so the shape
+    // matches what survives the JSON round-trip to the browser.
+    expect(Object.prototype.hasOwnProperty.call(cell('nocontract'), 'unallocatedPct')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(cell('nocontract'), 'unallocatedDays')).toBe(false);
+    // PAIRED PRESENCE: the same assertion is false for a resource that HAS an
+    // answer, so "absent" is not simply how this rollup treats every row.
+    expect(Object.prototype.hasOwnProperty.call(cell('idle'), 'unallocatedPct')).toBe(true);
+  });
+
+  it('a working-day holiday lowers the OWN target too, so the same booking reads as less unallocated', () => {
+    // The share's denominator threads `holidays` through `employedWorkingDays`, a
+    // third hop past the two the describe above pins. 2026-05-04 is a Monday: 20
+    // working days instead of 21, so 'part' has a 160h target and 42h booked ->
+    // 118h idle = 73.75%, against 75% with the full calendar.
+    const withHoliday = benchRollup({ ...input, holidays: new Set([`${MONTH}-04`]) }, `${MONTH}-10`);
+    const partCell = withHoliday.internalRows.find(r => r.resourceId === 'part')!.monthly[MONTH];
+    expect(partCell.unallocatedPct).toBeCloseTo(73.75, 10);
+    // ABSENCE TWIN: 75% is exactly what a dropped holiday set produces here.
+    expect(partCell.unallocatedPct).not.toBe(75);
+    expect(withHoliday.internalRows.find(r => r.resourceId === 'idle')!.monthly[MONTH].unallocatedDays).toBe(20);
+  });
+});
+
+/**
+ * The per-resource history (RPT comparison row 51) — an ORDERED, backward-looking
+ * list for one row, derived by running `benchRollup` over that resource alone.
+ *
+ * `h1` is hired 2026-04-01, so March is genuinely outside her employment: that is
+ * the absence case, and it must stay an ABSENT entry rather than a 0-day row.
+ */
+describe('unallocatedHistoryFor', () => {
+  const DISPLAY = ['2026-03', '2026-04', '2026-05'];
+  const FETCH = ['2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06'];
+  const NO_HOL = new Set<string>();
+
+  const input: BenchRollupInput = {
+    resources: [
+      { id: 'h1', name: 'History Person', role: 'Developer', kind: 'internal', contractHoursPerDay: 8, hireDate: '2026-04-01' },
+      // A second, BUSIER resource whose months must never leak into h1's history.
+      { id: 'other', name: 'Other Person', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
+      // A dummy placeholder: excluded from the bench rollup by design, so its
+      // history is empty rather than an error.
+      { id: 'dummy1', name: 'Open Position', role: 'Developer', kind: 'dummy', contractHoursPerDay: 8 },
+    ],
+    assignments: [{ id: 'aH', resourceId: 'h1' }, { id: 'aO', resourceId: 'other' }, { id: 'aD', resourceId: 'dummy1' }],
+    assignmentMonths: FETCH.flatMap(month => [
+      { assignmentId: 'aH', month, status: 'Allocated' },
+      { assignmentId: 'aO', month, status: 'Allocated' },
+      { assignmentId: 'aD', month, status: 'Allocated' },
+    ]),
+    assignmentDays: [
+      // h1: nothing in April (100% idle), 42h of 168 in May (75% idle).
+      { assignmentId: 'aH', date: '2026-05-05', hours: 42 },
+      // other: booked solid every month, so any leak shows up as a 0% month.
+      ...FETCH.map(m => ({ assignmentId: 'aO', date: `${m}-05`, hours: 999 })),
+      { assignmentId: 'aD', date: '2026-04-07', hours: 80 },
+    ],
+    months: FETCH, displayMonths: DISPLAY, hoursPerDay: 8, holidays: NO_HOL,
+  };
+
+  it('returns the employed months OLDEST-FIRST with the share and the aging bucket, and NOTHING for the month before the hire', () => {
+    // April 2026 = 22 working days -> a 176h target, none booked: 100%, 22 days.
+    // May 2026 = 21 working days -> 168h, 42h booked: 75%, 15.75 days.
+    // `toStrictEqual` on the WHOLE array is the load-bearing choice here: it pins
+    // the order, pins that March is absent rather than zeroed, pins that the May
+    // cell carries NO `agingBucket` key, and pins that `upcomingUnallocated` is
+    // not carried at all — even though the underlying BenchCell has it set (June
+    // is bench for her, so May's forward flag is genuinely true upstream).
+    expect(unallocatedHistoryFor(input, 'h1', '2026-05-10')).toStrictEqual([
+      { month: '2026-04', state: 'BENCH', agingBucket: 'B', unallocatedPct: 100, unallocatedDays: 22 },
+      { month: '2026-05', state: 'PARTIAL', unallocatedPct: 75, unallocatedDays: 15.75 },
+    ]);
+  });
+
+  it('the upstream cell really does carry `upcomingUnallocated` — so the assertion above proves the history DROPS it, rather than there being nothing to drop', () => {
+    const roll = benchRollup(input, '2026-05-10');
+    expect(roll.internalRows.find(r => r.resourceId === 'h1')!.monthly['2026-05'].upcomingUnallocated).toBe(true);
+  });
+
+  it('an unknown resource id -> an empty history, not a throw and not another resource’s months', () => {
+    expect(unallocatedHistoryFor(input, 'nobody', '2026-05-10')).toStrictEqual([]);
+  });
+
+  it('a DUMMY placeholder -> an empty history (excluded from the rollup by design), never a fabricated "fully allocated" run', () => {
+    // Paired against the presence case above: h1 provably yields two cells from the
+    // very same input, so this emptiness is a genuine negative.
+    expect(unallocatedHistoryFor(input, 'dummy1', '2026-05-10')).toStrictEqual([]);
+    expect(unallocatedHistoryFor(input, 'h1', '2026-05-10').length).toBe(2);
+  });
+
+  it('never mixes in another resource’s months: the busy resource has its OWN history, all 0%', () => {
+    const other = unallocatedHistoryFor(input, 'other', '2026-05-10');
+    expect(other.map(c => c.month)).toStrictEqual(DISPLAY);       // employed throughout, so all three
+    expect(other.every(c => c.unallocatedPct === 0)).toBe(true);  // booked solid
+    // ...and h1's own history is unchanged by that resource's existence.
+    expect(unallocatedHistoryFor(input, 'h1', '2026-05-10').map(c => c.month)).toStrictEqual(['2026-04', '2026-05']);
+  });
+
+  it('honours the requested display window: a single-month window returns exactly that month', () => {
+    const narrow = unallocatedHistoryFor({ ...input, displayMonths: ['2026-05'] }, 'h1', '2026-05-10');
+    expect(narrow.map(c => c.month)).toStrictEqual(['2026-05']);
   });
 });
 
