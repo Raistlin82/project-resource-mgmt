@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { NEVER, of, throwError } from 'rxjs';
 import { ScheduleComponent } from './schedule.component';
 import { ApiService, Assignment, Resource, ResourceRequest } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
@@ -55,19 +55,37 @@ interface Harness {
   updateAssignment: ReturnType<typeof vi.fn>;
 }
 
-function setup(): Harness {
+interface SetupOptions {
+  /** Leave the three-leg forkJoin in flight (no leg ever emits). */
+  pending?: boolean;
+  /** Fail the /requests leg, as an expired bearer or a 500 does. */
+  failing?: boolean;
+  /** false reproduces the pre-OIDC-bootstrap window (and the SSR document). */
+  authReady?: boolean;
+  /** Override the roster (e.g. one conflict-free resource). */
+  resources?: Resource[];
+  /** Override the bookings. */
+  assignments?: Assignment[];
+}
+
+function setup(opts: SetupOptions = {}): Harness {
   const updateAssignment = vi.fn((id: string, patch: Partial<Assignment>) =>
     of({ ...assignments().find(a => a.id === id)!, ...patch }),
   );
+  // A leg that never emits keeps forkJoin — and therefore the resource — loading.
+  const leg = <T>(value: T) => (opts.pending ? NEVER : of(value));
   const apiStub = {
-    getResources: () => of(RESOURCES),
-    getAssignments: () => of(assignments()),
-    getRequests: () => of(REQUESTS),
+    getResources: () => leg(opts.resources ?? RESOURCES),
+    getAssignments: () => leg(opts.assignments ?? assignments()),
+    getRequests: () => (opts.failing ? throwError(() => new Error('500')) : leg(REQUESTS)),
     updateAssignment,
   } as unknown as ApiService;
-  // authReady true: these are principal-gated reads, and a fixture left
-  // un-ready would never fetch, so nothing under test would ever render.
-  const authStub = { authReady: signal(true), isAuthenticated: signal(true) } as unknown as AuthService;
+  // authReady true by default: these are principal-gated reads, and a fixture
+  // left un-ready would never fetch, so nothing under test would ever render.
+  const authStub = {
+    authReady: signal(opts.authReady ?? true),
+    isAuthenticated: signal(true),
+  } as unknown as AuthService;
   const notifyStub = { error: vi.fn(), success: vi.fn(), info: vi.fn(), warn: vi.fn() } as unknown as NotificationService;
 
   TestBed.configureTestingModule({
@@ -88,9 +106,17 @@ function setup(): Harness {
   };
 }
 
-/** Render, then pin the horizon anchor and render again. */
-async function render(): Promise<Harness> {
-  const h = setup();
+/**
+ * Render, then pin the horizon anchor and render again.
+ *
+ * The pre-authReady case IS flushed, and that is the subtlety of the read-state
+ * detector below: `params()` false makes the stream `of(<empty>)`, which
+ * RESOLVES. Un-flushed, the resource would still be in its initial pending state,
+ * so the skeleton would be on screen for a reason unrelated to the gate under
+ * test and the spec would pass with the gate removed.
+ */
+async function render(opts: SetupOptions = {}): Promise<Harness> {
+  const h = setup(opts);
   h.fixture.detectChanges();
   await h.fixture.whenStable();
   h.fixture.detectChanges();
@@ -101,6 +127,27 @@ async function render(): Promise<Harness> {
   await h.fixture.whenStable();
   h.fixture.detectChanges();
   return h;
+}
+
+/**
+ * Render WITHOUT awaiting whenStable — it never settles while a resource is in
+ * flight, and "in flight" is precisely the state the pending/error cases assert
+ * about. The anchor is pinned anyway so the timeline branch is reachable in the
+ * cases that do resolve.
+ */
+function renderUnsettled(opts: SetupOptions = {}): Harness {
+  const h = setup(opts);
+  h.fixture.detectChanges();
+  h.component['anchorMs'].set(ANCHOR_MS);
+  h.fixture.detectChanges();
+  return h;
+}
+
+/** The list-state's loading region — its own contract (role=status +
+ *  aria-busy), not a shimmer class. Scoped away from the "Preparing the
+ *  timeline…" placeholder, which carries aria-busy but no role. */
+function skeleton(host: HTMLElement): Element | null {
+  return host.querySelector('[role="status"][aria-busy="true"]');
 }
 
 function bars(host: HTMLElement): HTMLElement[] {
@@ -197,6 +244,143 @@ const WHITE: Oklch = { l: 1, c: 0, h: 0 };
 /** The light-theme token block, and the dark-theme override block. */
 const LIGHT_TOKENS = cssBlock(GLOBAL_CSS, '@theme');
 const DARK_TOKENS = cssBlock(GLOBAL_CSS, ':root[data-theme="dark"]');
+
+/**
+ * The summary strip used to render ABOVE the read-state wrapper, so for the whole
+ * three-endpoint read the page asserted "No over-allocation detected" across
+ * "0 resources and 0 bookings" — a reassuring claim about data not yet fetched.
+ * When a leg failed, model() threw out of that strip and aborted the pass, which
+ * made the error panel unreachable and left the false all-clear as the screen's
+ * TERMINAL state.
+ *
+ * The third case is what stops "delete the sentence" from passing: a genuinely
+ * conflict-free roster MUST still say it.
+ */
+describe('ScheduleComponent — the summary strip no longer certifies unfetched data', () => {
+  it('does not claim "No over-allocation detected" before authReady, even though the API has a roster', async () => {
+    const { host, component } = await render({ authReady: false });
+
+    // POSITIVE CONTROLS pinning the exact state: the read resolved to the
+    // pre-auth default AND is not reporting loading. Without the second, the
+    // skeleton could be up merely because nothing had flushed.
+    expect(component['data'].value().resources).toEqual([]);
+    expect(component['data'].isLoading()).toBe(false);
+
+    expect(host.textContent).not.toContain('No over-allocation detected');
+    expect(host.textContent).not.toContain('No resources to schedule');
+    expect(skeleton(host)).not.toBeNull();
+    // The header must survive — it is how the user knows WHICH screen is loading.
+    expect(host.textContent).toContain('Resource Schedule');
+  });
+
+  it('does not claim it while the three-leg read is genuinely in flight either', () => {
+    const { host, component } = renderUnsettled({ pending: true });
+
+    expect(component['data'].isLoading()).toBe(true);
+    expect(host.textContent).not.toContain('No over-allocation detected');
+    expect(host.textContent).not.toContain('No resources to schedule');
+    expect(skeleton(host)).not.toBeNull();
+  });
+
+  // THE MIRROR, and the reason "delete the sentence" cannot pass: a resolved read
+  // over a roster with no overlapping bookings MUST state the all-clear.
+  it('does say "No over-allocation detected" for a resolved, genuinely conflict-free roster', async () => {
+    const { host, component } = await render();
+
+    expect(skeleton(host)).toBeNull();
+    // Positive control on the DATA, not just the copy: the roster really is
+    // conflict-free and really has bookings, so the sentence is earned.
+    expect(component['overAllocatedCount']()).toBe(0);
+    expect(component['totalBookings']()).toBe(2);
+    expect(host.textContent).toContain('No over-allocation detected');
+    expect(host.textContent).toContain('Across 2 resources and 2 bookings.');
+  });
+
+  // And the opposite data state on the same element, so the strip is proven to
+  // report a real figure rather than a constant.
+  it('reports the over-allocated count when two bookings overlap past 100%', async () => {
+    const overlapping: Assignment[] = [
+      { id: 'A1', requestId: 'REQ_A', resourceId: 'R1', assignedHours: 40, status: 'Allocated', startDate: A1_START, endDate: A1_END, allocationPct: 100 },
+      { id: 'A2', requestId: 'REQ_B', resourceId: 'R1', assignedHours: 40, status: 'Allocated', startDate: A1_START, endDate: A1_END, allocationPct: 100 },
+    ];
+    const { host, component } = await render({ resources: [RESOURCES[0]], assignments: overlapping });
+
+    expect(component['overAllocatedCount']()).toBe(1);
+    expect(host.textContent).toContain('1 resource over-allocated');
+    expect(host.textContent).not.toContain('No over-allocation detected');
+  });
+
+  it('shows the error panel and Retry instead of aborting change detection when a leg fails', async () => {
+    // model() and the `working` linkedSignal SOURCE both dereference
+    // data.value(), which throws in the error state. The linkedSignal source is
+    // evaluated outside the template, so no reordering protects it — this case
+    // fails on an unguarded source even with the strip moved inside the wrapper.
+    const h = renderUnsettled({ failing: true });
+    // Microtask flushes, NOT whenStable(): the rxResource reaches its error state
+    // one microtask after the stream throws, and whenStable() would be a coin
+    // flip on a resource that has not settled.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(() => h.fixture.detectChanges()).not.toThrow();
+
+    // Positive control: the test cannot pass by the read quietly succeeding.
+    expect(h.component['data'].status()).toBe('error');
+    expect(h.host.textContent).toContain("Couldn't load the schedule");
+    const retry = [...h.host.querySelectorAll('button')].find(b => b.textContent!.includes('Retry'));
+    expect(retry).toBeDefined();
+    // A failed read is not an all-clear, and not an empty roster either.
+    expect(h.host.textContent).not.toContain('No over-allocation detected');
+    expect(h.host.textContent).not.toContain('No resources to schedule');
+    // The header stays, so the user can see which screen failed.
+    expect(h.host.textContent).toContain('Resource Schedule');
+  });
+
+  // THE MIRROR for the empty state: a resolved read with an empty roster must
+  // say so — this is the half a permanently-loading wrapper fails.
+  it('does say "No resources to schedule" once a resolved read has an empty roster', async () => {
+    const { host } = await render({ resources: [], assignments: [] });
+
+    expect(skeleton(host)).toBeNull();
+    expect(host.textContent).toContain('No resources to schedule');
+  });
+
+  /**
+   * The two accessors that are evaluated OUTSIDE the ng-template — the `working`
+   * linkedSignal's SOURCE, and `model()` (reached from projectColor() and the
+   * drag handlers) — asserted at the seam rather than through the DOM.
+   *
+   * Deliberately not folded into the error-panel case above: with the summary
+   * strip now inside the wrapper, NOTHING in the template evaluates either one
+   * in the error state, so the DOM test passes with both guards removed. It is
+   * exactly that invisibility that makes this the regression the next person
+   * will reintroduce — moving one binding back above the wrapper is enough — so
+   * the invariant is pinned where it lives instead of relying on the current
+   * template layout to enforce it.
+   */
+  it('keeps the working copy and the derived model readable in the error state (guarded at the seam, not by template placement)', async () => {
+    const h = renderUnsettled({ failing: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    h.fixture.detectChanges();
+
+    // Positive control: these assertions are meaningless unless the read failed.
+    expect(h.component['data'].status()).toBe('error');
+
+    // A linkedSignal source is evaluated outside the template; no reordering or
+    // ng-template deferral protects it.
+    expect(() => h.component['working']()).not.toThrow();
+    expect(() => h.component['model']()).not.toThrow();
+    expect(h.component['model']().lanes).toEqual([]);
+
+    // ABSENCE TWIN: the guards must not have turned the accessors into constant
+    // empties. A resolved read must still produce the real lanes and bookings —
+    // so "return [] unconditionally" cannot pass.
+    TestBed.resetTestingModule();
+    const ok = await render();
+    expect(ok.component['working']()).toHaveLength(2);
+    expect(ok.component['model']().lanes).toHaveLength(2);
+  });
+});
 
 describe('ScheduleComponent — the timeline no longer claims a table it does not own', () => {
   it('does not declare role="table" while owning zero role="row" elements', async () => {

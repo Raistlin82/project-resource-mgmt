@@ -114,7 +114,24 @@ const OUT_OF_SCOPE_TITLE = 'You do not manage this resource, so you cannot decid
                   [class.text-ink-muted]="filter() !== 'mine'"
                   class="px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ease-out flex items-center gap-2">
             My inbox
-            <span class="command-status">{{ mineCount() }}</span>
+            <!-- The count is the ONLY figure on this screen that renders OUTSIDE
+                 the read-state wrapper below, so it needs its own answer for the
+                 two non-resolved states — the wrapper cannot cover a figure that
+                 is not inside it. null covers both: an em dash says "not known
+                 yet", where the 0 this printed before was a claim that nothing
+                 awaits this user's sign-off, read and acted on (navigate away)
+                 before the read had been made.
+                 The dash carries an sr-only sibling rather than an aria-label:
+                 this is a <span> (role=generic), where aria-label is discarded —
+                 same trap, and same remedy, as list-state.component.ts:50. -->
+            <span class="command-status">
+              @if (mineCount() === null) {
+                <span class="sr-only">Inbox count not loaded yet</span>
+                <span aria-hidden="true">&mdash;</span>
+              } @else {
+                {{ mineCount() }}
+              }
+            </span>
           </button>
           <button type="button" (click)="filter.set('all')" data-test="filter-all"
                   [attr.aria-pressed]="filter() === 'all'"
@@ -128,7 +145,8 @@ const OUT_OF_SCOPE_TITLE = 'You do not manage this resource, so you cannot decid
         </div>
       </div>
 
-      <app-list-state [loading]="res.isLoading()" [error]="res.status() === 'error'" label="approvals" (retry)="res.reload()">
+      <!-- [loading] folds auth readiness — see listLoading(). -->
+      <app-list-state [loading]="listLoading()" [error]="res.status() === 'error'" label="approvals" (retry)="res.reload()">
       <ng-template>
       <div class="command-card overflow-hidden">
         <div class="overflow-x-auto">
@@ -456,7 +474,47 @@ export class Approvals {
     return this.filter() === 'mine' ? all.filter(r => r.approvable) : all;
   });
 
-  mineCount = computed(() => this.allRows().filter(r => r.approvable).length);
+  /**
+   * Whether the inbox has nothing truthful to render yet. `isLoading()` alone is
+   * NOT that question: `params()` above is false until the OIDC bootstrap settles
+   * and the stream answers that with `of(EMPTY_DATA)` — a RESOLVED empty, not a
+   * pending one — so isLoading() was FALSE for the whole afterNextRender ->
+   * /api/storage-status -> OIDC discovery window (auth.service.ts 154, 191-249)
+   * *and* in the SSR HTML shipped to the browser. Bound bare, the wrapper below
+   * rendered "Your inbox is clear." / "Nothing is waiting on your sign-off right
+   * now." while three allocation requests sat pending this PM's decision. A PM
+   * who glances and navigates away has been told a falsehood by a page that had
+   * not yet asked the question.
+   *
+   * Not-ready counts as loading, never as ready-and-empty — the same rule
+   * resources.component.ts's `listLoading()` applies, whose shape this mirrors.
+   */
+  protected readonly listLoading = computed<boolean>(
+    () => !this.auth.authReady() || this.res.isLoading(),
+  );
+
+  /**
+   * Count of items awaiting this actor, or `null` when that is not yet known.
+   *
+   * TWO reasons this is nullable rather than a plain number. (1) The badge that
+   * renders it sits ABOVE the read-state wrapper, so a bare 0 during the
+   * pre-authReady window is the same false "nothing to approve" statement
+   * `listLoading()` exists to prevent — the wrapper cannot cover a figure
+   * outside it. (2) `res.value()` THROWS while the resource is in its error
+   * state, and `allRows()` dereferences it; an unguarded throw from a binding
+   * above the wrapper aborts the change-detection pass and makes the "Couldn't
+   * load approvals" panel and its Retry — the only recovery short of a browser
+   * reload — unreachable code.
+   *
+   * This is NOT the banned `status()==='error' ? [] : value()`: nothing here
+   * turns a failed read into an empty answer. `null` renders as an em dash and
+   * the wrapper renders the error panel in the same pass, so the screen says
+   * "we could not load this", never "there is none".
+   */
+  mineCount = computed<number | null>(() => {
+    if (this.listLoading() || this.res.status() === 'error') return null;
+    return this.allRows().filter(r => r.approvable).length;
+  });
 
   decide(row: ApprovalRow, decision: 'Approved' | 'Rejected'): void {
     if (!row.canDecide || this.pendingId() === row.request.id) return;

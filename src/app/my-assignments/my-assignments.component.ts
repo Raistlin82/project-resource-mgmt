@@ -37,6 +37,11 @@ interface WeekDay {
   isToday: boolean;
 }
 
+/** Mon-Fri. The divisor that turns a WEEKLY `capacity` into a daily rate — see
+ *  `currentUtilization`. Not a stand-in for "weeks in a month": the period's own
+ *  business-day count comes from the calendar. */
+const BUSINESS_DAYS_PER_WEEK = 5;
+
 @Component({
   selector: 'app-my-assignments',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -134,7 +139,11 @@ interface WeekDay {
                     <mat-icon class="text-[28px] w-[28px] h-[28px]">trending_up</mat-icon>
                   </div>
                   <div>
-                    <p class="command-kpi-label">Current Utilization</p>
+                    <!-- The label names the denominator. The figure is scoped to
+                         the period the navigator below is showing, so a bare
+                         "Current Utilization" beside a week/month toggle left the
+                         reader no way to know what it was a percentage OF. -->
+                    <p class="command-kpi-label">Utilization ({{ viewMode() }})</p>
                     <p class="command-kpi-value">
                       {{ currentUtilization() | number:'1.0-0' }}%
                     </p>
@@ -541,11 +550,70 @@ export class MyAssignmentsComponent {
   // Requested or Allocated (the allocation-approval workflow states).
   activeAssignmentsCount = computed(() => this.myAssignments().filter(a => a.status !== 'Rejected').length);
   totalAssignedHours = computed(() => this.myAssignments().reduce((sum, a) => sum + a.assignedHours, 0));
+
+  /** Every business-day ISO inside the displayed period. Both halves of the
+   *  utilization ratio are derived from this ONE list, so the numerator and the
+   *  denominator can never be scoped to different windows. */
+  private periodBusinessDays = computed<string[]>(() => {
+    const { start, end } = this.periodRange();
+    const days: string[] = [];
+    for (let date = start; date <= end; date = this.addDays(date, 1)) {
+      if (this.isBusinessDay(date)) days.push(this.toIso(date));
+    }
+    return days;
+  });
+
+  /**
+   * Estimated hours booked INSIDE the displayed period — the same per-day figures
+   * the table below renders, summed. Reusing `estimatedHoursForDay` is the point:
+   * the tile and the grid the user is looking at can never disagree.
+   */
+  periodAssignedHours = computed(() => {
+    const days = this.periodBusinessDays();
+    let total = 0;
+    for (const assignment of this.periodAssignments()) {
+      for (const iso of days) total += this.estimatedHoursForDay(assignment, iso);
+    }
+    return this.roundHours(total);
+  });
+
+  /**
+   * Utilization over the DISPLAYED PERIOD — booked hours in the period against
+   * the resource's capacity for that same period.
+   *
+   * It used to divide LIFETIME `totalAssignedHours()` by `capacity * 4`, with the
+   * comment "Assuming capacity is weekly, multiply by 4 for monthly approx". Both
+   * halves were wrong and they compounded. The numerator summed every assignment
+   * the person has ever held, so a consultant with six months of past bookings
+   * read as catastrophically over-allocated for work already delivered; the
+   * denominator was one fabricated month regardless of which week or month the
+   * screen was showing, and 4 weeks is not a month (a 31-day month holds 21-23
+   * business days, not 20). The figure therefore answered no question at all,
+   * while sitting beside a week/month toggle and a period navigator that implied
+   * it tracked them, and it drove the red/green/amber tile tint.
+   *
+   * `capacity` is WEEKLY hours, so the daily rate is capacity / 5 business days,
+   * and the period's capacity is that rate times the business days actually in
+   * the period — 5 for a week view, 20-23 for a month, from the real calendar
+   * rather than a constant.
+   *
+   * Worked example: capacity 40 (8h/day), week view, Mon-Fri = 5 business days
+   * => denominator 40h. One booking of 20h spread over that window estimates 4h
+   * per day, so the numerator is 20h and the tile reads 50%. The same inputs
+   * under the old formula gave 20 / (40 * 4) = 12.5% — a quarter of the truth,
+   * and it would not have moved had the user paged to a different week.
+   *
+   * Returns 0 only when there is genuinely nothing to divide by (no profile, no
+   * capacity, or a period with no business days). That is not a withheld read
+   * being reported as zero: `dataRes` failing or still loading is answered by the
+   * app-list-state wrapper above, which never instantiates this template.
+   */
   currentUtilization = computed(() => {
     const p = this.profile();
-    if (!p || !p.capacity) return 0;
-    // Assuming capacity is weekly, multiply by 4 for monthly approx
-    return (this.totalAssignedHours() / (p.capacity * 4)) * 100;
+    const businessDays = this.periodBusinessDays().length;
+    if (!p || !p.capacity || businessDays === 0) return 0;
+    const periodCapacity = (p.capacity / BUSINESS_DAYS_PER_WEEK) * businessDays;
+    return (this.periodAssignedHours() / periodCapacity) * 100;
   });
 
   setViewMode(mode: 'week' | 'month'): void {
