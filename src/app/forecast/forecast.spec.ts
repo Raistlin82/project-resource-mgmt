@@ -1,5 +1,5 @@
-import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
@@ -9,6 +9,7 @@ import { ApiService, Resource, ResourceRequest, Assignment, AssignmentDay, Assig
 import { AuthService } from '../services/auth.service';
 import { todayLocalIso } from '../services/local-date.util';
 import { CapacityPeriod } from '../services/forecast.util';
+import { contrast, cssBlock, token, WHITE } from '../shared/theme-contrast';
 
 /**
  * `/forecast`'s bench section is now `notFullyAllocatedAt` (bench.util.ts), fed
@@ -749,239 +750,57 @@ describe('Forecast — Supply is the chart overlay, not a bar stacked onto deman
 // Source-text + token arithmetic. jsdom performs NO layout and resolves no
 // custom properties, so the honest form of a contrast claim is (a) a static
 // assertion over this component's own source and (b) the OKLCH→WCAG ratio
-// computed numerically from styles.css. Asserting the token NAME alone would be
-// green against today's failing 3.40:1.
+// computed numerically from styles.css.
+//
+// The arithmetic itself, and the palette-wide contract it serves, now live in
+// src/app/shared/theme-contrast(.spec).ts — one copy for every spec that makes a
+// colour claim. What stays here is the part that is specific to /forecast: that
+// the pressed horizon chip really carries the inverse-ink class in a rendered
+// view, on the accent fill the shared spec measures.
 // -----------------------------------------------------------------------------
 
 const COMPONENT_SRC = readFileSync(resolve(process.cwd(), 'src/app/forecast/forecast.ts'), 'utf8');
 const GLOBAL_CSS = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8');
 
-interface Oklch {
-  l: number;
-  c: number;
-  h: number;
-}
-
-/** The declarations of one flat CSS rule (this stylesheet has no nested braces). */
-function cssBlock(css: string, selector: string): string {
-  const needle = `${selector} {`;
-  const at = css.indexOf(needle);
-  expect(at, `CSS selector not found: ${selector}`).toBeGreaterThanOrEqual(0);
-  return css.slice(at + needle.length, css.indexOf('}', at));
-}
-
-function token(block: string, name: string): Oklch {
-  const m = new RegExp(`${name}:\\s*oklch\\(([^)]+)\\)`).exec(block);
-  expect(m, `token not found: ${name}`).not.toBeNull();
-  const [l, c, h] = m![1].trim().split(/\s+/).map(Number);
-  return { l, c, h: h ?? 0 };
-}
-
-/** WCAG relative luminance: OKLCH → OKLab → linear sRGB (Ottosson) → Y. */
-function luminance({ l, c, h }: Oklch): number {
-  const rad = (h * Math.PI) / 180;
-  const a = c * Math.cos(rad);
-  const bb = c * Math.sin(rad);
-  const l_ = (l + 0.3963377774 * a + 0.2158037573 * bb) ** 3;
-  const m_ = (l - 0.1055613458 * a - 0.0638541728 * bb) ** 3;
-  const s_ = (l - 0.0894841775 * a - 1.291485548 * bb) ** 3;
-  const clamp = (v: number) => Math.min(1, Math.max(0, v));
-  const r = clamp(4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_);
-  const g = clamp(-1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_);
-  const b = clamp(-0.0041960863 * l_ - 0.7034186147 * m_ + 1.707614701 * s_);
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
-function contrast(x: Oklch, y: Oklch): number {
-  const [hi, lo] = [luminance(x), luminance(y)].sort((a, b) => b - a);
-  return (hi + 0.05) / (lo + 0.05);
-}
-
 describe('Forecast — the pressed horizon label is legible in dark theme', () => {
   const DARK = cssBlock(GLOBAL_CSS, ':root[data-theme="dark"]');
-  const WHITE: Oklch = { l: 1, c: 0, h: 0 };
 
-  it('replaces the hard-coded white with the ink-inverse token, which actually moves the ratio', async () => {
+  it('puts an inverse-ink label on the accent fill, and the pair measures AA in dark', async () => {
     const accentDark = token(DARK, '--color-accent');
     const inkInverseDark = token(DARK, '--color-ink-inverse');
 
-    // The ratios, not the token name: this is what proves the swap is a fix and
-    // not a rename. There is no `dark:` variant in this design system, so the
-    // only lever is which token the class resolves to.
-    expect(contrast(WHITE, accentDark)).toBeLessThan(4.5);
+    // The RATIO, not the token name. This used to assert that white FAILED here
+    // (3.40:1 on the old lifted accent) and that ink-inverse — then the dark
+    // surface colour — passed. Both halves of that are now wrong: the dark fill
+    // was darkened until white clears AA, and ink-inverse is white in both
+    // themes, so the two classes are interchangeable and BOTH must pass. The
+    // old expectation is deleted rather than relaxed: it certified a palette
+    // that no longer exists, and as written it would fail on the fixed one.
+    expect(contrast(WHITE, accentDark)).toBeGreaterThanOrEqual(4.5);
     expect(contrast(inkInverseDark, accentDark)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(inkInverseDark, accentDark)).toBeCloseTo(contrast(WHITE, accentDark), 6);
+    // Absence twin for the pair above: the fill this replaced is still sub-AA
+    // under the same helper, so "clears AA" is a measurement and not a constant.
+    expect(contrast(WHITE, { l: 0.64, c: 0.16, h: 258 })).toBeLessThan(4.5);
 
-    // Absence over this file's own source: no element may put text-white on a
-    // bg-accent/bg-critical surface. Scoped to forecast.ts — the repo-wide scan
-    // covers 14 further sites in files this change does not own.
-    //
-    // Comments are stripped FIRST, because a comment cannot render — and the
-    // comment explaining this very fix names both `text-white` and `bg-accent`,
-    // so an unstripped scan reports the documentation as the defect.
-    const offenders = COMPONENT_SRC.replace(/<!--[\s\S]*?-->/g, '')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .split('\n')
-      .filter(line => /text-white/.test(line) && /bg-accent|bg-critical/.test(line));
-    expect(offenders).toEqual([]);
-    // Non-vacuous: the same scan finds the replacement, so it is provably
-    // reading the line the assertion above is about.
-    expect(COMPONENT_SRC).toMatch(/bg-accent text-ink-inverse/);
-
-    // And the class really reaches the pressed button in a rendered view.
+    // The class really reaches the pressed button in a rendered view — the half
+    // that no token arithmetic can prove.
     const fixture = await setup();
     await flush(fixture);
     const pressed = Array.from(host(fixture).querySelectorAll<HTMLElement>('button')).find(
       b => b.getAttribute('aria-pressed') === 'true',
     )!;
     expect(pressed.classList.contains('text-ink-inverse')).toBe(true);
-    expect(pressed.classList.contains('text-white')).toBe(false);
-  });
-});
-
-// -----------------------------------------------------------------------------
-// The repo-wide half of the same rule, with a SHRINKING allow-list.
-//
-// The scoped scan above proves forecast.ts is clean. The remaining offenders live
-// in files this batch does not own, so they are enumerated rather than fixed — and
-// the enumeration is written so it can only ever get shorter:
-//   * a NEW offender anywhere fails, allow-listed file or not (per-file counts are
-//     capped at what is recorded here);
-//   * an allow-list entry that has been fixed elsewhere ALSO fails, as stale, so
-//     the list cannot outlive the defect it documents.
-// -----------------------------------------------------------------------------
-
-/**
- * Every offender site, as `path:line`. Comments are stripped first: a comment
- * cannot render, and the comments explaining this very rule name both class
- * names, so an unstripped scan reports the documentation as the defect.
- */
-function textWhiteOffenders(): string[] {
-  const root = resolve(process.cwd(), 'src/app');
-  const out: string[] = [];
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const p = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        walk(p);
-      } else if (p.endsWith('.ts') && !p.endsWith('.spec.ts')) {
-        readFileSync(p, 'utf8')
-          .replace(/<!--[\s\S]*?-->/g, '')
-          .replace(/\/\*[\s\S]*?\*\//g, '')
-          .split('\n')
-          .forEach((line, i) => {
-            if (/text-white/.test(line) && /bg-accent|bg-critical/.test(line)) {
-              out.push(`${relative(process.cwd(), p)}:${i + 1}`);
-            }
-          });
-      }
-    }
-  };
-  walk(root);
-  return out.sort();
-}
-
-/**
- * Files still carrying `text-white` on a bg-accent/bg-critical surface, with the
- * count recorded at the time this scan landed. NOT owned by this batch — each is
- * a destructive-confirm button, a segmented control or a nav/CTA in another
- * agent's file. Fix a file: drop its entry (a stale entry fails below).
- *
- * app.ts:63 is the focus-visible skip-link, which the register explicitly exempts
- * as unrelated; it is listed rather than exempted so the count is honest and the
- * decision is visible instead of silently filtered out.
- */
-const TEXT_WHITE_ALLOWLIST: Readonly<Record<string, number>> = {
-  'src/app/app.ts': 2,
-  'src/app/configuration/manage-cost-categories.component.ts': 1,
-  'src/app/configuration/manage-cost-centers.component.ts': 1,
-  'src/app/configuration/manage-industries.component.ts': 1,
-  'src/app/configuration/manage-locations.component.ts': 1,
-  'src/app/configuration/manage-partner-roles.component.ts': 1,
-  'src/app/configuration/manage-rate-cards.component.ts': 1,
-  'src/app/configuration/manage-vendors.component.ts': 1,
-  'src/app/not-found/not-found.component.ts': 1,
-  'src/app/projects/project-partners/project-partners.ts': 1,
-  'src/app/projects/project-rates/project-rates.ts': 1,
-  'src/app/projects/projects/projects.ts': 1,
-  'src/app/resources/resources.component.ts': 1,
-  'src/app/utilization/utilization.component.ts': 3,
-};
-
-describe('text-white on bg-accent / bg-critical is confined to a shrinking allow-list', () => {
-  const byFile = (): Map<string, number> => {
-    const counts = new Map<string, number>();
-    for (const site of textWhiteOffenders()) {
-      const file = site.slice(0, site.lastIndexOf(':'));
-      counts.set(file, (counts.get(file) ?? 0) + 1);
-    }
-    return counts;
-  };
-
-  it('has no offender outside the allow-list', () => {
-    const strays = [...byFile().keys()].filter(f => !(f in TEXT_WHITE_ALLOWLIST)).sort();
-    expect(strays).toEqual([]);
-  });
-
-  it('never grows: no allow-listed file carries more offenders than recorded', () => {
-    const counts = byFile();
-    for (const [file, cap] of Object.entries(TEXT_WHITE_ALLOWLIST)) {
-      expect(counts.get(file) ?? 0, `${file} gained a new text-white site`).toBeLessThanOrEqual(cap);
-    }
-  });
-
-  it('keeps no stale entry: every allow-listed file still has at least one offender', () => {
-    // This is what makes the list SHRINK rather than calcify — and it is also the
-    // non-vacuity proof for the two assertions above, because it fails if the
-    // scan stops reading these files at all (a broken walk, a changed path).
-    const counts = byFile();
-    for (const file of Object.keys(TEXT_WHITE_ALLOWLIST)) {
-      expect(counts.get(file) ?? 0, `${file} is fixed — delete its allow-list entry`).toBeGreaterThan(0);
-    }
-  });
-
-  it('measures the ratio the swap is for: ink-inverse beats white on both surfaces', () => {
-    // The token NAME is not the claim; the number is. Asserted here as well as in
-    // the scoped test above so the repo-wide list cannot be "satisfied" by a
-    // rename that moves no contrast.
-    const dark = cssBlock(GLOBAL_CSS, ':root[data-theme="dark"]');
-    const white: Oklch = { l: 1, c: 0, h: 0 };
-    const inkInverse = token(dark, '--color-ink-inverse');
-
-    for (const surface of ['--color-accent', '--color-critical'] as const) {
-      const bg = token(dark, surface);
-      // White is below AA on both — the defect the allow-list is tracking.
-      expect(contrast(white, bg), `white on dark ${surface}`).toBeLessThan(4.5);
-      // And the replacement token genuinely moves the number on both.
-      expect(
-        contrast(inkInverse, bg),
-        `ink-inverse must beat white on dark ${surface}`,
-      ).toBeGreaterThan(contrast(white, bg));
-    }
-  });
-
-  it('clears AA on bg-accent but NOT on dark bg-critical, which needs a token decision', () => {
-    /*
-     * Recorded deliberately, because the register's remedy is only half right and a
-     * later reader must not assume the allow-list above is purely clerical.
-     *
-     *   dark --color-accent   : white 3.40:1 -> ink-inverse 5.27:1  (AA reached)
-     *   dark --color-critical : white 4.01:1 -> ink-inverse 4.47:1  (AA NOT reached)
-     *
-     * So swapping the class fixes the accent sites outright, while every dark
-     * bg-critical site — all of them destructive-confirm buttons — stays under AA
-     * for small text no matter which of the two foregrounds it picks. Closing that
-     * needs the dark `--color-critical` fill itself to move, which is a background
-     * token ~30 unrelated call sites paint with; not a change to slip into a tail
-     * batch. This spec pins the arithmetic so the decision is made on numbers.
-     */
-    const dark = cssBlock(GLOBAL_CSS, ':root[data-theme="dark"]');
-    const inkInverse = token(dark, '--color-ink-inverse');
-
-    expect(contrast(inkInverse, token(dark, '--color-accent'))).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(inkInverse, token(dark, '--color-critical'))).toBeLessThan(4.5);
-    // It does clear the 3:1 large-text floor, so a >=18.66px bold label is fine
-    // there today; it is the 14px button labels that are not.
-    expect(contrast(inkInverse, token(dark, '--color-critical'))).toBeGreaterThanOrEqual(3);
+    // …and the unpressed chips do NOT carry it, so the class is bound to the
+    // state rather than printed on every chip.
+    const idle = Array.from(host(fixture).querySelectorAll<HTMLElement>('button')).filter(
+      b => b.getAttribute('aria-pressed') === 'false',
+    );
+    expect(idle.length).toBeGreaterThan(0);
+    expect(idle.every(b => !b.classList.contains('text-ink-inverse'))).toBe(true);
+    // Non-vacuous over the source: the scan that reads this file finds the pair
+    // the assertions above are about.
+    expect(COMPONENT_SRC).toMatch(/bg-accent text-ink-inverse/);
   });
 });
 
@@ -996,10 +815,11 @@ describe('Capacity Control renders negative figures at AA in dark theme', () => 
   const SURFACES = ['--color-surface', '--color-surface-muted'] as const;
 
   it('resolves --cc-red-text to a shade that clears 4.5:1 where the raw fill tone does not', () => {
-    // The RATIO, not the token name: --cc-red reads 4.47:1 on the dark surface, so
-    // a spec asserting "the template says --cc-red-text" would have been green
-    // against the failing value. Both surfaces are checked because the data tables
-    // here zebra-stripe, and the muted row is the worse of the two.
+    // The RATIO, not the token name: --cc-red reads 3.33:1 on the dark surface
+    // (4.47:1 before the fill was darkened to make white AA on it), so a spec
+    // asserting "the template says --cc-red-text" would have been green against
+    // the failing value. Both surfaces are checked because the data tables here
+    // zebra-stripe, and the muted row is the worse of the two.
     const criticalFill = token(DARK, '--color-critical');
     const criticalText = token(DARK, '--color-critical-text');
     for (const s of SURFACES) {
