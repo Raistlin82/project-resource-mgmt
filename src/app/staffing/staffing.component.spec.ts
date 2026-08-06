@@ -1,10 +1,11 @@
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { of, throwError, type Observable } from 'rxjs';
 import { StaffingComponent } from './staffing.component';
 import { ApiService, Assignment, Resource, ResourceOrganization, ResourceRequest } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
+import { localIsoDate } from '../services/local-date.util';
 
 /** Two plain internal resources — enough to exercise the "no request selected" list mode. */
 const RESOURCES: Resource[] = [
@@ -12,15 +13,30 @@ const RESOURCES: Resource[] = [
   { id: '2', name: 'Bob', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal' },
 ];
 
-function setup(overrides: { resources?: Resource[]; requests?: ResourceRequest[]; orgNodes?: ResourceOrganization[] } = {}) {
-  const getRequests = vi.fn(() => of(overrides.requests ?? []));
-  const getResources = vi.fn(() => of(overrides.resources ?? RESOURCES));
+/** Array or Observable, so the read-failure specs below can hand in a
+ *  throwError(...) — with array-only parameters they are unwritable. */
+function stream<T>(value: T[] | Observable<T[]> | undefined, fallback: T[]): Observable<T[]> {
+  if (value === undefined) return of(fallback);
+  return Array.isArray(value) ? of(value) : value;
+}
+
+function setup(overrides: {
+  resources?: Resource[] | Observable<Resource[]>;
+  requests?: ResourceRequest[] | Observable<ResourceRequest[]>;
+  orgNodes?: ResourceOrganization[] | Observable<ResourceOrganization[]>;
+  /** The pre-authReady window (SSR + the whole OIDC bootstrap) is a real state
+   *  of this screen, so it has to be settable here. */
+  authReady?: boolean;
+  createAssignment$?: Observable<Assignment>;
+} = {}) {
+  const getRequests = vi.fn(() => stream(overrides.requests, []));
+  const getResources = vi.fn(() => stream(overrides.resources, RESOURCES));
   // D (Task 8): the org tree the capability/practice/competence filters derive from.
-  const getResourceOrganizations = vi.fn(() => of(overrides.orgNodes ?? []));
-  const createAssignment = vi.fn(() => of({} as Assignment));
+  const getResourceOrganizations = vi.fn(() => stream(overrides.orgNodes, []));
+  const createAssignment = vi.fn(() => overrides.createAssignment$ ?? of({} as Assignment));
   const apiStub = { getRequests, getResources, getResourceOrganizations, createAssignment } as unknown as ApiService;
   const notifyStub = { show: vi.fn() } as unknown as NotificationService;
-  const authStub = { authReady: signal(true), isAuthenticated: signal(true) } as unknown as AuthService;
+  const authStub = { authReady: signal(overrides.authReady ?? true), isAuthenticated: signal(true) } as unknown as AuthService;
 
   TestBed.configureTestingModule({
     imports: [StaffingComponent],
@@ -32,7 +48,42 @@ function setup(overrides: { resources?: Resource[]; requests?: ResourceRequest[]
   });
 
   const fixture = TestBed.createComponent(StaffingComponent);
-  return { fixture, getRequests, getResources, createAssignment, notifyStub };
+  return { fixture, getRequests, getResources, getResourceOrganizations, createAssignment, notifyStub };
+}
+
+/**
+ * `res`/`orgsRes` are the component's own (non-public) rxResources. The
+ * read-failure specs need their status as a POSITIVE CONTROL — without it a test
+ * can pass because the read it meant to break quietly succeeded — so read it
+ * through one narrow, named accessor rather than widening the component surface.
+ */
+function statusOf(component: StaffingComponent, key: 'res' | 'orgsRes'): string {
+  return (component as unknown as Record<string, { status: () => string }>)[key].status();
+}
+
+/** Retry controls inside any app-list-state error panel, in DOM order. */
+function retryButtons(host: HTMLElement): HTMLButtonElement[] {
+  return [...host.querySelectorAll<HTMLButtonElement>('[role="alert"] button')]
+    .filter(b => b.textContent?.includes('Retry'));
+}
+
+/**
+ * A specific app-list-state's loading region, identified by the sr-only label it
+ * renders from its `label` input. Scoped deliberately: this screen mounts TWO
+ * list-states, so a bare `[role="status"]` query cannot say which one is busy.
+ */
+function loadingRegion(host: HTMLElement, label: string): HTMLElement | null {
+  return [...host.querySelectorAll<HTMLElement>('[role="status"]')]
+    .find(el => el.textContent?.includes(`Loading ${label}`)) ?? null;
+}
+
+/** N days from today in LOCAL calendar terms — the same clock the component's
+ *  employment filter reads (todayLocalIso), so nothing below can flip with the
+ *  runner's timezone or go stale as the calendar moves. */
+function isoDaysFromToday(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return localIsoDate(d);
 }
 
 async function flush(fixture: { detectChanges: () => void; whenStable: () => Promise<unknown> }) {
@@ -197,6 +248,381 @@ describe('StaffingComponent', () => {
       fixture.componentInstance.searchQuery.set('');
       fixture.detectChanges();
       expect(names()).toEqual(['John Miller']); // capability alone
+    });
+  });
+
+  // The right-hand candidate panel reads the same two rxResources its header
+  // does and had NO list-state of its own. An rxResource `.value()` THROWS while
+  // its status is 'error', and a throw during change detection aborts that pass
+  // and every later one, so the panel froze with no message and no Retry.
+  //
+  // Every OTHER spec in this file stubs both reads with a synchronous of(...) —
+  // which is exactly how this stayed green — so each case below carries a
+  // positive control asserting the read it meant to break really did fail.
+  describe('a failed read reaches an error panel and its Retry', () => {
+    it('renders the candidate panel error and Retry without throwing when the org tree fails and the pool succeeds', async () => {
+      const { fixture } = setup({ orgNodes: throwError(() => new Error('500 Internal Server Error')) });
+      // The pre-fix throw happens INSIDE the render, so it surfaces here as a
+      // rejected promise rather than as a failed expectation further down.
+      await expect(flush(fixture)).resolves.toBeUndefined();
+
+      expect(statusOf(fixture.componentInstance, 'orgsRes')).toBe('error');
+      expect(statusOf(fixture.componentInstance, 'res')).toBe('resolved');
+      // ...and every SUBSEQUENT pass must stay clean, not just the first.
+      expect(() => fixture.detectChanges()).not.toThrow();
+
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.textContent).toContain("Couldn't load candidate resources");
+      expect(retryButtons(host)).toHaveLength(1);
+      // Scoped to the failing region: the requests panel reads neither the org
+      // tree nor anything derived from it, so it must NOT be showing an error.
+      expect(host.textContent).not.toContain("Couldn't load requests");
+    });
+
+    it('renders BOTH panels\' errors without throwing when the requests/resources pool fails', async () => {
+      const { fixture } = setup({ resources: throwError(() => new Error('401 Unauthorized')) });
+      await expect(flush(fixture)).resolves.toBeUndefined();
+
+      expect(statusOf(fixture.componentInstance, 'res')).toBe('error');
+      expect(() => fixture.detectChanges()).not.toThrow();
+
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.textContent).toContain("Couldn't load requests");
+      expect(host.textContent).toContain("Couldn't load candidate resources");
+      // The header's own filters are the throwing bindings; they must keep
+      // rendering (the query and the selections are the USER's state, not the
+      // read's), which is why the fix is a defensive accessor, not a move.
+      expect(host.querySelector('[data-test="capability-filter"]')).not.toBeNull();
+      fixture.componentInstance.searchQuery.set('Alice');
+      expect(() => fixture.detectChanges()).not.toThrow();
+    });
+
+    it('never claims a skill gap while the pool is unavailable', async () => {
+      // An empty pool covers nothing, so an unguarded requestSkillGap reports
+      // EVERY required skill as missing — a confident "nobody can cover these
+      // skills" hiring signal derived from a failed read.
+      const request: ResourceRequest = {
+        id: 'REQ1', name: 'Apollo', requiredRole: 'Developer', requiredEffort: 80,
+        staffedEffort: 0, skills: ['Java'], status: 'Open',
+      };
+      const { fixture } = setup({ requests: [request], resources: throwError(() => new Error('500')) });
+      await expect(flush(fixture)).resolves.toBeUndefined();
+
+      fixture.componentInstance.selectedRequest.set(request);
+      expect(() => fixture.detectChanges()).not.toThrow();
+
+      expect(statusOf(fixture.componentInstance, 'res')).toBe('error');
+      expect(fixture.componentInstance.missingSkillGap()).toEqual([]);
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.textContent).not.toContain('Skill gap: no available resource covers these skills');
+    });
+
+    it('shows NO error panel and the real rows/facets when both reads succeed', async () => {
+      // The must-still-be-ALLOWED case. Without it, a guard that reported
+      // failure unconditionally — or a template that always rendered the panel —
+      // would satisfy every case above.
+      const ORG_NODES: ResourceOrganization[] = [
+        { id: '2', name: 'Engineering', description: '', costCenters: [], level: 'capability' },
+      ];
+      const { fixture } = setup({ orgNodes: ORG_NODES });
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      expect(statusOf(fixture.componentInstance, 'res')).toBe('resolved');
+      expect(statusOf(fixture.componentInstance, 'orgsRes')).toBe('resolved');
+      expect(host.textContent).not.toContain("Couldn't load");
+      expect(retryButtons(host)).toHaveLength(0);
+
+      const names = [...host.querySelectorAll('[data-test="resource-name"]')].map(e => e.textContent?.trim());
+      expect(names).toEqual(['Alice', 'Bob']);
+      // The facet options are the very bindings the guard short-circuits, so
+      // assert they are genuinely populated here — an accessor stuck at []
+      // would pass the failure cases above and fail this one.
+      const capabilities = [...host.querySelectorAll<HTMLOptionElement>('[data-test="capability-filter"] option')]
+        .map(o => o.value);
+      expect(capabilities).toEqual(['', 'Engineering']);
+    });
+
+    it("Retry on the candidate panel reloads BOTH legs, not only the one that broke", async () => {
+      const { fixture, getRequests, getResources, getResourceOrganizations } =
+        setup({ orgNodes: throwError(() => new Error('500 Internal Server Error')) });
+      await expect(flush(fixture)).resolves.toBeUndefined();
+      expect(getResourceOrganizations).toHaveBeenCalledTimes(1);
+      expect(getResources).toHaveBeenCalledTimes(1);
+
+      const host = fixture.nativeElement as HTMLElement;
+      retryButtons(host)[0].click();
+      await flush(fixture);
+
+      expect(getResourceOrganizations).toHaveBeenCalledTimes(2);
+      expect(getRequests).toHaveBeenCalledTimes(2);
+      expect(getResources).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // Both rxResources resolve their pre-auth defaults SYNCHRONOUSLY while
+  // authReady() is false, so isLoading() is false for the whole OIDC bootstrap
+  // window and for the SSR HTML. Both panels therefore stated, as settled fact,
+  // that there was nothing to staff and nobody to staff it with.
+  describe('the pre-authReady window renders as loading, not as "nothing here"', () => {
+    const NO_REQUESTS = 'No open requests available for staffing.';
+    const NO_CANDIDATES = 'No resources found matching your criteria.';
+
+    it('shows both skeletons and NEITHER empty-state sentence while authReady() is false and the API has data', async () => {
+      const request: ResourceRequest = {
+        id: 'REQ1', name: 'Apollo', requiredRole: 'Consultant', requiredEffort: 80,
+        staffedEffort: 0, skills: [], status: 'Open',
+      };
+      // Non-empty API data is the point: both sentences would be lies about data
+      // that exists and is about to arrive.
+      const { fixture, getRequests, getResources } = setup({ requests: [request], authReady: false });
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      // Positive control: the reads genuinely have not been made yet, so this is
+      // the pre-auth window and not a resolved-empty collection.
+      expect(getRequests).not.toHaveBeenCalled();
+      expect(getResources).not.toHaveBeenCalled();
+      expect(statusOf(fixture.componentInstance, 'res')).toBe('resolved');
+
+      // The ABSENCE halves first — they are what the user was misled by; the
+      // skeletons are merely what replaces them.
+      expect(host.textContent).not.toContain(NO_REQUESTS);
+      expect(host.textContent).not.toContain(NO_CANDIDATES);
+      expect(loadingRegion(host, 'requests')).not.toBeNull();
+      expect(loadingRegion(host, 'candidate resources')).not.toBeNull();
+    });
+
+    it('shows both empty-state sentences and NO skeleton once authReady() is true and both reads really are empty', async () => {
+      // The mirror, and the load-bearing half: a fix that pinned the skeletons
+      // on forever — or deleted the empty states — passes the case above and
+      // fails this one.
+      const { fixture, getResources } = setup({ requests: [], resources: [], authReady: true });
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      expect(getResources).toHaveBeenCalledTimes(1);
+      expect(loadingRegion(host, 'requests')).toBeNull();
+      expect(loadingRegion(host, 'candidate resources')).toBeNull();
+      expect(host.textContent).toContain(NO_REQUESTS);
+      expect(host.textContent).toContain(NO_CANDIDATES);
+    });
+  });
+
+  // A stored terminationDate is never revisited (there is no DELETE /resources),
+  // so a departed employee stayed in the staffing pool: ranked, captioned
+  // "100% Utilized" (which reads "busy", never "left"), offered an Assign button
+  // that either 400s with no reason or silently books them — and their skills
+  // were counted as capability coverage, suppressing the hire/subcontract signal.
+  describe('terminated resources are neither staffable candidates nor capability coverage', () => {
+    /** Mirrors seeded resource '9' Elena Rossi (terminated, Java 2, Developer),
+     *  but with the date derived from today so the fixture cannot go stale. */
+    const LEAVER: Resource = {
+      id: '9', name: 'Elena Rossi', role: 'Developer',
+      skills: [{ name: 'Java', level: 2 }], projectRoles: ['Developer'], externalExperience: [],
+      utilization: 100, capacity: 40, kind: 'internal', terminationDate: isoDaysFromToday(-30),
+    };
+    /** Active, but covers none of the required skills. */
+    const ACTIVE_DESIGNER: Resource = {
+      id: '7', name: 'Dana Designer', role: 'Designer',
+      skills: [{ name: 'Figma', level: 4 }], projectRoles: ['Designer'], externalExperience: [],
+      utilization: 20, capacity: 40, kind: 'internal',
+    };
+    /** Active AND covers Java — the must-still-be-allowed control. */
+    const ACTIVE_DEV: Resource = {
+      id: '8', name: 'Dario Dev', role: 'Developer',
+      skills: [{ name: 'Java', level: 4 }], projectRoles: ['Developer'], externalExperience: [],
+      utilization: 20, capacity: 40, kind: 'internal',
+    };
+    const JAVA_REQUEST: ResourceRequest = {
+      id: 'REQ1', name: 'Apollo', requiredRole: 'Developer', requiredEffort: 80,
+      staffedEffort: 0, skills: ['Java'], status: 'Open',
+      // A start date inside the leaver's post-termination window — the booking
+      // the server would refuse, and the reason this control must not be offered.
+      startDate: isoDaysFromToday(30), endDate: isoDaysFromToday(60),
+    };
+
+    it('drops the leaver from the ranking AND reports the skill only he covered as a gap', async () => {
+      const { fixture } = setup({ requests: [JAVA_REQUEST], resources: [ACTIVE_DESIGNER, LEAVER] });
+      await flush(fixture);
+      fixture.componentInstance.selectRequest(JAVA_REQUEST);
+      fixture.detectChanges();
+
+      const ranked = fixture.componentInstance.rankedCandidates()!.map(c => c.resourceId);
+      expect(ranked).not.toContain('9');          // ABSENCE: he cannot be staffed
+      expect(ranked).toEqual(['7']);              // the active designer still ranks
+      // PRESENCE: the skill only the leaver held is a gap, not coverage — this
+      // half fails today for the opposite reason to the half above.
+      expect(fixture.componentInstance.missingSkillGap()).toContain('Java');
+
+      const host = fixture.nativeElement as HTMLElement;
+      const names = [...host.querySelectorAll('[data-test="resource-name"]')].map(e => e.textContent?.trim());
+      expect(names).not.toContain('Elena Rossi');
+      expect(host.textContent).toContain('Skill gap: no available resource covers these skills');
+      // No Assign control can exist for a candidate who is not listed.
+      expect(host.querySelector('[data-assign-for="9"]')).toBeNull();
+    });
+
+    it('still ranks an ACTIVE holder of the same skill and reports NO gap — the filter refuses leavers, not everybody', async () => {
+      // A guard that always refused would pass the case above; this is the case
+      // that must still be allowed.
+      const { fixture } = setup({ requests: [JAVA_REQUEST], resources: [ACTIVE_DEV, LEAVER] });
+      await flush(fixture);
+      fixture.componentInstance.selectRequest(JAVA_REQUEST);
+      fixture.detectChanges();
+
+      const ranked = fixture.componentInstance.rankedCandidates()!.map(c => c.resourceId);
+      expect(ranked).toEqual(['8']);
+      expect(fixture.componentInstance.missingSkillGap()).toEqual([]);
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.textContent).not.toContain('Skill gap: no available resource covers these skills');
+      expect(host.querySelector('[data-assign-for="8"]')).not.toBeNull();
+    });
+
+    it('hides the leaver from the plain (no request selected) list too', async () => {
+      const { fixture } = setup({ resources: [ACTIVE_DEV, LEAVER] });
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const names = [...host.querySelectorAll('[data-test="resource-name"]')].map(e => e.textContent?.trim());
+      expect(names).toEqual(['Dario Dev']);
+    });
+
+    it('keeps a resource whose termination is still in the FUTURE — a notice period is not a departure', async () => {
+      // The boundary the fix must not overshoot: isTerminatedAsOf is date-based,
+      // so a scheduled leaver is still staffable today.
+      const noticePeriod: Resource = { ...LEAVER, id: '12', name: 'Nadia Notice', terminationDate: isoDaysFromToday(30) };
+      const { fixture } = setup({ resources: [noticePeriod] });
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const names = [...host.querySelectorAll('[data-test="resource-name"]')].map(e => e.textContent?.trim());
+      expect(names).toEqual(['Nadia Notice']);
+    });
+  });
+
+  // The reveal replaced the button that triggered it, so document.activeElement
+  // became <body>: the next Tab restarted at the skip link, and a screen-reader
+  // user got no signal that a form had appeared.
+  describe('revealing the proposal form moves focus into it', () => {
+    const REQUEST: ResourceRequest = {
+      id: 'REQ1', name: 'Apollo', requiredRole: 'Consultant', requiredEffort: 80,
+      staffedEffort: 0, skills: [], status: 'Open', startDate: '2026-09-01', endDate: '2026-09-30',
+    };
+
+    it('focus lands on the Allocation % input, not on <body>', async () => {
+      const { fixture } = setup({ requests: [REQUEST] });
+      await flush(fixture);
+      fixture.componentInstance.selectRequest(REQUEST);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      const assign = host.querySelector<HTMLButtonElement>('[data-assign-for="1"]')!;
+      assign.focus();
+      // The pre-click guard: without it this test passes in any environment
+      // where the button was never focused in the first place.
+      expect(document.activeElement).toBe(assign);
+
+      assign.click();
+      await flush(fixture);
+
+      const alloc = host.querySelector<HTMLInputElement>('[data-test="assign-allocation"]');
+      expect(alloc).not.toBeNull();
+      expect(document.activeElement).not.toBe(document.body);
+      expect(document.activeElement).toBe(alloc);
+    });
+
+    it('the revealed panel carries an accessible name, so the reveal is announced and not merely focused', async () => {
+      const { fixture } = setup({ requests: [REQUEST] });
+      await flush(fixture);
+      fixture.componentInstance.selectRequest(REQUEST);
+      fixture.componentInstance.startAssign('1');
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      const panel = host.querySelector('[data-test="assign-panel"]')!;
+      expect(panel.getAttribute('role')).toBe('group');
+      // Named after the candidate: "a form appeared" is not enough to know WHOSE.
+      expect(panel.getAttribute('aria-label')).toBe('Assignment proposal for Alice');
+    });
+
+    it('Cancel returns focus to the Assign button it came from', async () => {
+      const { fixture } = setup({ requests: [REQUEST] });
+      await flush(fixture);
+      fixture.componentInstance.selectRequest(REQUEST);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      host.querySelector<HTMLButtonElement>('[data-assign-for="1"]')!.click();
+      await flush(fixture);
+      expect(document.activeElement).toBe(host.querySelector('[data-test="assign-allocation"]'));
+
+      const cancel = [...host.querySelectorAll<HTMLButtonElement>('button')]
+        .find(b => b.getAttribute('aria-label') === 'Cancel assignment')!;
+      cancel.click();
+      await flush(fixture);
+
+      const reAssign = host.querySelector<HTMLButtonElement>('[data-assign-for="1"]');
+      expect(reAssign).not.toBeNull();
+      expect(document.activeElement).not.toBe(document.body);
+      expect(document.activeElement).toBe(reAssign);
+    });
+
+    it('selecting another request does NOT pull focus, since its candidate list is rebuilt', async () => {
+      // The must-NOT-happen twin of the case above: cancelAssign() is also called
+      // by selectRequest/clearSelection, where the button focus would return to
+      // may no longer exist.
+      const other: ResourceRequest = { ...REQUEST, id: 'REQ2', name: 'Zeus' };
+      const { fixture } = setup({ requests: [REQUEST, other] });
+      await flush(fixture);
+      fixture.componentInstance.selectRequest(REQUEST);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      host.querySelector<HTMLButtonElement>('[data-assign-for="1"]')!.click();
+      await flush(fixture);
+
+      // Move focus somewhere neutral, then switch requests.
+      const search = host.querySelector<HTMLInputElement>('input[aria-label="Search candidate resources"]')!;
+      search.focus();
+      fixture.componentInstance.selectRequest(other);
+      await flush(fixture);
+
+      expect(fixture.componentInstance.assigningResourceId()).toBeNull();
+      expect(document.activeElement).toBe(search);
+    });
+  });
+
+  // A refused allocation used to be a dead end: the server explains WHY (an
+  // employment window, an overlapping booking, a closed month) and the fixed
+  // string threw all of it away.
+  describe('a refused allocation reports the reason it was refused', () => {
+    const REQUEST: ResourceRequest = {
+      id: 'REQ1', name: 'Apollo', requiredRole: 'Consultant', requiredEffort: 80,
+      staffedEffort: 0, skills: [], status: 'Open', startDate: '2026-09-01', endDate: '2026-09-30',
+    };
+
+    /** Drive a create through to its error handler and return the toasts raised. */
+    async function attemptWith(error: unknown): Promise<string[]> {
+      const { fixture, notifyStub } = setup({ requests: [REQUEST], createAssignment$: throwError(() => error) });
+      await flush(fixture);
+      fixture.componentInstance.selectRequest(REQUEST);
+      fixture.componentInstance.startAssign('1');
+      fixture.detectChanges();
+      fixture.componentInstance.confirmAssign('1');
+      return (notifyStub.show as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(c => String(c[0]));
+    }
+
+    it("shows the server's message verbatim, not the generic string", async () => {
+      const refusal = 'booking date 2026-09-01 is after terminationDate 2026-03-15';
+      const messages = await attemptWith({ error: { error: refusal } });
+      expect(messages).toEqual([refusal]);
+      // The absence half: the generic copy must not be what the user is left with
+      // when the server said something specific.
+      expect(messages[0]).not.toContain('Unable to create the allocation');
+    });
+
+    it('still says something when the failure carries no server message — the fallback cannot be dropped', async () => {
+      const messages = await attemptWith(new Error('network down'));
+      expect(messages).toEqual(['Unable to create the allocation']);
     });
   });
 });

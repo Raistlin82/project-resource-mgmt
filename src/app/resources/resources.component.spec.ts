@@ -5,6 +5,7 @@ import { ResourcesComponent } from './resources.component';
 import { ApiService, Resource, ResourceOrganization, RateCard, Assignment, Vendor } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
+import { localIsoDate, todayLocalIso } from '../services/local-date.util';
 
 /** Two internal resources and one subco (vendor V4) — the seeded shape from Task 2. */
 const RESOURCES: Resource[] = [
@@ -47,6 +48,9 @@ function setup(
   orgNodes: ResourceOrganization[] | Observable<ResourceOrganization[]> = [],
   rateCards: RateCard[] | Observable<RateCard[]> = [],
   assignments$: Observable<Assignment[]> = of([]),
+  // The pre-authReady window is a real state of this screen (SSR + the whole
+  // OIDC bootstrap), not a test artefact, so it needs to be settable here.
+  authReady = true,
 ) {
   const getResources = vi.fn(() => (Array.isArray(resources) ? of(resources) : resources));
   const getProjectRoles = vi.fn(() => of([]));
@@ -63,7 +67,7 @@ function setup(
     getRateCards, getVendors, getAssignments, createResource, updateResource,
   } as unknown as ApiService;
   const notifyStub = { show: vi.fn() } as unknown as NotificationService;
-  const authStub = { authReady: signal(true), isAuthenticated: signal(true) } as unknown as AuthService;
+  const authStub = { authReady: signal(authReady), isAuthenticated: signal(true) } as unknown as AuthService;
 
   TestBed.configureTestingModule({
     imports: [ResourcesComponent],
@@ -76,6 +80,40 @@ function setup(
 
   const fixture = TestBed.createComponent(ResourcesComponent);
   return { fixture, getResources, getResourceOrganizations, getVendors, createResource, updateResource, notifyStub };
+}
+
+/** N days from today in LOCAL calendar terms — the same clock the component's
+ *  own Active/Terminated split reads (todayLocalIso), so nothing below can flip
+ *  with the runner's timezone. */
+function isoDaysFromToday(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return localIsoDate(d);
+}
+
+/** The Status cell (7th column) of the row for `name`, or '' when absent. */
+function statusCellText(host: HTMLElement, name: string): string {
+  const row = [...host.querySelectorAll('tbody tr')].find(
+    tr => tr.querySelector('[data-test="resource-name"]')?.textContent?.trim() === name,
+  );
+  return row?.querySelectorAll('td')[6]?.textContent?.trim() ?? '';
+}
+
+/** Recorded NotificationService messages, in call order. */
+function toasts(notifyStub: NotificationService): string[] {
+  return (notifyStub.show as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(c => String(c[0]));
+}
+
+/**
+ * The LIST region's own loading region, identified by the sr-only label
+ * app-list-state renders from its `label` input. Scoped deliberately: this
+ * screen mounts a SECOND app-list-state (the rate-card/billability one, label
+ * "rate card details"), so a bare `[role="status"]`/`.command-skeleton` query
+ * cannot tell which region is loading.
+ */
+function listLoadingRegion(host: HTMLElement): HTMLElement | null {
+  return [...host.querySelectorAll<HTMLElement>('[role="status"]')]
+    .find(el => el.textContent?.includes('Loading resources')) ?? null;
 }
 
 /**
@@ -843,6 +881,140 @@ describe('ResourcesComponent', () => {
       card.appendChild(port);
       port.appendChild(table);
       expect(hasHorizontalPanPort(table)).toBe(true);
+    });
+  });
+
+  // `resourcesRes` resolves its pre-auth default ([]) SYNCHRONOUSLY while
+  // authReady() is false, so isLoading() is false for the whole OIDC bootstrap
+  // window and for the SSR HTML. Bound bare, app-list-state therefore rendered
+  // the resolved-empty table — "No resources match the current filter.", a
+  // claim about the user's FILTER — before any read had been made.
+  describe('the pre-authReady window renders as loading, not as "no match"', () => {
+    const EMPTY_COPY = 'No resources match the current filter.';
+
+    it('shows the list skeleton and NOT the empty-filter copy while authReady() is false and the API has rows', async () => {
+      // Non-empty API data is the point: the copy would be a lie about data
+      // that exists and is about to arrive.
+      const { fixture, getResources } = setup(RESOURCES, [], [], of([]), false);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      // Positive control: the read genuinely has not been made yet, so this is
+      // the pre-auth window and not a resolved-empty collection.
+      expect(getResources).not.toHaveBeenCalled();
+      expect(statusOf(fixture.componentInstance, 'resourcesRes')).toBe('resolved');
+
+      // The ABSENCE assertion first: it is the load-bearing half (the screen
+      // must not make a claim about the filter), and the skeleton is merely what
+      // replaces it.
+      expect(host.textContent).not.toContain(EMPTY_COPY);
+      expect(host.querySelectorAll('tbody tr').length).toBe(0);
+      expect(listLoadingRegion(host)).not.toBeNull();
+    });
+
+    it('shows the empty-filter copy and NO skeleton once authReady() is true and the list really is empty', async () => {
+      // The mirror, and the load-bearing half: a fix that pinned the skeleton
+      // on forever — or deleted the empty state — passes the case above and
+      // fails this one.
+      const { fixture, getResources } = setup([], [], [], of([]), true);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      expect(getResources).toHaveBeenCalledTimes(1);
+      expect(listLoadingRegion(host)).toBeNull();
+      expect(host.textContent).toContain(EMPTY_COPY);
+    });
+
+    it('renders the real rows (no skeleton, no empty copy) once authReady() is true and rows arrive', async () => {
+      const { fixture } = setup(RESOURCES, [], [], of([]), true);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      expect(listLoadingRegion(host)).toBeNull();
+      expect(host.textContent).not.toContain(EMPTY_COPY);
+      const names = [...host.querySelectorAll('[data-test="resource-name"]')].map(e => e.textContent?.trim());
+      expect(names).toEqual(['Alice', 'Bob', 'External Co']);
+    });
+  });
+
+  // A terminationDate in the FUTURE is a notice period: stored, legitimate, and
+  // NOT yet in effect. The dialog and the toast used to assert an accomplished
+  // cessation for it while the list kept the resource Active, still counting
+  // toward capacity and still offered as a People Manager.
+  describe('a future termination date is announced as scheduled, not as done', () => {
+    const MARCO: Resource[] = [
+      { id: '1', name: 'Marco Bianchi', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal' },
+    ];
+
+    /** Open the Terminate dialog for Marco with `date` chosen, then click the
+     *  dialog's own confirm button (not the handler) so the wiring is exercised. */
+    async function terminateWith(date: string) {
+      const ctx = setup(MARCO, [], [], of([]), true);
+      await flush(ctx.fixture);
+      ctx.fixture.componentInstance.askTerminate(MARCO[0]);
+      ctx.fixture.componentInstance.terminationDate.set(date);
+      ctx.fixture.detectChanges();
+      const host = ctx.fixture.nativeElement as HTMLElement;
+      const copy = host.querySelector('[data-test="terminate-copy"]')!.textContent ?? '';
+      const confirm = [...host.querySelectorAll<HTMLButtonElement>('button')]
+        .find(b => b.textContent?.trim() === 'Terminate contract')!;
+      confirm.click();
+      await flush(ctx.fixture);
+      return { ...ctx, copy, host };
+    }
+
+    it('a notice period 30 days out: neither dialog nor toast says "terminated", and both name the date', async () => {
+      const date = isoDaysFromToday(30);
+      const { copy, notifyStub, updateResource } = await terminateWith(date);
+
+      // The PUT is unchanged — a future notice-period end is legitimate and the
+      // server deliberately accepts it. Only the claims made about it change.
+      expect(updateResource).toHaveBeenCalledWith('1', { terminationDate: date });
+
+      // The dialog states the FUTURE fact and names the date; what it must not
+      // do is assert the accomplished one ("is marked Terminated"), which is
+      // exactly the sentence the today/past branch keeps.
+      expect(copy).toContain(date);
+      expect(copy).toMatch(/will be marked Terminated on/);
+      expect(copy).not.toMatch(/is marked Terminated/);
+
+      const messages = toasts(notifyStub);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).not.toMatch(/terminated/i);
+      expect(messages[0]).toContain(date);
+    });
+
+    it("today's date: the toast keeps the past tense, so the fix is not just vaguer wording", async () => {
+      // The must-still-be-ALLOWED case. Without it, one deliberately vague
+      // message ("contract updated") would satisfy the assertion above.
+      const { copy, notifyStub } = await terminateWith(todayLocalIso());
+
+      expect(toasts(notifyStub)[0]).toMatch(/terminated/i);
+      expect(copy).toMatch(/is marked Terminated/);
+      expect(copy).not.toMatch(/will be marked Terminated/);
+    });
+
+    it('the list distinguishes all three states its own predicate implies', async () => {
+      const roster: Resource[] = [
+        { ...MARCO[0], id: '1', name: 'Marco Bianchi', terminationDate: isoDaysFromToday(30) },
+        { ...MARCO[0], id: '2', name: 'Elena Rossi', terminationDate: isoDaysFromToday(-30) },
+        { ...MARCO[0], id: '3', name: 'Alice Verdi' },
+      ];
+      const { fixture } = setup(roster, [], [], of([]), true);
+      await flush(fixture);
+      fixture.componentInstance.activeOnly.set(false); // show the leaver too
+      fixture.detectChanges();
+      const host = fixture.nativeElement as HTMLElement;
+
+      // Exact cell text, so "Termination scheduled" cannot be read as either of
+      // the other two chips by substring luck.
+      expect(statusCellText(host, 'Marco Bianchi')).toBe('Termination scheduled');
+      expect(statusCellText(host, 'Elena Rossi')).toBe('Terminated');
+      expect(statusCellText(host, 'Alice Verdi')).toBe('Active');
+
+      // ...and the scheduled row must NOT be the one the chip is derived from
+      // by accident: exactly one row carries the new chip.
+      expect(host.querySelectorAll('[data-test="resource-status-scheduled"]').length).toBe(1);
     });
   });
 });

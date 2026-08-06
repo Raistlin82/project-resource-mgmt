@@ -82,7 +82,7 @@ const REMOTE_LOCATION = 'Remote';
         </div>
 
         <app-list-state
-          [loading]="resourcesRes.isLoading()"
+          [loading]="listLoading()"
           [error]="listReadFailed()"
           skeleton="table-rows" [rows]="6" [columns]="6"
           label="resources"
@@ -125,9 +125,20 @@ const REMOTE_LOCATION = 'Remote';
                   <td class="text-right tabular-nums">{{ r.capacity | number:'1.0-2' }}</td>
                   <td class="tabular-nums">{{ r.hireDate || '—' }}</td>
                   <td>
+                    <!-- THREE states, not two: this screen's own predicate has
+                         always implied a third one (a terminationDate in the
+                         FUTURE is stored, legitimate — a notice period — and not
+                         yet in effect), and rendering it as a plain "Active"
+                         chip is what let the confirmation claim a cessation the
+                         list then contradicted. -->
                     @if (isTerminated(r)) {
                       <span class="command-chip is-neutral" [title]="'Terminated ' + r.terminationDate">
                         Terminated
+                      </span>
+                    } @else if (isTerminationScheduled(r)) {
+                      <span data-test="resource-status-scheduled" class="command-chip is-caution"
+                            [title]="'Termination scheduled for ' + r.terminationDate">
+                        Termination scheduled
                       </span>
                     } @else {
                       <span class="command-chip is-positive">Active</span>
@@ -383,7 +394,16 @@ const REMOTE_LOCATION = 'Remote';
                 <mat-icon class="text-critical-text text-3xl">person_off</mat-icon>
               </div>
               <h3 id="resourceTerminateTitle" class="font-display text-lg font-bold text-[var(--cc-ink)] mb-2">Terminate contract</h3>
-              <p class="text-[var(--cc-muted)] text-sm">End the contract for <strong class="text-ink">{{ t.name }}</strong>. The resource is marked Terminated (logical deletion) and can be reactivated later.</p>
+              <!-- A notice-period end in the FUTURE is legitimate (and the server
+                   deliberately allows it), but nothing has ended yet: the row
+                   keeps its Active/scheduled chip, the person keeps counting
+                   toward capacity and stays selectable as a People Manager. The
+                   present tense is therefore reserved for today/past. -->
+              @if (terminationScheduled()) {
+                <p data-test="terminate-copy" class="text-[var(--cc-muted)] text-sm"><strong class="text-ink">{{ t.name }}</strong> will be marked Terminated on <strong class="text-ink">{{ terminationDate() }}</strong>. Until then the contract stays in force and the resource keeps counting toward capacity.</p>
+              } @else {
+                <p data-test="terminate-copy" class="text-[var(--cc-muted)] text-sm">End the contract for <strong class="text-ink">{{ t.name }}</strong>. The resource is marked Terminated (logical deletion) and can be reactivated later.</p>
+              }
               <div class="mt-4 text-left">
                 <label for="res-term-date" class="block text-sm font-medium text-ink-secondary mb-1">Termination date</label>
                 <input id="res-term-date" type="date" [ngModel]="terminationDate()" (ngModelChange)="terminationDate.set($event)" class="command-input">
@@ -499,14 +519,33 @@ export class ResourcesComponent {
    * truthful to show — keying it on `resourcesRes` alone would leave an org-tree
    * failure as a silently facet-less filter bar with no panel at all.
    *
-   * `loading` deliberately stays keyed on `resourcesRes` alone: the facet bar
-   * renders ABOVE this wrapper (its query and selections are component state,
-   * not resource state, so it must survive a failed reload rather than be
-   * blanked), so a skeleton here would not cover the loading facets anyway —
-   * it would only hide rows that are already fetched and displayable.
+   * `loading` (below) deliberately stays keyed on `resourcesRes` alone rather
+   * than on both legs: the facet bar renders ABOVE this wrapper (its query and
+   * selections are component state, not resource state, so it must survive a
+   * failed reload rather than be blanked), so a skeleton driven by the org tree
+   * would not cover the loading facets anyway — it would only hide rows that
+   * are already fetched and displayable.
    */
   protected readonly listReadFailed = computed<boolean>(() =>
     this.listInputs().some(r => r.status() === 'error'),
+  );
+
+  /**
+   * Whether the LIST region has nothing truthful to render yet. `isLoading()`
+   * alone is NOT that question: `resourcesRes` resolves its pre-auth default
+   * (`[]`) synchronously while `authReady()` is false, so isLoading() is FALSE
+   * for the entire OIDC bootstrap window (afterNextRender -> /api/storage-status
+   * -> OIDC discovery, auth.service.ts:154,191-249) *and* in the SSR HTML shipped
+   * to the browser. Bound bare, this wrapper therefore showed the resolved-empty
+   * table — i.e. "No resources match the current filter.", a confident claim
+   * about the user's FILTER — for a read that had not been made yet, whose
+   * natural remedy (clear the filter) was never the cause.
+   *
+   * Not-ready counts as loading, never as ready-and-empty: the same rule
+   * `rateFiguresState()` below already applies to the rate-card figures.
+   */
+  protected readonly listLoading = computed<boolean>(() =>
+    !this.auth.authReady() || this.resourcesRes.isLoading(),
   );
 
   /** Retry target for the list region: reloads every leg listReadFailed()
@@ -878,6 +917,19 @@ export class ResourcesComponent {
     return !!r.terminationDate && r.terminationDate <= todayIso();
   }
 
+  /** The third state `isTerminated` implies but never named: a terminationDate
+   *  RECORDED but still in the future (a notice period). Deliberately the exact
+   *  complement of isTerminated over "has a terminationDate", so no resource can
+   *  ever match both or fall between them. */
+  isTerminationScheduled(r: Resource): boolean {
+    return !!r.terminationDate && r.terminationDate > todayIso();
+  }
+
+  /** Whether the date currently chosen in the Terminate dialog is a future one —
+   *  drives the dialog copy and the confirmation toast so neither asserts an
+   *  accomplished cessation the list itself does not show. */
+  protected readonly terminationScheduled = computed<boolean>(() => this.terminationDate() > todayIso());
+
   /** Whether a control should show its inline error (touched/dirty + invalid). */
   invalid(name: 'name' | 'role' | 'capacity' | 'hireDate' | 'vendorId'): boolean {
     const c = this.form.get(name);
@@ -981,9 +1033,17 @@ export class ResourcesComponent {
     const r = this.terminating();
     const date = this.terminationDate();
     if (!r || !date) return;
+    // Snapshot the tense BEFORE the round trip: the signal is user-editable and
+    // the dialog closes on success, so reading it in the callback would report
+    // whatever state the screen has drifted to.
+    const scheduled = this.terminationScheduled();
     this.api.updateResource(r.id, { terminationDate: date }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: () => {
-        this.notifications.show(`${r.name}'s contract terminated`, 'success');
+        // Past tense only for a cessation that has actually happened. For a
+        // future notice-period end the PUT succeeded but the contract has not
+        // ended: the row still shows the resource as staffable, so "contract
+        // terminated" would be the screen contradicting itself.
+        this.notifications.show(scheduled ? `${r.name}'s contract ends ${date}` : `${r.name}'s contract terminated`, 'success');
         this.resourcesRes.reload();
         this.terminating.set(null);
       },

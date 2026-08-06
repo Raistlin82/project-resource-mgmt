@@ -1,4 +1,14 @@
-import { ChangeDetectionStrategy, Component, DestroyRef, inject, signal, computed } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  DestroyRef,
+  ElementRef,
+  afterRenderEffect,
+  computed,
+  inject,
+  signal,
+  viewChild,
+} from '@angular/core';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, ResourceRequest, Resource, Assignment, ResourceOrganization } from '../services/api.service';
@@ -14,7 +24,8 @@ import {
   type CandidateScore,
   type MatchDimension,
 } from '../services/match.util';
-import { dimensionsOf } from '../services/org-scope.util';
+import { dimensionsOf, isTerminatedAsOf } from '../services/org-scope.util';
+import { todayLocalIso } from '../services/local-date.util';
 import { ListStateComponent } from '../shared/list-state.component';
 import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
 
@@ -25,6 +36,22 @@ interface DimensionMeter {
   value: number;
   weight: number;
   pct: number;
+}
+
+/**
+ * The single place the loading / error / ready question is answered on this
+ * screen, so its two list regions cannot answer it differently. `!authReady`
+ * counts as LOADING, never as ready-and-empty: an rxResource keyed on authReady
+ * resolves its pre-auth default synchronously, so `isLoading()` alone reports
+ * "settled, nothing here" throughout the OIDC bootstrap window.
+ */
+function stateOf(
+  inputs: readonly { status: () => string; isLoading: () => boolean }[],
+  authReady: boolean,
+): 'error' | 'loading' | 'ready' {
+  if (inputs.some(r => r.status() === 'error')) return 'error';
+  if (!authReady || inputs.some(r => r.isLoading())) return 'loading';
+  return 'ready';
 }
 
 @Component({
@@ -45,7 +72,7 @@ interface DimensionMeter {
             </div>
           </div>
           <div class="overflow-y-auto flex-1">
-            <app-list-state [loading]="res.isLoading()" [error]="res.status() === 'error'" label="requests" (retry)="res.reload()">
+            <app-list-state [loading]="poolState() === 'loading'" [error]="poolState() === 'error'" label="requests" (retry)="res.reload()">
             <ng-template>
             <div class="divide-y divide-[var(--cc-line)]">
             @for (req of openRequests(); track req.id) {
@@ -167,7 +194,16 @@ interface DimensionMeter {
               </div>
             }
           </div>
+          <!-- The candidate list reads the SAME two resources the header above
+               does, and used to render with no loading/error state of its own:
+               during the pre-authReady window it stated "No resources found
+               matching your criteria." about a read not yet made, and a failed
+               read left the panel frozen with no message and no Retry. One
+               wrapper over both legs owns all three states. -->
           <div class="overflow-y-auto flex-1 divide-y divide-[var(--cc-line)]">
+            <app-list-state [loading]="candidateListState() === 'loading'" [error]="candidateListState() === 'error'"
+                            label="candidate resources" (retry)="reloadCandidateInputs()">
+            <ng-template>
             @if (rankedCandidates(); as candidates) {
               <!-- Ranked candidate mode: a request is selected. -->
               @for (cand of candidates; track cand.resourceId) {
@@ -195,14 +231,22 @@ interface DimensionMeter {
                     </div>
                     <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0 w-full sm:w-auto">
                       @if (assigningResourceId() === cand.resourceId) {
-                        <div class="flex flex-col gap-3 w-full sm:w-auto">
+                        <!-- The reveal replaces the button that triggered it, so
+                             focus had nowhere to go and landed on <body>: the next
+                             Tab restarted at the skip link, and a screen-reader
+                             user got no signal that a form had appeared at all.
+                             role=group + a name makes the reveal announceable;
+                             #allocInput is what the render effect focuses. -->
+                        <div class="flex flex-col gap-3 w-full sm:w-auto" role="group"
+                             data-test="assign-panel"
+                             [attr.aria-label]="'Assignment proposal for ' + cand.resource.name">
                           <div class="command-card-muted p-3 text-sm text-[var(--cc-muted)]">
                             This creates an empty assignment. Book hours per day in the Allocation Calendar afterwards.
                           </div>
                           <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                             <label class="command-field">
                               <span class="command-field-label">Allocation %</span>
-                              <input type="number" [ngModel]="assignAllocationPct()" (ngModelChange)="assignAllocationPct.set($event)" class="command-input font-mono tabular-nums" min="0" max="100" step="5">
+                              <input #allocInput data-test="assign-allocation" type="number" [ngModel]="assignAllocationPct()" (ngModelChange)="assignAllocationPct.set($event)" class="command-input font-mono tabular-nums" min="0" max="100" step="5">
                             </label>
                             <label class="command-field">
                               <span class="command-field-label">Start date</span>
@@ -215,11 +259,14 @@ interface DimensionMeter {
                           </div>
                           <div class="flex items-center gap-2">
                             <button (click)="confirmAssign(cand.resourceId)" [disabled]="assigning()" class="command-button flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">Create proposal</button>
-                            <button type="button" (click)="cancelAssign()" aria-label="Cancel assignment" title="Cancel assignment" class="command-button secondary"><mat-icon class="text-[20px] w-[20px] h-[20px]">close</mat-icon></button>
+                            <!-- Cancelling is the mirror of the reveal: the button
+                                 the user came from is re-rendered, so focus goes
+                                 back to it instead of to <body>. -->
+                            <button type="button" (click)="cancelAssign(true)" aria-label="Cancel assignment" title="Cancel assignment" class="command-button secondary"><mat-icon class="text-[20px] w-[20px] h-[20px]">close</mat-icon></button>
                           </div>
                         </div>
                       } @else {
-                        <button (click)="startAssign(cand.resourceId)" class="command-button secondary w-full sm:w-auto">
+                        <button (click)="startAssign(cand.resourceId)" [attr.data-assign-for]="cand.resourceId" class="command-button secondary w-full sm:w-auto">
                           <mat-icon class="text-[18px] w-[18px] h-[18px]">person_add</mat-icon> Assign
                         </button>
                       }
@@ -291,6 +338,8 @@ interface DimensionMeter {
                 <div class="p-12 text-center text-sm text-[var(--cc-muted)]">No resources found matching your criteria.</div>
               }
             }
+            </ng-template>
+            </app-list-state>
           </div>
         </div>
       </div>
@@ -318,10 +367,33 @@ export class StaffingComponent {
     defaultValue: { requests: [] as ResourceRequest[], resources: [] as Resource[] }
   });
 
-  openRequests = computed(() =>
-    this.res.value().requests.filter(r => r.status === 'Open' || r.status === 'Published')
+  /**
+   * READ-FAILURE GUARD for the combined requests+resources read.
+   * `rxResource.value()` THROWS ResourceValueError while its status is 'error',
+   * and this envelope is dereferenced from bindings that live ABOVE (and beside)
+   * every error affordance on this screen: the candidate search box, the four
+   * org/manager filter <select>s and the skill-gap banner all sit in the
+   * right-hand card's header, outside any app-list-state. One throw aborts the
+   * whole change-detection pass and every later one at the same expression, so
+   * the right-hand panel froze at whatever it last rendered — typing in the
+   * search box did nothing, and no message or Retry ever appeared. Reordering
+   * markup cannot fix that; only not reading a throwing accessor can.
+   *
+   * This is NOT the banned `status()==='error' ? [] : value()`: emptiness is
+   * never this screen's ANSWER about the data. `poolState()`/`candidateListState()`
+   * below put both list regions into their error panel in exactly the same
+   * state, and `missingSkillGap()` refuses to speak at all — the empty envelope
+   * exists only so the signal graph can settle while those panels are what the
+   * user sees. The halves are one fix; weakening either re-creates the defect.
+   */
+  private pool = computed<{ requests: ResourceRequest[]; resources: Resource[] }>(() =>
+    this.res.status() === 'error' ? { requests: [], resources: [] } : this.res.value(),
   );
-  allResources = computed(() => this.res.value().resources);
+
+  openRequests = computed(() =>
+    this.pool().requests.filter(r => r.status === 'Open' || r.status === 'Published')
+  );
+  allResources = computed(() => this.pool().resources);
   selectedRequest = signal<ResourceRequest | null>(null);
   searchQuery = signal('');
 
@@ -332,7 +404,49 @@ export class StaffingComponent {
     stream: ({ params: ready }) => (ready ? this.api.getResourceOrganizations() : of<ResourceOrganization[]>([])),
     defaultValue: [] as ResourceOrganization[],
   });
-  orgOptions = this.orgsRes.value;
+  /** READ-FAILURE GUARD, same contract as `pool` above and for the same reason:
+   *  the org tree is a SECOND, independently failing read whose `.value()`
+   *  throws at the very same header bindings (the capability/practice/competence
+   *  option lists). /requests+/resources succeeding while
+   *  /resource-organizations 500s is enough on its own to freeze the panel,
+   *  which is why `candidateListState()` covers BOTH legs and Retry reloads both. */
+  orgOptions = computed<ResourceOrganization[]>(() =>
+    this.orgsRes.status() === 'error' ? [] : this.orgsRes.value(),
+  );
+
+  /** Every read the LEFT (Open Requests) panel derives from. */
+  private requestInputs() {
+    return [this.res];
+  }
+
+  /** Every read the RIGHT (candidate) panel derives from — one shared list, so
+   *  the gate, the skeleton and the Retry cannot drift from what feeds them. */
+  private candidateInputs() {
+    return [this.res, this.orgsRes];
+  }
+
+  /**
+   * Tri-state for the requests pool. `isLoading()` alone is not the question:
+   * with `authReady()` false the rxResource resolves its pre-auth default
+   * SYNCHRONOUSLY, so isLoading() is false for the entire OIDC bootstrap window
+   * and for the SSR HTML — which is how "No open requests available for
+   * staffing." came to be rendered as a settled fact before any read had been
+   * made. Not-ready counts as loading, never as ready-and-empty.
+   */
+  protected readonly poolState = computed<'error' | 'loading' | 'ready'>(() =>
+    stateOf(this.requestInputs(), this.auth.authReady()),
+  );
+
+  /** Same tri-state for the candidate panel, over BOTH of its reads. */
+  protected readonly candidateListState = computed<'error' | 'loading' | 'ready'>(() =>
+    stateOf(this.candidateInputs(), this.auth.authReady()),
+  );
+
+  /** Retry target for the candidate panel: reloads every leg its state watches,
+   *  so one Retry can never leave the other leg still failed. */
+  protected reloadCandidateInputs(): void {
+    for (const r of this.candidateInputs()) r.reload();
+  }
 
   // D (Task 8): Capability / Practice / Competence / People Manager filters. '' =
   // all. Matched via `dimensionsOf`, not a raw equality against r.organization —
@@ -380,6 +494,66 @@ export class StaffingComponent {
   /** True while a createAssignment request is in flight, to block duplicate submits (double-staffing). */
   assigning = signal(false);
 
+  /** The Allocation % input of the currently revealed proposal panel (only one
+   *  candidate can be open at a time, so this query is single-valued). */
+  private allocInput = viewChild<ElementRef<HTMLInputElement>>('allocInput');
+  private hostEl = inject<ElementRef<HTMLElement>>(ElementRef);
+  /** The candidate whose panel focus has already been moved into — so a later
+   *  re-render cannot steal focus back from wherever the user has moved it. */
+  private focusMovedFor: string | null = null;
+  /** The candidate whose Assign button must regain focus once the panel closes.
+   *  Set ONLY by an explicit Cancel: the other callers of cancelAssign() change
+   *  the selection (and therefore the whole candidate list), where pulling focus
+   *  back to a button that may no longer exist would be wrong. */
+  private restoreFocusTo: string | null = null;
+
+  constructor() {
+    // Focus follows the reveal. `afterRenderEffect` (the allocation-calendar
+    // convention in this codebase) re-runs on the signals it reads and NEVER runs
+    // on the server, so this reacts to the panel actually being in the DOM
+    // instead of guessing when that happens, and stays SSR-safe.
+    afterRenderEffect(() => {
+      const open = this.assigningResourceId();
+      if (open) {
+        if (this.focusMovedFor === open) return;
+        const input = this.allocInput()?.nativeElement;
+        if (!input) return;
+        this.focusMovedFor = open;
+        this.restoreFocusTo = null;
+        input.focus();
+        return;
+      }
+      this.focusMovedFor = null;
+      const restore = this.restoreFocusTo;
+      if (!restore) return;
+      this.restoreFocusTo = null;
+      this.hostEl.nativeElement
+        .querySelector<HTMLButtonElement>(`[data-assign-for="${restore}"]`)
+        ?.focus();
+    });
+  }
+
+  /**
+   * The pool anyone may actually be staffed FROM: everybody minus the people who
+   * have already left. A stored `terminationDate` is never revisited elsewhere
+   * (there is no DELETE /resources), so a departed employee stayed in this pool
+   * and was ranked as a candidate — scored, listed with an "Assign" button and
+   * captioned "100% Utilized", which reads "busy", never "left the company".
+   * Clicking Assign then either 400s with the server's employment check ("booking
+   * date … is after terminationDate …") behind a generic toast, or, on a request
+   * with no dates, SUCCEEDS and books a departed employee.
+   *
+   * Filtered here rather than inside `searchedResources` so BOTH consumers share
+   * it: `missingSkillGap` counted a leaver's skills as capability coverage, which
+   * suppressed exactly the hire/subcontract signal that panel exists to raise.
+   * The employment filter is applied BEFORE the search filter on purpose — the
+   * comment on `missingSkillGap` justifies bypassing the SEARCH filter, not this.
+   */
+  private staffableResources = computed<Resource[]>(() => {
+    const today = todayLocalIso();
+    return this.allResources().filter(r => !isTerminatedAsOf(r, today));
+  });
+
   /**
    * Resources after applying the free-text search box (name / role / skills)
    * AND the D (Task 8) capability/practice/competence/People Manager filters —
@@ -388,7 +562,7 @@ export class StaffingComponent {
    * way whether or not a request is selected.
    */
   private searchedResources = computed(() => {
-    const resources = this.allResources();
+    const resources = this.staffableResources();
     const query = this.searchQuery().trim().toLowerCase();
     const cap = this.capabilityFilter();
     const pra = this.practiceFilter();
@@ -424,14 +598,21 @@ export class StaffingComponent {
   displayedResources = computed(() => this.searchedResources());
 
   /**
-   * Skills the request needs that NO resource in the full pool can cover.
-   * Computed over allResources() (not the filtered search) so a stray search term
-   * can't hide a genuine capability gap that warrants hiring / upskilling.
+   * Skills the request needs that NO STAFFABLE resource can cover.
+   * Computed over the whole staffable pool (not the filtered search) so a stray
+   * search term can't hide a genuine capability gap that warrants hiring /
+   * upskilling — but leavers are excluded, because a skill only a departed
+   * employee holds is precisely a gap, not coverage.
    */
   missingSkillGap = computed<string[]>(() => {
     const req = this.selectedRequest();
     if (!req) return [];
-    return requestSkillGap(this.allResources(), req);
+    // An unavailable pool covers nothing, so requestSkillGap would report EVERY
+    // required skill as missing and the banner would raise a confident
+    // "nobody can cover these skills" hiring signal about data we do not have.
+    // Saying nothing is the only honest answer here; the panel below says why.
+    if (this.poolState() !== 'ready') return [];
+    return requestSkillGap(this.staffableResources(), req);
   });
 
   /** Per-dimension meters for a candidate, in display order, normalised to their own weight. */
@@ -500,7 +681,16 @@ export class StaffingComponent {
     }
   }
 
-  cancelAssign() {
+  /**
+   * Close the proposal panel. `restoreFocus` is opt-in (same shape as app.ts's
+   * `closeMenu(restoreFocus = false)`): the dialog's own Cancel control passes
+   * true so the keyboard user returns to the Assign button they came from, while
+   * the selection-changing callers (selectRequest / clearSelection / a successful
+   * create) leave focus alone — the candidate list they rebuild may not even
+   * contain that button any more.
+   */
+  cancelAssign(restoreFocus = false) {
+    if (restoreFocus) this.restoreFocusTo = this.assigningResourceId();
     this.assigningResourceId.set(null);
     this.assignStartDate.set('');
     this.assignEndDate.set('');
@@ -538,9 +728,13 @@ export class StaffingComponent {
           this.res.reload();
           this.notifications.show(this.assignmentResultMessage(created), 'success');
         },
-        error: () => {
+        // The server's refusals here are specific and actionable (an employment
+        // window, an overlapping booking, a closed month); the fixed string threw
+        // all of them away and left the user with a dead control and no reason.
+        // Same shape as project-details.ts's freezeCostBaseline handler.
+        error: (err: { error?: { error?: string } }) => {
           this.assigning.set(false);
-          this.notifications.show('Unable to create the allocation', 'error');
+          this.notifications.show(err.error?.error ?? 'Unable to create the allocation', 'error');
         }
       });
     }
