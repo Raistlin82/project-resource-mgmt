@@ -3,7 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Observable, of, Subject, throwError } from 'rxjs';
 import { Billing } from './billing';
 import {
-  ApiService, BillingPlanItem, Contract, Customer, FxRate, NegotiatedRate, Order, Project, Resource, TimeEntry,
+  ApiService, BillingPlanItem, Contract, Customer, FxRate, Milestone, NegotiatedRate, Order, Project, Resource, TimeEntry,
 } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
@@ -360,10 +360,12 @@ describe('Billing prices an Expense condition at the customer-facing amount', ()
   });
 });
 
-/** The rows() shape the two suites below read. `rows` is public on the component. */
+/** The rows() shape the suites below read. `rows` is public on the component. */
 interface RowProbe {
   readonly item: BillingPlanItem;
   readonly due: string | null;
+  /** The Trigger cell (billing.ts:324), the invoice line note (:705) and the CSV column. */
+  readonly trigger: string;
   readonly overdueDays: number;
   readonly invoiceNumber: string | null;
 }
@@ -639,5 +641,225 @@ describe('Billing — the master table is inside the same state machine as the K
 
     expect(getOrders).toHaveBeenCalledTimes(2);
     expect(getCustomers).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * DT-04's REMAINING HALF — the Trigger column.
+ *
+ * The Due column was pinned to bare civil dates in an earlier batch. `formatDate`,
+ * which the Trigger cell (billing.ts:324), the invoice line-item note (:705) and the
+ * CSV 'Trigger' column (:1483) all render through, was left on `toLocaleDateString()`
+ * over a UTC-parsed instant — the batch that fixed `dueOf` said so explicitly.
+ *
+ * WHAT THIS RUNNER CAN AND CANNOT PROVE. Stated rather than papered over, because a
+ * TZ-dependent expectation green under the CI default is one of this project's
+ * recorded blind-green shapes. The suite runs in ONE zone (nothing in angular.json or
+ * package.json pins TZ; this machine resolves to Europe/Rome), so no assertion here
+ * could distinguish a UTC-pinned formatter from a local one for EVERY input. Two
+ * things are red regardless of which zone you read them in:
+ *
+ *   - THE FORMAT. A default `toLocaleDateString()` emits '6/15/2026'; no locale turns
+ *     that into 'Jun 15, 2026'. Zone-independent, and the shape that makes the two
+ *     date columns of one row agree — Due renders `| date: 'mediumDate'`.
+ *   - THE DAY, for a stored value carrying a TIME. In any UTC-POSITIVE zone
+ *     2026-06-15T23:30:00Z reads back locally as the 16th. Red here. (In a
+ *     UTC-NEGATIVE zone it is the date-only case that shifts instead — the same
+ *     defect, entered from the other side.)
+ *
+ * Neither assertion reads the wall clock.
+ */
+describe('Billing — the Trigger column names the day the stored date names', () => {
+  const CT: Contract = {
+    id: 'CT1', customerId: 'C1', name: 'Framework', type: 'T&M', totalValue: 0,
+    currency: 'EUR', status: 'Active', startDate: '2026-01-01', endDate: '2026-12-31',
+  };
+  const MILESTONE_M1: Milestone = {
+    id: 'M1', projectId: 'P1', name: 'UAT sign-off', date: '2026-06-15', status: 'Pending',
+  };
+  const DATE_ONLY: BillingPlanItem = {
+    id: 'BP-D', contractId: 'CT1', type: 'Advance', label: 'Advance',
+    amount: 1_000, currency: 'EUR', status: 'Planned', expectedDate: '2026-06-15',
+  };
+  /**
+   * 23:30Z is already the 16th in Europe/Rome. REACHABLE, not a lying fixture: the
+   * server's date backstop admits anything `Date.parse` accepts (`isIsoDateString`,
+   * src/server.ts:154-155) despite its "(YYYY-MM-DD)" message, and it exists for
+   * exactly the direct API / integration callers that would send this.
+   */
+  const WITH_TIME: BillingPlanItem = {
+    id: 'BP-T', contractId: 'CT1', type: 'Expense', label: 'Travel',
+    amount: 500, currency: 'EUR', status: 'Planned', expectedDate: '2026-06-15T23:30:00.000Z',
+  };
+
+  async function rows(items: BillingPlanItem[], milestones: Milestone[] = []): Promise<RowProbe[]> {
+    const fixture = await setupSparse({
+      getBillingPlanItems: () => of(items),
+      getContracts: () => of([CT]),
+      getMilestones: () => of(milestones),
+    });
+    await tick(fixture);
+    return rowsOf(fixture);
+  }
+
+  const byId = (all: RowProbe[], id: string): RowProbe => all.find(r => r.item.id === id)!;
+
+  it('renders a date-only expectedDate as that civil day, in the medium shape the Due column uses', async () => {
+    const all = await rows([DATE_ONLY]);
+    const row = byId(all, 'BP-D');
+
+    // RED in every zone before the fix: '6/15/2026'.
+    expect(row.trigger).toBe('Jun 15, 2026');
+    // And the day is the one the source string names. This is the assertion that
+    // fails outright in a UTC-negative zone, where the old code printed the 14th.
+    expect(row.trigger).toContain('15');
+    expect(row.trigger).not.toContain('14');
+  });
+
+  it('keeps the UTC day for a stored value that carries a time, so the row and its edit form agree', async () => {
+    // `openEdit` seeds the date input with `expectedDate.slice(0, 10)` = 2026-06-15,
+    // so a Trigger cell reading the 16th makes ONE row state two different days.
+    // RED in this runner's zone before the fix (local read = 01:30 on the 16th).
+    const all = await rows([WITH_TIME]);
+    const row = byId(all, 'BP-T');
+
+    expect(row.trigger).toBe('Jun 15, 2026');
+    expect(row.trigger).not.toContain('16');
+    // The fixture really does carry a time — otherwise this case is the one above.
+    expect(row.item.expectedDate).toContain('T23:30');
+    expect(row.item.expectedDate!.slice(0, 10)).toBe('2026-06-15');
+  });
+
+  it('leaves the non-date triggers alone — milestone name, recurrence, "On demand"', async () => {
+    // THE ABSENCE TWIN for the switch in `triggerOf`. A "fix" that routes every
+    // trigger through the date formatter, or that loses the milestone lookup, passes
+    // both cases above and fails here: none of these cells may look like a date.
+    const milestoneItem: BillingPlanItem = {
+      id: 'BP-M', contractId: 'CT1', type: 'Milestone', label: 'SAL 2', milestoneId: 'M1',
+      amount: 5_000, currency: 'EUR', status: 'Planned', expectedDate: '2026-06-15',
+    };
+    const recurringItem: BillingPlanItem = {
+      id: 'BP-R', contractId: 'CT1', type: 'Recurring', label: 'Managed service',
+      amount: 900, currency: 'EUR', status: 'Planned', recurrence: 'Quarterly',
+      expectedDate: '2026-06-15',
+    };
+    const onDemand: BillingPlanItem = {
+      id: 'BP-O', contractId: 'CT1', type: 'TimeAndMaterials', label: 'T&M',
+      amount: 0, currency: 'EUR', status: 'Planned',
+    };
+    const all = await rows([milestoneItem, recurringItem, onDemand], [MILESTONE_M1]);
+
+    expect(byId(all, 'BP-M').trigger).toBe('UAT sign-off');
+    expect(byId(all, 'BP-R').trigger).toBe('Quarterly');
+    expect(byId(all, 'BP-O').trigger).toBe('On demand');
+    for (const id of ['BP-M', 'BP-R', 'BP-O']) {
+      expect(byId(all, id).trigger).not.toContain('2026');
+    }
+  });
+
+  it('echoes an unparseable expectedDate rather than printing "Invalid Date"', async () => {
+    // No-regression parity with the guard the old implementation had. Not reachable
+    // through the API (isIsoDateString rejects it), so this pins the contract only —
+    // it is not evidence of a live failure path.
+    const all = await rows([{ ...DATE_ONLY, id: 'BP-X', expectedDate: 'not-a-date' }]);
+
+    expect(byId(all, 'BP-X').trigger).toBe('not-a-date');
+    expect(byId(all, 'BP-X').trigger).not.toContain('Invalid');
+  });
+});
+
+/**
+ * The modal-overlay family fix (register: manage-rate-cards.component.ts:103, "also
+ * ... billing.ts"), applied to THIS screen's create/edit overlay.
+ *
+ * `flex items-center` on a position:fixed box with no overflow splits any surplus
+ * height above AND below the viewport at once, so on a short viewport the panel's
+ * header (with Close) goes off the top while the Create/Save row goes off the bottom —
+ * and a fixed box cannot be scrolled by the page. The invoice overlay lower down the
+ * same template was already built the safe way, which is why the register names it as
+ * the in-repo GREEN anchor for this predicate.
+ *
+ * STRUCTURAL CONTRACT ONLY. jsdom performs no layout — offsetHeight is 0 and there is
+ * no viewport — so NOTHING here proves the Save row is clipped at 320x460. It proves
+ * the three class tokens that make an overlay scrollable sit on the right two
+ * elements. The clipping arithmetic needs a real browser at 320x460 asserting
+ * `getBoundingClientRect().bottom <= window.innerHeight`, and this repo has no
+ * browser runner (no playwright in package.json).
+ */
+describe('Billing — both modal overlays carry the scroll-safe class contract (structure only; jsdom has no layout)', () => {
+  interface ScrollSafety {
+    readonly overlayScrolls: boolean;
+    readonly overlayStartsAtTopOnShortViewports: boolean;
+    readonly panelHeightBounded: boolean;
+  }
+  const scrollSafetyOf = (overlayClass: string, panelClass: string): ScrollSafety => ({
+    overlayScrolls: overlayClass.includes('overflow-y-auto'),
+    overlayStartsAtTopOnShortViewports: overlayClass.includes('items-start'),
+    panelHeightBounded: /max-h-\[/.test(panelClass),
+  });
+
+  const SAFE: ScrollSafety = {
+    overlayScrolls: true, overlayStartsAtTopOnShortViewports: true, panelHeightBounded: true,
+  };
+
+  const safetyOfOverlay = (fixture: ComponentFixture<Billing>, selector: string): ScrollSafety => {
+    const overlay = host(fixture).querySelector(selector) as HTMLElement | null;
+    expect(overlay, `the ${selector} overlay must be rendered`).toBeTruthy();
+    const panel = overlay!.firstElementChild as HTMLElement;
+    return scrollSafetyOf(overlay!.className, panel.className);
+  };
+
+  it('discriminates a clipping overlay from a scroll-safe one, so the predicate is not a class-string tautology', () => {
+    // THE NEGATIVE CONTROL, and the reason the three assertions below mean anything.
+    // These are the EXACT class strings the create/edit overlay carried at d1c89b4: a
+    // fixed, centred box with no overflow. All three predicates must report false.
+    expect(scrollSafetyOf(
+      'fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6',
+      'command-card w-full max-w-2xl overflow-hidden flex flex-col',
+    )).toStrictEqual({
+      overlayScrolls: false, overlayStartsAtTopOnShortViewports: false, panelHeightBounded: false,
+    });
+  });
+
+  it('holds for the create/edit overlay', async () => {
+    const fixture = await setupSparse();
+    await tick(fixture);
+    fixture.componentInstance.openCreate();
+    await tick(fixture);
+
+    // Not the invoice overlay: only one modal is open, and this asserts which.
+    expect(host(fixture).querySelector('.invoice-overlay')).toBeNull();
+    expect(safetyOfOverlay(fixture, '[appModal]')).toStrictEqual(SAFE);
+  });
+
+  it('holds for the invoice overlay — the in-repo element the family fix was copied from', async () => {
+    const CT: Contract = {
+      id: 'CT1', customerId: 'C1', name: 'Framework', type: 'T&M', totalValue: 0,
+      currency: 'EUR', status: 'Active', startDate: '2026-01-01', endDate: '2026-12-31',
+    };
+    const ORDER: Order = {
+      id: 'ORD-1', contractId: 'CT1', type: 'Customer', amount: 1_000, currency: 'EUR',
+      status: 'Invoiced', orderDate: '2026-07-15', invoiceNumber: 'INV-0001', invoiceDate: '2026-07-15',
+    };
+    const ITEM: BillingPlanItem = {
+      id: 'BP1', contractId: 'CT1', type: 'Milestone', label: 'SAL 1',
+      amount: 1_000, currency: 'EUR', status: 'Invoiced', orderId: 'ORD-1',
+    };
+    const fixture = await setupSparse({
+      getBillingPlanItems: () => of([ITEM]),
+      getContracts: () => of([CT]),
+      getOrders: () => of([ORDER]),
+    });
+    await tick(fixture);
+
+    const row = rowsOf(fixture)[0];
+    // openInvoice() returns EARLY unless the row carries an invoice number, so
+    // without this the overlay would never mount and the assertion below would fail
+    // on a missing element rather than on the class contract.
+    expect(row.invoiceNumber, 'the fixture must carry an invoice or openInvoice is a no-op').toBe('INV-0001');
+    fixture.componentInstance.openInvoice(row as unknown as Parameters<Billing['openInvoice']>[0]);
+    await tick(fixture);
+
+    expect(safetyOfOverlay(fixture, '.invoice-overlay')).toStrictEqual(SAFE);
   });
 });
