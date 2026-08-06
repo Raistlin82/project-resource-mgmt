@@ -12,7 +12,7 @@ import { DecimalPipe, isPlatformBrowser } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { of } from 'rxjs';
 import { rxResource } from '@angular/core/rxjs-interop';
-import { ApiService, CapacityMonthly, CapacityRow } from '../services/api.service';
+import { ApiService, CapacityCell, CapacityMonthly, CapacityRow, CapacityTotals } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { CsvColumn, downloadCsv, downloadJson, toCsv, toJson } from '../services/export.util';
 import { ListStateComponent } from '../shared/list-state.component';
@@ -118,6 +118,55 @@ function shiftMonth(month: string, delta: number): string {
   const ny = Math.floor(total / 12);
   const nm = total - ny * 12 + 1;
   return `${ny}-${String(nm).padStart(2, '0')}`;
+}
+
+/**
+ * Round a quantity to 2 decimals for export. The ≤2-decimal rule is project-wide —
+ * on screen, in chart labels AND in exported files — and `rollupMonthly` produces
+ * raw quotients (hours ÷ working-day target), so every FTE arrives here with full
+ * binary-float residue.
+ *
+ * The result is still a NUMBER, deliberately: `.toFixed(2)` would make each cell a
+ * string, and a JSON consumer would then have to re-parse every figure.
+ */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/** Immutable per-cell round. `band` is a judgement, not a quantity — copied verbatim. */
+function roundCell(c: CapacityCell): CapacityCell {
+  return {
+    ...c,
+    confirmedHours: round2(c.confirmedHours),
+    plannedHours: round2(c.plannedHours),
+    targetHours: round2(c.targetHours),
+    fteConfirmed: round2(c.fteConfirmed),
+    ftePlanned: round2(c.ftePlanned),
+  };
+}
+
+/** Immutable per-row round. Ids and names pass straight through. */
+function roundRows(rows: readonly CapacityRow[]): CapacityRow[] {
+  return rows.map((r) => {
+    const monthly: Record<string, CapacityCell> = {};
+    for (const [m, c] of Object.entries(r.monthly)) monthly[m] = roundCell(c);
+    return { ...r, monthly };
+  });
+}
+
+/** Immutable per-month totals round. `resourceCount` is an integer headcount — untouched. */
+function roundTotals(totals: Record<string, CapacityTotals>): Record<string, CapacityTotals> {
+  const out: Record<string, CapacityTotals> = {};
+  for (const [m, t] of Object.entries(totals)) {
+    out[m] = {
+      ...t,
+      demandFteConfirmed: round2(t.demandFteConfirmed),
+      demandFtePlanned: round2(t.demandFtePlanned),
+      capacityFte: round2(t.capacityFte),
+      demandFteUncovered: round2(t.demandFteUncovered),
+    };
+  }
+  return out;
 }
 
 /**
@@ -257,8 +306,21 @@ function shiftMonth(month: string, delta: number): string {
                             <div class="rounded-lg ring-1 p-2 text-center {{ c.meta.cell }} {{ c.meta.ring }}"
                                  data-test="band-cell"
                                  [attr.data-cell]="row.resourceId + '-' + c.month"
-                                 [attr.data-band]="c.band"
-                                 [attr.aria-label]="c.aria">
+                                 [attr.data-band]="c.band">
+                              <!-- A11Y: the composed name lives in a visually-hidden
+                                   SPAN, never in an aria-label on this div. The div has
+                                   no role, and ARIA forbids naming a role=generic
+                                   element — so the attribute sat in the DOM (and a spec
+                                   asserted it) while no screen reader ever surfaced it.
+                                   In table mode the cell announced only its own
+                                   fragments, "125% Over conf 100%": no resource, no
+                                   month, and not the 200h-of-160h detail that makes the
+                                   band judgement checkable.
+                                   An aria-label on the enclosing td would expose the
+                                   name but REPLACE that visible reading; an sr-only
+                                   child ADDS to it (same device as
+                                   list-state.component.ts:50). -->
+                              <span class="sr-only">{{ c.aria }}</span>
                               <div class="text-base font-bold font-mono tabular-nums {{ c.meta.text }}">{{ c.plannedPct | number:'1.0-0' }}%</div>
                               <div class="text-[10px] font-bold uppercase tracking-wide {{ c.meta.text }}">{{ c.meta.label }}</div>
                               <!-- Confirmed marker: inner bar (share of planned that is approved)
@@ -270,7 +332,14 @@ function shiftMonth(month: string, delta: number): string {
                             </div>
                           } @else {
                             <div class="rounded-lg border border-dashed border-line bg-surface-muted p-2 text-center text-ink-muted"
-                                 [attr.aria-label]="row.resourceName + ' — ' + monthLabel(c.month) + ': not active'">
+                                 [attr.data-cell]="row.resourceId + '-' + c.month">
+                              <!-- Same role-less-div rule as the banded branch, and the
+                                   worse loss: an AT user got "— n/a" with no idea whose
+                                   cell or which month. c.aria already carries the
+                                   "NAME — MONTH YEAR: not active" wording (toCellVm), so
+                                   the inline duplicate expression went with the
+                                   attribute rather than being reproduced here. -->
+                              <span class="sr-only">{{ c.aria }}</span>
                               <div class="text-sm font-mono tabular-nums">—</div>
                               <div class="text-[10px] uppercase tracking-wide">n/a</div>
                             </div>
@@ -335,7 +404,12 @@ function shiftMonth(month: string, delta: number): string {
                       @for (c of row.cells; track c.month) {
                         <td class="px-2 py-2 align-top">
                           @if (c.present) {
-                            <div class="rounded-lg ring-1 ring-line bg-surface-muted p-2 text-center" [attr.aria-label]="c.aria">
+                            <div class="rounded-lg ring-1 ring-line bg-surface-muted p-2 text-center"
+                                 [attr.data-cell]="row.resourceId + '-' + c.month">
+                              <!-- Role-less div again: the name goes in the span. This is
+                                   the only carrier of resource + month + hours for the
+                                   uncovered-demand grid. -->
+                              <span class="sr-only">{{ c.aria }}</span>
                               <div class="text-base font-bold font-mono tabular-nums text-ink">{{ c.plannedFte | number:'1.1-1' }} <span class="text-[10px] font-semibold text-ink-muted">FTE</span></div>
                               <div class="mt-1 text-[10px] font-mono tabular-nums text-ink-muted">
                                 {{ c.plannedHours | number:'1.0-0' }}h planned
@@ -346,7 +420,8 @@ function shiftMonth(month: string, delta: number): string {
                             </div>
                           } @else {
                             <div class="rounded-lg border border-dashed border-line bg-surface-muted p-2 text-center text-ink-muted"
-                                 [attr.aria-label]="row.resourceName + ' — ' + monthLabel(c.month) + ': not active'">
+                                 [attr.data-cell]="row.resourceId + '-' + c.month">
+                              <span class="sr-only">{{ c.aria }}</span>
                               <div class="text-sm font-mono tabular-nums">—</div>
                               <div class="text-[10px] uppercase tracking-wide">n/a</div>
                             </div>
@@ -573,7 +648,8 @@ export class CapacityComponent {
     return CapacityComponent.MONTH_LONG_FMT.format(new Date(month + '-01T00:00:00Z'));
   }
 
-  /** Build one cell view model, precomputing tone tokens + the WCAG hours aria-label. */
+  /** Build one cell view model, precomputing tone tokens + the WCAG hours name
+   *  (rendered as the cell's sr-only text — see the template). */
   private toCellVm(row: CapacityRow, month: string): CellVm {
     const cell = row.monthly[month];
     if (!cell) {
@@ -663,6 +739,36 @@ export class CapacityComponent {
 
   protected exportJson(): void {
     if (!isPlatformBrowser(this.platformId)) return;
-    downloadJson('capacity-monthly.json', toJson(this.envelope()));
+    downloadJson('capacity-monthly.json', this.buildJson());
+  }
+
+  /**
+   * The exact JSON text `exportJson()` writes — split out so it is assertable
+   * without a DOM download, exactly like {@link buildCsv}.
+   *
+   * It used to serialise the envelope verbatim, so the June cell the screen shows
+   * as "0.1 FTE / 23h planned" was written as `ftePlanned: 0.13232954545454542`,
+   * `confirmedHours: 23.289999999999996`. The two export buttons sitting side by
+   * side therefore handed out mutually inconsistent artefacts for identical data,
+   * and this file — the hand-off for the hiring/subco forecast — presented FTE to
+   * 16 decimals while its CSV sibling had rounded the same cells all along.
+   *
+   * The rebuild is IMMUTABLE on purpose. `envelope()` returns the live rxResource
+   * value the grid renders from; rounding it in place would move the on-screen
+   * figures too, and only for users who happened to click Export.
+   *
+   * Rounded: every cell quantity, in BOTH blocks, plus the totals — including
+   * `demandFteUncovered`, which is the KPI the forecast block consumes. Untouched:
+   * `months`, ids/names, `band` (a judgement, not a quantity) and `resourceCount`
+   * (an integer headcount).
+   */
+  protected buildJson(): string {
+    const value = this.envelope();
+    return toJson({
+      ...value,
+      rows: roundRows(value.rows),
+      demandRows: roundRows(value.demandRows),
+      totals: roundTotals(value.totals),
+    });
   }
 }

@@ -4,6 +4,7 @@ import { of, throwError } from 'rxjs';
 import { CapacityComponent } from './capacity.component';
 import { ApiService, CapacityMonthly } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
+import { toJson } from '../services/export.util';
 
 /**
  * Known 2-resource × 2-month envelope with distinct bands: Alice is `over` in
@@ -119,6 +120,20 @@ function retryButton(host: HTMLElement): HTMLButtonElement | undefined {
   return [...host.querySelectorAll('button')].find((b) => /Retry/.test(b.textContent ?? ''));
 }
 
+/**
+ * The accessible name of a grid cell AS ASSISTIVE TECH WOULD COMPUTE IT: an
+ * `aria-label` on the cell's own `<td>` (a namable host), else the visually-hidden
+ * text inside it.
+ *
+ * The cell `<div>`'s own `aria-label` is deliberately NOT consulted — that is the
+ * defect. The div has no role, ARIA prohibits naming a role=generic element, and
+ * reading the attribute back with `getAttribute` is exactly the assertion that
+ * certified the bug for as long as it shipped.
+ */
+function exposedName(cell: Element): string {
+  return cell.closest('td')?.getAttribute('aria-label') ?? cell.querySelector('.sr-only')?.textContent ?? '';
+}
+
 describe('CapacityComponent', () => {
   it('renders the over cell (band + percentage) and KPI/totals from the envelope once auth is ready', async () => {
     const { fixture, getCapacityMonthly } = setup(true);
@@ -141,8 +156,13 @@ describe('CapacityComponent', () => {
     expect(overCell.className).toContain('bg-critical-tint');
     expect(overCell.textContent).toContain('125%');
     expect(overCell.textContent?.toLowerCase()).toContain('over');
-    // WCAG: the cell carries an hours-detail aria-label, not colour alone.
-    expect(overCell.getAttribute('aria-label')).toMatch(/200|160/);
+    // WCAG: the hours detail is EXPOSED, not merely present in the markup. This
+    // replaces `expect(overCell.getAttribute('aria-label')).toMatch(/200|160/)`,
+    // which was green purely because the attribute string sat in the DOM — on a
+    // role-less <div>, where ARIA forbids naming, so no AT ever surfaced it. The
+    // dedicated describe below covers all four cell branches.
+    expect(exposedName(overCell)).toMatch(/200|160/);
+    expect(overCell.hasAttribute('aria-label')).toBe(false);
 
     // The idle cell is the neutral tone (distinct from the over cell).
     const idleCell = host.querySelector('[data-cell="r2-2026-07"]') as HTMLElement;
@@ -350,6 +370,212 @@ describe('CapacityComponent', () => {
       expect([...host.querySelectorAll('button')].filter((b) => /CSV|JSON/.test(b.textContent ?? '')).length).toBe(2);
       expect(host.querySelectorAll('[data-test="band-cell"]').length).toBeGreaterThan(0);
       expect(host.querySelectorAll('[data-test="demand-row"]').length).toBe(1);
+    });
+  });
+
+  describe('cell accessible name (must sit on a namable host, not a role-less div)', () => {
+    it('exposes resource, month, hours and target on an internal band cell', async () => {
+      const { fixture } = setup(true);
+      await flush(fixture);
+
+      const host = fixture.nativeElement as HTMLElement;
+      const cell = host.querySelector('[data-cell="r1-2026-07"]') as HTMLElement;
+      const name = exposedName(cell);
+
+      // Everything the visible fragments cannot supply: who, when, and the
+      // 200h-of-160h detail that makes the band judgement checkable.
+      expect(name).toContain('Alice');
+      expect(name).toMatch(/July 2026/);
+      expect(name).toMatch(/planned 200h of 160h target/);
+      expect(name).toMatch(/confirmed 160h/);
+      expect(name).toMatch(/band: Over/i);
+
+      // ABSENCE: the prohibited attribute is GONE from the div, so "leave it and
+      // also add a span" does not count and the old assertion cannot come back.
+      expect(cell.hasAttribute('aria-label')).toBe(false);
+      // ...and it did not simply migrate to the <td>: an aria-label there would
+      // expose the name but REPLACE the cell's visible reading for AT.
+      expect(cell.closest('td')!.hasAttribute('aria-label')).toBe(false);
+      expect(cell.textContent).toContain('125%');
+      expect(cell.textContent).toContain('conf 100%');
+    });
+
+    it('exposes resource and month on an inactive placeholder cell', async () => {
+      // A resource present in `months` but with no cell for one of them — the
+      // dashed placeholder, whose only visible text is an em dash and "n/a".
+      const partial: CapacityMonthly = {
+        ...ENVELOPE,
+        rows: [{ resourceId: 'r1', resourceName: 'Alice', monthly: { '2026-07': ENVELOPE.rows[0].monthly['2026-07'] } }],
+        demandRows: [],
+      };
+      const { fixture } = setup(true, partial);
+      await flush(fixture);
+
+      const host = fixture.nativeElement as HTMLElement;
+      const placeholder = host.querySelector('[data-cell="r1-2026-08"]') as HTMLElement;
+      expect(placeholder).not.toBeNull();
+      // It really is the placeholder branch, not a band cell.
+      expect(placeholder.getAttribute('data-test')).not.toBe('band-cell');
+      expect(placeholder.textContent).toContain('n/a');
+
+      const name = exposedName(placeholder);
+      expect(name).toContain('Alice');
+      expect(name).toMatch(/August 2026/);
+      expect(name).toMatch(/not active/);
+      expect(placeholder.hasAttribute('aria-label')).toBe(false);
+    });
+
+    it('exposes resource, month and hours on an uncovered-demand cell', async () => {
+      const { fixture } = setup(true);
+      await flush(fixture);
+
+      const host = fixture.nativeElement as HTMLElement;
+      const cell = host.querySelector('[data-cell="d1-2026-07"]') as HTMLElement;
+      expect(cell).not.toBeNull();
+
+      const name = exposedName(cell);
+      expect(name).toContain('Dummy SAP');
+      expect(name).toMatch(/July 2026/);
+      expect(name).toMatch(/320h planned/);
+      expect(name).toMatch(/uncovered demand/);
+      // The demand cell must still NOT announce a band: the envelope's 'idle' is an
+      // inert placeholder, and a dummy has no capacity to saturate.
+      expect(name).not.toMatch(/Utilisation band/);
+      expect(cell.hasAttribute('aria-label')).toBe(false);
+    });
+
+    it('leaves no aria-label on any role-less div or span in the rendered page', async () => {
+      // The local form of the register's repo-wide scan. Repo-wide cannot go green
+      // from this batch (8 further live sites are in files this change does not
+      // own), but scoped here it is still the absence twin the three cases above
+      // need: each of them anchors ONE cell, so a sibling branch could regress
+      // while all three stayed green.
+      const { fixture } = setup(true);
+      await flush(fixture);
+
+      const host = fixture.nativeElement as HTMLElement;
+      const offenders = [...host.querySelectorAll('div[aria-label], span[aria-label]')]
+        .filter((el) => !el.hasAttribute('role'))
+        .map((el) => el.getAttribute('data-cell') ?? el.className);
+      expect(offenders).toEqual([]);
+
+      // And the scan is not vacuous: the elements it would have caught ARE on the
+      // page (2 resources + 1 dummy × 2 months), they just carry a named child now.
+      expect(host.querySelectorAll('.sr-only').length).toBeGreaterThanOrEqual(6);
+    });
+  });
+
+  describe('JSON export (≤2 decimals, like its CSV sibling)', () => {
+    /**
+     * Any number printed with 3+ fractional digits. Safe swept over the whole
+     * document: ids are opaque strings and months are 'YYYY-MM', so nothing else
+     * in this payload contains a decimal point.
+     */
+    const LONG_FLOAT = /\d+\.\d{3,}/;
+
+    /**
+     * The float shape the server actually returns: `rollupMonthly` divides summed
+     * hours by a working-day target, so every FTE is a raw quotient and every hours
+     * sum carries binary-float residue. A FACTORY, not a shared constant, so the
+     * immutability case below cannot be fooled by an earlier test's mutation.
+     */
+    function longFloatEnvelope(): CapacityMonthly {
+      return {
+        months: ['2026-06'],
+        rows: [{
+          resourceId: 'r1',
+          resourceName: 'Alice',
+          monthly: {
+            '2026-06': {
+              confirmedHours: 23.289999999999996, plannedHours: 46.57999999999999, targetHours: 176,
+              fteConfirmed: 0.13232954545454542, ftePlanned: 0.26465909090909084, band: 'idle',
+            },
+          },
+        }],
+        demandRows: [{
+          resourceId: 'd1',
+          resourceName: 'Dummy SAP',
+          monthly: {
+            '2026-06': {
+              confirmedHours: 0, plannedHours: 11.229999999999997, targetHours: 176,
+              fteConfirmed: 0, ftePlanned: 0.06380681818181817, band: 'idle',
+            },
+          },
+        }],
+        totals: {
+          '2026-06': {
+            demandFteConfirmed: 0.13232954545454542, demandFtePlanned: 0.26465909090909084,
+            capacityFte: 0.9545454545454546, resourceCount: 1, demandFteUncovered: 0.06380681818181817,
+          },
+        },
+      };
+    }
+
+    it('rounds every quantity to 2 decimals — cells, demand rows and totals alike', async () => {
+      const { fixture } = setup(true, longFloatEnvelope());
+      await flush(fixture);
+
+      // The fixture itself must carry a long float, or the sweep at the end is a
+      // blind green gate: an already-clean envelope passes `not.toMatch` unchanged.
+      expect(toJson(longFloatEnvelope())).toMatch(LONG_FLOAT);
+
+      const json = fixture.componentInstance['buildJson']();
+      const parsed = JSON.parse(json) as CapacityMonthly;
+
+      // toStrictEqual, not toEqual: `toEqual({k: undefined})` is satisfied by `{}`,
+      // so a round that DROPPED a field would otherwise pass here.
+      expect(parsed.rows[0].monthly['2026-06']).toStrictEqual({
+        confirmedHours: 23.29, plannedHours: 46.58, targetHours: 176,
+        fteConfirmed: 0.13, ftePlanned: 0.26, band: 'idle',
+      });
+      expect(Object.keys(parsed.rows[0].monthly['2026-06']).sort()).toEqual(
+        ['band', 'confirmedHours', 'fteConfirmed', 'ftePlanned', 'plannedHours', 'targetHours'],
+      );
+
+      // The demand block and the totals are export payload too — the original fix
+      // proposal listed neither, and `demandFteUncovered` is the figure the
+      // hiring/subco forecast block consumes.
+      expect(parsed.demandRows[0].monthly['2026-06'].plannedHours).toBe(11.23);
+      expect(parsed.demandRows[0].monthly['2026-06'].ftePlanned).toBe(0.06);
+      expect(parsed.totals['2026-06']).toStrictEqual({
+        demandFteConfirmed: 0.13, demandFtePlanned: 0.26, capacityFte: 0.95,
+        resourceCount: 1, demandFteUncovered: 0.06,
+      });
+
+      // The sweep: nowhere in the serialised text does 3+ decimals survive.
+      expect(json).not.toMatch(LONG_FLOAT);
+      // Non-quantities are untouched, so the round is not a blanket reformat.
+      expect(parsed.months).toEqual(['2026-06']);
+      expect(parsed.rows[0].resourceName).toBe('Alice');
+    });
+
+    it('rebuilds immutably: the live envelope the grid renders from is never rounded', async () => {
+      // `envelope()` IS the rxResource value the table binds to. A round applied in
+      // place would silently change the on-screen figures — and only for users who
+      // clicked Export.
+      const env = longFloatEnvelope();
+      const { fixture } = setup(true, env);
+      await flush(fixture);
+
+      fixture.componentInstance['buildJson']();
+
+      expect(env.rows[0].monthly['2026-06'].confirmedHours).toBe(23.289999999999996);
+      expect(env.rows[0].monthly['2026-06'].ftePlanned).toBe(0.26465909090909084);
+      expect(env.demandRows[0].monthly['2026-06'].plannedHours).toBe(11.229999999999997);
+      expect(env.totals['2026-06'].capacityFte).toBe(0.9545454545454546);
+    });
+
+    it('agrees with the CSV sibling on the same cell', async () => {
+      // The whole point of the finding: two buttons side by side must not hand out
+      // mutually inconsistent artefacts. CSV writes 2-decimal FTE strings.
+      const { fixture } = setup(true, longFloatEnvelope());
+      await flush(fixture);
+
+      const csv = fixture.componentInstance['buildCsv']();
+      const parsed = JSON.parse(fixture.componentInstance['buildJson']()) as CapacityMonthly;
+      expect(csv).toContain('Internal capacity,Alice,0.26,0.13');
+      expect(parsed.rows[0].monthly['2026-06'].ftePlanned).toBe(0.26);
+      expect(parsed.rows[0].monthly['2026-06'].fteConfirmed).toBe(0.13);
     });
   });
 
