@@ -6,7 +6,7 @@ import type { CapacityCell, CapacityRow, CapacityTotals } from './capacity.util'
 import type { ResourceKind } from './resource-kind.util';
 import type { OrgLevel } from './org-scope.util';
 import type { NegotiatedRate } from './sell-rate.util';
-import type { BenchRollup } from './bench.util';
+import type { BenchRollup, UnallocatedHistory } from './bench.util';
 
 export type { CapacityCell, CapacityRow, CapacityTotals, ResourceKind };
 // Negotiated sell rate (design spec §3): the wire shape IS Task 1's pure-layer
@@ -14,7 +14,10 @@ export type { CapacityCell, CapacityRow, CapacityTotals, ResourceKind };
 export type { NegotiatedRate } from './sell-rate.util';
 // Block F bench/availability rollup (design spec §8): re-exported rather than
 // redeclared so the wire shape and the pure layer never drift.
-export type { BenchRollup, BenchRow, BenchCell, BenchState, HiringDemandRow, AvailabilityDate, UnallocatedAgingBucket } from './bench.util';
+export type {
+  BenchRollup, BenchRow, BenchCell, BenchState, HiringDemandRow, AvailabilityDate, UnallocatedAgingBucket,
+  UnallocatedHistory, UnallocatedHistoryCell,
+} from './bench.util';
 
 export interface Resource {
   id: string;
@@ -1134,6 +1137,25 @@ export class ApiService {
     let params = new HttpParams();
     if (from) params = params.set('from', from);
     return this.http.get<BenchRollup>(`${this.baseUrl}/bench/monthly`, { params });
+  }
+
+  /**
+   * ONE resource's month-by-month disallocation history (days not allocated + the
+   * percentage), ending at the current month.
+   *
+   * A SEPARATE read from {@link getBenchMonthly} on purpose: that window is fixed
+   * at 6 forward months for the whole grid (see its note), whereas this looks
+   * backward over a longer span for a single row that the user expanded. `months`
+   * defaults to 12 server-side and is refused — not clamped — above 24.
+   *
+   * `cells: []` means NOT TRACKED (a dummy placeholder, or nobody employed in the
+   * window), never "allocated the whole time".
+   */
+  getUnallocatedHistory(resourceId: string, months?: number): Observable<UnallocatedHistory> {
+    let params = new HttpParams();
+    if (months !== undefined) params = params.set('months', String(months));
+    return this.http.get<UnallocatedHistory>(
+      `${this.baseUrl}/bench/history/${encodeURIComponent(resourceId)}`, { params });
   }
 
   // --- Configuration APIs ---

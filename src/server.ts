@@ -15,7 +15,8 @@ import { deriveAssignmentStatus, monthRowId, parseMonthRowId, monthlyAggregateHo
 import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity, monthlyTargetHours } from './app/services/calendar.util';
 import { planSubstitution, planGiveBack, planSubstitutionBooking, type SubstitutionPlan } from './app/services/substitution.util';
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
-import { benchRollup } from './app/services/bench.util';
+import { benchRollup, unallocatedHistoryFor } from './app/services/bench.util';
+import { parseHistoryMonths, benchHistoryWindow } from './server/bench-history-window.util';
 import { searchPage, clampSearchPage } from './app/services/search.util';
 import { convertToBase, computeProjectFinancials, recognitionJournal, plannedCostSchedule, type FinanceData } from './app/services/finance.util';
 import { negotiatedRateCurrencyError, sellRateFor } from './app/services/sell-rate.util';
@@ -3930,6 +3931,61 @@ apiRouter.get('/bench/monthly', async (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
 
   res.json(benchRollup({ resources, assignments, assignmentDays, assignmentMonths, months, displayMonths, hoursPerDay, holidays: holSet }, today));
+});
+
+// ---------------------------------------------------------------------------
+// COMPUTED READ (Block F, RPT comparison row 51): ONE resource's month-by-month
+// disallocation history — days not allocated and the percentage, per month, ending
+// at the current month.
+//
+// Deliberately NOT a widening of '/bench/monthly': that window is fixed at 6
+// months by design spec §8 and four screens read it (the staffing candidate card
+// renders exactly one dot per month of it), it looks FORWARD from an Open planning
+// period rather than backward from now, and this history is an on-demand detail of
+// a single row. The full rationale, and the window arithmetic, live in
+// src/server/bench-history-window.util.ts — extracted so it is testable at all.
+//
+// Already authorized: the '/capacity' READ_RULE was extended to a
+// `startsWith('/bench')` PREFIX test for '/bench/monthly', so this path inherits
+// the same audience with no rule change. roleGate is GLOBAL middleware — do NOT
+// re-gate per-handler. Read-only: no mutation, no audit entry, no withLock.
+// ---------------------------------------------------------------------------
+apiRouter.get('/bench/history/:resourceId', async (req, res) => {
+  const monthsParam = req.query['months'];
+  const parsed = parseHistoryMonths(typeof monthsParam === 'string' ? monthsParam : undefined);
+  if (!parsed.ok) { res.status(400).json({ error: parsed.error }); return; }
+
+  const resourceId = req.params['resourceId'];
+  const resource = await repos.resources.get(resourceId);
+  // 404 only for an id that does not exist. A resource that EXISTS but has no
+  // history (a dummy placeholder — excluded from the bench rollup by design — or
+  // anyone employed in none of the window's months) answers 200 with `cells: []`,
+  // which the client renders as "not tracked". Collapsing the two would make a
+  // real resource look deleted.
+  if (!resource) { res.status(404).json({ error: 'Resource not found' }); return; }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const { months, displayMonths } = benchHistoryWindow(today.slice(0, 7), parsed.months);
+
+  const [assignments, assignmentDays, assignmentMonthRows, holidays, hoursPerDay] = await Promise.all([
+    repos.assignments.list(),
+    repos.assignmentDays.list(),
+    repos.assignmentMonths.list(),
+    repos.holidays.list(),
+    getHoursPerDay(),
+  ]);
+  const holSet = new Set(holidays.map(h => h.id));
+  const assignmentMonths = assignmentMonthRows.map(m => ({ assignmentId: m.assignmentId, month: m.month, status: m.status }));
+
+  const cells = unallocatedHistoryFor(
+    {
+      resources: [resource], assignments, assignmentDays, assignmentMonths,
+      months, displayMonths, hoursPerDay, holidays: holSet,
+    },
+    resourceId,
+    today,
+  );
+  res.json({ resourceId, resourceName: resource.name, cells });
 });
 
 /**

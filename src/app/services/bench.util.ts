@@ -28,6 +28,44 @@ export function benchStateFor(plannedHours: number, targetHours: number): BenchS
   return 'ALLOCATED';
 }
 
+/**
+ * How much of a resource-month is NOT allocated, as a percentage and in days —
+ * the RPT "% di disallocazione" figure (comparison matrix row 50).
+ *
+ * THE DENOMINATOR IS THE RESOURCE'S OWN TARGET, not the company standard month:
+ * `employedWorkingDayCount × ownHoursPerDay`, i.e. the same product
+ * `rollupMonthly` pro-rates capacity by (`capacity.util.ts`, the `capacityFte`
+ * line). A part-timer on 4h/day and a mid-month joiner each have their own
+ * target, so neither is reported as half-idle for working every hour they are
+ * contracted for. This is DELIBERATELY a different denominator from
+ * {@link benchStateFor}'s, which classifies BENCH/PARTIAL/ALLOCATED against the
+ * STANDARD month — so a fully-booked part-timer can legitimately read
+ * `state: 'PARTIAL'` with `unallocatedPct: 0`. The two fields answer two
+ * different questions ("is there room in the standard month" vs "is this person
+ * idle against their own contract"); the divergence is pinned by a test rather
+ * than left to be rediscovered as a bug.
+ *
+ * `undefined`, never a number, when the own target is 0 — a percentage of no
+ * capacity is UNANSWERABLE, not 0%. Reporting 0 there would say "fully
+ * allocated" about someone who has no contracted hours at all, which is the
+ * error direction that hides people.
+ *
+ * Truncated to [0, 100]: an OVER-allocated month is 0% unallocated, never
+ * negative (there is no fourth state above ALLOCATED either — see
+ * {@link benchStateFor}).
+ */
+export function unallocatedShare(
+  plannedHours: number, ownHoursPerDay: number, employedWorkingDayCount: number,
+): { unallocatedPct: number; unallocatedDays: number } | undefined {
+  const targetHours = employedWorkingDayCount * ownHoursPerDay;
+  // `!(x > 0)` rather than `x <= 0` so NaN lands here too; a non-finite booking is
+  // likewise unanswerable, and must never reach a template as "NaN%".
+  if (!(targetHours > 0) || !Number.isFinite(plannedHours)) return undefined;
+  // targetHours > 0 implies ownHoursPerDay > 0, so the days division is safe.
+  const idleHours = Math.min(targetHours, Math.max(0, targetHours - plannedHours));
+  return { unallocatedPct: (idleHours / targetHours) * 100, unallocatedDays: idleHours / ownHoursPerDay };
+}
+
 /** Retrospective aging buckets (spec §5.1) — ordered, like `AR_AGING_BUCKETS`. */
 export const UNALLOCATED_AGING_BUCKETS = ['B', 'C', 'D'] as const;
 export type UnallocatedAgingBucket = (typeof UNALLOCATED_AGING_BUCKETS)[number];
@@ -133,6 +171,24 @@ export interface BenchCell {
   state: BenchState;
   agingBucket?: UnallocatedAgingBucket;
   upcomingUnallocated: boolean;
+  /**
+   * How much of this month the resource is NOT allocated for — RPT's
+   * disallocation figure (comparison matrix row 50), which the 3-valued `state`
+   * cannot express (it cannot tell someone idle at 10% from someone idle at 90%).
+   *
+   * OPTIONAL, and the absence is a VALUE, not an omission: both fields are absent
+   * exactly when the resource's own monthly target is 0, because a share of no
+   * capacity is unanswerable rather than 0 (see {@link unallocatedShare}). Same
+   * kind of semantic absence `agingBucket` already has on this type. A renderer
+   * must therefore distinguish "no answer" from "0%" — showing 0% for an absent
+   * value claims someone is fully allocated when nothing is known.
+   *
+   * Raw and unrounded, like every other figure crossing this boundary; the 2-decimal
+   * cap is a rendering step.
+   */
+  unallocatedPct?: number;
+  /** Days not allocated in the month, same absence rule as {@link BenchCell.unallocatedPct}. */
+  unallocatedDays?: number;
 }
 export interface BenchRow {
   resourceId: string; resourceName: string; kind: 'internal' | 'subco';
@@ -187,6 +243,11 @@ export function benchRollup(input: BenchRollupInput, today: string): BenchRollup
 
     const activeOf = new Map<string, boolean>();
     const stateOf = new Map<string, BenchState>();
+    // The resource's OWN monthly target, per month: employed working days ×
+    // their own contracted hours. Kept alongside `stateOf` (whose target is the
+    // company standard month) because `unallocatedShare` needs the pro-rated
+    // one — see its doc comment for why the two denominators differ on purpose.
+    const ownTargetOf = new Map<string, { days: number; hoursPerDay: number }>();
     for (const m of months) {
       // Employment is measured in DAYS, not months — the same `employedWorkingDays`
       // gate `rollupMonthly` uses, and the same granularity the server enforces a
@@ -197,11 +258,13 @@ export function benchRollup(input: BenchRollupInput, today: string): BenchRollup
       // screens over one endpoint's data disagreeing about whether a person exists
       // this month is the defect; there is no bench-specific reason to answer the
       // employment question differently from the capacity grid.
-      const active = employedWorkingDays(r, m, holidays).length > 0;
+      const employedDays = employedWorkingDays(r, m, holidays);
+      const active = employedDays.length > 0;
       activeOf.set(m, active);
       if (!active) continue;
       const cell = hoursByResMonth.get(r.id)?.get(m) ?? { confirmed: 0, planned: 0 };
       stateOf.set(m, benchStateFor(cell.planned, targetByMonth.get(m)!));
+      ownTargetOf.set(m, { days: employedDays.length, hoursPerDay: r.contractHoursPerDay ?? hoursPerDay });
     }
 
     if (!displayMonths.some(m => activeOf.get(m))) continue; // never active in a SHOWN month -> no row
@@ -214,6 +277,10 @@ export function benchRollup(input: BenchRollupInput, today: string): BenchRollup
       const state = stateOf.get(m)!;
       const cell: BenchCell = { state, upcomingUnallocated: false };
       if (state === 'BENCH') cell.agingBucket = bucketForMonthsIdle(monthsIdleAt(benchFlags, monthIndex.get(m)!));
+      const own = ownTargetOf.get(m)!;
+      const share = unallocatedShare(hoursByResMonth.get(r.id)?.get(m)?.planned ?? 0, own.hoursPerDay, own.days);
+      // Left ABSENT, never zeroed, when the own target is 0 — see BenchCell.
+      if (share) { cell.unallocatedPct = share.unallocatedPct; cell.unallocatedDays = share.unallocatedDays; }
       monthly[m] = cell;
     }
     for (const m of displayMonths) {
@@ -235,6 +302,79 @@ export function benchRollup(input: BenchRollupInput, today: string): BenchRollup
   }
 
   return { months: displayMonths, internalRows, subcoRows, hiringDemand: hiringDemandByMonth(resources, hoursByResMonth, displayMonths) };
+}
+
+/** One month of {@link UnallocatedHistory} — see it for why `upcomingUnallocated` is absent. */
+export interface UnallocatedHistoryCell {
+  month: string;
+  state: BenchState;
+  agingBucket?: UnallocatedAgingBucket;
+  /** Same "absent means unanswerable" rule as {@link BenchCell.unallocatedPct}. */
+  unallocatedPct?: number;
+  unallocatedDays?: number;
+}
+
+/**
+ * Per-resource monthly disallocation history — RPT's expandable row (comparison
+ * matrix row 51: `2025-03 · disallocato 21 gg · 100%`).
+ *
+ * `cells` is OLDEST-FIRST, matching `displayMonths` and every other month list in
+ * the app (the bench grid, the capacity grid), and carries ONLY the months the
+ * resource was genuinely employed in: a month they were not employed is an ABSENT
+ * entry, never a 0%/0-day row, because "we did not employ them" and "we employed
+ * them and left them idle" are opposite facts.
+ *
+ * `cells: []` is a legitimate answer (a dummy placeholder, which the bench rollup
+ * excludes by design, or anyone employed in none of the window's months) and means
+ * NOT TRACKED — never "allocated the whole time". Same rule the availability strip
+ * already renders explicitly.
+ *
+ * `upcomingUnallocated` is deliberately NOT carried: it is a forward-looking claim
+ * about the month AFTER the one it sits on, which is meaningless in a retrospective
+ * list and, on the last cell, would describe a month the history does not show.
+ */
+export interface UnallocatedHistory {
+  resourceId: string;
+  resourceName: string;
+  cells: UnallocatedHistoryCell[];
+}
+
+/**
+ * The history's cells for ONE resource, derived by running {@link benchRollup}
+ * over `input` narrowed to that resource.
+ *
+ * Reusing `benchRollup` rather than re-deriving the percentage is the point: the
+ * history's most recent month and the /bench grid's current-month column are then
+ * the SAME computation, so they cannot drift into disagreeing about how idle
+ * somebody is. It also inherits the aging buckets and the employment-day gate for
+ * free. Narrowing `resources` first keeps the cost proportional to one row instead
+ * of the whole org (`hiringDemand` collapses to empty, since a single internal or
+ * subco resource contributes none).
+ */
+export function unallocatedHistoryFor(
+  input: BenchRollupInput, resourceId: string, today: string,
+): UnallocatedHistoryCell[] {
+  const only = input.resources.filter(r => r.id === resourceId);
+  if (only.length === 0) return [];
+  const roll = benchRollup({ ...input, resources: only }, today);
+  const row = [...roll.internalRows, ...roll.subcoRows][0];
+  if (row === undefined) return [];
+  const cells: UnallocatedHistoryCell[] = [];
+  for (const month of input.displayMonths) {
+    const cell = row.monthly[month];
+    if (cell === undefined) continue; // not employed that month: absent, not zeroed
+    // Optional keys are OMITTED rather than set to `undefined`, so this object has
+    // the same shape in-process as it does after the JSON round-trip the client
+    // actually receives (`JSON.stringify` drops undefined-valued keys). Setting
+    // them explicitly would make a `toStrictEqual` test pass against a shape no
+    // browser ever sees.
+    const out: UnallocatedHistoryCell = { month, state: cell.state };
+    if (cell.agingBucket !== undefined) out.agingBucket = cell.agingBucket;
+    if (cell.unallocatedPct !== undefined) out.unallocatedPct = cell.unallocatedPct;
+    if (cell.unallocatedDays !== undefined) out.unallocatedDays = cell.unallocatedDays;
+    cells.push(out);
+  }
+  return cells;
 }
 
 /**
