@@ -21,22 +21,24 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
         <!-- Header -->
         <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div class="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
-            @if (!projectId()) {
+            @if (headingLevel() === 1) {
               <div>
-                <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Project Schedule & Plans</h2>
+                <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Project Schedule & Plans</h1>
                 <p class="text-sm text-[var(--cc-muted)] mt-2">Manage work packages, scheduling, and key milestones.</p>
               </div>
+            } @else {
+              <div>
+                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Project Schedule & Plans</h2>
+                <p class="text-sm text-[var(--cc-muted)] mt-1">Manage work packages, scheduling, and key milestones.</p>
+              </div>
+            }
+            @if (!projectId()) {
               <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block w-full min-w-0 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)] sm:w-auto">
                 <option value="" disabled>Select a project...</option>
                 @for (p of projects(); track p.id) {
                   <option [value]="p.id">{{ p.name }}</option>
                 }
               </select>
-            } @else {
-              <div>
-                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Project Schedule & Plans</h2>
-                <p class="text-sm text-[var(--cc-muted)] mt-1">Manage work packages, scheduling, and key milestones.</p>
-              </div>
             }
           </div>
           <div class="flex flex-wrap gap-3">
@@ -442,6 +444,20 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
 })
 export class ProjectPlans {
   projectId = input<string>();
+  /**
+   * Which element carries this panel's own title: `<h1>` when it stands alone on
+   * its route, `<h2>` when project-details embeds it as a tab panel beneath the
+   * project-name `<h1>`.
+   *
+   * ONE mechanism, applied identically by all eight embeddable project panels;
+   * the `[headingLevel]="2"` bindings and the full rationale live in
+   * project-details.ts. Adding a plain `<h1>` here instead would have put TWO h1
+   * elements on /projects/:id — trading the missing-h1 defect for a duplicate-h1
+   * one. Typed `1 | 2` so no caller can ask for the `<h3>` that would skip a
+   * level under the page `<h1>`. The size classes are unchanged in both
+   * branches: the heading LEVEL is what moves, never the type scale.
+   */
+  headingLevel = input<1 | 2>(1);
   private api = inject(ApiService);
   private notificationService = inject(NotificationService);
   private auth = inject(AuthService);

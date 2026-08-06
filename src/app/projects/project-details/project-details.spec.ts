@@ -62,6 +62,22 @@ function moneySkeleton(fixture: { nativeElement: unknown }): Element | null {
   return host(fixture).querySelector('[aria-label="Loading project financials"]');
 }
 
+/**
+ * Every heading in the WHOLE rendered page, in document order, with its level
+ * read from the tag name.
+ *
+ * Two things this shape buys that a text search cannot. (1) The h1 assertions
+ * below count elements rather than looking one up: `querySelector('h1')` is
+ * satisfied by the FIRST of two, which is exactly the duplicate-h1 defect a
+ * naive "add an h1 to each panel" sweep produces. (2) It makes the heading
+ * OUTLINE observable, so a skipped level is provable from structure instead of
+ * from a class name.
+ */
+function headings(fixture: { nativeElement: unknown }): { level: number; text: string }[] {
+  return Array.from(host(fixture).querySelectorAll('h1, h2, h3, h4, h5, h6'))
+    .map(el => ({ level: Number(el.tagName.slice(1)), text: el.textContent?.trim() ?? '' }));
+}
+
 async function tick(fixture: ComponentFixture<unknown>, microtasks = 5): Promise<void> {
   fixture.detectChanges();
   for (let i = 0; i < microtasks; i++) await Promise.resolve();
@@ -89,6 +105,13 @@ function makeApiStub(overrides: Partial<Record<string, unknown>> = {}) {
     getOrders: empty, getOrderLines: empty, getProjectFinancials: empty, getTimeEntries: empty,
     getProjectIssues: empty, getChangeRequests: empty,
     getFxRates: () => of(EUR_ONLY_FX),
+    // Reads belonging to the nine TAB PANELS this page embeds, not to the page
+    // itself. Only the heading-convention suite at the bottom of this file opens
+    // a panel, and the Overview-only suites never touch these.
+    getProjectTasks: empty, getProjectPartners: empty, getProjectDocuments: empty,
+    getWorkPackages: empty, getMilestones: empty, getVendors: empty, getPartnerRoles: empty,
+    getCostCenters: empty, getProjectCostCenters: empty, getCostCategories: empty,
+    getNegotiatedRates: empty, getProjectRoles: empty,
     getRequests: () => of([REQUEST]),
     getAssignments: () => of([ASSIGNMENT]),
     getResources: () => of([RESOURCE]),
@@ -123,6 +146,12 @@ function makeAuthStub(role: StubRole, authReady = true) {
     // AuthService.canApproveFinancials IS canReadFinancials (auth.service.ts:134).
     canApproveFinancials: () => caps.canReadFinancials,
     canManageCommercial: () => caps.canManageCommercial,
+    // Read by the embedded tab panels (project-tasks' coverage column,
+    // change-requests' requester, project-documents' author), so they too come
+    // from the shipping table rather than from hand-written booleans.
+    canReadCommercial: () => caps.canReadCommercial,
+    userId: () => 'u-viewer',
+    displayName: () => 'Julie Armstrong',
   } as unknown as AuthService;
 }
 
@@ -136,7 +165,7 @@ function createFixture(role: StubRole, apiOverrides: Partial<Record<string, unkn
       provideRouter([]),
       { provide: ApiService, useValue: api },
       { provide: AuthService, useValue: makeAuthStub(role, authReady) },
-      { provide: NotificationService, useValue: { show: vi.fn() } },
+      { provide: NotificationService, useValue: { show: vi.fn(), error: vi.fn() } },
     ],
   });
   const fixture = TestBed.createComponent(ProjectDetailsComponent);
@@ -642,5 +671,151 @@ describe('ProjectDetailsComponent — order lines are converted to the base curr
     expect(host(fixture).textContent).toContain("Couldn't load project financials");
     expect(findKpi(fixture, 'Contract Revenue')).toBeNull();
     expect(host(fixture).textContent).not.toContain('120,000');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The heading convention: `[headingLevel]="2"` on every embedded panel.
+//
+// THIS IS THE ABSENCE TWIN of the eight panel specs' "standalone route has
+// exactly one h1" tests, and the half a naive sweep fails. Each of those eight
+// components is ALSO a route of its own (app.routes.ts), so each needs its title
+// to be an h1 there — but all nine tab panels render INSIDE this page, which
+// already has its own h1 (the project name). Giving each panel a plain h1 would
+// have put TWO h1 elements on /projects/:id: one accessibility defect traded for
+// another.
+//
+// Every assertion here COUNTS h1 elements. `querySelector('h1')` — or a
+// `toContain(projectName)` on its text — is satisfied by the first of two and so
+// passes with the duplicate present, which is precisely the shape this file
+// exists to refuse.
+//
+// SCOPE OF THE NO-SKIPPED-LEVEL CHECK, stated so its absence elsewhere is not
+// read as an oversight. It is asserted HERE, over the whole embedded page,
+// because that is where the convention put a new h2 into an existing outline.
+// The eight panels' own specs do not assert an outline for their STANDALONE
+// route: there the new h1 is followed by the h3 card / empty-state titles those
+// panels already had ("No Project Selected", a document card, the financial-plan
+// KPI labels, the plan sections), which is the shape every page in this app that
+// already owns its h1 has — projects.ts:27 then :55, orders.ts:23 then :97. Its
+// depth is a repo-wide question about those h3s, not about this input, and
+// asserting the jump here would be asserting the defect.
+// ---------------------------------------------------------------------------
+
+describe('ProjectDetailsComponent — exactly ONE h1 on the page, whichever tab panel is open', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  /**
+   * Every panel this page can render, with the title text the panel itself
+   * prints. Nine entries, not eight: `rates` is embedded here too. It takes no
+   * `[headingLevel]` binding because it has no route of its own and its title is
+   * already an h2 — and it is listed so that a later change giving it an h1
+   * cannot slip through this page's h1 count.
+   */
+  const PANELS: readonly { tab: string; title: string }[] = [
+    { tab: 'partners', title: 'Project Partners' },
+    { tab: 'documents', title: 'Documents' },
+    { tab: 'plans', title: 'Project Schedule & Plans' },
+    { tab: 'financials', title: 'Financial Plans' },
+    { tab: 'cost-centers', title: 'Cost Centers' },
+    { tab: 'rates', title: 'Negotiated Rates' },
+    { tab: 'tasks', title: 'Tasks' },
+    { tab: 'issues', title: 'Issues' },
+    { tab: 'changes', title: 'Change Control' },
+  ];
+
+  /** delivery-executive holds every capability the nine panels gate on, so each
+   *  one renders its real content rather than an access notice. */
+  async function openTab(tab: string) {
+    const { fixture } = await render('delivery-executive', moneyProject());
+    fixture.componentInstance.activeTab.set(tab);
+    await tick(fixture);
+    return fixture;
+  }
+
+  it('Overview: one h1, and it is the project name — not a tile label', async () => {
+    const { fixture } = await render('delivery-executive', moneyProject());
+    // Anchored to a RESOLVED page: read through the same exact-label tile helper
+    // the rest of this file uses, so "one h1" is not being asserted about a
+    // skeleton or an error panel.
+    expect(kpi(fixture, 'Budget').value).toContain('80,000');
+
+    const h1s = host(fixture).querySelectorAll('h1');
+    expect(h1s).toHaveLength(1);
+    expect(h1s[0].textContent?.trim()).toBe(PROJECT.name);
+  });
+
+  for (const { tab, title } of PANELS) {
+    it(`${tab}: the page still has exactly ONE h1 and it is the project name, never the panel title`, async () => {
+      const fixture = await openTab(tab);
+
+      // PRECONDITION, asserted first: the panel really is on screen. Without
+      // this the h1 count would be satisfied by a panel that failed to render at
+      // all — green before and after any change to it.
+      const panelTitle = headings(fixture).find(h => h.text === title);
+      expect(panelTitle, `the ${tab} panel must have rendered its "${title}" title`).toBeDefined();
+
+      const h1s = host(fixture).querySelectorAll('h1');
+      expect(h1s, `${tab} must not add a second h1 to /projects/:id`).toHaveLength(1);
+      expect(h1s[0].textContent?.trim()).toBe(PROJECT.name);
+      // ...and the one h1 is the PROJECT, so the panel title is not it.
+      expect(h1s[0].textContent?.trim()).not.toBe(title);
+    });
+
+    it(`${tab}: the panel title is an h2 — one level under the page h1, not the h3 that would skip one`, async () => {
+      const fixture = await openTab(tab);
+      const panelTitle = headings(fixture).find(h => h.text === title);
+      expect(panelTitle, `the ${tab} panel must have rendered its "${title}" title`).toBeDefined();
+      // RED before the fix for cost-centers, whose embedded title was an h3
+      // sitting directly under the project-name h1.
+      expect(panelTitle!.level).toBe(2);
+    });
+
+    it(`${tab}: no heading level is skipped anywhere on the page`, async () => {
+      const fixture = await openTab(tab);
+      const outline = headings(fixture);
+      // A rendered panel always contributes at least its own title, so an empty
+      // or single-heading outline means nothing rendered and the loop below
+      // would be vacuous.
+      expect(outline.length, `the ${tab} panel must contribute headings`).toBeGreaterThan(1);
+      expect(outline[0].level, 'the page must open at h1').toBe(1);
+      for (let i = 1; i < outline.length; i++) {
+        const jump = outline[i].level - outline[i - 1].level;
+        expect(
+          jump,
+          `"${outline[i].text}" (h${outline[i].level}) jumps ${jump} levels after "${outline[i - 1].text}" (h${outline[i - 1].level})`,
+        ).toBeLessThanOrEqual(1);
+      }
+    });
+  }
+
+  it('the level is passed by the PARENT, not inferred from projectId, so no h1 appears while the project is still loading', async () => {
+    // `[projectId]="project()?.id"` is undefined until projectsRes resolves. A
+    // child that keyed its heading off "do I have an id" — the discriminator
+    // these panels already use for their project picker — would render its
+    // standalone h1 inside this page for that whole window. Here the project
+    // never resolves at all, so the state is held open and observable.
+    const pending = new Subject<Project[]>();
+    const { fixture } = await render('delivery-executive', moneyProject({
+      getProjects: () => pending.asObservable(),
+    }));
+    fixture.componentInstance.activeTab.set('tasks');
+    await tick(fixture);
+
+    // The page's own h1 is inside `@if (project(); as p)`, so it is absent too:
+    // zero h1 elements is the honest count here, and the panel must not supply
+    // one of its own.
+    expect(host(fixture).querySelectorAll('h1')).toHaveLength(0);
+    // The panel IS rendered — this is not a vacuous count over an empty page.
+    const panelTitle = headings(fixture).find(h => h.text === 'Tasks');
+    expect(panelTitle, 'the tasks panel must be on screen in this state').toBeDefined();
+    expect(panelTitle!.level).toBe(2);
+
+    pending.next([PROJECT]);
+    pending.complete();
+    await tick(fixture);
+    // MIRROR: once the project lands, the page h1 appears — exactly one of it.
+    expect(host(fixture).querySelectorAll('h1')).toHaveLength(1);
+    expect(host(fixture).querySelector('h1')?.textContent?.trim()).toBe(PROJECT.name);
   });
 });

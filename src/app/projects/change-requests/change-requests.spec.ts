@@ -181,3 +181,110 @@ describe('Change Requests — the impact tiles and the finance engine share ONE 
     expect(Number.isNaN(cmp.approvedScheduleImpact())).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The heading convention. This component is BOTH the /change-requests route and a
+// tab panel inside project-details, which renders its own h1 (the project name).
+// `headingLevel` is the one mechanism all eight embeddable panels use; the twin
+// of these cases — that /projects/:id still has exactly ONE h1 with a panel open
+// — lives in project-details.spec.ts.
+// ---------------------------------------------------------------------------
+
+function host(fixture: ComponentFixture<ChangeRequests>): HTMLElement {
+  return fixture.nativeElement as HTMLElement;
+}
+
+/** Class tokens, SPLIT — never a className substring check. 'text-3xl' is a
+ *  substring of 'sm:text-3xl', so a substring test cannot tell the responsive
+ *  variant from the base one. */
+function classTokens(el: Element): string[] {
+  return el.className.split(/\s+/).filter(Boolean);
+}
+
+/** The heading — at whatever level — whose trimmed text is exactly `text`. */
+function headingFor(fixture: ComponentFixture<ChangeRequests>, text: string): HTMLElement {
+  const el = Array.from(host(fixture).querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'))
+    .find(h => h.textContent?.trim() === text);
+  expect(el, `a heading reading "${text}" must be rendered`).toBeTruthy();
+  return el!;
+}
+
+describe('ChangeRequests — the screen title is an h1 on its own route, an h2 when embedded', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  const TITLE = 'Change Control';
+  const APPROVED = cr({ status: 'Approved', impactBudget: 1_000, id: 'CR-A' });
+
+  /** The /change-requests route: the router sets no inputs at all, so the
+   *  component's own defaults are what ships. */
+  function renderStandalone(): ComponentFixture<ChangeRequests> {
+    const api = {
+      getProjects: () => of([]),
+      getChangeRequests: () => of([APPROVED]),
+      getResources: () => of([]),
+    } as unknown as ApiService;
+    TestBed.configureTestingModule({
+      imports: [ChangeRequests],
+      providers: [
+        { provide: ApiService, useValue: api },
+        { provide: AuthService, useValue: { authReady: signal(true), userId: signal('1') } },
+        { provide: NotificationService, useValue: { show: vi.fn() } },
+      ],
+    });
+    return TestBed.createComponent(ChangeRequests);
+  }
+
+  /** Exactly what project-details binds on this panel. */
+  function renderEmbedded(): ComponentFixture<ChangeRequests> {
+    const fixture = renderStandalone();
+    fixture.componentRef.setInput('projectId', PROJECT);
+    fixture.componentRef.setInput('headingLevel', 2);
+    return fixture;
+  }
+
+  async function settle(fixture: ComponentFixture<ChangeRequests>): Promise<void> {
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+  }
+
+  it('standalone: EXACTLY ONE h1, and it carries the screen title', async () => {
+    const fixture = renderStandalone();
+    await settle(fixture);
+    // RED before the fix: 0 — the title was an h2 and the route had no h1 at all.
+    // COUNTED, not looked up: querySelector('h1') would also pass with two.
+    const h1s = host(fixture).querySelectorAll('h1');
+    expect(h1s).toHaveLength(1);
+    expect(h1s[0].textContent?.trim()).toBe(TITLE);
+    // The standalone shape, proved by its own affordance: the all-projects filter
+    // that only this route shows.
+    expect(host(fixture).querySelector('#changeProjectFilter')).not.toBeNull();
+  });
+
+  it('embedded: NO h1 anywhere, and the title is an h2 — the absence twin', async () => {
+    const fixture = renderEmbedded();
+    await settle(fixture);
+    expect(host(fixture).querySelectorAll('h1')).toHaveLength(0);
+    expect(headingFor(fixture, TITLE).tagName).toBe('H2');
+    expect(headingFor(fixture, TITLE).tagName).not.toBe('H3');
+    expect(host(fixture).querySelector('#changeProjectFilter')).toBeNull();
+    // The panel really rendered its own content, so the count is not vacuous.
+    expect(host(fixture).textContent).toContain(APPROVED.title);
+  });
+
+  it('the title keeps its type scale — and here that is the SAME scale in both states, because this panel only ever had one title branch (class TOKENS read from the source; jsdom loads no stylesheet)', async () => {
+    const standalone = renderStandalone();
+    await settle(standalone);
+    const standaloneTokens = classTokens(headingFor(standalone, TITLE));
+    TestBed.resetTestingModule();
+
+    const embedded = renderEmbedded();
+    await settle(embedded);
+    const embeddedTokens = classTokens(headingFor(embedded, TITLE));
+
+    // The strongest form of "the element moves, the styling does not": byte-equal
+    // token lists, page scale in both.
+    expect(embeddedTokens).toEqual(standaloneTokens);
+    expect(standaloneTokens).toEqual(expect.arrayContaining(['text-2xl', 'sm:text-3xl', 'tracking-tight']));
+  });
+});

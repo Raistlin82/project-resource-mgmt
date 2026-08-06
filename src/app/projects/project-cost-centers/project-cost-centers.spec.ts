@@ -174,3 +174,113 @@ describe('ProjectCostCenters — a refused save must not discard what was typed'
     expect(optionValues).toEqual(['CC-1002']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The heading convention. This component is BOTH the /project-cost-centers route
+// and a tab panel inside project-details, which renders its own h1 (the project
+// name). `headingLevel` is the one mechanism all eight embeddable panels use; the
+// twin of these cases — that /projects/:id still has exactly ONE h1 with a panel
+// open — lives in project-details.spec.ts.
+//
+// This panel is the one that ALSO carried a level-skip: embedded, its title was
+// an h3 sitting directly under the project-name h1.
+// ---------------------------------------------------------------------------
+
+/** Class tokens, SPLIT — never a className substring check. 'text-3xl' is a
+ *  substring of 'sm:text-3xl', so a substring test cannot tell the responsive
+ *  variant from the base one. */
+function classTokens(el: Element): string[] {
+  return el.className.split(/\s+/).filter(Boolean);
+}
+
+/** The heading — at whatever level — whose trimmed text is exactly `text`. */
+function headingFor(fixture: { nativeElement: unknown }, text: string): HTMLElement {
+  const el = Array.from(host(fixture).querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'))
+    .find(h => h.textContent?.trim() === text);
+  expect(el, `a heading reading "${text}" must be rendered`).toBeTruthy();
+  return el!;
+}
+
+describe('ProjectCostCenters — the screen title is an h1 on its own route, an h2 when embedded', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  const TITLE = 'Cost Centers';
+  const PROJECT: Project = {
+    id: '9', name: 'Project Nine', location: 'Rome', startDate: '2026-01-01',
+    endDate: '2026-12-31', status: 'In Execution', ownerId: 'R1',
+  };
+  const ROW: ProjectCostCenter = {
+    id: 'CC-1001', projectId: '9', name: 'Engineering & Dev', manager: 'Alice Smith',
+    allocated: 150000, actual: 125000,
+  };
+
+  /** The /project-cost-centers route: the router sets no inputs at all, so the
+   *  component's own defaults are what ships. */
+  function renderStandalone(): ComponentFixture<ProjectCostCenters> {
+    const api = {
+      getProjects: () => of([PROJECT]),
+      getResources: () => of([]),
+      getCostCenters: () => of([] as CostCenter[]),
+      getProjectCostCenters: () => of([ROW]),
+    } as unknown as ApiService;
+    TestBed.configureTestingModule({
+      imports: [ProjectCostCenters],
+      providers: [
+        { provide: ApiService, useValue: api },
+        { provide: AuthService, useValue: { authReady: signal(true), canApproveFinancials: signal(true) } as unknown as AuthService },
+        { provide: NotificationService, useValue: { show: vi.fn() } as unknown as NotificationService },
+      ],
+    });
+    return TestBed.createComponent(ProjectCostCenters);
+  }
+
+  /** Exactly what project-details binds on this panel. */
+  function renderEmbedded(): ComponentFixture<ProjectCostCenters> {
+    const fixture = renderStandalone();
+    fixture.componentRef.setInput('projectId', '9');
+    fixture.componentRef.setInput('headingLevel', 2);
+    return fixture;
+  }
+
+  it('standalone: EXACTLY ONE h1, and it carries the screen title', async () => {
+    const fixture = renderStandalone();
+    await tick(fixture);
+    // RED before the fix: 0 — the title was an h2 and the route had no h1 at all.
+    // COUNTED, not looked up: querySelector('h1') would also pass with two.
+    const h1s = host(fixture).querySelectorAll('h1');
+    expect(h1s).toHaveLength(1);
+    expect(h1s[0].textContent?.trim()).toBe(TITLE);
+    expect(host(fixture).querySelector('select[aria-label="Select project"]')).not.toBeNull();
+  });
+
+  it('embedded: NO h1 anywhere, and the title is an h2 — NOT the h3 it used to be', async () => {
+    const fixture = renderEmbedded();
+    await tick(fixture);
+    expect(host(fixture).querySelectorAll('h1')).toHaveLength(0);
+    // RED before the fix: 'H3' — a level skipped straight under the page h1,
+    // which is a defect of its own rather than a milder form of the missing h1.
+    expect(headingFor(fixture, TITLE).tagName).toBe('H2');
+    expect(headingFor(fixture, TITLE).tagName).not.toBe('H3');
+    expect(host(fixture).querySelector('select[aria-label="Select project"]')).toBeNull();
+    // The panel really rendered its table, so the count above is not vacuous.
+    expect(host(fixture).textContent).toContain(ROW.name);
+  });
+
+  it('the title keeps the type scale it had in each state (class TOKENS read from the source — jsdom loads no stylesheet and computes no size)', async () => {
+    const standalone = renderStandalone();
+    await tick(standalone);
+    expect(classTokens(headingFor(standalone, TITLE))).toEqual(
+      expect.arrayContaining(['text-2xl', 'sm:text-3xl', 'tracking-tight']),
+    );
+    TestBed.resetTestingModule();
+
+    const embedded = renderEmbedded();
+    await tick(embedded);
+    // Promoting the h3 to an h2 must not have promoted its SIZE: text-lg, exactly
+    // as before.
+    const embeddedTokens = classTokens(headingFor(embedded, TITLE));
+    expect(embeddedTokens).toEqual(expect.arrayContaining(['text-lg']));
+    expect(embeddedTokens).not.toContain('text-2xl');
+    expect(embeddedTokens).not.toContain('sm:text-3xl');
+  });
+});

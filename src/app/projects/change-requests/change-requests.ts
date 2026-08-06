@@ -20,7 +20,14 @@ import { countsTowardEffectiveBudget } from '../../services/finance.util';
       <div class="space-y-6">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
-            <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Change Control</h2>
+            <!-- Unlike its seven siblings this panel has only ever had ONE title
+                 branch, so the two arms carry the SAME size classes: the element
+                 changes with the heading level, the type scale does not move. -->
+            @if (headingLevel() === 1) {
+              <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Change Control</h1>
+            } @else {
+              <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Change Control</h2>
+            }
             <p class="text-sm text-[var(--cc-muted)] mt-1">Govern scope, budget, and schedule changes through explicit decisions.</p>
           </div>
           <button (click)="openForm()" class="command-button">
@@ -235,6 +242,20 @@ import { countsTowardEffectiveBudget } from '../../services/finance.util';
 })
 export class ChangeRequests {
   projectId = input<string>();
+  /**
+   * Which element carries this panel's own title: `<h1>` when it stands alone on
+   * its route, `<h2>` when project-details embeds it as a tab panel beneath the
+   * project-name `<h1>`.
+   *
+   * ONE mechanism, applied identically by all eight embeddable project panels;
+   * the `[headingLevel]="2"` bindings and the full rationale live in
+   * project-details.ts. Adding a plain `<h1>` here instead would have put TWO h1
+   * elements on /projects/:id — trading the missing-h1 defect for a duplicate-h1
+   * one. Typed `1 | 2` so no caller can ask for the `<h3>` that would skip a
+   * level under the page `<h1>`. The size classes are unchanged in both
+   * branches: the heading LEVEL is what moves, never the type scale.
+   */
+  headingLevel = input<1 | 2>(1);
   private api = inject(ApiService);
   private auth = inject(AuthService);
   private notifications = inject(NotificationService);

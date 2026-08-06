@@ -396,3 +396,107 @@ describe('ProjectPlans — the three plan dialogs survive a refused write', () =
     expect(c.editingWpId()).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// The heading convention. This component is BOTH the /project-plans route and a
+// tab panel inside project-details, which renders its own h1 (the project name).
+// `headingLevel` is the one mechanism all eight embeddable panels use; the twin
+// of these cases — that /projects/:id still has exactly ONE h1 with a panel open
+// — lives in project-details.spec.ts.
+// ---------------------------------------------------------------------------
+
+/** Class tokens, SPLIT — never a className substring check. 'text-3xl' is a
+ *  substring of 'sm:text-3xl', so a substring test cannot tell the responsive
+ *  variant from the base one (the same trap the overlay suite above names). */
+function classTokens(el: Element): string[] {
+  return el.className.split(/\s+/).filter(Boolean);
+}
+
+/** The heading — at whatever level — whose trimmed text is exactly `text`. */
+function headingFor(fixture: { nativeElement: unknown }, text: string): HTMLElement {
+  const el = Array.from(host(fixture).querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'))
+    .find(h => h.textContent?.trim() === text);
+  expect(el, `a heading reading "${text}" must be rendered`).toBeTruthy();
+  return el!;
+}
+
+describe('ProjectPlans — the screen title is an h1 on its own route, an h2 when embedded', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  const TITLE = 'Project Schedule & Plans';
+
+  /** The /project-plans route: the router sets no inputs at all, so the
+   *  component's own defaults are what ships. */
+  function renderStandalone(): ComponentFixture<ProjectPlans> {
+    const api = {
+      getProjects: () => of([PLAN_PROJECT]),
+      getResources: () => of([]),
+      getWorkPackages: () => of([PLAN_WP]),
+      getMilestones: () => of([PENDING_MS]),
+    } as unknown as ApiService;
+    TestBed.configureTestingModule({
+      imports: [ProjectPlans],
+      providers: [
+        { provide: ApiService, useValue: api },
+        { provide: AuthService, useValue: { authReady: signal(true), userId: signal('U-actor') } as unknown as AuthService },
+        { provide: NotificationService, useValue: { show: vi.fn() } as unknown as NotificationService },
+      ],
+    });
+    return TestBed.createComponent(ProjectPlans);
+  }
+
+  /** Exactly what project-details binds on this panel. */
+  function renderEmbedded(): ComponentFixture<ProjectPlans> {
+    const fixture = renderStandalone();
+    fixture.componentRef.setInput('projectId', 'P1');
+    fixture.componentRef.setInput('headingLevel', 2);
+    return fixture;
+  }
+
+  it('standalone: EXACTLY ONE h1, and it carries the screen title', async () => {
+    const fixture = renderStandalone();
+    await tick(fixture);
+    // RED before the fix: 0 — the title was an h2 and the route had no h1 at all.
+    // COUNTED, not looked up: querySelector('h1') would also pass with two.
+    const h1s = host(fixture).querySelectorAll('h1');
+    expect(h1s).toHaveLength(1);
+    expect(h1s[0].textContent?.trim()).toBe(TITLE);
+    expect(host(fixture).querySelector('select[aria-label="Select project"]')).not.toBeNull();
+  });
+
+  it('embedded: NO h1 anywhere, and the title is an h2 — the absence twin', async () => {
+    const fixture = renderEmbedded();
+    await tick(fixture);
+    expect(host(fixture).querySelectorAll('h1')).toHaveLength(0);
+    expect(headingFor(fixture, TITLE).tagName).toBe('H2');
+    expect(headingFor(fixture, TITLE).tagName).not.toBe('H3');
+    expect(host(fixture).querySelector('select[aria-label="Select project"]')).toBeNull();
+    // The panel's own sections really are on screen — so the count above is not
+    // vacuous — and they stay h3, one level UNDER the h2 title, not beside it.
+    // Matched on a substring, not on equality: this heading wraps a <mat-icon>,
+    // whose ligature text ('account_tree') is part of its textContent.
+    const sections = Array.from(host(fixture).querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'))
+      .filter(h => h.textContent?.includes('Work Packages'));
+    expect(sections).toHaveLength(1);
+    expect(sections[0].tagName).toBe('H3');
+    expect(host(fixture).textContent).toContain(PLAN_WP.name);
+  });
+
+  it('the title keeps the type scale it had in each state (class TOKENS read from the source — jsdom loads no stylesheet and computes no size)', async () => {
+    const standalone = renderStandalone();
+    await tick(standalone);
+    expect(classTokens(headingFor(standalone, TITLE))).toEqual(
+      expect.arrayContaining(['text-2xl', 'sm:text-3xl', 'tracking-tight']),
+    );
+    TestBed.resetTestingModule();
+
+    const embedded = renderEmbedded();
+    await tick(embedded);
+    // This panel's embedded title is text-xl, not the text-lg its siblings use;
+    // the point is that each state keeps the scale it already had.
+    const embeddedTokens = classTokens(headingFor(embedded, TITLE));
+    expect(embeddedTokens).toEqual(expect.arrayContaining(['text-xl']));
+    expect(embeddedTokens).not.toContain('text-2xl');
+    expect(embeddedTokens).not.toContain('sm:text-3xl');
+  });
+});

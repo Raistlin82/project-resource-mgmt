@@ -19,16 +19,18 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
       <div class="space-y-6">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-4">
+            @if (headingLevel() === 1) {
+              <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Issues</h1>
+            } @else {
+              <h2 class="font-display text-lg font-bold text-[var(--cc-ink)]">Issues</h2>
+            }
             @if (!projectId()) {
-              <h2 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Issues</h2>
               <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
                 <option value="" disabled>Select a project...</option>
                 @for (p of projects(); track p.id) {
                   <option [value]="p.id">{{ p.name }}</option>
                 }
               </select>
-            } @else {
-              <h2 class="font-display text-lg font-bold text-[var(--cc-ink)]">Issues</h2>
             }
           </div>
           <button (click)="openForm()" class="command-button">
@@ -226,6 +228,20 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
 })
 export class ProjectIssues {
   projectId = input<string>();
+  /**
+   * Which element carries this panel's own title: `<h1>` when it stands alone on
+   * its route, `<h2>` when project-details embeds it as a tab panel beneath the
+   * project-name `<h1>`.
+   *
+   * ONE mechanism, applied identically by all eight embeddable project panels;
+   * the `[headingLevel]="2"` bindings and the full rationale live in
+   * project-details.ts. Adding a plain `<h1>` here instead would have put TWO h1
+   * elements on /projects/:id — trading the missing-h1 defect for a duplicate-h1
+   * one. Typed `1 | 2` so no caller can ask for the `<h3>` that would skip a
+   * level under the page `<h1>`. The size classes are unchanged in both
+   * branches: the heading LEVEL is what moves, never the type scale.
+   */
+  headingLevel = input<1 | 2>(1);
   private api = inject(ApiService);
   private auth = inject(AuthService);
   private notificationService = inject(NotificationService);
