@@ -10,7 +10,9 @@ import {
   CapacityPeriod,
   OverAllocationEntry,
   SkillGapEntry,
+  UtilizationBand,
   capacityForecast,
+  forecastUtilizationBand,
   overAllocated,
   skillGap,
 } from '../services/forecast.util';
@@ -29,13 +31,21 @@ import { ListStateComponent } from '../shared/list-state.component';
 /** Selectable rolling horizon, in weeks. */
 type Horizon = 8 | 12;
 
-/** Gap band used to colour utilisation: spare / healthy / over capacity. */
-type GapBand = 'under' | 'tight' | 'over';
+/**
+ * Round to 2 decimals and stay a NUMBER — the repo-wide display/export rule for
+ * hours. Numeric matters: `escapeCsv` emits a finite number verbatim, so a
+ * negative Gap (the over-capacity weeks the export exists to flag) is written
+ * summable. `.toFixed(2)` would hand it a STRING and make that cell's inertness
+ * depend on escapeCsv's numeric-cell regex instead of on its type.
+ */
+function round2(value: number): number {
+  return Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
+}
 
 /** A capacity period enriched with display-only band + label for the table. */
 interface PeriodRow extends CapacityPeriod {
-  /** Utilisation band driving the gap colour. */
-  band: GapBand;
+  /** Utilisation band driving the pill colour (`forecastUtilizationBand`). */
+  band: UtilizationBand;
   /** Short label for the period start (e.g. "12 May"). */
   label: string;
 }
@@ -59,12 +69,17 @@ interface PeriodRow extends CapacityPeriod {
           <span class="command-section-label">Horizon</span>
           <div class="inline-flex rounded-md border border-[var(--cc-line-strong)] bg-[var(--cc-surface)] p-1" role="group" aria-label="Forecast horizon in weeks">
             @for (h of horizons; track h) {
+              <!-- text-ink-inverse, NOT text-white, on the pressed (bg-accent) state.
+                   This design system has no 'dark:' variant, so legibility has to be
+                   token-side: dark --color-ink-inverse is near-black against the dark
+                   accent (>= AA), while a literal white is 3.40:1 there — which made the
+                   SELECTED horizon the harder of the two labels to read. -->
               <button
                 type="button"
                 (click)="setHorizon(h)"
                 [attr.aria-pressed]="horizon() === h"
                 class="rounded px-4 py-1.5 text-sm font-semibold font-mono tabular-nums transition-colors"
-                [class]="horizon() === h ? 'bg-accent text-white shadow-sm' : 'text-ink-secondary hover:text-accent-text'">
+                [class]="horizon() === h ? 'bg-accent text-ink-inverse shadow-sm' : 'text-ink-secondary hover:text-accent-text'">
                 {{ h }}w
               </button>
             }
@@ -78,10 +93,24 @@ interface PeriodRow extends CapacityPeriod {
         @if (hasData()) {
         <!-- KPI strip -->
         <section class="grid grid-cols-2 gap-4 sm:gap-6 lg:grid-cols-5" aria-label="Capacity key metrics">
-          <div class="command-kpi" [class.warning]="avgBand() === 'tight'" [class.danger]="avgBand() === 'over'" [class.green]="avgBand() === 'under'">
+          <!-- Bands come from 'forecastUtilizationBand' (the repo's semaphore), so
+               'spare' — below the healthy 85-105 band — is a CAUTION, not green:
+               unsold capacity is the bench bill, and painting it green is what made
+               one 45% average read as healthy here while /what-if scored the same
+               move as bad. 'unknown' (no capacity anywhere in the horizon) carries
+               no tone at all and renders "n/a", never 0%. -->
+          <div class="command-kpi" [class.warning]="avgBand() === 'spare'" [class.danger]="avgBand() === 'over'" [class.green]="avgBand() === 'healthy'">
             <p class="command-kpi-label">Avg Utilization</p>
-            <p class="command-kpi-value">{{ avgUtilization() | number: '1.0-0' }}%</p>
-            <p class="command-kpi-note">Mean across {{ horizon() }} weeks</p>
+            <p class="command-kpi-value">
+              @if (avgUtilization() === null) { n/a } @else { {{ avgUtilization() | number: '1.0-0' }}% }
+            </p>
+            <p class="command-kpi-note">
+              @if (avgUtilization() === null) {
+                No capacity in the horizon to measure against
+              } @else {
+                Mean across {{ measuredWeeks() }} of {{ horizon() }} weeks
+              }
+            </p>
           </div>
           <div class="command-kpi info">
             <p class="command-kpi-label">Total Supply</p>
@@ -93,7 +122,17 @@ interface PeriodRow extends CapacityPeriod {
             <p class="command-kpi-value">{{ peakDemand() | number: '1.0-0' }}</p>
             <p class="command-kpi-note">Peak weekly hours</p>
           </div>
-          <div class="command-kpi green">
+          <!-- Bench headcount is UNBILLABLE capacity: green is reserved for an EMPTY
+               bench, idle people are critical and partials a caution. The tone used to
+               be the static 'green' class, so bench 0 and bench 14 rendered
+               byte-identically healthy here while /bench showed the same metric in the
+               critical tone. The three conditions are mutually exclusive on purpose —
+               .command-kpi.green is declared AFTER .danger/.warning in styles.css, so
+               any overlap would let the cascade pick the colour instead of the data. -->
+          <div class="command-kpi"
+               [class.danger]="benchIdleCount() > 0"
+               [class.warning]="benchIdleCount() === 0 && benchPartialCount() > 0"
+               [class.green]="benchCount() === 0">
             <p class="command-kpi-label">On Bench</p>
             <p class="command-kpi-value">{{ benchCount() }}</p>
             <p class="command-kpi-note">{{ benchIdleCount() }} idle &middot; {{ benchPartialCount() }} partial</p>
@@ -131,15 +170,29 @@ interface PeriodRow extends CapacityPeriod {
               caption="Weekly supply, committed and pipeline demand in hours" />
           </div>
 
-          <!-- Utilisation trend across the horizon, against the 100% capacity line. -->
+          <!-- Utilisation trend across the horizon, against the 100% capacity line.
+               Plotted over 'measuredWeekLabels()', not 'weekLabels()': a week with no
+               supply has NO utilisation, and TrendSeries takes plain numbers, so the
+               choices were to plot a 0 (a fabricated idle week — the coercion this fix
+               removes) or to omit the point. Both axes drop the same weeks together so
+               they stay index-aligned, the omitted weeks are named underneath, and the
+               table below still lists every week of the horizon with "n/a". -->
           <div class="px-5 pb-2">
-            <command-trend-chart
-              [categories]="weekLabels()"
-              [series]="utilizationSeries()"
-              mode="area" [smooth]="true"
-              formatKind="percent"
-              ariaLabel="Weekly utilization versus 100% capacity"
-              caption="Weekly utilization percentage against the 100% capacity line" />
+            @if (measuredWeekLabels().length) {
+              <command-trend-chart
+                [categories]="measuredWeekLabels()"
+                [series]="utilizationSeries()"
+                mode="area" [smooth]="true"
+                formatKind="percent"
+                ariaLabel="Weekly utilization versus 100% capacity"
+                caption="Weekly utilization percentage against the 100% capacity line" />
+            }
+            @if (unmeasuredWeekLabels().length) {
+              <p class="pb-2 text-xs text-[var(--cc-muted)]" role="status">
+                No utilization for {{ unmeasuredWeekLabels().length }} week{{ unmeasuredWeekLabels().length === 1 ? '' : 's' }}
+                ({{ unmeasuredWeekLabels().join(', ') }}): there is no capacity then, so there is nothing to measure against.
+              </p>
+            }
           </div>
 
           <div class="overflow-x-auto">
@@ -161,10 +214,10 @@ interface PeriodRow extends CapacityPeriod {
                     <td class="num">{{ row.demand | number: '1.0-0' }}</td>
                     <td class="num">
                       <span class="command-status"
-                            [class.green]="row.band === 'under'"
-                            [class.amber]="row.band === 'tight'"
+                            [class.green]="row.band === 'healthy'"
+                            [class.amber]="row.band === 'spare'"
                             [class.red]="row.band === 'over'">
-                        {{ row.utilizationPct | number: '1.0-0' }}%
+                        @if (row.utilizationPct === null) { n/a } @else { {{ row.utilizationPct | number: '1.0-0' }}% }
                       </span>
                     </td>
                     <td class="num font-semibold" [style.color]="row.gap < 0 ? 'var(--cc-red)' : 'var(--cc-green-text)'">
@@ -185,7 +238,14 @@ interface PeriodRow extends CapacityPeriod {
                 <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Bench</h2>
                 <p class="mt-1 text-sm text-[var(--cc-muted)]">Not fully allocated this month (BENCH or PARTIAL) — see the full 6-month view on <a routerLink="/bench" class="font-semibold text-[var(--cc-primary-text)]">Bench</a>.</p>
               </div>
-              <span class="command-status green">{{ benchCount() }}</span>
+              <!-- Same tri-state as the "On Bench" KPI above, and mutually exclusive for
+                   the same cascade reason: .command-status.red is declared AFTER .green
+                   in styles.css, so overlapping conditions would let the order of the
+                   stylesheet decide the chip's colour. -->
+              <span class="command-status"
+                    [class.red]="benchIdleCount() > 0"
+                    [class.amber]="benchIdleCount() === 0 && benchPartialCount() > 0"
+                    [class.green]="benchCount() === 0">{{ benchCount() }}</span>
             </div>
             <div class="overflow-x-auto">
               <table class="command-data-table">
@@ -390,13 +450,31 @@ export class Forecast {
   readonly periodRows = computed<PeriodRow[]>(() => {
     return this.periods().map(r => ({
       ...r,
-      band: this.bandFor(r.utilizationPct),
+      band: forecastUtilizationBand(r.utilizationPct),
       label: this.shortDate(r.period),
     }));
   });
 
-  /** Week-start labels (e.g. "12 May") shared by the bar + trend charts. */
+  /** Week-start labels (e.g. "12 May") for the supply/demand bar chart. */
   readonly weekLabels = computed<string[]>(() => this.periods().map(r => this.shortDate(r.period)));
+
+  /**
+   * The periods whose utilisation is DEFINED (i.e. that have supply). A period
+   * with no capacity has no utilisation, so it is excluded from the average and
+   * from the trend chart rather than being read as 0% — the whole point of
+   * `utilizationPct` being nullable. It still appears in the table, as "n/a".
+   */
+  private readonly measuredPeriods = computed<PeriodRow[]>(() =>
+    this.periodRows().filter(r => r.utilizationPct !== null),
+  );
+
+  /** Week labels the utilisation trend can actually plot. */
+  readonly measuredWeekLabels = computed<string[]>(() => this.measuredPeriods().map(r => r.label));
+
+  /** Week labels the utilisation trend must omit — named in the note under the chart. */
+  readonly unmeasuredWeekLabels = computed<string[]>(() =>
+    this.periodRows().filter(r => r.utilizationPct === null).map(r => r.label),
+  );
 
   /**
    * Capacity bar series — Supply (series-6/slate), Committed (accent), Pipeline (series-2/teal).
@@ -414,12 +492,13 @@ export class Forecast {
 
   /**
    * Utilisation trend (as a 0..1 fraction so the percent formatter renders 42%
-   * etc.) against a flat 100%-capacity reference line.
+   * etc.) against a flat 100%-capacity reference line. Built from
+   * `measuredPeriods()` only — a null utilisation is never plotted as 0.
    */
   readonly utilizationSeries = computed<TrendSeries[]>(() => {
-    const rows = this.periods();
+    const rows = this.measuredPeriods();
     return [
-      { name: 'Utilization', values: rows.map(r => r.utilizationPct / 100) },
+      { name: 'Utilization', values: rows.map(r => (r.utilizationPct as number) / 100) },
       { name: 'Capacity', values: rows.map(() => 1) },
     ];
   });
@@ -436,13 +515,22 @@ export class Forecast {
     this.periods().reduce((max, r) => Math.max(max, r.demand), 0),
   );
 
-  readonly avgUtilization = computed<number>(() => {
-    const rows = this.periods();
-    if (!rows.length) return 0;
-    return rows.reduce((acc, r) => acc + r.utilizationPct, 0) / rows.length;
+  /**
+   * Mean utilisation over the periods that HAVE one, and `null` — rendered
+   * "n/a" — when none do. Dividing by the full horizon length (or defaulting to
+   * 0) would report a confident, healthy-looking low utilisation for weeks that
+   * simply have no capacity to measure.
+   */
+  readonly avgUtilization = computed<number | null>(() => {
+    const rows = this.measuredPeriods();
+    if (!rows.length) return null;
+    return rows.reduce((acc, r) => acc + (r.utilizationPct as number), 0) / rows.length;
   });
 
-  readonly avgBand = computed<GapBand>(() => this.bandFor(this.avgUtilization()));
+  /** How many weeks the average is actually computed over (shown in the KPI note). */
+  readonly measuredWeeks = computed<number>(() => this.measuredPeriods().length);
+
+  readonly avgBand = computed<UtilizationBand>(() => forecastUtilizationBand(this.avgUtilization()));
 
   // --- Bench / over-allocation / skills ---
 
@@ -470,7 +558,11 @@ export class Forecast {
   readonly overAllocations = computed<OverAllocationEntry[]>(() => overAllocated(this.forecastData()));
   readonly overCount = computed<number>(() => this.overAllocations().length);
 
-  readonly skills = computed<SkillGapEntry[]>(() => skillGap(this.forecastData()));
+  // `currentMonth()` is threaded in so coverage counts only people employed NOW:
+  // a departed colleague's skills used to count as capability, which flipped
+  // 'Thin' to 'Covered' and — where the leaver was the only holder of a skill —
+  // hid the very shortage this table exists to raise.
+  readonly skills = computed<SkillGapEntry[]>(() => skillGap(this.forecastData(), this.currentMonth()));
   readonly shortageCount = computed<number>(() => this.skills().filter(s => s.shortage).length);
 
   setHorizon(h: Horizon): void {
@@ -480,35 +572,60 @@ export class Forecast {
   /** Export the capacity timeline (per-period supply/demand/util/gap) as CSV. */
   exportTimeline(): void {
     if (!this.isBrowser) return;
+    downloadCsv(`capacity-timeline-${this.horizon()}w.csv`, this.buildTimelineCsv());
+  }
+
+  /**
+   * The exact CSV text `exportTimeline()` writes, split out so it is assertable
+   * without a DOM download — the same seam `capacity.component.ts` uses for its
+   * own `buildCsv()`.
+   *
+   * Every hour figure goes through `round2`. The raw `overlapFraction` products
+   * carry 14 decimals (Committed 83.48936835522201, Gap 196.510631644778) where
+   * the screen shows 83 and 197, and this file gets pasted straight into
+   * capacity decks: five of the seven columns disagreed with the UI they were
+   * exported from.
+   */
+  protected buildTimelineCsv(rows: readonly CapacityPeriod[] = this.periods()): string {
     const columns: readonly CsvColumn<CapacityPeriod>[] = [
       { key: 'period', header: 'Period' },
-      { key: 'supply', header: 'Supply' },
-      { key: 'committed', header: 'Committed' },
-      { key: 'pipeline', header: 'Pipeline' },
-      { key: 'demand', header: 'Demand' },
-      { key: 'utilizationPct', header: 'Utilization %', map: r => r.utilizationPct.toFixed(1) },
-      { key: 'gap', header: 'Gap' },
+      { key: 'supply', header: 'Supply', map: r => round2(r.supply) },
+      { key: 'committed', header: 'Committed', map: r => round2(r.committed) },
+      { key: 'pipeline', header: 'Pipeline', map: r => round2(r.pipeline) },
+      { key: 'demand', header: 'Demand', map: r => round2(r.demand) },
+      {
+        key: 'utilizationPct',
+        header: 'Utilization %',
+        // 'n/a', never 0: a 0 in a spreadsheet column is indistinguishable from
+        // a genuinely idle week, and this cell means "no capacity to measure".
+        map: r => (r.utilizationPct === null ? 'n/a' : round2(r.utilizationPct)),
+      },
+      { key: 'gap', header: 'Gap', map: r => round2(r.gap) },
     ];
-    downloadCsv(`capacity-timeline-${this.horizon()}w.csv`, toCsv(this.periods(), columns));
+    return toCsv(rows, columns);
   }
 
   /** Export the skill-gap table (demand hours, supply count, shortage flag) as CSV. */
   exportSkillGap(): void {
     if (!this.isBrowser) return;
+    downloadCsv('skill-gap.csv', this.buildSkillGapCsv());
+  }
+
+  /**
+   * The skill-gap CSV, split out for the same reason as `buildTimelineCsv`.
+   * `demandHours` is a sum of `unstaffedEffort` values and is fractional in the
+   * seed as shipped (request '8' has requiredEffort 0.4), so it needs the same
+   * 2-decimal rule — otherwise this fix leaves a second raw-float column on the
+   * very same screen.
+   */
+  protected buildSkillGapCsv(rows: readonly SkillGapEntry[] = this.skills()): string {
     const columns: readonly CsvColumn<SkillGapEntry>[] = [
       { key: 'skill', header: 'Skill' },
-      { key: 'demandHours', header: 'Demand Hours' },
+      { key: 'demandHours', header: 'Demand Hours', map: r => round2(r.demandHours) },
       { key: 'supplyCount', header: 'Supply Count' },
       { key: 'shortage', header: 'Shortage' },
     ];
-    downloadCsv('skill-gap.csv', toCsv(this.skills(), columns));
-  }
-
-  /** Utilisation → colour band: <85% spare, 85–100% tight, >100% over capacity. */
-  private bandFor(utilizationPct: number): GapBand {
-    if (utilizationPct > 100) return 'over';
-    if (utilizationPct >= 85) return 'tight';
-    return 'under';
+    return toCsv(rows, columns);
   }
 
   /** ISO date → "12 May" style label (UTC, time-zone stable). */

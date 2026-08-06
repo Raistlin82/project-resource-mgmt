@@ -1,5 +1,7 @@
 import { Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, Holiday } from './api.service';
 import { countsTowardDeliveryCapacity, kindOf } from './resource-kind.util';
+import { DayHours, MonthStatus, monthRowId, monthlyAggregateHours } from './allocation-month.util';
+import { isActiveInMonth, semaphoreBand } from './capacity.util';
 
 /**
  * Capacity / demand forecasting — a pure, framework-free module.
@@ -11,18 +13,24 @@ import { countsTowardDeliveryCapacity, kindOf } from './resource-kind.util';
  *    count toward DELIVERY capacity (C1: `internal` + `subco`, excluding `dummy`
  *    — a dummy is a placeholder for a hole to be filled, not capacity the
  *    organisation can staff work with today; a subco IS deliverable capacity,
- *    just not internal — see `countsTowardDeliveryCapacity`). For a monthly
+ *    just not internal — see `countsTowardDeliveryCapacity`) **and were employed
+ *    in that period's month** (`isActiveInMonth`). Supply is therefore
+ *    PER-PERIOD, not a constant: a leaver stops contributing after they go and a
+ *    future hire only starts contributing once they arrive. For a monthly
  *    horizon the weekly capacity is scaled up by WEEKS_PER_MONTH so supply and
  *    demand share the same per-period unit.
- *  - COMMITTED DEMAND = booked assignment hours, spread evenly across the booking
- *    window taken from the linked request's startDate/endDate. When the request
- *    (or its dates) is missing, the whole booking lands in the first period of
- *    the horizon ("current period") so it is never silently dropped.
+ *  - COMMITTED DEMAND = each assignment's CONFIRMED hours — aggregated from its
+ *    day rows weighted by the status of the MONTH each day falls in
+ *    (`monthlyAggregateHours`, the server's single definition of confirmed) —
+ *    spread evenly across the booking window taken from the linked request's
+ *    startDate/endDate. When the request (or its dates) is missing, the whole
+ *    booking lands in the first period of the horizon ("current period") so it
+ *    is never silently dropped.
  *  - PIPELINE DEMAND = requiredEffort of open / unfulfilled requests (those not
  *    yet fully staffed), spread evenly across the request's own window, with the
  *    same first-period fallback. Only the still-unstaffed remainder is counted.
- *  - DEMAND = committed + pipeline; UTILIZATION% = demand / supply × 100
- *    (0 when supply is 0 — explicit zero-capacity guard).
+ *  - DEMAND = committed + pipeline; UTILIZATION% = demand / supply × 100, or
+ *    **null when the period has no supply at all** — see `utilizationPct`.
  *  - GAP = supply − demand (positive ⇒ spare capacity, negative ⇒ shortfall).
  *
  * Every public function tolerates malformed numbers (NaN / Infinity / missing)
@@ -54,8 +62,18 @@ export interface CapacityPeriod {
   pipeline: number;
   /** committed + pipeline. */
   demand: number;
-  /** demand / supply × 100; 0 when supply is 0. */
-  utilizationPct: number;
+  /**
+   * demand / supply × 100, or **null when the period has no supply**.
+   *
+   * `null` means "no answer", NOT 0%. Once supply became period-dependent (a
+   * leaver stops contributing, a future hire has not arrived yet) a period can
+   * legitimately have no capacity to measure against, and a 0 there is a lie in
+   * the dangerous direction: `forecastUtilizationBand` would paint it as spare
+   * capacity, the KPI average would drag the whole horizon down, and the CSV
+   * cell would be indistinguishable from a genuinely idle week. Every consumer
+   * must render it as unavailable instead — withheld is not zero.
+   */
+  utilizationPct: number | null;
   /** supply − demand (negative ⇒ over capacity). */
   gap: number;
 }
@@ -108,6 +126,42 @@ export function isCompleteForecastWindow(startIso: string, endIso: string): bool
   const start = strictIsoDay(startIso);
   const end = strictIsoDay(endIso);
   return start !== null && end !== null && end >= start;
+}
+
+/**
+ * Paint band for a utilisation figure on the Capacity Control screens.
+ *
+ *  - `unknown` — no utilisation exists (no supply in the period): render "n/a"
+ *    with NO tone. Never a colour, because every colour would be a claim.
+ *  - `spare`   — below the healthy band. A CAUTION, not health: unsold capacity
+ *    is the bench bill. This is the half that was inverted — /forecast painted
+ *    <85% green while /what-if called the same move bad, so one 45% average was
+ *    simultaneously healthy on one screen and a crisis on the other.
+ *  - `healthy` — inside the semaphore's healthy band (85–105%).
+ *  - `over`    — above it.
+ */
+export type UtilizationBand = 'unknown' | 'spare' | 'healthy' | 'over';
+
+/**
+ * The ONE utilisation paint rule shared by /forecast and /what-if, delegating to
+ * the repo's existing `semaphoreBand`/`SEMAPHORE_THRESHOLDS` (capacity.util.ts)
+ * rather than re-deriving a second ladder — a second ladder is exactly how the
+ * two screens came to disagree. `idle` and `under` collapse into one caution
+ * tone here because this surface only has three colours to spend.
+ *
+ * NOT to be conflated with {@link utilizationChangeTone} below: that answers a
+ * different question (did this scenario move TOWARD or AWAY FROM the healthy
+ * band) and its 80/100 bounds are a delta reference, not a paint rule. Aligning
+ * the two sets of bounds would move what-if's delta colours and is a separate,
+ * deliberate decision.
+ */
+export function forecastUtilizationBand(utilizationPct: number | null): UtilizationBand {
+  // Non-finite is treated as "no answer" too: semaphoreBand(NaN) falls through
+  // to 'over', so a poisoned number would otherwise paint a confident red.
+  if (utilizationPct === null || !Number.isFinite(utilizationPct)) return 'unknown';
+  const band = semaphoreBand(utilizationPct);
+  if (band === 'idle' || band === 'under') return 'spare';
+  return band === 'healthy' ? 'healthy' : 'over';
 }
 
 export type UtilizationChangeTone = 'good' | 'bad' | 'neutral';
@@ -204,9 +258,41 @@ function isOpenRequest(r: ResourceRequest): boolean {
   return !closed && unstaffedEffort(r) > 0;
 }
 
-/** Only approved monthly rollups are committed; proposals are pipeline/planned. */
-function isCommittedAssignment(assignment: Assignment): boolean {
-  return assignment.status === 'Allocated';
+/**
+ * CONFIRMED hours per assignment id, aggregated from the assignment's own day
+ * rows weighted by the status of the MONTH each day falls in — i.e. through
+ * `monthlyAggregateHours`, the same pure rule the server and the capacity
+ * dashboard use, so the client never invents a second definition of "confirmed".
+ *
+ * This replaced an all-or-nothing filter on `Assignment.status` +
+ * `assignedHours`. `Assignment.status` is a DERIVED rollup
+ * (`deriveAssignmentStatus`, precedence Requested > Rejected > Allocated >
+ * Draft), so one September month still awaiting a decision made the whole
+ * assignment read 'Requested' and erased its already-APPROVED August hours from
+ * committed demand: 160 board-approved hours contributing exactly 0.00 to the
+ * forecast, the Committed bar and the CSV. The inverse was equally wrong —
+ * [Allocated 100h, Draft 100h] rolls up to 'Allocated' and counted all 200h.
+ *
+ * Two documented consequences of going through the month rows, both asserted in
+ * the spec: a month row with a non-confirmed status contributes nothing, and an
+ * assignment with NO month row at all contributes nothing (B1 self-healing rule
+ * — legacy day rows stay out of the aggregates until their first calendar edit).
+ */
+function confirmedHoursByAssignment(data: ForecastData): Map<string, number> {
+  const statusByRowId = new Map<string, MonthStatus>(
+    data.assignmentMonths.map(m => [monthRowId(m.assignmentId, m.month), m.status]),
+  );
+  const daysByAssignment = new Map<string, DayHours[]>();
+  for (const d of data.assignmentDays) {
+    const list = daysByAssignment.get(d.assignmentId);
+    if (list) list.push(d);
+    else daysByAssignment.set(d.assignmentId, [d]);
+  }
+  const confirmed = new Map<string, number>();
+  for (const [assignmentId, days] of daysByAssignment) {
+    confirmed.set(assignmentId, monthlyAggregateHours(days, statusByRowId).confirmed);
+  }
+  return confirmed;
 }
 
 /**
@@ -232,20 +318,21 @@ export function capacityForecast(
   // a dummy has no capacity to deliver with yet; a subco does.
   const supplyScale = granularity === 'monthly' ? WEEKS_PER_MONTH : 1;
   const deliveryResources = data.resources.filter(r => countsTowardDeliveryCapacity(kindOf(r)));
-  const supply = sum(deliveryResources.map(r => finite(r.capacity))) * supplyScale;
 
   const requestById = new Map<string, ResourceRequest>();
   for (const r of data.requests) requestById.set(r.id, r);
 
-  // Pre-resolve committed bookings: the assignment's HOURS, time-phased over the
-  // linked REQUEST's window (resolveWindow below reads req.startDate/endDate, not
-  // the assignment's own dates). That is P1-16's remaining half — recorded in the
+  // Pre-resolve committed bookings: the assignment's CONFIRMED hours (from its
+  // month rows — see confirmedHoursByAssignment), time-phased over the linked
+  // REQUEST's window (resolveWindow below reads req.startDate/endDate, not the
+  // assignment's own dates). That is P1-16's remaining half — recorded in the
   // reconciliation report's §10, not silently — so this comment must not read as
   // "the assignment's window".
-  const committedBookings = data.assignments.filter(isCommittedAssignment).map(a => {
+  const confirmedByAssignment = confirmedHoursByAssignment(data);
+  const committedBookings = data.assignments.map(a => {
     const req = requestById.get(a.requestId);
     const win = resolveWindow(req?.startDate, req?.endDate, horizonStart);
-    return { hours: finite(a.assignedHours), win };
+    return { hours: finite(confirmedByAssignment.get(a.id)), win };
   });
 
   // Pre-resolve pipeline bookings (unstaffed effort of open requests + their window).
@@ -259,6 +346,23 @@ export function capacityForecast(
     const pStart = horizonStart + i * lenMs;
     const pEnd = pStart + lenMs;
 
+    // Supply is resolved INSIDE the loop and gated on employment in the period's
+    // month, so people who have left (or have not joined yet) stop inflating it.
+    // The forecast used to sum every deliverable resource once, for every period:
+    // a colleague terminated five months ago still advertised 40h/week of supply
+    // that the API refuses to book, while the Bench table on the very same screen
+    // correctly omitted her — two halves of one page disagreeing.
+    //
+    // Granularity is the MONTH, matching `isActiveInMonth` and the call
+    // bench.util.ts makes, so a week straddling a mid-month leaving date still
+    // counts in full. Prorating a partial month is B2 spec §4's open product
+    // question (see capacity.util's `employedWorkingDays`) — deliberately not
+    // decided here.
+    const pMonth = toIsoDate(pStart).slice(0, 7);
+    const supply =
+      sum(deliveryResources.filter(r => isActiveInMonth(r, pMonth)).map(r => finite(r.capacity))) *
+      supplyScale;
+
     const committed = sum(
       committedBookings.map(b => b.hours * overlapFraction(b.win.start, b.win.end, pStart, pEnd)),
     );
@@ -266,7 +370,10 @@ export function capacityForecast(
       pipelineBookings.map(b => b.hours * overlapFraction(b.win.start, b.win.end, pStart, pEnd)),
     );
     const demand = committed + pipeline;
-    const utilizationPct = supply > 0 ? (demand / supply) * 100 : 0;
+    // null, NOT 0: no capacity in the period means there is nothing to measure
+    // against, and a 0 here reads as "idle" — the healthy-looking answer. See
+    // `CapacityPeriod.utilizationPct`.
+    const utilizationPct = supply > 0 ? (demand / supply) * 100 : null;
 
     rows.push({
       period: toIsoDate(pStart),
@@ -281,11 +388,18 @@ export function capacityForecast(
   return rows;
 }
 
-/** Total booked (assignment) hours for a resource across all assignments. */
+/**
+ * Total CONFIRMED hours per resource across all their assignments — the same
+ * month-row aggregation `capacityForecast` uses, deliberately not a second
+ * definition. Feeds `overAllocated`'s "Over by" column, which carried the
+ * identical all-or-nothing bug: one un-approved month zeroed the whole
+ * assignment's contribution, so a resource 200h over capacity reported 0h over.
+ */
 function bookedHoursByResource(data: ForecastData): Map<string, number> {
+  const confirmedByAssignment = confirmedHoursByAssignment(data);
   const booked = new Map<string, number>();
-  for (const a of data.assignments.filter(isCommittedAssignment)) {
-    booked.set(a.resourceId, finite(booked.get(a.resourceId)) + finite(a.assignedHours));
+  for (const a of data.assignments) {
+    booked.set(a.resourceId, finite(booked.get(a.resourceId)) + finite(confirmedByAssignment.get(a.id)));
   }
   return booked;
 }
@@ -329,13 +443,24 @@ export function overAllocated(data: ForecastData, thresholdPct = 110): OverAlloc
  * behind that demand, and how many resources possess the skill (at any level).
  * `shortage` is true when there is demand but zero covering resources. Sorted
  * shortages first, then by demand hours.
+ *
+ * `asOfMonth` ('YYYY-MM') is REQUIRED, not optional: coverage is only real for
+ * people who are actually employed then. A departed colleague's skills used to
+ * count as capability, which inflated `supplyCount` and flipped both badges the
+ * wrong way — 'Thin' became 'Covered', and where the leaver was the ONLY holder
+ * of a skill `shortage` flipped from true to false, suppressing exactly the
+ * hire/subcontract signal this table exists to raise. Making the parameter
+ * mandatory is the point: an omitted month would silently restore that hole.
  */
-export function skillGap(data: ForecastData): SkillGapEntry[] {
+export function skillGap(data: ForecastData, asOfMonth: string): SkillGapEntry[] {
   const openRequests = data.requests.filter(isOpenRequest);
 
-  // Supply: resources possessing each skill (case-insensitive match).
+  // Supply: employed resources possessing each skill (case-insensitive match).
+  const covering = data.resources.filter(
+    r => countsTowardDeliveryCapacity(kindOf(r)) && isActiveInMonth(r, asOfMonth),
+  );
   const supplyBySkill = new Map<string, number>();
-  for (const res of data.resources.filter(r => countsTowardDeliveryCapacity(kindOf(r)))) {
+  for (const res of covering) {
     for (const s of res.skills ?? []) {
       const key = (s?.name ?? '').toLowerCase();
       if (!key) continue;

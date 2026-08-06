@@ -2,7 +2,7 @@ import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Observable, of, throwError } from 'rxjs';
 import { WhatIf } from './what-if';
-import { ApiService, Resource } from '../services/api.service';
+import { ApiService, Resource, ResourceRequest } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { todayLocalIso } from '../services/local-date.util';
@@ -179,6 +179,132 @@ describe('WhatIf — authReady gating', () => {
     await flush(fixture);
 
     expect(getResources).not.toHaveBeenCalled();
+  });
+});
+
+// =============================================================================
+// Utilisation band + "no capacity" handling.
+//
+// /what-if and /forecast used to hand-roll ONE ladder EACH (<85 green, 85-100
+// amber, >100 red here), so the sandbox's own per-week pills contradicted the
+// tone its Avg Utilization card gave the same figure, and both contradicted
+// /forecast. Both screens now go through `forecastUtilizationBand`.
+//
+// Windows are expressed as offsets from `todayLocalIso()` — the same clock the
+// component reads and which cannot be injected here — so nothing depends on the
+// run date or the CI time zone.
+// =============================================================================
+
+const TODAY = todayLocalIso();
+/** The fixed comparison horizon of this screen, in weeks (what-if.ts HORIZON_WEEKS). */
+const HORIZON_WEEKS = 12;
+
+function isoPlusDays(iso: string, days: number): string {
+  return new Date(Date.parse(`${iso}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * One resource and one open request spanning the whole 12-week horizon, so every
+ * period carries exactly `effort / 12` hours and utilisation is an exact figure.
+ */
+function evenDemand(capacity: number, effort: number, employment: Partial<Resource> = {}): Partial<ApiService> {
+  const resources: Resource[] = [
+    { id: 'r1', name: 'Solo Dev', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity, kind: 'internal', ...employment },
+  ];
+  const requests: ResourceRequest[] = [
+    { id: 'req1', name: 'Steady demand', requiredRole: 'Developer', requiredEffort: effort, status: 'Open', skills: [], startDate: TODAY, endDate: isoPlusDays(TODAY, HORIZON_WEEKS * 7) },
+  ];
+  return {
+    getResources: () => of(resources),
+    getRequests: () => of(requests),
+    getAssignments: () => of([]),
+    getAssignmentDays: () => of([]),
+    getAssignmentMonths: () => of([]),
+  } as Partial<ApiService>;
+}
+
+function kpiTile(fixture: ComponentFixture<WhatIf>, label: string): HTMLElement {
+  const tile = Array.from(host(fixture).querySelectorAll<HTMLElement>('.command-kpi')).find(
+    el => el.querySelector('.command-kpi-label')?.textContent?.trim() === label,
+  );
+  expect(tile, `KPI tile not found: ${label}`).toBeTruthy();
+  return tile!;
+}
+
+/** The Util % pills of the Scenario Capacity Timeline, in row order. */
+function utilPills(fixture: ComponentFixture<WhatIf>): HTMLElement[] {
+  const section = Array.from(host(fixture).querySelectorAll('.command-card')).find(
+    card => card.querySelector('h2')?.textContent?.trim() === 'Scenario Capacity Timeline',
+  );
+  expect(section, 'scenario timeline not found').toBeTruthy();
+  return Array.from(section!.querySelectorAll<HTMLElement>('tbody tr td:nth-child(4) .command-status'));
+}
+
+describe('WhatIf — the scenario timeline paints utilisation with the SAME band as /forecast', () => {
+  it('does not paint a 45% week with the healthy tone', async () => {
+    // 540h over 12 weeks = 45h/week against 100h/week of supply.
+    const fixture = await setup(evenDemand(100, 540));
+    await flush(fixture);
+
+    const pills = utilPills(fixture);
+    expect(pills.length).toBe(HORIZON_WEEKS);
+    expect(pills.every(p => p.textContent?.trim() === '45%')).toBe(true);
+    // ABSENCE: green here is what let the sandbox call a 45% week healthy in the
+    // table while its own Avg Utilization card scored the move as bad.
+    expect(pills.some(p => p.classList.contains('green'))).toBe(false);
+    expect(pills.every(p => p.classList.contains('amber'))).toBe(true);
+  });
+
+  it('still paints a fully-sold 90% week as healthy — the paired positive', async () => {
+    // 1080h over 12 weeks = 90h/week against 100h/week of supply.
+    const fixture = await setup(evenDemand(100, 1080));
+    await flush(fixture);
+
+    const pills = utilPills(fixture);
+    expect(pills.every(p => p.textContent?.trim() === '90%')).toBe(true);
+    // 90% used to render amber here (the old >=85 "tight" rung), so neither
+    // "delete green" nor "paint everything amber" satisfies both halves.
+    expect(pills.every(p => p.classList.contains('green'))).toBe(true);
+    expect(pills.some(p => p.classList.contains('amber'))).toBe(false);
+  });
+});
+
+describe('WhatIf — an unmeasurable average renders as n/a, never as 0%', () => {
+  it('shows n/a with no tone for base, scenario and delta when no period has capacity', async () => {
+    // The only resource joins long after the horizon ends: there is no supply to
+    // measure against in any of the 12 weeks.
+    const fixture = await setup(evenDemand(100, 540, { hireDate: isoPlusDays(TODAY, 365) }));
+    await flush(fixture);
+
+    const k = fixture.componentInstance.kpis().find(x => x.label === 'Avg Utilization')!;
+    expect(k.base).toBeNull();
+    expect(k.scenario).toBeNull();
+    // A signed delta out of two unknowns would be pure invention.
+    expect(k.delta).toBeNull();
+
+    const tile = kpiTile(fixture, 'Avg Utilization');
+    expect(tile.querySelector('.command-kpi-value')?.textContent?.trim()).toBe('n/a');
+    expect(tile.querySelector('.command-kpi-value')?.textContent?.trim()).not.toBe('0%');
+    // No tone: colouring a comparison that was never possible is the same defect
+    // as the header badge that used to affirm parity it could not know.
+    expect(tile.classList.contains('green')).toBe(false);
+    expect(tile.classList.contains('danger')).toBe(false);
+
+    const pills = utilPills(fixture);
+    expect(pills.length).toBe(HORIZON_WEEKS);
+    // Exact text, not toContain: '0%' is a substring of '100%'.
+    expect(pills.every(p => p.textContent?.trim() === 'n/a')).toBe(true);
+    expect(pills.some(p => p.textContent?.trim() === '0%')).toBe(false);
+  });
+
+  it('still reports a real 0% when the capacity exists and nothing is booked — the paired positive', async () => {
+    const fixture = await setup(evenDemand(100, 0));
+    await flush(fixture);
+
+    const k = fixture.componentInstance.kpis().find(x => x.label === 'Avg Utilization')!;
+    expect(k.scenario).toBe(0);
+    expect(kpiTile(fixture, 'Avg Utilization').querySelector('.command-kpi-value')?.textContent?.trim()).toBe('0%');
+    expect(utilPills(fixture).every(p => p.textContent?.trim() === '0%')).toBe(true);
   });
 });
 
