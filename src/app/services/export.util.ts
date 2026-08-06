@@ -18,12 +18,33 @@ const FORMULA_TRIGGERS = new Set(['=', '+', '-', '@', '\t', '\r']);
 const QUOTE_NEEDED = /[",\n\r]/;
 
 /**
+ * A cell that is ENTIRELY a number — optional sign, digits, optional decimals, and an
+ * optional trailing `%`. Such a cell cannot be a formula, so the injection prefix must
+ * not be applied to it whatever its JavaScript type.
+ *
+ * The type-based exemption below was not enough: every money column in the app
+ * pre-formats with `.toFixed()`, which returns a STRING. So `-12160` was emitted
+ * verbatim but `(-12160).toFixed(2)` became `'-12160.00` — a text label. In
+ * Excel/Sheets that cell shows a stray apostrophe, `=SUM` over the column skips it,
+ * and a pivot omits exactly the overrunning rows the export exists to surface.
+ * `reporting.ts` alone has eight such columns (VAC, margin, marginPct, PCP delta and
+ * its pct, customer margin, gap points) and billing.ts's amount is negative for
+ * every CreditNote.
+ *
+ * Deliberately strict: anything with a second operator or a letter — `-1+1`, `-A1`,
+ * `+SUM(A1)` — is NOT numeric and stays prefixed.
+ */
+const NUMERIC_CELL = /^[+-]?(\d+(\.\d+)?|\.\d+)%?$/;
+
+/**
  * Escapes a single CSV cell.
  *
  * 1. Formula-injection guard: if the (stringified) value starts with `= + - @`, TAB, or
- *    CR, prefix a single quote so it renders as inert text. This applies only to
- *    strings — a finite number is never a spreadsheet formula, and prefixing it (e.g.
- *    a negative `-1500`) would corrupt it into a text label that breaks SUM/aggregation.
+ *    CR, prefix a single quote so it renders as inert text. A FULLY NUMERIC cell is
+ *    exempt whatever its JS type — a number is never a spreadsheet formula, and
+ *    prefixing it (e.g. a negative `-1500`, or the string `'-1500.00'` that
+ *    `.toFixed(2)` produces) would corrupt it into a text label that breaks
+ *    SUM/aggregation.
  * 2. RFC-4180 quoting: if the value contains a comma, double-quote, CR, or LF, wrap it in
  *    double quotes and double any embedded double-quotes.
  *
@@ -38,7 +59,7 @@ export function escapeCsv(value: unknown): string {
 
   let s = value === null || value === undefined ? '' : String(value);
 
-  if (s.length > 0 && FORMULA_TRIGGERS.has(s[0])) {
+  if (s.length > 0 && FORMULA_TRIGGERS.has(s[0]) && !NUMERIC_CELL.test(s)) {
     s = `'${s}`;
   }
 

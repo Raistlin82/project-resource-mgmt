@@ -15,11 +15,44 @@ describe('export.util — escapeCsv', () => {
   it('prefixes a single quote to neutralise formula-injection triggers', () => {
     expect(escapeCsv('=1+1')).toBe("'=1+1");
     expect(escapeCsv('+SUM(A1)')).toBe("'+SUM(A1)");
-    expect(escapeCsv('-2')).toBe("'-2");
+    // A leading '-' followed by anything non-numeric IS dangerous and stays prefixed.
+    // (This case used to be `escapeCsv('-2') === "'-2"`, which was the defect: every
+    // money column pre-formats with .toFixed(), so a real negative amount arrived here
+    // as a STRING and was turned into a text label. See the numeric-cell test below.)
+    expect(escapeCsv('-1+1')).toBe("'-1+1");
+    expect(escapeCsv('-A1')).toBe("'-A1");
     expect(escapeCsv('@cmd')).toBe("'@cmd");
     expect(escapeCsv('\tTAB')).toBe("'\tTAB");
     // A leading CR triggers the formula prefix AND forces RFC-4180 quoting (CR is a quote-trigger).
     expect(escapeCsv('\rCR')).toBe('"\'\rCR"');
+  });
+
+  it('emits a fully numeric STRING cell verbatim, whatever its JS type', () => {
+    // THE DEFECT. The exemption above was typeof-based, but every money column in the
+    // app pre-formats with .toFixed(), which returns a string: reporting.ts's VAC,
+    // margin, marginPct, PCP delta and gap columns, and billing.ts's amount (negative
+    // for every CreditNote). So `-12160` was emitted verbatim while
+    // `(-12160).toFixed(2)` became "'-12160.00" — a text label. =SUM over the column
+    // then skipped exactly the overrunning rows the export exists to surface.
+    expect(escapeCsv((-12160).toFixed(2))).toBe('-12160.00');
+    expect(escapeCsv((-3.5).toFixed(1))).toBe('-3.5');
+    expect(escapeCsv('-2')).toBe('-2');
+    expect(escapeCsv('+7')).toBe('+7');
+    expect(escapeCsv('-.5')).toBe('-.5');
+    // Percentages are pre-formatted the same way (marginPct, gapPts).
+    expect(escapeCsv('-12.34%')).toBe('-12.34%');
+  });
+
+  it('still refuses anything that only LOOKS numeric', () => {
+    // ASSERTION OF ABSENCE: the guard must not be deletable to make the test above
+    // green. These are the shapes an attacker actually uses, and every one of them
+    // starts with a trigger character while failing the numeric test.
+    expect(escapeCsv('=1+1')).toBe("'=1+1");
+    expect(escapeCsv('-1+1')).toBe("'-1+1");
+    expect(escapeCsv('-1-2')).toBe("'-1-2");
+    expect(escapeCsv('+1e9')).toBe("'+1e9");
+    expect(escapeCsv('-12160.00.00')).toBe("'-12160.00.00");
+    expect(escapeCsv('@SUM(A1)')).toBe("'@SUM(A1)");
   });
 
   it('emits finite numbers verbatim — never as injection-prefixed text', () => {

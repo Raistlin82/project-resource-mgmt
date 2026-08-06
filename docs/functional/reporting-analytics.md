@@ -597,10 +597,18 @@ flowchart TD
      `Margin_Compression_Alerts.csv`, `Reporting_Summary.csv`) and a success toast.
 
 2. **Trust the cell safety.**
-   - **How:** `escapeCsv` prefixes a `'` to any string cell starting with
-     `= + - @`, TAB or CR (formula-injection guard) — but **never** to a finite
-     number (so `-1500` stays numeric and SUM-able) — and RFC-4180 double-quotes
-     cells containing comma/quote/newline. Money columns are labelled "EUR (base)".
+   - **How:** `escapeCsv` prefixes a `'` to any cell starting with
+     `= + - @`, TAB or CR (formula-injection guard) — but **never** to a cell that
+     is *entirely* a number, whatever its JavaScript type, so `-1500` and the
+     string `"-1500.00"` that `.toFixed(2)` produces both stay numeric and
+     SUM-able. The type-based exemption alone was not enough: every money column
+     pre-formats with `.toFixed()`, so real negative figures (VAC, margin, PCP
+     delta, credit-note amounts) arrived as strings and were emitted as text
+     labels — `=SUM` then skipped exactly the overrunning rows the export exists
+     to surface. Anything with a second operator or a letter (`-1+1`, `-A1`,
+     `+SUM(A1)`) is not numeric and is still prefixed. RFC-4180 double-quoting
+     applies to cells containing comma/quote/newline. Money columns are labelled
+     "EUR (base)".
    - **Output:** spreadsheet-safe, correctly-typed CSV.
 
 **Exceptions.**
