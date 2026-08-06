@@ -19,6 +19,7 @@ import {
   AR_AGING_BUCKETS,
   budgetForProject,
   approvedChangeBudgetForProject,
+  countsTowardEffectiveBudget,
   effectiveBudgetForProject,
   expenseCostForProject,
   marginDrivers,
@@ -147,6 +148,58 @@ describe('finance.util', () => {
     expect(f.etc).toBe(4500);
     expect(f.eac).toBe(10500);
     expect(f.varianceAtCompletion).toBe(19500);
+  });
+
+  /**
+   * EAC = labor INCURRED + external + ETC. Three cases pin that shape —
+   * equivalently `max(plannedLaborCost, actualLaborCost) + externalCost` —
+   * without ever restating the implementation: actual below plan (the ETC
+   * branch), actual part-way (the case above, kept as the middle point) and
+   * actual past plan (ETC floors at 0).
+   *
+   * The defect these close: `eac` read `actualCost`, which falls back to the
+   * PLAN while no timesheet is approved, so the plan was charged as incurred and
+   * as still-to-come at once. Only ONE assertion in this suite was ever on that
+   * fallback branch ("approved CR can flip VAC negative", further down), and its
+   * 18000 — with the comment above it — certified the double count to reviewers.
+   */
+  it('does not double-count the planned-labor fallback into EAC (no approved time yet)', () => {
+    // `data` carries NO timeEntries; state it explicitly so the fixture cannot
+    // drift onto the actual-cost branch and make the whole case inert.
+    const noTime: FinanceData = { ...data, timeEntries: [] };
+    const f = computeProjectFinancials('P', noTime);
+
+    // BRANCH GUARD: these two ARE the proof we are on the planned-labor fallback.
+    expect(f.plannedLaborCost).toBe(7500);
+    expect(f.actualLaborCost).toBe(0);
+
+    expect(f.etc).toBe(7500);
+    expect(f.eac).toBe(10500);            // 0 incurred labor + 3000 external + 7500 ETC
+    // ABSENCE: 18000 is exactly what `actualCost + etc` produced here.
+    expect(f.eac).not.toBe(18000);
+    expect(f.varianceAtCompletion).toBe(30000 - 10500);
+
+    // The fallback-branch TILES must not move: "delete the fallback from
+    // laborCostForProject" also lands eac on 10500, and would blank Labor Cost
+    // and Actual Cost on every pre-timesheet project.
+    expect(f.laborCost).toBe(7500);
+    expect(f.actualCost).toBe(10500);
+  });
+
+  it('floors ETC at zero once actual labor passes the plan, and EAC follows actual', () => {
+    // 120h × 75 = 9000 actual against a 7500 plan. Stops the fix from being
+    // "delete the ETC term": that would give 12000 here too, but 3000 above.
+    const overrun: FinanceData = {
+      ...data,
+      timeEntries: [time('t1', 'a1', 'r1', '1', 'P', 120, 'Approved')],
+    };
+    const f = computeProjectFinancials('P', overrun);
+    expect(f.plannedLaborCost).toBe(7500);
+    expect(f.actualLaborCost).toBe(9000);
+    expect(f.etc).toBe(0);
+    expect(f.eac).toBe(12000);            // 9000 incurred labor + 3000 external + 0 ETC
+    expect(f.laborCost).toBe(9000);
+    expect(f.actualCost).toBe(12000);
   });
 
   it('guards against division by zero (no revenue, no budget)', () => {
@@ -1041,19 +1094,60 @@ describe('finance.util effective budget (change requests)', () => {
     expect(f.varianceAtCompletion).toBe(30000 - f.eac);
   });
 
-  it('adds only APPROVED change-request impactBudget to the effective budget', () => {
+  it('adds APPROVED change-request impactBudget to the effective budget, ignoring undecided and rejected ones', () => {
     const d: FinanceData = {
       ...data,
       changeRequests: [
         cr('c1', 'P', 'Approved', 5000),
         cr('c2', 'P', 'Approved', 2500),
-        cr('c3', 'P', 'Submitted', 9999), // not approved -> ignored
-        cr('c4', 'P', 'Rejected', 9999),  // not approved -> ignored
+        cr('c3', 'P', 'Submitted', 9999), // not decided -> ignored
+        cr('c4', 'P', 'Rejected', 9999),  // decided against -> ignored
         cr('c5', 'Q', 'Approved', 1000),  // other project -> ignored
       ],
     };
     expect(approvedChangeBudgetForProject('P', d)).toBe(7500);
     expect(effectiveBudgetForProject('P', d)).toBe(37500); // 30000 + 7500
+  });
+
+  /**
+   * Draft → Submitted → Approved → Implemented is one-way: an Implemented change
+   * request can never return to Approved (CHANGE_REQUEST_TRANSITIONS,
+   * src/server/route-policy.util.ts:115-121), and the Change Requests screen
+   * already counts it in its own "approved budget impact" tile. Matching only
+   * 'Approved' here meant that clicking "Mark <title> implemented" — the normal
+   * end of the lifecycle — withdrew the uplift from budget, burn %, VAC and hence
+   * delivery health, so two figures on the same project page disagreed with no
+   * way back through the UI.
+   */
+  it('keeps an IMPLEMENTED change request in the effective budget (it is more committed, not less)', () => {
+    const d: FinanceData = {
+      ...data,
+      changeRequests: [
+        cr('c1', 'P', 'Implemented', 7500),
+        // ABSENCE, in the same fixture: these must still contribute 0, which is
+        // what blocks the cheap "count every status" pass.
+        cr('c2', 'P', 'Draft', 9999),
+        cr('c3', 'P', 'Submitted', 9999),
+        cr('c4', 'P', 'Rejected', 9999),
+      ],
+    };
+    expect(approvedChangeBudgetForProject('P', d)).toBe(7500);
+    expect(effectiveBudgetForProject('P', d)).toBe(37500); // 30000 + 7500, not 30000
+
+    const f = computeProjectFinancials('P', d);
+    expect(f.budget).toBe(37500);
+    // burn and VAC are computed on the uplifted budget, not on the bare 30000.
+    expect(f.burnPct).toBeCloseTo((f.actualCost / 37500) * 100, 10);
+    expect(f.burnPct).not.toBeCloseTo((f.actualCost / 30000) * 100, 10);
+    expect(f.varianceAtCompletion).toBe(37500 - f.eac);
+  });
+
+  it('countsTowardEffectiveBudget accepts exactly Approved and Implemented', () => {
+    // Exhaustive over the union, so a later status added to ChangeRequest cannot
+    // slip in as committed by default, and the twin of every `true` is a `false`.
+    const statuses: readonly ChangeRequest['status'][] = ['Draft', 'Submitted', 'Approved', 'Rejected', 'Implemented'];
+    expect(statuses.filter(countsTowardEffectiveBudget)).toEqual(['Approved', 'Implemented']);
+    expect(statuses.filter(s => !countsTowardEffectiveBudget(s))).toEqual(['Draft', 'Submitted', 'Rejected']);
   });
 
   it('computeProjectFinancials uses CR-adjusted budget for budget/burnPct/VAC; EAC unchanged', () => {
@@ -1084,9 +1178,14 @@ describe('finance.util effective budget (change requests)', () => {
     };
     const f = computeProjectFinancials('P', small);
     expect(f.budget).toBe(9000);
-    // labor 7500 (planned fallback, no time entries) + external 3000 = actualCost 10500; etc 7500; eac 18000
-    expect(f.eac).toBe(18000);
-    expect(f.varianceAtCompletion).toBe(9000 - 18000); // -9000
+    // No time entries, so labor is INCURRED 0 and the 7500 plan is the ETC:
+    // eac = 0 + external 3000 + etc 7500 = 10500. (This assertion and the comment
+    // that stood here read 18000 — the plan charged twice, once as incurred cost
+    // and once as cost to complete. Rewritten, not weakened: the case still
+    // proves a negative-impact CR can drive VAC below zero.)
+    expect(f.eac).toBe(10500);
+    expect(f.varianceAtCompletion).toBe(9000 - 10500); // -1500
+    expect(f.varianceAtCompletion).toBeLessThan(0);
   });
 });
 
@@ -1158,10 +1257,10 @@ describe('finance.util alerts', () => {
   });
 
   it('an approved CR can clear an EAC-over-budget flag by raising the effective budget', () => {
-    // EAC for P with no time entries = actualCost 10500 + ETC 7500 = 18000
+    // EAC for P with no time entries = incurred labor 0 + external 3000 + ETC 7500 = 10500
     const tight: FinanceData = { ...data, financials: [fin('f1', 'P', 8000, 0)] };
     expect(projectAlerts('P', tight).eacOverBudget).toBe(true);
-    const withCr: FinanceData = { ...tight, changeRequests: [cr('c1', 'P', 'Approved', 12000)] }; // 8000 -> 20000 > 18000
+    const withCr: FinanceData = { ...tight, changeRequests: [cr('c1', 'P', 'Approved', 12000)] }; // 8000 -> 20000 > 10500
     expect(projectAlerts('P', withCr).eacOverBudget).toBe(false);
   });
 

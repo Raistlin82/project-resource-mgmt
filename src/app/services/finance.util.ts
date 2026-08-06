@@ -17,7 +17,7 @@ export interface FinanceData {
   contracts?: Contract[];
   customers?: Customer[];
   milestones?: Milestone[];
-  /** Approved change requests adjust the effective project budget (see effectiveBudgetForProject). */
+  /** Committed (Approved/Implemented) change requests adjust the effective project budget (see effectiveBudgetForProject). */
   changeRequests?: ChangeRequest[];
   /** Optional project master data; used only to label portfolio-level alert rows. */
   projects?: Project[];
@@ -76,12 +76,12 @@ export interface ProjectFinancials {
   laborCost: number;     // actual labor when available, otherwise planned fallback
   externalCost: number;  // Σ purchase-order lines imputed to the project
   actualCost: number;    // laborCost + externalCost
-  budget: number;        // effective budget: Σ financial-plan budget + Σ approved CR impactBudget
+  budget: number;        // effective budget: Σ financial-plan budget + Σ committed CR impactBudget
   margin: number;        // revenue − actualCost
   marginPct: number;     // margin / revenue (0 when no revenue)
   burnPct: number;       // actualCost / effective budget (0 when no budget)
   etc: number;           // estimated cost to complete
-  eac: number;           // estimate at completion (actualCost + ETC; CR-independent)
+  eac: number;           // estimate at completion (actualLaborCost + externalCost + ETC; CR-independent)
   varianceAtCompletion: number; // effective budget − EAC
 }
 
@@ -319,19 +319,44 @@ export function budgetForProject(projectId: string, d: FinanceData): number {
   return sum(d.financials.filter(f => f.projectId === projectId).map(f => f.budget));
 }
 
-/** Σ impactBudget of APPROVED change requests for a project (0 when none / changeRequests absent). */
+/**
+ * Does a change request in this status have a COMMITTED budget impact?
+ *
+ * The lifecycle is Draft → Submitted → Approved → Implemented and it is one-way
+ * (CHANGE_REQUEST_TRANSITIONS, src/server/route-policy.util.ts:115-121: from
+ * 'Implemented' there is no legal transition back). An uplift that was approved
+ * and has since been IMPLEMENTED is therefore MORE committed than one merely
+ * approved, never less — so both statuses count. Matching only 'Approved' meant
+ * that ticking a change request off as implemented, the normal end of its life,
+ * silently WITHDREW its budget uplift from budget, burn %, VAC and hence
+ * delivery health, with no way back through the UI.
+ *
+ * Exported so that the Change Requests screen's "approved budget impact" tile
+ * and this engine share ONE definition of the predicate. They had already
+ * drifted — change-requests.ts counted Implemented, this file did not — and that
+ * drift (two figures on the same project page disagreeing) is the actual defect.
+ */
+export function countsTowardEffectiveBudget(status: ChangeRequest['status']): boolean {
+  return status === 'Approved' || status === 'Implemented';
+}
+
+/**
+ * Σ impactBudget of the change requests whose budget impact is committed for a
+ * project — Approved *and* Implemented, per countsTowardEffectiveBudget (0 when
+ * none / changeRequests absent).
+ */
 export function approvedChangeBudgetForProject(projectId: string, d: FinanceData): number {
   return sum(
     (d.changeRequests ?? [])
-      .filter(c => c.projectId === projectId && c.status === 'Approved')
+      .filter(c => c.projectId === projectId && countsTowardEffectiveBudget(c.status))
       .map(c => c.impactBudget),
   );
 }
 
 /**
  * Effective (CR-adjusted) budget: the base financial-plan budget plus the sum of
- * approved change-request budget impacts for the project. Identical to the base
- * budget when no change requests are supplied or none are approved.
+ * committed change-request budget impacts for the project. Identical to the base
+ * budget when no change requests are supplied or none are committed.
  */
 export function effectiveBudgetForProject(projectId: string, d: FinanceData): number {
   return budgetForProject(projectId, d) + approvedChangeBudgetForProject(projectId, d);
@@ -345,11 +370,20 @@ export function computeProjectFinancials(projectId: string, d: FinanceData): Pro
   const laborCost = laborCostForProject(projectId, d);
   const externalCost = externalCostForProject(projectId, d);
   const actualCost = laborCost + externalCost;
-  // CR-adjusted budget drives budget/burn/VAC; EAC is independent (actualCost + ETC).
+  // CR-adjusted budget drives budget/burn/VAC; EAC is independent of it (incurred + ETC).
   const budget = effectiveBudgetForProject(projectId, d);
   const margin = revenue - actualCost;
   const etc = Math.max(0, plannedLaborCost - actualLaborCost);
-  const eac = actualCost + etc;
+  // EAC = labor cost INCURRED + external cost + cost to complete. The labor term
+  // must be `actualLaborCost`, never `actualCost`: `laborCost` (and therefore
+  // `actualCost`) falls back to plannedLaborCost while no timesheet is approved
+  // (laborCostForProject above), so charging it here billed the whole plan as
+  // already spent AND, through `etc`, as still to spend. That double-count hit
+  // every project at kickoff — precisely when EAC/VAC is read — pushing VAC
+  // negative, painting delivery health red and firing eacOverBudget on projects
+  // that were under budget. Equivalent closed form: max(planned, actual) + external.
+  // `laborCost`/`actualCost` stay on the fallback so the cost tiles keep the plan.
+  const eac = actualLaborCost + externalCost + etc;
   return {
     revenue,
     invoiced,
