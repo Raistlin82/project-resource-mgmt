@@ -265,3 +265,96 @@ describe('Billing conditional form validation', () => {
     expect(form.invalid).toBe(true);
   });
 });
+
+/**
+ * The customer-facing amount on /billing.
+ *
+ * `customerFacingBillingAmount()` marks an 'Expense' condition up by `markupPct`
+ * — re-billing a cost with a margin is the entire economic purpose of that type —
+ * and it is the figure the SERVER books the Order and OrderLine at, and the figure
+ * `finance.util.ts` uses everywhere through `billableAmount()`. billing.ts was the
+ * one screen in the codebase reading `item.amount` raw, so the printable invoice,
+ * the row totals, the KPI strip and the CSV all under-billed the markup, and the
+ * printed "Total due" contradicted the order the same transaction had just created.
+ */
+describe('Billing prices an Expense condition at the customer-facing amount', () => {
+  const CT: Contract = {
+    id: 'CT2', customerId: 'C1', name: 'Expense Framework', type: 'T&M', totalValue: 0,
+    currency: 'USD', status: 'Active', startDate: '2026-01-01', endDate: '2026-12-31',
+  };
+  const CUST: Customer = { id: 'C1', name: 'Acme Co' };
+  const PRJ: Project = {
+    id: 'P2', name: 'Project Beta', location: 'Remote', startDate: '2026-01-01',
+    endDate: '2026-12-31', status: 'Active', contractId: 'CT2',
+  };
+  // The seeded shape (src/db/seed.ts BP7): 3200 USD + 5% markup = 3360 customer-facing.
+  const EXPENSE = {
+    id: 'BP7', contractId: 'CT2', projectId: 'P2', type: 'Expense', label: 'Re-billed travel',
+    amount: 3200, markupPct: 5, taxRatePct: 22, retentionPct: 0, currency: 'USD',
+    status: 'Invoiced', orderId: 'ORD-BP7',
+  } as unknown as BillingPlanItem;
+  // The CONTROL: same money, same tax, NOT an Expense — must be untouched by the fix.
+  const MILESTONE = {
+    id: 'BP8', contractId: 'CT2', projectId: 'P2', type: 'Milestone', label: 'Acceptance',
+    amount: 3200, taxRatePct: 22, retentionPct: 0, currency: 'USD', status: 'Invoiced',
+  } as unknown as BillingPlanItem;
+
+  async function setupRows(items: BillingPlanItem[]): Promise<ComponentFixture<Billing>> {
+    const fixture = await setupSparse({
+      getBillingPlanItems: () => of(items),
+      getContracts: () => of([CT]),
+      getCustomers: () => of([CUST]),
+      getProjects: () => of([PRJ]),
+      getOrders: () => of([{ id: 'ORD-BP7', contractId: 'CT2', type: 'Customer', amount: 3360, currency: 'USD', status: 'Invoiced', orderDate: '2026-05-10', invoiceNumber: 'INV-2026-0007', invoiceDate: '2026-05-10' }]),
+      getFxRates: () => of<FxRate[]>([{ currency: 'EUR', rateToBase: 1 }, { currency: 'USD', rateToBase: 1 }]),
+    });
+    await tick(fixture);
+    return fixture;
+  }
+
+  const rowFor = (fixture: ComponentFixture<Billing>, id: string) =>
+    (fixture.componentInstance as unknown as { rows: () => { item: { id: string }; customerAmount: number; tax: number; retention: number; netPayable: number }[] })
+      .rows().find(r => r.item.id === id)!;
+
+  it('computes tax and net payable on the MARKED-UP amount', async () => {
+    // RED before the fix: customerAmount did not exist, tax was 704 (22% of 3200)
+    // and netPayable was 3904. The customer was invoiced 195.20 too little — exactly
+    // the 160.00 markup plus its tax.
+    const fixture = await setupRows([EXPENSE]);
+    const row = rowFor(fixture, 'BP7');
+    expect(row.customerAmount).toBe(3360);
+    expect(row.tax).toBeCloseTo(739.2, 10);
+    expect(row.netPayable).toBeCloseTo(4099.2, 10);
+  });
+
+  it('keeps a NON-Expense condition on exactly the same figures as before', async () => {
+    // ASSERTION OF ABSENCE #1. This is what kills an unconditional `* 1.05` in the
+    // fix, and what catches a fixture that silently lost its `type: 'Expense'` — the
+    // wrong-identity-fixture failure this project has already paid for.
+    const fixture = await setupRows([MILESTONE]);
+    const row = rowFor(fixture, 'BP8');
+    expect(row.customerAmount).toBe(3200);
+    expect(row.tax).toBeCloseTo(704, 10);
+    expect(row.netPayable).toBeCloseTo(3904, 10);
+  });
+
+  it('holds the identity netPayable === customerAmount - retention + tax', async () => {
+    // An invariant rather than literals, so the row cannot drift into an internally
+    // inconsistent state even if the rates change.
+    const fixture = await setupRows([EXPENSE, MILESTONE]);
+    for (const id of ['BP7', 'BP8']) {
+      const row = rowFor(fixture, id);
+      expect(row.netPayable).toBeCloseTo(row.customerAmount - row.retention + row.tax, 10);
+    }
+  });
+
+  it('never renders the under-billed total anywhere on the screen', async () => {
+    // ASSERTION OF ABSENCE #2, and the one that matters most: 3,904.00 is the exact
+    // number the defect printed as "Total due" on the document handed to the
+    // customer. No correct implementation may leave it on an Expense-only screen.
+    const fixture = await setupRows([EXPENSE]);
+    const text = host(fixture).textContent ?? '';
+    expect(text).not.toContain('3,904');
+    expect(text).not.toContain('3,200');
+  });
+});

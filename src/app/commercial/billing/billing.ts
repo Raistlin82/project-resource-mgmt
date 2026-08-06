@@ -26,7 +26,7 @@ import { sellRateFor, DEFAULT_HOURS_PER_DAY } from '../../services/sell-rate.uti
 import { CsvColumn, downloadCsv, toCsv } from '../../services/export.util';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { ListStateComponent } from '../../shared/list-state.component';
-import { billingPlanValidationError } from '../../services/billing-validation.util';
+import { billingPlanValidationError, customerFacingBillingAmount } from '../../services/billing-validation.util';
 import { authGatedResource } from '../../services/auth-gated-resource.util';
 
 type BillingStatus = BillingPlanItem['status'];
@@ -63,6 +63,19 @@ interface BillingRow {
   readonly contractName: string;
   readonly projectName: string;
   readonly trigger: string;
+  /**
+   * What the CUSTOMER is billed — `customerFacingBillingAmount(item)`, i.e.
+   * `item.amount` for every type except 'Expense', which is marked up by
+   * `markupPct`. This is the figure the SERVER books the Order and OrderLine at
+   * (src/server/commercial-write.util.ts), and the one `finance.util.ts` uses
+   * everywhere via `billableAmount()`.
+   *
+   * It exists because this screen used to read `item.amount` raw — the single
+   * outlier in the codebase — so the printable invoice, the KPI strip and the CSV
+   * all under-billed a re-billed expense by exactly its markup, and the printed
+   * total contradicted the order the same transaction had just created.
+   */
+  readonly customerAmount: number;
   readonly tax: number;
   readonly retention: number;
   readonly netPayable: number;
@@ -290,8 +303,11 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                   <td class="text-ink-secondary">{{ row.contractName }}</td>
                   <td class="text-ink-secondary">{{ row.projectName }}</td>
                   <td class="text-ink-muted">{{ row.trigger }}</td>
+                  <!-- customerAmount, not item.amount: on an Expense condition the raw
+                       column excludes the re-billing markup, so this cell used to
+                       contradict the Net Payable cell in its own row. -->
                   <td class="num font-semibold" [class.text-critical-text]="row.item.type === 'CreditNote'" [class.text-ink]="row.item.type !== 'CreditNote'">
-                    {{ row.item.amount | currency: row.item.currency : 'symbol' : '1.0-0' }}
+                    {{ row.customerAmount | currency: row.item.currency : 'symbol' : '1.0-0' }}
                   </td>
                   <td class="num text-ink-secondary">{{ (row.item.taxRatePct ?? 0) / 100 | percent: '1.0-0' }}</td>
                   <td class="num text-ink-secondary">{{ (row.item.retentionPct ?? 0) / 100 | percent: '1.0-0' }}</td>
@@ -661,7 +677,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                     <td class="py-3 px-3 text-ink-secondary">{{ inv.meta.label }}</td>
                     <td class="py-3 pl-3 text-right font-semibold tabular-nums"
                         [class.text-critical-text]="inv.item.type === 'CreditNote'">
-                      {{ inv.item.amount | currency: inv.item.currency : 'symbol' : '1.2-2' }}
+                      {{ inv.customerAmount | currency: inv.item.currency : 'symbol' : '1.2-2' }}
                     </td>
                   </tr>
                 </tbody>
@@ -672,7 +688,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                 <dl class="w-full sm:w-80 text-sm space-y-1.5">
                   <div class="flex justify-between">
                     <dt class="text-ink-secondary">Net</dt>
-                    <dd class="tabular-nums">{{ inv.item.amount | currency: inv.item.currency : 'symbol' : '1.2-2' }}</dd>
+                    <dd class="tabular-nums">{{ inv.customerAmount | currency: inv.item.currency : 'symbol' : '1.2-2' }}</dd>
                   </div>
                   @if (inv.retention > 0) {
                     <div class="flex justify-between text-ink-secondary">
@@ -1031,6 +1047,7 @@ export class Billing {
     return this.items()
       .filter(i => (!type || i.type === type) && (!status || i.status === status) && (!contractId || i.contractId === contractId))
       .map<BillingRow>(item => {
+        const customerAmount = this.customerAmountOf(item);
         const tax = this.taxOf(item);
         const retention = this.retentionOf(item);
         const contract = contracts.get(item.contractId);
@@ -1045,9 +1062,10 @@ export class Billing {
           contractName,
           projectName: item.projectId ? projects.get(item.projectId)?.name ?? item.projectId : '—',
           trigger: this.triggerOf(item, milestones),
+          customerAmount,
           tax,
           retention,
-          netPayable: item.amount - retention + tax,
+          netPayable: customerAmount - retention + tax,
           due: this.dueOf(item),
           overdueDays: this.overdueDaysOf(item),
           invoiceNumber: order?.invoiceNumber ?? null,
@@ -1085,7 +1103,8 @@ export class Billing {
   readonly kpis = computed(() => {
     const items = this.items();
     const fx = this.fxRates();
-    const base = (i: BillingPlanItem) => convertToBase(i.amount, i.currency, fx);
+    // Customer-facing, not raw: the tiles must agree with the printed document.
+    const base = (i: BillingPlanItem) => convertToBase(this.customerAmountOf(i), i.currency, fx);
     const sumWhere = (pred: (i: BillingPlanItem) => boolean) =>
       items.filter(pred).reduce((s, i) => s + base(i), 0);
 
@@ -1174,12 +1193,22 @@ export class Billing {
       }, 0);
   }
 
+  /**
+   * THE ONE place this screen decides what the customer is billed. Every money
+   * figure here — tax, retention, net payable, the KPI tiles and the CSV — must go
+   * through it, or the tiles disagree with the printed document instead of only
+   * disagreeing with the server.
+   */
+  private customerAmountOf(i: BillingPlanItem): number {
+    return customerFacingBillingAmount(i);
+  }
+
   private taxOf(i: BillingPlanItem): number {
-    return i.amount * ((i.taxRatePct ?? 0) / 100);
+    return this.customerAmountOf(i) * ((i.taxRatePct ?? 0) / 100);
   }
 
   private retentionOf(i: BillingPlanItem): number {
-    return i.amount * ((i.retentionPct ?? 0) / 100);
+    return this.customerAmountOf(i) * ((i.retentionPct ?? 0) / 100);
   }
 
   private triggerOf(i: BillingPlanItem, milestones: Map<string, Milestone>): string {
@@ -1344,7 +1373,7 @@ export class Billing {
       { key: 'contract', header: 'Contract', map: r => r.contractName },
       { key: 'project', header: 'Project', map: r => r.projectName },
       { key: 'trigger', header: 'Trigger', map: r => r.trigger },
-      { key: 'amount', header: 'Amount', map: r => r.item.amount.toFixed(2) },
+      { key: 'amount', header: 'Amount', map: r => r.customerAmount.toFixed(2) },
       { key: 'currency', header: 'Currency', map: r => r.item.currency },
       { key: 'taxPct', header: 'Tax %', map: r => (r.item.taxRatePct ?? 0).toFixed(2) },
       { key: 'retentionPct', header: 'Retention %', map: r => (r.item.retentionPct ?? 0).toFixed(2) },
