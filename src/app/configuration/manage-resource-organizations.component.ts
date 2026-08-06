@@ -11,6 +11,7 @@ import { ORG_LEVELS, ancestorChain, descendantOrgIds, type OrgLevel } from '../s
 import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
 import { todayLocalIso } from '../services/local-date.util';
 import { authGatedResource } from '../services/auth-gated-resource.util';
+import { MultiSelectChipsComponent, type MultiSelectOption } from '../shared/multi-select-chips.component';
 
 /** One rendered tree row: the node plus its indentation depth (root = 0). */
 interface OrgTreeRow {
@@ -28,7 +29,7 @@ function todayIso(): string {
 @Component({
   selector: 'app-manage-resource-organizations',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [ReactiveFormsModule, MatIconModule, ModalDialogDirective],
+  imports: [ReactiveFormsModule, MatIconModule, ModalDialogDirective, MultiSelectChipsComponent],
   template: `
     <div class="command-page space-y-6">
     <div class="command-card overflow-hidden">
@@ -128,16 +129,21 @@ function todayIso(): string {
               </div>
               <div>
                 <label for="orgCostCenters" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Cost Centers</label>
-                <!-- costCenters[] is an FK MULTI-select to the cost-centers catalog (by id). -->
-                <select id="orgCostCenters" formControlName="costCenters" multiple class="command-select min-h-[120px]">
-                  @for (cc of costCenterOptions(); track cc.id) {
-                    <option [value]="cc.id">{{ cc.id }} — {{ cc.name }}</option>
-                  }
-                  @for (orphan of orphanCostCenters(); track orphan) {
-                    <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
-                  }
-                </select>
-                <p class="text-xs font-medium text-[var(--cc-muted)] mt-2">Hold Ctrl/Cmd to select multiple cost centers.</p>
+                <!-- costCenters[] is a MULTI-value FK to the cost-centers catalog (by id).
+                     UX register P2-19: this was a <select multiple>, which needs a
+                     Ctrl/Cmd-click to hold a second cost centre — impossible on touch,
+                     where picking a second one silently REPLACED the first. These ids feed
+                     cost allocation, so that replacement was a silent money-side data
+                     change. Now the shared choose-then-add + removable-chip primitive,
+                     which keeps the ORPHAN contract this select already had (a stored id
+                     the catalog no longer offers stays on the node and stays removable):
+                     the model is the raw id array and the primitive never intersects it
+                     with its option list. -->
+                <app-multi-select-chips formControlName="costCenters" inputId="orgCostCenters"
+                                        [options]="costCenterChipOptions()"
+                                        pickerLabel="Cost center to add"
+                                        placeholder="Select a cost center..."
+                                        emptyText="No cost centers assigned yet." />
               </div>
             </div>
 
@@ -429,13 +435,18 @@ export class ManageResourceOrganizationsComponent {
     return rows;
   });
 
-  // ORPHAN VALUES: stored ids no longer in the catalog stay selectable as disabled
-  // options so an edit never silently discards them.
-  orphanCostCenters = computed<string[]>(() => {
-    const selected: string[] = this.orgForm.controls['costCenters'].value ?? [];
-    const known = new Set(this.costCenterOptions().map(cc => cc.id));
-    return selected.filter(id => !known.has(id));
-  });
+  /**
+   * Cost-centre picker options for the chips control: the STORED value is the cost
+   * centre id, the label carries the id AND the name because the id is what the table
+   * and every cost-allocation report show. Mapping only — the ORPHAN case is owned by
+   * the chips primitive (which never intersects the model with these options), so
+   * there is deliberately no orphan list here any more.
+   */
+  costCenterChipOptions = computed<MultiSelectOption[]>(() =>
+    this.costCenterOptions().map(cc => ({ value: cc.id, label: `${cc.id} — ${cc.name}` })));
+
+  // ORPHAN VALUE: a stored id no longer in the catalog stays selectable as a disabled
+  // option so an edit never silently discards it.
   orphanServiceOrg = computed<string | null>(() => {
     const current: string = this.orgForm.controls['serviceOrganizationId'].value ?? '';
     if (!current) return null;

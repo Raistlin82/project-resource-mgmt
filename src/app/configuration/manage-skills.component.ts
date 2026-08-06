@@ -6,10 +6,11 @@ import { forkJoin } from 'rxjs';
 import { ApiService, Skill, SkillCatalog, ProficiencySet } from '../services/api.service';
 import { NotificationService } from '../services/notification.service';
 import { authGatedResource } from '../services/auth-gated-resource.util';
+import { MultiSelectChipsComponent, type MultiSelectOption } from '../shared/multi-select-chips.component';
 
 @Component({
   selector: 'app-manage-skills',
-  imports: [ReactiveFormsModule, MatIconModule],
+  imports: [ReactiveFormsModule, MatIconModule, MultiSelectChipsComponent],
   template: `
     <div class="command-card overflow-hidden">
       <div class="command-card-header flex-wrap">
@@ -60,12 +61,18 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
 
             <div>
               <label for="skillCatalogs" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Catalogs</label>
-              <select id="skillCatalogs" formControlName="catalogs" multiple class="command-select min-h-[120px]">
-                @for (cat of catalogs(); track cat.id) {
-                  <option [value]="cat.id" class="py-1">{{ cat.name }}</option>
-                }
-              </select>
-              <p class="text-xs font-medium text-[var(--cc-muted)] mt-2">Hold Ctrl/Cmd to select multiple catalogs.</p>
+              <!-- UX register P2-19: this was a <select multiple>, which needs a
+                   Ctrl/Cmd-click to hold a second catalog — impossible on touch, where
+                   picking a second one silently replaced the first. Now the shared
+                   choose-then-add + removable-chip primitive, which also renders an
+                   ORPHAN catalog id (one the catalog list no longer offers) as a chip
+                   instead of dropping it: the control stores raw ids and the primitive
+                   never intersects the model with its options. -->
+              <app-multi-select-chips formControlName="catalogs" inputId="skillCatalogs"
+                                      [options]="catalogOptions()"
+                                      pickerLabel="Catalog to add"
+                                      placeholder="Select a catalog..."
+                                      emptyText="No catalogs assigned yet." />
             </div>
 
             <div class="flex justify-end gap-3 pt-2">
@@ -111,9 +118,23 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
                   }
                 </td>
                 <td class="text-right">
-                  <button type="button" (click)="toggleRestrict(skill)" class="w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-caution-text hover:border-caution hover:bg-caution-tint transition-all inline-flex items-center justify-center shadow-sm mr-2" [attr.aria-label]="(skill.restricted ? 'Unrestrict ' : 'Restrict ') + skill.name" [title]="skill.restricted ? 'Unrestrict' : 'Restrict'">
-                    <mat-icon class="text-[20px] w-[20px] h-[20px]">{{ skill.restricted ? 'lock_open' : 'block' }}</mat-icon>
-                  </button>
+                  <!-- The restrict toggle gets the SAME row-rendered arm/Confirm shape as
+                       the delete beside it (and as manage-project-roles). It used to PUT on
+                       a single click with no arming and no confirmation, so one control on
+                       this screen was guarded and its sibling was not.
+                       The armed label follows the ROW's direction, because this one control
+                       both restricts and unrestricts. -->
+                  @if (pendingRestrictId() === skill.id) {
+                    <div class="inline-flex items-center gap-2 mr-2">
+                      <span class="text-xs font-bold text-[var(--cc-muted)]">{{ skill.restricted ? 'Unrestrict' : 'Restrict' }} {{ skill.name }}?</span>
+                      <button type="button" (click)="confirmRestrict(skill)" class="px-3 py-1.5 text-xs font-bold text-caution-text bg-caution-tint ring-1 ring-caution rounded-lg hover:bg-[color-mix(in_oklch,var(--color-caution)_16%,var(--color-surface))] transition-all shadow-sm">Confirm</button>
+                      <button type="button" (click)="cancelRestrict()" class="px-3 py-1.5 text-xs font-bold text-ink-secondary bg-surface border border-line rounded-lg hover:bg-surface-muted transition-all shadow-sm">Cancel</button>
+                    </div>
+                  } @else {
+                    <button type="button" (click)="requestRestrict(skill)" class="w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-caution-text hover:border-caution hover:bg-caution-tint transition-all inline-flex items-center justify-center shadow-sm mr-2" [attr.aria-label]="(skill.restricted ? 'Unrestrict ' : 'Restrict ') + skill.name" [title]="skill.restricted ? 'Unrestrict' : 'Restrict'">
+                      <mat-icon class="text-[20px] w-[20px] h-[20px]">{{ skill.restricted ? 'lock_open' : 'block' }}</mat-icon>
+                    </button>
+                  }
                   <!-- ARMED STATE IS RENDERED IN THE ROW, not announced in a toast.
                        The previous shape armed pendingDeleteId invisibly and never
                        expired it, while its only warning was a toast that auto-dismisses
@@ -161,6 +182,15 @@ export class ManageSkillsComponent {
   showForm = signal(false);
   /** Read by the template: the armed row renders its own Confirm/Cancel pair. */
   protected pendingDeleteId = signal<string | null>(null);
+  /** Same, for the restrict toggle — one armed row at a time, per control. */
+  protected pendingRestrictId = signal<string | null>(null);
+
+  /**
+   * Catalog picker options for the chips control: the STORED value is the catalog
+   * id, the label is its name. Mapping only — never a filter over the model.
+   */
+  catalogOptions = computed<MultiSelectOption[]>(() =>
+    this.catalogs().map(c => ({ value: c.id, label: c.name })));
 
   skillForm: FormGroup = this.fb.group({
     name: ['', Validators.required],
@@ -196,8 +226,37 @@ export class ManageSkillsComponent {
     }
   }
 
-  toggleRestrict(skill: Skill) {
+  /**
+   * Arms the restrict toggle. Deliberately CANNOT write: the only path to the PUT is
+   * the Confirm control rendered inside the armed row, so a stale click on this icon
+   * — or on another row's — can never flip a skill.
+   *
+   * The toast is corroboration, not the warning: it names the skill and the
+   * direction. It deliberately does NOT promise that restricting takes the skill out
+   * of use. NOTHING enforces the flag today: all three consumers of /skills
+   * (my-profile, resource-requests and this screen) list every skill and none filters
+   * on `restricted`, and the server's own reference check builds its valid-name set
+   * from every row (`skillNames()` in src/server.ts) so a restricted skill still
+   * validates on a resource or a request. So the honest statement is that the catalog
+   * entry is marked — promising an enforcement that does not exist is the same defect
+   * the vendors dialog was corrected for.
+   */
+  requestRestrict(skill: Skill) {
+    this.pendingRestrictId.set(skill.id);
+    const action = skill.restricted ? 'unrestricting' : 'restricting';
+    this.notificationService.show(
+      `Confirm ${action} "${skill.name}". This marks the catalog entry only: profiles and requests that already name the skill keep it, and it stays selectable.`,
+      'info',
+    );
+  }
+
+  cancelRestrict() {
+    this.pendingRestrictId.set(null);
+  }
+
+  confirmRestrict(skill: Skill) {
     this.api.updateSkill(skill.id, { restricted: !skill.restricted }).subscribe(() => {
+      this.pendingRestrictId.set(null);
       this.dataRes.reload();
     });
   }

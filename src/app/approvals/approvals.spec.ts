@@ -363,3 +363,48 @@ describe('Approvals inbox — the segmented filter exposes its selection (P2-09)
     expect(pressed()).toEqual(['false', 'true']);
   });
 });
+
+/**
+ * UX register P3-01 — the decision note's placeholder read "Nota (opzionale)" in an
+ * app whose every other string is English. On THIS control it was worse than a
+ * translation slip: the input already carried an English `aria-label`, so one field
+ * announced "Approval note for AR1" to a screen reader while the sighted user read
+ * Italian — two labels for one input, disagreeing.
+ *
+ * Asserted with toBe, deliberately: 'Nota' CONTAINS 'Not', so `toContain('Note')`
+ * passes on the defect itself.
+ */
+describe('Approvals inbox — the decision note is labelled in one language (P3-01)', () => {
+  /** The note input on a row this actor may decide. */
+  function noteInput(host: HTMLElement): HTMLInputElement {
+    const input = host.querySelector<HTMLInputElement>('td input[type="text"]');
+    expect(input, 'no decision-note input rendered — the fixture never reached a decidable row').not.toBeNull();
+    return input!;
+  }
+
+  it('gives the note an English placeholder that agrees with its aria-label', async () => {
+    // 'mid' is rr's manager, so the Allocation row is decidable and the note renders —
+    // the same fixture the scope cases above use.
+    const { fixture } = await setup({ approvals: [allocation('AR1', 'A_RR')], userId: 'mid' });
+    const input = noteInput(fixture.nativeElement as HTMLElement);
+
+    expect(input.getAttribute('placeholder')).toBe('Note (optional)');
+    // The two labels on this one input must not disagree: the aria-label was already
+    // English, which is what made the Italian placeholder a contradiction rather than
+    // just an untranslated string.
+    expect(input.getAttribute('aria-label')).toBe('Approval note for A_RR:2026-09');
+  });
+
+  it('leaves no Italian copy anywhere on the screen', async () => {
+    // The ABSENCE half, and the reason the assertion above is not the whole claim: a
+    // fix that only edited the placeholder while another Italian string survived
+    // elsewhere on the row would pass it. Scoped to whole words so 'Nota' cannot hide
+    // inside an English word and an English word cannot trip the scan.
+    const { fixture } = await setup({ approvals: [allocation('AR1', 'A_RR')], userId: 'mid' });
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(host.innerHTML).not.toMatch(/\b(Nota|opzionale|obbligatorio|Annulla|Conferma)\b/i);
+    // …and the row really is there, so the scan above is not passing on an empty page.
+    expect(noteInput(host)).not.toBeNull();
+  });
+});

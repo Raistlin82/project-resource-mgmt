@@ -224,11 +224,17 @@ const OUT_OF_SCOPE_TITLE = 'You do not manage this resource, so you cannot decid
                       <div class="inline-flex items-center gap-2 justify-end">
                         @if (row.canDecide) {
                           <span class="inline-block w-40">
+                            <!-- UX register P3-01: the placeholder read "Nota (opzionale)"
+                                 in an app whose every other string is English — and on THIS
+                                 control the aria-label beside it was already English, so one
+                                 input carried two labels that disagreed: a screen reader
+                                 announced "Approval note for …" while the sighted user read
+                                 Italian. -->
                             <input #noteInput type="text"
                                    [value]="noteFor(row.request.id)"
                                    (input)="setNote(row.request.id, noteInput.value)"
                                    [disabled]="pendingId() === row.request.id"
-                                   placeholder="Nota (opzionale)"
+                                   placeholder="Note (optional)"
                                    [attr.aria-label]="'Approval note for ' + row.reference"
                                    class="command-input">
                           </span>
