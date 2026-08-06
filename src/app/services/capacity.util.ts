@@ -64,10 +64,13 @@ export function monthsInRange(from: string, to: string): string[] {
  * COARSE, month-granularity employment test: hired on or before the month's START
  * and not terminated before it.
  *
- * It is WRONG AT BOTH ENDS, which is why `rollupMonthly` now uses
- * {@link employedWorkingDays} instead. Kept because `bench.util.ts` still calls it;
- * substituting it there is that file's own change (it would move /bench headcounts,
- * which the bench specs pin).
+ * It is WRONG AT BOTH ENDS, which is why `rollupMonthly` and `benchRollup` both use
+ * {@link employedWorkingDays} instead. The only remaining caller is
+ * `forecast.util.ts`, whose horizon is WEEKLY and which asks a different question —
+ * "was this person employed at all in the period's month" — against a `capacity`
+ * scalar it never pro-rates. Substituting the day-granular gate there changes which
+ * weeks report supply at all (register P1-17/P1-18, still open), so it is that
+ * file's own change, not a drive-by.
  */
 export function isActiveInMonth(r: { hireDate?: string; terminationDate?: string }, month: string): boolean {
   const monthStart = `${month}-01`;

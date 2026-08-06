@@ -65,7 +65,11 @@ const ZERO_DENOM_ROLLUP: BenchRollup = {
   hiringDemand: [],
 };
 
-async function setupWith(rollup: BenchRollup, authReady = true) {
+async function setupWith(rollup: BenchRollup, authReady = true, holidayIds: string[] = []) {
+  // Reset first so ONE test can render the same component twice under different
+  // providers — the holiday-threading cases below compare two renders, and
+  // configureTestingModule throws once the module has been instantiated.
+  TestBed.resetTestingModule();
   await TestBed.configureTestingModule({
     imports: [BenchComponent],
     providers: [
@@ -73,7 +77,7 @@ async function setupWith(rollup: BenchRollup, authReady = true) {
       { provide: ApiService, useValue: {
         getBenchMonthly: () => of(rollup),
         getHoursPerDay: () => of({ value: 8 }),
-        getHolidays: () => of([]),
+        getHolidays: () => of(holidayIds.map(id => ({ id, name: id }))),
       } },
       { provide: AuthService, useValue: { authReady: () => authReady } },
     ],
@@ -129,6 +133,41 @@ describe('BenchComponent', () => {
     expect(row).toBeTruthy();
     const fteCell = row!.querySelectorAll('td')[2];
     expect(fteCell.textContent?.trim()).toBe('0.25');
+  });
+
+  /**
+   * `getHolidays: () => of([])` used to be the ONLY holiday input this file ever
+   * supplied, which made `fteFor`'s third argument inert here: dropping the
+   * `holSet` from `standardMonthlyHours(month, hoursPerDay, holSet)`
+   * (bench.component.ts) left this whole suite green while every Hiring Demand FTE
+   * was computed against a month that never closes for a public holiday. That is
+   * the third hop of the same threading (bench.util.spec.ts owns the two inside
+   * `benchRollup`), and it is the one that renders.
+   *
+   * April 2026 arithmetic, verified: 22 working days = 176h at 8h/day; 2026-04-06
+   * is a MONDAY (a real working day) and 2026-04-05 a SUNDAY (already excluded).
+   * 168 booked hours therefore read 168/176 = 0.95 FTE with no holiday and
+   * 168/168 = 1 FTE once the Monday is closed.
+   */
+  const HIRING_168: BenchRollup = { ...ROLLUP, hiringDemand: [{ month: '2026-04', role: 'Developer', hours: 168 }] };
+
+  function hiringFteText(fixture: Awaited<ReturnType<typeof setupWith>>): string {
+    const section = (fixture.nativeElement as HTMLElement).querySelector('[data-test="hiring-demand"]')!;
+    const row = Array.from(section.querySelectorAll('tbody tr')).find(tr => (tr.textContent ?? '').includes('Developer'));
+    return row!.querySelectorAll('td')[2].textContent?.trim() ?? '';
+  }
+
+  it('threads the loaded holidays into the hiring-demand FTE denominator: a working-day holiday raises the figure', async () => {
+    expect(hiringFteText(await setupWith(HIRING_168, true, []))).toBe('0.95');
+    expect(hiringFteText(await setupWith(HIRING_168, true, ['2026-04-06']))).toBe('1');
+    // ABSENCE TWIN: 0.95 is exactly what a dropped holiday set produces — the
+    // company closed a day and the placeholder's demand still read as under one FTE.
+    expect(hiringFteText(await setupWith(HIRING_168, true, ['2026-04-06']))).not.toBe('0.95');
+  });
+
+  it('a holiday falling on a Sunday leaves the hiring-demand FTE untouched (so the case above is about the CALENDAR, not the list length)', async () => {
+    expect(hiringFteText(await setupWith(HIRING_168, true, ['2026-04-05']))).toBe('0.95');
+    expect(hiringFteText(await setupWith(HIRING_168, true, ['2026-04-05']))).not.toBe('1');
   });
 
   // Design spec: a resource can legitimately show "Beyond <month>" (never bench
