@@ -127,6 +127,56 @@ const ROW_TWO_MONTHS: AllocationApprovalRow = {
   ],
 };
 
+/**
+ * THE SWEEP FIXTURE (RPT §4.2 "Allocazione multipla"). TWO resources, each with
+ * a pending, decidable project in September AND in November — the minimum shape
+ * in which the multi-resource sweep proves anything at all: with one resource,
+ * or with one month, "advance to the next month that has work" and "advance
+ * blindly to the next month" are the same move and no assertion can tell them
+ * apart.
+ *
+ * OCTOBER, in between, is the month with nothing to decide — and it is barren in
+ * each of the ways a cheaper availability rule gets wrong:
+ *   - Ada's October line exists and is already 'Allocated' (so "the month has
+ *     lines" is not availability), and
+ *   - Bob's October line IS 'Requested' but carries NO `approvalId` — the
+ *     stranded pre-B3 shape nothing can decide (so "some line is pending" is
+ *     not availability either).
+ * Only the full `decidable()` predicate skips October, which is exactly what
+ * makes "lands on November" falsifiable.
+ */
+const SWEEP_MONTHS = ['2026-09', '2026-10', '2026-11'];
+
+const SWEEP_ADA: AllocationApprovalRow = {
+  resourceId: 'r1', resourceName: 'Ada', managerId: 'm1', kind: 'internal', contractHoursPerDay: 8,
+  targetHours: { '2026-09': 176, '2026-10': 176, '2026-11': 176 },
+  totalHours: { '2026-09': 80, '2026-10': 80, '2026-11': 80 },
+  items: [
+    { assignmentMonthId: 'S1:2026-09', assignmentId: 'S1', month: '2026-09', status: 'Requested', requestId: '1', projectName: 'Apollo', hours: 80, approvalId: 'AR1' },
+    // Already decided — nothing for the sweep to stop for.
+    { assignmentMonthId: 'S1:2026-10', assignmentId: 'S1', month: '2026-10', status: 'Allocated', requestId: '1', projectName: 'Apollo', hours: 80 },
+    { assignmentMonthId: 'S1:2026-11', assignmentId: 'S1', month: '2026-11', status: 'Requested', requestId: '1', projectName: 'Apollo', hours: 80, approvalId: 'AR2' },
+  ],
+};
+
+const SWEEP_BOB: AllocationApprovalRow = {
+  resourceId: 'r2', resourceName: 'Bob', managerId: 'm2', kind: 'internal', contractHoursPerDay: 8,
+  targetHours: { '2026-09': 176, '2026-10': 176, '2026-11': 176 },
+  totalHours: { '2026-09': 40, '2026-10': 40, '2026-11': 40 },
+  items: [
+    { assignmentMonthId: 'T1:2026-09', assignmentId: 'T1', month: '2026-09', status: 'Requested', requestId: '4', projectName: 'Zeus', hours: 40, approvalId: 'AR3' },
+    // Pending, but with NO approval: undecidable, so October stays barren.
+    { assignmentMonthId: 'T1:2026-10', assignmentId: 'T1', month: '2026-10', status: 'Requested', requestId: '4', projectName: 'Zeus', hours: 40 },
+    { assignmentMonthId: 'T1:2026-11', assignmentId: 'T1', month: '2026-11', status: 'Requested', requestId: '4', projectName: 'Zeus', hours: 40, approvalId: 'AR4' },
+  ],
+};
+
+/** What the server answers for a whole-month sweep batch, per month. */
+const SWEEP_RESULTS = (month: string) => [
+  { assignmentMonthId: `S1:${month}`, status: 'Approved' },
+  { assignmentMonthId: `T1:${month}`, status: 'Approved' },
+];
+
 interface SetupOptions {
   rows?: AllocationApprovalRow[];
   months?: string[];
@@ -494,8 +544,10 @@ describe('ApprovalModalComponent — scope-truthful copy (P2-22)', () => {
   });
 
   it('counts the multi-resource batch without dropping its "& Continue" promise', () => {
-    // ROW contributes one decidable line (Apollo), ROW_2 one (Zeus).
-    const { fixture } = setup({ rows: [ROW, ROW_2], months: ['2026-09'], multi: true });
+    // SWEEP_ADA contributes one decidable September line (Apollo), SWEEP_BOB one
+    // (Zeus) — and November still holds work for both, which is what entitles
+    // the label to promise a continuation at all (see the sweep suite below).
+    const { fixture } = setup({ rows: [SWEEP_ADA, SWEEP_BOB], months: SWEEP_MONTHS, multi: true });
     const host = fixture.nativeElement as HTMLElement;
     expect(textOf(host, 'approve-label')).toBe('Approve & Continue');
 
@@ -621,30 +673,16 @@ describe('ApprovalModalComponent — closes on nothing left to decide (carried-f
   });
 });
 
+/**
+ * Mode PLUMBING only — which action and which body layout each mode renders.
+ * Where the sweep goes after a decision, and what it does when it runs out of
+ * months, is pinned by the sweep suite further down (it supersedes the two
+ * advance/close cases that used to live here: both of their fixtures had no
+ * later month holding work, so neither could tell a month-skipping advance from
+ * a blind one, and the terminal case asserted the auto-close the sweep no longer
+ * performs).
+ */
 describe('ApprovalModalComponent — multi-resource mode', () => {
-  it('advances to the next month and stays open after Approve & Continue', () => {
-    const { fixture } = setup({ rows: [ROW, ROW_2], months: ['2026-09', '2026-10'], multi: true });
-    let closedEmitted = 0;
-    fixture.componentInstance.closed.subscribe(() => closedEmitted++);
-
-    (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('[data-test="approve-continue"]')!.click();
-    fixture.detectChanges();
-
-    expect(fixture.componentInstance.selectedMonth()).toBe('2026-10');
-    expect(closedEmitted).toBe(0);
-  });
-
-  it('closes after deciding the last month', () => {
-    const { fixture } = setup({ rows: [ROW, ROW_2], months: ['2026-09'], multi: true });
-    let closedEmitted = 0;
-    fixture.componentInstance.closed.subscribe(() => closedEmitted++);
-
-    (fixture.nativeElement as HTMLElement).querySelector<HTMLButtonElement>('[data-test="approve-continue"]')!.click();
-    fixture.detectChanges();
-
-    expect(closedEmitted).toBe(1);
-  });
-
   it('renders the single-month action when multi is false', () => {
     const { fixture } = setup({ rows: [ROW], months: ['2026-09'], multi: false });
     const host = fixture.nativeElement as HTMLElement;
@@ -658,6 +696,173 @@ describe('ApprovalModalComponent — multi-resource mode', () => {
     expect(sections.length).toBe(2);
     expect(sections[0].textContent).toContain('Ada');
     expect(sections[1].textContent).toContain('Bob');
+  });
+});
+
+/**
+ * RPT §4.2 — the multi-resource MONTH SWEEP behind "Approve & Continue": the
+ * panel stays open and walks itself forward, so N resources' pending months are
+ * cleared without ever reopening the modal or touching the month selector.
+ *
+ * Every case below is a PAIR, because each half alone is passed by a broken
+ * implementation:
+ *   - "advances to November" alone is passed by a blind `idx + 1` if the fixture
+ *     has no barren month in between (hence October, barren in two different
+ *     ways — see SWEEP_MONTHS), and
+ *   - "does not advance past the last month with work" alone is passed by an
+ *     implementation that never advances at all.
+ * The month the sweep lands on is asserted together with the state of that
+ * month's footer: an advance onto a month whose actions are dead is the dead end
+ * this rule exists to prevent, and "we moved" on its own cannot see it.
+ */
+describe('ApprovalModalComponent — multi-resource month sweep (RPT §4.2)', () => {
+  const textOf = (host: HTMLElement, test: string) =>
+    host.querySelector(`[data-test="${test}"]`)!.textContent!.trim();
+  const approveContinue = (host: HTMLElement) =>
+    host.querySelector<HTMLButtonElement>('[data-test="approve-continue"]')!;
+
+  /**
+   * Change the month the way the approver does — set the value, dispatch
+   * 'change'. The component binds `(change)` plus a per-option `[selected]`
+   * (never `[value]`/`ngModel` on the <select>), so this is the only path that
+   * matches production; writing `selectedMonth` directly would bypass
+   * `onMonthChange` and with it the notice-withdrawal below.
+   */
+  function selectMonth(fixture: { nativeElement: unknown; detectChanges: () => void }, month: string): void {
+    const select = (fixture.nativeElement as HTMLElement).querySelector<HTMLSelectElement>('[aria-label="Open months"]')!;
+    select.value = month;
+    select.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+  }
+
+  function sweepSetup(month = '2026-09') {
+    const result = setup({
+      rows: [SWEEP_ADA, SWEEP_BOB], months: SWEEP_MONTHS, multi: true,
+      decideResults: SWEEP_RESULTS(month),
+    });
+    let closedEmitted = 0;
+    result.fixture.componentInstance.closed.subscribe(() => closedEmitted++);
+    return { ...result, host: result.fixture.nativeElement as HTMLElement, closedCount: () => closedEmitted };
+  }
+
+  it('skips a month with nothing decidable and lands on the next month that still has work — with that month live', () => {
+    const { fixture, host, closedCount } = sweepSetup();
+    const component = fixture.componentInstance;
+
+    // September opens as the whole month across BOTH resources.
+    expect([...component.checked()].sort()).toStrictEqual(['S1:2026-09', 'T1:2026-09']);
+
+    approveContinue(host).click();
+    fixture.detectChanges();
+
+    // October is passed over: Ada's line there is already Allocated, Bob's is
+    // pending with no approval. A blind `idx + 1` stops on it.
+    expect(component.selectedMonth()).toBe('2026-11');
+    expect(closedCount()).toBe(0);
+    // ...and the landing month is LIVE — both resources' November lines are
+    // checked and the primary action is enabled, which is the whole reason the
+    // barren month is skipped rather than presented.
+    expect([...component.checked()].sort()).toStrictEqual(['S1:2026-11', 'T1:2026-11']);
+    expect(approveContinue(host).disabled).toBe(false);
+    expect(host.querySelector('[data-test="sweep-complete"]')).toBeNull();
+  });
+
+  it('sends the LANDING month\'s own rows on the next decision, for both resources', () => {
+    // The advance is only worth anything if the month it lands on is the month
+    // the next batch decides: an advance that moved the label but not the
+    // payload would re-send September twice.
+    const { fixture, host, decideCalls } = sweepSetup();
+
+    approveContinue(host).click();
+    fixture.detectChanges();
+    approveContinue(host).click();
+
+    expect(decideCalls.length).toBe(2);
+    expect(decideCalls[0].map(i => i.assignmentMonthId).sort()).toStrictEqual(['S1:2026-09', 'T1:2026-09']);
+    expect(decideCalls[1].map(i => i.assignmentMonthId).sort()).toStrictEqual(['S1:2026-11', 'T1:2026-11']);
+  });
+
+  it('ABSENCE TWIN: on the last month with work it does NOT move and does NOT close — it declares itself finished (DOM presence only: jsdom lays out nothing, so "visible" here means present and named in the accessibility tree)', () => {
+    const { fixture, host, closedCount } = sweepSetup('2026-11');
+    selectMonth(fixture, '2026-11');
+
+    // The label stops promising a continuation BEFORE the click — nothing after
+    // November holds work, so "& Continue" would be an overpromise.
+    expect(textOf(host, 'approve-label')).toBe('Approve month');
+    expect(host.querySelector('[data-test="sweep-complete"]')).toBeNull();
+
+    approveContinue(host).click();
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.selectedMonth()).toBe('2026-11'); // no walk off the end
+    expect(closedCount()).toBe(0);                                     // and no silent close
+    const notice = host.querySelector('[data-test="sweep-complete"]')!;
+    expect(notice.getAttribute('role')).toBe('status');
+    expect(notice.textContent).toContain('November 2026');
+    expect(notice.textContent).toContain('no later month');
+    // STRUCTURE, not appearance (jsdom resolves no layout and no scroll): the
+    // notice is a sibling of the scrolling region, not a child of it. Inside it,
+    // a panel the approver had scrolled down would announce the end of the sweep
+    // above the fold.
+    expect(notice.closest('.overflow-y-auto')).toBeNull();
+    expect(host.querySelector('[data-test="sweep-complete-band"]')!.classList.contains('shrink-0')).toBe(true);
+  });
+
+  it('promises "& Continue" only while a later month still holds work', () => {
+    const { fixture, host } = sweepSetup();
+
+    expect(textOf(host, 'approve-label')).toBe('Approve & Continue');
+    // Standing ON the barren month, the promise still holds: November is further
+    // along and the sweep would reach it.
+    selectMonth(fixture, '2026-10');
+    expect(textOf(host, 'approve-label')).toBe('Approve & Continue');
+    selectMonth(fixture, '2026-11');
+    expect(textOf(host, 'approve-label')).toBe('Approve month');
+  });
+
+  it('withdraws the completion notice once the approver picks a month by hand', () => {
+    // The notice claims "nothing after the month we stopped on". Navigating back
+    // to a live month makes that claim describe somewhere the approver no longer
+    // is, so it must not survive the move.
+    const { fixture, host } = sweepSetup('2026-11');
+    selectMonth(fixture, '2026-11');
+    approveContinue(host).click();
+    fixture.detectChanges();
+    expect(host.querySelector('[data-test="sweep-complete"]')).not.toBeNull();
+
+    selectMonth(fixture, '2026-09');
+
+    expect(fixture.componentInstance.selectedMonth()).toBe('2026-09');
+    expect(host.querySelector('[data-test="sweep-complete"]')).toBeNull();
+    expect(textOf(host, 'approve-label')).toBe('Approve & Continue');
+  });
+
+  it('keeps a wholly REFUSED last month on screen and retryable instead of signing off on it', () => {
+    // The batch completes with every item errored — a 200 with Error results.
+    // The old auto-close made this indistinguishable from a clean sweep: the
+    // panel vanished, the host dropped the checkbox selection, and the toast was
+    // the only trace. The notice speaks only about LATER months, so it can stand
+    // beside a month whose lines are still pending and still checked.
+    const { fixture, notifyStub } = setup({
+      rows: [SWEEP_ADA, SWEEP_BOB], months: SWEEP_MONTHS, multi: true,
+      decideResults: [
+        { assignmentMonthId: 'S1:2026-11', status: 'Error', error: 'Locked period' },
+        { assignmentMonthId: 'T1:2026-11', status: 'Error', error: 'Locked period' },
+      ],
+    });
+    const host = fixture.nativeElement as HTMLElement;
+    let closedEmitted = 0;
+    fixture.componentInstance.closed.subscribe(() => closedEmitted++);
+    selectMonth(fixture, '2026-11');
+
+    approveContinue(host).click();
+    fixture.detectChanges();
+
+    expect(notifyStub.error).toHaveBeenCalledWith('2 of 2 months could not be decided. First error: Locked period');
+    expect(closedEmitted).toBe(0);
+    expect([...fixture.componentInstance.checked()].sort()).toStrictEqual(['S1:2026-11', 'T1:2026-11']);
+    expect(approveContinue(host).disabled).toBe(false);
+    expect(host.querySelector('[data-test="sweep-complete"]')).not.toBeNull();
   });
 });
 
