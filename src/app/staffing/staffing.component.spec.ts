@@ -2,7 +2,10 @@ import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { of, throwError, type Observable } from 'rxjs';
 import { StaffingComponent } from './staffing.component';
-import { ApiService, Assignment, Resource, ResourceOrganization, ResourceRequest } from '../services/api.service';
+import {
+  ApiService, Assignment, Resource, ResourceOrganization, ResourceRequest,
+  type BenchRollup, type ProficiencySet, type ProjectRole, type Skill, type SkillCatalog, type Vendor,
+} from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { localIsoDate } from '../services/local-date.util';
@@ -13,6 +16,31 @@ const RESOURCES: Resource[] = [
   { id: '2', name: 'Bob', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'internal' },
 ];
 
+// --- Facet reference data (RPT §3.2.1-§3.2.5) --------------------------------
+const VENDORS: Vendor[] = [
+  { id: 'V4', name: 'Mediolanum Consulting S.r.l.' },
+  { id: 'V1', name: 'Albion Cloud Services Ltd' },
+];
+const PROJECT_ROLES: ProjectRole[] = [
+  { id: 'pr1', code: 'SR_DEV', name: 'Senior Developer', description: '', restricted: false },
+  { id: 'pr2', code: 'CONS', name: 'Consultant', description: '', restricted: false },
+  { id: 'pr3', code: 'UX', name: 'UX Designer', description: '', restricted: false },
+];
+const PROFICIENCY_SETS: ProficiencySet[] = [
+  { id: 'p1', name: 'Standard IT Proficiency', description: '', levels: [
+    { id: 'l3', level: 3, name: 'Advanced', description: '' },
+    { id: 'l1', level: 1, name: 'Beginner', description: '' },
+  ] },
+];
+const SKILLS: Skill[] = [
+  { id: 's1', conceptUri: 'u/1', name: 'Java', description: '', catalogs: ['c1'], proficiencySetId: 'p1', restricted: false },
+  { id: 's2', conceptUri: 'u/2', name: 'Figma', description: '', catalogs: ['c2'], proficiencySetId: undefined, restricted: false },
+];
+const SKILL_CATALOGS: SkillCatalog[] = [
+  { id: 'c1', name: 'Development Skills', description: '', skills: ['s1'] },
+  { id: 'c2', name: 'Design Skills', description: '', skills: ['s2'] },
+];
+
 /** Array or Observable, so the read-failure specs below can hand in a
  *  throwError(...) — with array-only parameters they are unwritable. */
 function stream<T>(value: T[] | Observable<T[]> | undefined, fallback: T[]): Observable<T[]> {
@@ -20,10 +48,30 @@ function stream<T>(value: T[] | Observable<T[]> | undefined, fallback: T[]): Obs
   return Array.isArray(value) ? of(value) : value;
 }
 
+/** The 6-month window the server fixes for /bench/monthly. */
+const BENCH_MONTHS = ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09'];
+
+/** Every month of the window in one state — enough to tell three cards apart. */
+function benchRow(resourceId: string, resourceName: string, state: 'BENCH' | 'PARTIAL' | 'ALLOCATED', kind: 'internal' | 'subco' = 'internal') {
+  return {
+    resourceId, resourceName, kind,
+    availabilityDate: { kind: 'date' as const, date: '2026-04-01' },
+    monthly: Object.fromEntries(BENCH_MONTHS.map(m => [m, { state, upcomingUnallocated: false }])),
+  };
+}
+
+const EMPTY_ROLLUP: BenchRollup = { months: [], internalRows: [], subcoRows: [], hiringDemand: [] };
+
 function setup(overrides: {
   resources?: Resource[] | Observable<Resource[]>;
   requests?: ResourceRequest[] | Observable<ResourceRequest[]>;
   orgNodes?: ResourceOrganization[] | Observable<ResourceOrganization[]>;
+  vendors?: Vendor[] | Observable<Vendor[]>;
+  projectRoles?: ProjectRole[] | Observable<ProjectRole[]>;
+  skills?: Skill[] | Observable<Skill[]>;
+  skillCatalogs?: SkillCatalog[] | Observable<SkillCatalog[]>;
+  proficiencySets?: ProficiencySet[] | Observable<ProficiencySet[]>;
+  bench$?: Observable<BenchRollup>;
   /** The pre-authReady window (SSR + the whole OIDC bootstrap) is a real state
    *  of this screen, so it has to be settable here. */
   authReady?: boolean;
@@ -33,8 +81,19 @@ function setup(overrides: {
   const getResources = vi.fn(() => stream(overrides.resources, RESOURCES));
   // D (Task 8): the org tree the capability/practice/competence filters derive from.
   const getResourceOrganizations = vi.fn(() => stream(overrides.orgNodes, []));
+  // RPT facets: the catalogs the option lists are drawn from.
+  const getVendors = vi.fn(() => stream(overrides.vendors, VENDORS));
+  const getProjectRoles = vi.fn(() => stream(overrides.projectRoles, PROJECT_ROLES));
+  const getSkills = vi.fn(() => stream(overrides.skills, SKILLS));
+  const getSkillCatalogs = vi.fn(() => stream(overrides.skillCatalogs, SKILL_CATALOGS));
+  const getProficiencySets = vi.fn(() => stream(overrides.proficiencySets, PROFICIENCY_SETS));
+  // RPT "Disponibilità futura": the existing 6-month bench rollup.
+  const getBenchMonthly = vi.fn(() => overrides.bench$ ?? of(EMPTY_ROLLUP));
   const createAssignment = vi.fn(() => overrides.createAssignment$ ?? of({} as Assignment));
-  const apiStub = { getRequests, getResources, getResourceOrganizations, createAssignment } as unknown as ApiService;
+  const apiStub = {
+    getRequests, getResources, getResourceOrganizations, createAssignment,
+    getVendors, getProjectRoles, getSkills, getSkillCatalogs, getProficiencySets, getBenchMonthly,
+  } as unknown as ApiService;
   const notifyStub = { show: vi.fn() } as unknown as NotificationService;
   const authStub = { authReady: signal(overrides.authReady ?? true), isAuthenticated: signal(true) } as unknown as AuthService;
 
@@ -48,7 +107,10 @@ function setup(overrides: {
   });
 
   const fixture = TestBed.createComponent(StaffingComponent);
-  return { fixture, getRequests, getResources, getResourceOrganizations, createAssignment, notifyStub };
+  return {
+    fixture, getRequests, getResources, getResourceOrganizations, createAssignment, notifyStub,
+    getVendors, getProjectRoles, getSkills, getSkillCatalogs, getProficiencySets, getBenchMonthly,
+  };
 }
 
 /**
@@ -623,6 +685,412 @@ describe('StaffingComponent', () => {
     it('still says something when the failure carries no server message — the fallback cannot be dropped', async () => {
       const messages = await attemptWith(new Error('network down'));
       expect(messages).toEqual(['Unable to create the allocation']);
+    });
+  });
+
+  // RPT filters candidates on 13 facets (manual §3.2.1-§3.2.5); this screen had
+  // free text plus four. Each case below carries BOTH halves — the matching
+  // candidate present AND the non-matching one absent — because a facet that
+  // does not filter at all satisfies the presence half on its own.
+  describe('RPT advanced facets', () => {
+    const ORG_NODES: ResourceOrganization[] = [
+      { id: 'o1', name: 'Engineering', description: '', costCenters: [], level: 'capability' },
+      { id: 'o2', name: 'Consulting', description: '', costCenters: [], level: 'capability' },
+    ];
+
+    /** One row per registry type, per rate band and per skill level, so every
+     *  facet below has something to keep AND something to drop. */
+    const FACET_RESOURCES: Resource[] = [
+      { id: '1', name: 'Julie Armstrong', role: 'Developer', kind: 'internal', organization: 'Engineering',
+        skills: [{ name: 'Java', level: 3 }], projectRoles: ['Senior Developer'], externalExperience: [],
+        utilization: 0, capacity: 40, costRateDay: 600 },
+      { id: '2', name: 'John Miller', role: 'Consultant', kind: 'internal', organization: 'Consulting',
+        skills: [{ name: 'Project Management', level: 2 }], projectRoles: ['Business Consultant'],
+        externalExperience: [], utilization: 0, capacity: 40 },
+      { id: '4', name: 'Dummy UX', role: 'Designer', kind: 'dummy', organization: 'Consulting',
+        skills: [{ name: 'Figma', level: 1 }], projectRoles: ['UX Designer'], externalExperience: [],
+        utilization: 0, capacity: 40, costRateDay: 300 },
+      { id: '6', name: 'Subco Dev', role: 'Developer', kind: 'subco', vendorId: 'V4', organization: 'Engineering',
+        skills: [{ name: 'Java', level: 1 }], projectRoles: ['Senior Developer'], externalExperience: [],
+        utilization: 0, capacity: 40, costRateDay: 1200 },
+    ];
+
+    async function facetFixture() {
+      const harness = setup({ resources: FACET_RESOURCES, orgNodes: ORG_NODES });
+      await flush(harness.fixture);
+      return harness;
+    }
+
+    function names(host: HTMLElement): (string | undefined)[] {
+      return [...host.querySelectorAll('[data-test="resource-name"]')].map(e => e.textContent?.trim());
+    }
+
+    it('anagrafica: each registry type keeps its own rows and EXCLUDES the others', async () => {
+      const { fixture } = await facetFixture();
+      const host = fixture.nativeElement as HTMLElement;
+
+      fixture.componentInstance.kindFilter.set('internal');
+      fixture.detectChanges();
+      expect(names(host)).toStrictEqual(['Julie Armstrong', 'John Miller']);
+      expect(names(host)).not.toContain('Dummy UX');
+      expect(names(host)).not.toContain('Subco Dev');
+
+      fixture.componentInstance.kindFilter.set('dummy');
+      fixture.detectChanges();
+      expect(names(host)).toStrictEqual(['Dummy UX']);
+
+      fixture.componentInstance.kindFilter.set('subco');
+      fixture.detectChanges();
+      expect(names(host)).toStrictEqual(['Subco Dev']);
+    });
+
+    it('società: a vendor keeps its subcontractor and drops everyone with no vendor', async () => {
+      const { fixture } = await facetFixture();
+      const host = fixture.nativeElement as HTMLElement;
+
+      fixture.componentInstance.vendorFilter.set('V4');
+      fixture.detectChanges();
+      expect(names(host)).toStrictEqual(['Subco Dev']);
+      expect(names(host)).not.toContain('Julie Armstrong');
+
+      // A vendor nobody belongs to keeps nobody — not "everybody", which is what
+      // an unapplied predicate would do.
+      fixture.componentInstance.vendorFilter.set('V1');
+      fixture.detectChanges();
+      expect(names(host)).toStrictEqual([]);
+    });
+
+    it('job role: matches the job-role list AND the primary role', async () => {
+      const { fixture } = await facetFixture();
+      const host = fixture.nativeElement as HTMLElement;
+
+      fixture.componentInstance.jobRoleFilter.set('Senior Developer');
+      fixture.detectChanges();
+      expect(names(host)).toStrictEqual(['Julie Armstrong', 'Subco Dev']);
+      expect(names(host)).not.toContain('John Miller');
+
+      // John's projectRoles say 'Business Consultant'; his PRIMARY role is
+      // 'Consultant', which is the catalog row a planner picks.
+      fixture.componentInstance.jobRoleFilter.set('Consultant');
+      fixture.detectChanges();
+      expect(names(host)).toStrictEqual(['John Miller']);
+      expect(names(host)).not.toContain('Julie Armstrong');
+    });
+
+    it('skill matrix: the skill narrows, and the minimum proficiency narrows further', async () => {
+      const { fixture } = await facetFixture();
+      const host = fixture.nativeElement as HTMLElement;
+
+      fixture.componentInstance.skillFilter.set('Java');
+      fixture.detectChanges();
+      expect(names(host)).toStrictEqual(['Julie Armstrong', 'Subco Dev']);
+      expect(names(host)).not.toContain('John Miller');
+
+      fixture.componentInstance.minSkillLevel.set(3);
+      fixture.detectChanges();
+      // The load-bearing absence: Subco Dev HOLDS Java, at level 1.
+      expect(names(host)).toStrictEqual(['Julie Armstrong']);
+      expect(names(host)).not.toContain('Subco Dev');
+    });
+
+    it('skill capability: a catalog keeps holders of its member skills only', async () => {
+      const { fixture } = await facetFixture();
+      const host = fixture.nativeElement as HTMLElement;
+
+      fixture.componentInstance.skillCatalogFilter.set('c1');   // Development Skills = Java
+      fixture.detectChanges();
+      expect(names(host)).toStrictEqual(['Julie Armstrong', 'Subco Dev']);
+      expect(names(host)).not.toContain('Dummy UX');
+
+      fixture.componentInstance.skillCatalogFilter.set('c2');   // Design Skills = Figma
+      fixture.detectChanges();
+      expect(names(host)).toStrictEqual(['Dummy UX']);
+      expect(names(host)).not.toContain('Julie Armstrong');
+    });
+
+    it('tariffa: the band keeps rates inside it and excludes an unresolved rate', async () => {
+      const { fixture } = await facetFixture();
+      const host = fixture.nativeElement as HTMLElement;
+
+      fixture.componentInstance.rateMin.set(500);
+      fixture.componentInstance.rateMax.set(900);
+      fixture.detectChanges();
+      expect(names(host)).toStrictEqual(['Julie Armstrong']);
+      expect(names(host)).not.toContain('Dummy UX');   // 300, below
+      expect(names(host)).not.toContain('Subco Dev');  // 1200, above
+      // John has no resolved rate at all: he cannot be shown to satisfy a band.
+      expect(names(host)).not.toContain('John Miller');
+
+      // ...and he is back with no band, so that exclusion is the BAND's doing.
+      fixture.componentInstance.rateMin.set(null);
+      fixture.componentInstance.rateMax.set(null);
+      fixture.detectChanges();
+      expect(names(host)).toContain('John Miller');
+    });
+
+    it('draws every advanced option list from its catalog, name-sorted', async () => {
+      const { fixture } = await facetFixture();
+      const host = fixture.nativeElement as HTMLElement;
+      const options = (test: string) =>
+        [...host.querySelectorAll<HTMLOptionElement>(`[data-test="${test}"] option`)].map(o => o.textContent?.trim());
+
+      expect(options('kind-filter')).toStrictEqual([
+        'All registry types', 'Internal', 'Dummy (placeholder)', 'Subcontractor',
+      ]);
+      // Seeded out of order on purpose: the screen sorts, the catalog does not.
+      expect(options('vendor-filter')).toStrictEqual([
+        'All companies', 'Albion Cloud Services Ltd', 'Mediolanum Consulting S.r.l.',
+      ]);
+      expect(options('job-role-filter')).toStrictEqual([
+        'All job roles', 'Consultant', 'Senior Developer', 'UX Designer',
+      ]);
+      expect(options('skill-filter')).toStrictEqual(['All skills', 'Figma', 'Java']);
+      expect(options('skill-catalog-filter')).toStrictEqual([
+        'All skill capabilities', 'Design Skills', 'Development Skills',
+      ]);
+    });
+
+    it('offers proficiency levels only for a skill that HAS a scale, ascending', async () => {
+      const { fixture } = await facetFixture();
+      const host = fixture.nativeElement as HTMLElement;
+      const levelSelect = () => host.querySelector<HTMLSelectElement>('[data-test="min-level-filter"]')!;
+      const levelOptions = () =>
+        [...levelSelect().querySelectorAll('option')].map(o => o.textContent?.trim());
+
+      // No skill selected: nothing to qualify, so the control is disabled.
+      expect(levelSelect().disabled).toBe(true);
+      expect(levelOptions()).toStrictEqual(['Any proficiency']);
+
+      fixture.componentInstance.skillFilter.set('Java');
+      fixture.detectChanges();
+      expect(levelSelect().disabled).toBe(false);
+      // Seeded 3-then-1; rendered ascending.
+      expect(levelOptions()).toStrictEqual(['Any proficiency', '1 — Beginner', '3 — Advanced']);
+
+      // Figma declares no proficiency set: no scale is invented for it.
+      fixture.componentInstance.skillFilter.set('Figma');
+      fixture.detectChanges();
+      expect(levelSelect().disabled).toBe(true);
+      expect(levelOptions()).toStrictEqual(['Any proficiency']);
+    });
+
+    it('resets a stale minimum level when the skill changes', async () => {
+      // A level 3 left over from Java would silently filter Figma, whose scale
+      // may not even have a level 3 — the reason this is a linkedSignal.
+      const { fixture } = await facetFixture();
+      fixture.componentInstance.skillFilter.set('Java');
+      fixture.componentInstance.minSkillLevel.set(3);
+      fixture.detectChanges();
+      expect(fixture.componentInstance.minSkillLevel()).toBe(3);
+
+      fixture.componentInstance.skillFilter.set('Figma');
+      fixture.detectChanges();
+      expect(fixture.componentInstance.minSkillLevel()).toBeNull();
+      const host = fixture.nativeElement as HTMLElement;
+      expect(names(host)).toStrictEqual(['Dummy UX']);
+    });
+
+    it('facets narrow the RANKING without replacing it', async () => {
+      // Constraint: facets filter the SET, match.util still owns the ORDER. A
+      // facet implementation that re-sorted (alphabetically, say) would break
+      // the descending-score assertion here.
+      const request: ResourceRequest = {
+        id: 'REQ1', name: 'Apollo', requiredRole: 'Developer', requiredEffort: 80,
+        staffedEffort: 0, skills: ['Java'], status: 'Open',
+      };
+      const { fixture } = setup({ resources: FACET_RESOURCES, orgNodes: ORG_NODES, requests: [request] });
+      await flush(fixture);
+      fixture.componentInstance.selectRequest(request);
+      fixture.detectChanges();
+
+      const all = fixture.componentInstance.rankedCandidates()!;
+      expect(all.length).toBe(4);
+      const scores = all.map(c => c.score);
+      expect([...scores].sort((a, b) => b - a)).toStrictEqual(scores);
+
+      fixture.componentInstance.skillFilter.set('Java');
+      fixture.componentInstance.minSkillLevel.set(3);
+      fixture.detectChanges();
+      const ranked = fixture.componentInstance.rankedCandidates()!;
+      expect(ranked.map(c => c.resourceId)).toStrictEqual(['1']);
+      expect(names(fixture.nativeElement as HTMLElement)).toStrictEqual(['Julie Armstrong']);
+      // The match score is still rendered for the survivor — the ranking UI is
+      // not collateral damage of the filtering.
+      expect((fixture.nativeElement as HTMLElement).textContent).toContain('Match score');
+    });
+
+    it('counts the hidden facets and clears every one of them, disclosed or not', async () => {
+      const { fixture } = await facetFixture();
+      const host = fixture.nativeElement as HTMLElement;
+      const badge = () => host.querySelector('[data-test="advanced-filters-count"]')?.textContent?.trim();
+      const clear = () => host.querySelector<HTMLButtonElement>('[data-test="clear-filters"]');
+
+      // Nothing active: no badge, no Clear control.
+      expect(badge()).toBeUndefined();
+      expect(clear()).toBeNull();
+
+      fixture.componentInstance.searchQuery.set('Julie');
+      fixture.detectChanges();
+      // A VISIBLE filter must not be counted as a hidden one...
+      expect(badge()).toBeUndefined();
+      // ...but it must still be clearable.
+      expect(clear()).not.toBeNull();
+
+      fixture.componentInstance.kindFilter.set('subco');
+      fixture.componentInstance.rateMin.set(100);
+      fixture.detectChanges();
+      expect(badge()).toBe('2 active');
+      expect(names(host)).toStrictEqual([]);   // 'Julie' AND subco AND >=100
+
+      clear()!.click();
+      fixture.detectChanges();
+      expect(fixture.componentInstance.kindFilter()).toBe('');
+      expect(fixture.componentInstance.rateMin()).toBeNull();
+      expect(fixture.componentInstance.searchQuery()).toBe('');
+      expect(badge()).toBeUndefined();
+      expect(clear()).toBeNull();
+      expect(names(host)).toHaveLength(4);
+    });
+
+    it('puts the candidate panel into its error state when the catalog read fails', async () => {
+      // The option lists are header bindings that sit outside every error
+      // panel, so a failed catalog read used to be able to freeze the panel the
+      // same way the org tree could.
+      const { fixture } = setup({ skills: throwError(() => new Error('500 Internal Server Error')) });
+      await expect(flush(fixture)).resolves.toBeUndefined();
+      expect(() => fixture.detectChanges()).not.toThrow();
+
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.textContent).toContain("Couldn't load candidate resources");
+      expect(retryButtons(host)).toHaveLength(1);
+      expect(host.textContent).not.toContain("Couldn't load requests");
+    });
+  });
+
+  // RPT shows a 6-dot future-availability traffic light on every result card
+  // (§3.2.2). The identical 3-state, 6-month rollup already existed here — on
+  // /bench, not where the choice is made.
+  describe('RPT future-availability strip', () => {
+    const STRIP_RESOURCES: Resource[] = [
+      { id: '1', name: 'Julie Armstrong', role: 'Developer', kind: 'internal', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40 },
+      { id: '2', name: 'John Miller', role: 'Consultant', kind: 'internal', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40 },
+      { id: '4', name: 'Dummy UX', role: 'Designer', kind: 'dummy', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40 },
+      { id: '6', name: 'Subco Dev', role: 'Developer', kind: 'subco', vendorId: 'V4', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40 },
+    ];
+
+    /** One resource per state, and one (the dummy) with NO row at all — which is
+     *  not a contrived case: placeholders are excluded from the rollup by design. */
+    const ROLLUP: BenchRollup = {
+      months: BENCH_MONTHS,
+      internalRows: [benchRow('1', 'Julie Armstrong', 'BENCH'), benchRow('2', 'John Miller', 'PARTIAL')],
+      subcoRows: [benchRow('6', 'Subco Dev', 'ALLOCATED', 'subco')],
+      hiringDemand: [],
+    };
+
+    /** The strip belonging to ONE candidate, found by its accessible name — a
+     *  page-wide dot query could not say whose availability it read. */
+    function stripFor(host: HTMLElement, name: string): HTMLElement | null {
+      return host.querySelector<HTMLElement>(`[aria-label="Future availability for ${name}"]`);
+    }
+    function glyphs(host: HTMLElement, name: string): string[] {
+      const strip = stripFor(host, name);
+      if (!strip) return [];
+      return [...strip.querySelectorAll('[data-test="availability-dot"]')].map(d => d.textContent?.trim() ?? '');
+    }
+
+    it('gives each candidate card its OWN six months, and the three states differ', async () => {
+      const { fixture } = setup({ resources: STRIP_RESOURCES, bench$: of(ROLLUP) });
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      expect(glyphs(host, 'Julie Armstrong')).toStrictEqual(['B', 'B', 'B', 'B', 'B', 'B']);
+      expect(glyphs(host, 'John Miller')).toStrictEqual(['P', 'P', 'P', 'P', 'P', 'P']);
+      expect(glyphs(host, 'Subco Dev')).toStrictEqual(['A', 'A', 'A', 'A', 'A', 'A']);
+      // The absence half of the three assertions above: no card shows a state
+      // that belongs to another card.
+      expect(glyphs(host, 'Julie Armstrong')).not.toContain('A');
+      expect(glyphs(host, 'Subco Dev')).not.toContain('B');
+
+      const first = stripFor(host, 'Julie Armstrong')!
+        .querySelector('[data-test="availability-dot"]')!;
+      expect(first.getAttribute('aria-label')).toBe('April 2026: Bench (free)');
+    });
+
+    it('shows a resource the rollup does not cover as NOT TRACKED, never as free', async () => {
+      const { fixture } = setup({ resources: STRIP_RESOURCES, bench$: of(ROLLUP) });
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      expect(glyphs(host, 'Dummy UX')).toStrictEqual(['–', '–', '–', '–', '–', '–']);
+      expect(glyphs(host, 'Dummy UX')).not.toContain('B');
+      expect(stripFor(host, 'Dummy UX')!.textContent).toContain('not tracked');
+    });
+
+    it('renders the strip in the RANKED mode too, not only in the plain list', async () => {
+      const request: ResourceRequest = {
+        id: 'REQ1', name: 'Apollo', requiredRole: 'Developer', requiredEffort: 80,
+        staffedEffort: 0, skills: [], status: 'Open',
+      };
+      const { fixture } = setup({ resources: STRIP_RESOURCES, requests: [request], bench$: of(ROLLUP) });
+      await flush(fixture);
+      fixture.componentInstance.selectRequest(request);
+      fixture.detectChanges();
+      const host = fixture.nativeElement as HTMLElement;
+
+      expect(host.textContent).toContain('Match score');   // positive control: ranked mode
+      expect(glyphs(host, 'Julie Armstrong')).toStrictEqual(['B', 'B', 'B', 'B', 'B', 'B']);
+      expect(glyphs(host, 'Subco Dev')).toStrictEqual(['A', 'A', 'A', 'A', 'A', 'A']);
+    });
+
+    it('states the legend once, for the window the SERVER chose', async () => {
+      const { fixture } = setup({ resources: STRIP_RESOURCES, bench$: of(ROLLUP) });
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const legend = host.querySelector('[data-test="availability-legend"]')!;
+      expect(legend.textContent).toContain('Apr 26 – Sep 26');
+      expect(legend.textContent).toContain('bench');
+      expect(legend.textContent).toContain('not tracked');
+    });
+
+    it('a FAILED availability read says so per card and leaves the ranking intact', async () => {
+      // The confident-zero this guards against: six green dots derived from a
+      // read that never returned would read as "everybody is free".
+      const { fixture, getBenchMonthly } = setup({
+        resources: STRIP_RESOURCES, bench$: throwError(() => new Error('500 Internal Server Error')),
+      });
+      await expect(flush(fixture)).resolves.toBeUndefined();
+      expect(() => fixture.detectChanges()).not.toThrow();
+      const host = fixture.nativeElement as HTMLElement;
+
+      // Not one dot anywhere, on any card.
+      expect(host.querySelectorAll('[data-test="availability-dot"]')).toHaveLength(0);
+      expect(host.querySelectorAll('[data-test="availability-unavailable"]').length).toBe(4);
+      expect(host.querySelector('[data-test="availability-legend"]')).toBeNull();
+      // The candidate list itself is untouched: /bench is an attribute of a
+      // candidate, not the candidate list.
+      expect([...host.querySelectorAll('[data-test="resource-name"]')].map(e => e.textContent?.trim()))
+        .toStrictEqual(['Julie Armstrong', 'John Miller', 'Dummy UX', 'Subco Dev']);
+      expect(host.textContent).not.toContain("Couldn't load candidate resources");
+
+      // ...and its own Retry re-reads only what failed.
+      expect(getBenchMonthly).toHaveBeenCalledTimes(1);
+      host.querySelector<HTMLButtonElement>('[data-test="availability-retry"]')!.click();
+      await flush(fixture);
+      expect(getBenchMonthly).toHaveBeenCalledTimes(2);
+    });
+
+    it('waits for authReady before asking for the rollup, and says loading meanwhile', async () => {
+      const { fixture, getBenchMonthly } = setup({
+        resources: STRIP_RESOURCES, bench$: of(ROLLUP), authReady: false,
+      });
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      // Without the authReady gate this read goes out with no bearer, 401s, and
+      // the strip latches on the error for the life of the view.
+      expect(getBenchMonthly).not.toHaveBeenCalled();
+      expect(host.querySelectorAll('[data-test="availability-dot"]')).toHaveLength(0);
+      expect(host.querySelector('[data-test="availability-legend"]')).toBeNull();
     });
   });
 });

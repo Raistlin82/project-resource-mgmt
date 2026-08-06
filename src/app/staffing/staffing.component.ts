@@ -6,12 +6,26 @@ import {
   afterRenderEffect,
   computed,
   inject,
+  linkedSignal,
   signal,
   viewChild,
 } from '@angular/core';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
-import { ApiService, ResourceRequest, Resource, Assignment, ResourceOrganization } from '../services/api.service';
+import {
+  ApiService,
+  ResourceRequest,
+  Resource,
+  Assignment,
+  ResourceOrganization,
+  type BenchRollup,
+  type BenchRow,
+  type ProficiencySet,
+  type ProjectRole,
+  type Skill,
+  type SkillCatalog,
+  type Vendor,
+} from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { DecimalPipe } from '@angular/common';
@@ -24,10 +38,18 @@ import {
   type CandidateScore,
   type MatchDimension,
 } from '../services/match.util';
-import { dimensionsOf, isTerminatedAsOf } from '../services/org-scope.util';
+import { isTerminatedAsOf } from '../services/org-scope.util';
 import { todayLocalIso } from '../services/local-date.util';
+import {
+  advancedFacetCount,
+  filterCandidates,
+  hasAnyFacet,
+  type CandidateFacetValues,
+} from '../services/candidate-filter.util';
+import { RESOURCE_KINDS, RESOURCE_KIND_LABELS, type ResourceKind } from '../services/resource-kind.util';
 import { ListStateComponent } from '../shared/list-state.component';
 import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
+import { AvailabilityStripComponent, type AvailabilityReadState } from './availability-strip.component';
 
 interface DimensionMeter {
   key: MatchDimension;
@@ -37,6 +59,24 @@ interface DimensionMeter {
   weight: number;
   pct: number;
 }
+
+/** The reference-data catalogs the facet option lists are drawn from. */
+interface FacetCatalogs {
+  vendors: Vendor[];
+  projectRoles: ProjectRole[];
+  skills: Skill[];
+  skillCatalogs: SkillCatalog[];
+  proficiencySets: ProficiencySet[];
+}
+
+const EMPTY_FACET_CATALOGS: FacetCatalogs = {
+  vendors: [], projectRoles: [], skills: [], skillCatalogs: [], proficiencySets: [],
+};
+
+/** Pre-read default for the bench rollup. Spelled out here rather than imported
+ *  from `bench.util.ts`: this screen depends on the TYPES that `api.service`
+ *  re-exports, not on that module. */
+const EMPTY_BENCH: BenchRollup = { months: [], internalRows: [], subcoRows: [], hiringDemand: [] };
 
 /**
  * The single place the loading / error / ready question is answered on this
@@ -57,7 +97,10 @@ function stateOf(
 @Component({
   selector: 'app-staffing',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DecimalPipe, FormsModule, ListStateComponent, ResourceKindBadgeComponent],
+  imports: [
+    MatIconModule, DecimalPipe, FormsModule, ListStateComponent, ResourceKindBadgeComponent,
+    AvailabilityStripComponent,
+  ],
   template: `
     <div class="command-page space-y-6">
       <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Staff Resource Requests</h1>
@@ -178,6 +221,146 @@ function stateOf(
               </select>
             </div>
 
+            <!-- RPT "Ricerca Avanzata", the remaining facets (§3.2.1-§3.2.5).
+                 Behind a native <details> so the visible control count stays
+                 what it is today: at 320px every control is full-width and
+                 stacked (flex-col until sm:), so nine more in the row above
+                 would fill the viewport before the first candidate. The summary
+                 states how many hidden facets are active, and Clear filters sits
+                 OUTSIDE the disclosure, so a collapsed panel can never be
+                 filtering invisibly with no way out.
+                 Same convention as the four selects above: (change) plus
+                 per-option [selected], never [(ngModel)] on a <select> whose
+                 <option>s come from an async rxResource. -->
+            <div class="mt-4 flex flex-col sm:flex-row sm:items-center gap-3">
+              <details class="flex-1 min-w-0" data-test="advanced-filters">
+                <summary class="cursor-pointer text-sm font-bold text-[var(--cc-ink)] select-none">
+                  Advanced filters
+                  @if (advancedActiveCount() > 0) {
+                    <span class="command-chip is-info ml-2" data-test="advanced-filters-count">
+                      {{ advancedActiveCount() }} active
+                    </span>
+                  }
+                </summary>
+
+                <fieldset class="mt-4 border-0 p-0 m-0">
+                  <legend class="text-[10px] font-bold uppercase tracking-wider text-[var(--cc-muted)] mb-2">
+                    Registry
+                  </legend>
+                  <div class="flex flex-col sm:flex-row sm:flex-wrap gap-3">
+                    <select (change)="onKindFilterChange($event)" aria-label="Filter by registry type"
+                            data-test="kind-filter" class="command-select sm:w-44">
+                      <option value="" [selected]="kindFilter() === ''">All registry types</option>
+                      @for (k of kindOptions; track k.value) {
+                        <option [value]="k.value" [selected]="k.value === kindFilter()">{{ k.label }}</option>
+                      }
+                    </select>
+                    <select (change)="onVendorFilterChange($event)" aria-label="Filter by company"
+                            data-test="vendor-filter" class="command-select sm:w-56">
+                      <option value="" [selected]="vendorFilter() === ''">All companies</option>
+                      @for (v of vendorOptions(); track v.id) {
+                        <option [value]="v.id" [selected]="v.id === vendorFilter()">{{ v.name }}</option>
+                      }
+                    </select>
+                  </div>
+                </fieldset>
+
+                <fieldset class="mt-4 border-0 p-0 m-0">
+                  <legend class="text-[10px] font-bold uppercase tracking-wider text-[var(--cc-muted)] mb-2">
+                    Skills and job role
+                  </legend>
+                  <div class="flex flex-col sm:flex-row sm:flex-wrap gap-3">
+                    <select (change)="onJobRoleFilterChange($event)" aria-label="Filter by job role"
+                            data-test="job-role-filter" class="command-select sm:w-48">
+                      <option value="" [selected]="jobRoleFilter() === ''">All job roles</option>
+                      @for (r of jobRoleOptions(); track r.id) {
+                        <option [value]="r.name" [selected]="r.name === jobRoleFilter()">{{ r.name }}</option>
+                      }
+                    </select>
+                    <select (change)="onSkillFilterChange($event)" aria-label="Filter by skill"
+                            data-test="skill-filter" class="command-select sm:w-44">
+                      <option value="" [selected]="skillFilter() === ''">All skills</option>
+                      @for (s of skillOptions(); track s.id) {
+                        <option [value]="s.name" [selected]="s.name === skillFilter()">{{ s.name }}</option>
+                      }
+                    </select>
+                    <!-- Qualifies the skill above, so it is disabled until one is
+                         chosen — and stays disabled for a skill that declares no
+                         proficiency scale, rather than offering an invented one. -->
+                    <select (change)="onMinLevelChange($event)" aria-label="Filter by minimum proficiency"
+                            data-test="min-level-filter" class="command-select sm:w-52"
+                            [disabled]="minLevelOptions().length === 0"
+                            [title]="minLevelOptions().length === 0 ? 'Pick a skill that has a proficiency scale first' : 'Minimum proficiency for the selected skill'">
+                      <option value="" [selected]="minSkillLevel() === null">Any proficiency</option>
+                      @for (l of minLevelOptions(); track l.value) {
+                        <option [value]="l.value" [selected]="l.value === minSkillLevel()">{{ l.label }}</option>
+                      }
+                    </select>
+                    <select (change)="onSkillCatalogFilterChange($event)" aria-label="Filter by skill capability"
+                            data-test="skill-catalog-filter" class="command-select sm:w-52">
+                      <option value="" [selected]="skillCatalogFilter() === ''">All skill capabilities</option>
+                      @for (c of skillCatalogOptions(); track c.id) {
+                        <option [value]="c.id" [selected]="c.id === skillCatalogFilter()">{{ c.name }}</option>
+                      }
+                    </select>
+                  </div>
+                </fieldset>
+
+                <fieldset class="mt-4 border-0 p-0 m-0">
+                  <legend class="text-[10px] font-bold uppercase tracking-wider text-[var(--cc-muted)] mb-2">
+                    Cost rate (&euro;/day)
+                  </legend>
+                  <div class="flex flex-col sm:flex-row sm:flex-wrap gap-3">
+                    <label class="command-field sm:w-40">
+                      <span class="command-field-label">From</span>
+                      <input type="number" min="0" step="10" data-test="rate-min-filter"
+                             class="command-input font-mono tabular-nums"
+                             [ngModel]="rateMin()" (ngModelChange)="onRateBoundChange('min', $event)">
+                    </label>
+                    <label class="command-field sm:w-40">
+                      <span class="command-field-label">To</span>
+                      <input type="number" min="0" step="10" data-test="rate-max-filter"
+                             class="command-input font-mono tabular-nums"
+                             [ngModel]="rateMax()" (ngModelChange)="onRateBoundChange('max', $event)">
+                    </label>
+                  </div>
+                  <p class="mt-2 text-xs text-[var(--cc-muted)]">
+                    Matches the effective cost rate. A resource whose rate is not resolved yet is excluded
+                    while a bound is set.
+                  </p>
+                </fieldset>
+              </details>
+
+              @if (anyFacetActive()) {
+                <button type="button" (click)="clearAllFilters()" data-test="clear-filters"
+                        class="command-button secondary shrink-0">Clear filters</button>
+              }
+            </div>
+
+            <!-- Legend for the per-card availability strip: stated once here
+                 rather than repeated on every card. -->
+            @if (availabilityState() === 'ready' && availabilityMonths().length > 0) {
+              <p class="mt-4 text-xs text-[var(--cc-muted)]" data-test="availability-legend">
+                Future availability {{ availabilityWindowLabel() }} —
+                <span class="font-bold text-positive-text">B</span> bench
+                <span class="mx-1">&middot;</span>
+                <span class="font-bold text-caution-text">P</span> partially allocated
+                <span class="mx-1">&middot;</span>
+                <span class="font-bold text-critical-text">A</span> fully allocated
+                <span class="mx-1">&middot;</span>
+                <span class="font-bold">&ndash;</span> not tracked
+              </p>
+            }
+            @if (availabilityState() === 'error') {
+              <p class="mt-4 flex flex-wrap items-center gap-2 text-xs font-semibold text-caution-text"
+                 role="status" data-test="availability-error">
+                <mat-icon class="text-[16px] w-[16px] h-[16px] shrink-0">warning_amber</mat-icon>
+                Future availability could not be loaded. The ranking below is unaffected.
+                <button type="button" (click)="reloadAvailability()" data-test="availability-retry"
+                        class="command-button secondary">Retry availability</button>
+              </p>
+            }
+
             @if (missingSkillGap().length > 0) {
               <div class="mt-6 flex items-start gap-3 rounded-md bg-caution-tint ring-1 ring-caution p-4">
                 <mat-icon class="text-caution-text text-[20px] w-[20px] h-[20px] shrink-0 mt-0.5">warning_amber</mat-icon>
@@ -226,6 +409,15 @@ function stateOf(
                           @for (skill of cand.resource.skills; track skill.name) {
                             <span class="text-[10px] font-bold tracking-wider uppercase bg-surface-muted text-ink-secondary px-2 py-1 rounded-md border border-line">{{ skill.name }}</span>
                           }
+                        </div>
+                        <!-- RPT §3.2.2's "Disponibilità futura" traffic light,
+                             on the card where the choice is actually made. -->
+                        <div class="mt-3">
+                          <app-availability-strip
+                            [state]="availabilityState()"
+                            [months]="availabilityMonths()"
+                            [row]="benchRowFor(cand.resourceId)"
+                            [resourceName]="cand.resource.name" />
                         </div>
                       </div>
                     </div>
@@ -330,6 +522,13 @@ function stateOf(
                           <span class="text-[10px] font-bold tracking-wider uppercase bg-surface-muted text-ink-secondary px-2 py-1 rounded-md border border-line">{{ skill.name }}</span>
                         }
                       </div>
+                      <div class="mt-3">
+                        <app-availability-strip
+                          [state]="availabilityState()"
+                          [months]="availabilityMonths()"
+                          [row]="benchRowFor(res.id)"
+                          [resourceName]="res.name" />
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -414,15 +613,55 @@ export class StaffingComponent {
     this.orgsRes.status() === 'error' ? [] : this.orgsRes.value(),
   );
 
+  /**
+   * The reference-data catalogs the RPT facets (§3.2.1–§3.2.5) are drawn from:
+   * vendor ("società"), project role ("job role"), skill ("skill matrix"),
+   * skill catalog ("skill capability") and the proficiency scale behind the
+   * minimum-level control. One rxResource over one forkJoin, not five: they are
+   * all option lists for the SAME control group, so a partial success would
+   * offer a half-populated filter panel with no way to say which half.
+   *
+   * All five reads are open to any authenticated principal (no `READ_RULES`
+   * entry narrows them — only their MUTATIONS are admin/delivery-executive), so
+   * this adds no role that can see the screen but not its filters.
+   */
+  private catalogsRes = rxResource<FacetCatalogs, boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => ready
+      ? forkJoin({
+          vendors: this.api.getVendors(),
+          projectRoles: this.api.getProjectRoles(),
+          skills: this.api.getSkills(),
+          skillCatalogs: this.api.getSkillCatalogs(),
+          proficiencySets: this.api.getProficiencySets(),
+        })
+      : of(EMPTY_FACET_CATALOGS),
+    defaultValue: EMPTY_FACET_CATALOGS,
+  });
+  /** READ-FAILURE GUARD, same contract as `pool`/`orgOptions` above: a THIRD
+   *  independently failing read whose `.value()` throws at header bindings that
+   *  sit outside every error panel. `candidateListState()` covers this leg too,
+   *  so the empty envelope is never what the user is left looking at. */
+  private catalogs = computed<FacetCatalogs>(() =>
+    this.catalogsRes.status() === 'error' ? EMPTY_FACET_CATALOGS : this.catalogsRes.value(),
+  );
+
   /** Every read the LEFT (Open Requests) panel derives from. */
   private requestInputs() {
     return [this.res];
   }
 
   /** Every read the RIGHT (candidate) panel derives from — one shared list, so
-   *  the gate, the skeleton and the Retry cannot drift from what feeds them. */
+   *  the gate, the skeleton and the Retry cannot drift from what feeds them.
+   *
+   *  `benchRes` is deliberately NOT here: the availability strip is an ATTRIBUTE
+   *  of a candidate, not the candidate list itself. A failed `/bench/monthly`
+   *  must not blank out the ranking (which is this screen's primary answer and
+   *  needs no bench data) — it degrades to a per-card "unavailable" plus its own
+   *  Retry, which is the honest reduction. Every other leg here is one the
+   *  candidate list cannot be computed without. */
   private candidateInputs() {
-    return [this.res, this.orgsRes];
+    return [this.res, this.orgsRes, this.catalogsRes];
   }
 
   /**
@@ -483,6 +722,216 @@ export class StaffingComponent {
   onManagerFilterChange(event: Event): void {
     this.managerFilter.set((event.target as HTMLSelectElement).value);
   }
+
+  // ---------------------------------------------------------------------------
+  // RPT "Ricerca Avanzata" — the remaining facets (manual §3.2.1–§3.2.5).
+  //
+  // Grouped behind a collapsed disclosure rather than added to the row above:
+  // nine more controls in one flat row is a wall, and at 320px every control is
+  // full-width and stacked, so the row above alone would already fill the
+  // viewport. The disclosure keeps the visible control count at what it is today
+  // (search + 4 dimension selects) and states how many hidden facets are active,
+  // so a filter can never narrow the list invisibly.
+  //
+  // NOT here, and why:
+  //   - "Cod. risorsa": there is no readable resource code column yet (a
+  //     separate change adds one); a facet over UUIDs would be unusable.
+  //   - "Livello professionale": not modelled anywhere — no column, no catalog,
+  //     no field. See the header of candidate-filter.util.ts.
+  //   - "Nome"/"Cognome" as two facets: `Resource.name` is one column; the free
+  //     text box already substring-matches it.
+  // ---------------------------------------------------------------------------
+  /** RPT "anagrafica". */
+  kindFilter = signal<'' | ResourceKind>('');
+  /** RPT "società" — the vendor a subco belongs to. */
+  vendorFilter = signal('');
+  /** RPT "job role". */
+  jobRoleFilter = signal('');
+  /** RPT "skill matrix" — a skill name. */
+  skillFilter = signal('');
+  /**
+   * Minimum proficiency for `skillFilter`. RESET whenever the skill changes: the
+   * levels come from the SELECTED skill's own proficiency set, so a level 4 left
+   * over from a skill measured 1-5 would silently filter a skill measured 1-3.
+   * That reset is the whole reason this is a linkedSignal and not a signal.
+   */
+  minSkillLevel = linkedSignal<string, number | null>({
+    source: () => this.skillFilter(),
+    computation: () => null,
+  });
+  /** RPT "skill capability" — a skill-catalog id. */
+  skillCatalogFilter = signal('');
+  /** RPT "tariffa" — inclusive bounds on the effective cost rate in €/day. */
+  rateMin = signal<number | null>(null);
+  rateMax = signal<number | null>(null);
+
+  /** Every facet value in one place, in the shape the pure filter consumes. */
+  protected readonly facets = computed<CandidateFacetValues>(() => ({
+    query: this.searchQuery(),
+    capability: this.capabilityFilter(),
+    practice: this.practiceFilter(),
+    competence: this.competenceFilter(),
+    managerId: this.managerFilter(),
+    kind: this.kindFilter(),
+    vendorId: this.vendorFilter(),
+    jobRole: this.jobRoleFilter(),
+    skill: this.skillFilter(),
+    minSkillLevel: this.minSkillLevel(),
+    skillCatalogId: this.skillCatalogFilter(),
+    costRateDayMin: this.rateMin(),
+    costRateDayMax: this.rateMax(),
+  }));
+
+  /** How many of the DISCLOSED facets are narrowing the list right now. */
+  protected readonly advancedActiveCount = computed(() => advancedFacetCount(this.facets()));
+  /** Whether anything at all is filtering — gates the "Clear filters" control. */
+  protected readonly anyFacetActive = computed(() => hasAnyFacet(this.facets()));
+
+  /**
+   * Option lists come from the CATALOGS, not from the pool: they are the
+   * controlled vocabularies a planner recognises (and the same rows the
+   * configuration screens maintain). People Manager is the one exception above —
+   * there is no manager catalog to read, so it is derived from the pool.
+   */
+  protected readonly kindOptions = RESOURCE_KINDS.map(k => ({ value: k, label: RESOURCE_KIND_LABELS[k] }));
+  protected readonly vendorOptions = computed(() =>
+    [...this.catalogs().vendors].sort((a, b) => a.name.localeCompare(b.name)),
+  );
+  protected readonly jobRoleOptions = computed(() =>
+    [...this.catalogs().projectRoles].sort((a, b) => a.name.localeCompare(b.name)),
+  );
+  protected readonly skillOptions = computed(() =>
+    [...this.catalogs().skills].sort((a, b) => a.name.localeCompare(b.name)),
+  );
+  protected readonly skillCatalogOptions = computed(() =>
+    [...this.catalogs().skillCatalogs].sort((a, b) => a.name.localeCompare(b.name)),
+  );
+
+  /**
+   * Proficiency levels of the SELECTED skill's own scale, ascending. Empty when
+   * no skill is selected, or when that skill declares no proficiency set — in
+   * both cases the control is disabled rather than offering a scale it invented.
+   */
+  protected readonly minLevelOptions = computed<{ value: number; label: string }[]>(() => {
+    const skillName = this.skillFilter();
+    if (skillName === '') return [];
+    const skill = this.catalogs().skills.find(s => s.name === skillName);
+    if (!skill?.proficiencySetId) return [];
+    const set = this.catalogs().proficiencySets.find(p => p.id === skill.proficiencySetId);
+    return [...(set?.levels ?? [])]
+      .sort((a, b) => a.level - b.level)
+      .map(l => ({ value: l.level, label: `${l.level} — ${l.name}` }));
+  });
+
+  onKindFilterChange(event: Event): void {
+    this.kindFilter.set((event.target as HTMLSelectElement).value as '' | ResourceKind);
+  }
+  onVendorFilterChange(event: Event): void {
+    this.vendorFilter.set((event.target as HTMLSelectElement).value);
+  }
+  onJobRoleFilterChange(event: Event): void {
+    this.jobRoleFilter.set((event.target as HTMLSelectElement).value);
+  }
+  onSkillFilterChange(event: Event): void {
+    this.skillFilter.set((event.target as HTMLSelectElement).value);
+  }
+  onMinLevelChange(event: Event): void {
+    const raw = (event.target as HTMLSelectElement).value;
+    this.minSkillLevel.set(raw === '' ? null : Number(raw));
+  }
+  onSkillCatalogFilterChange(event: Event): void {
+    this.skillCatalogFilter.set((event.target as HTMLSelectElement).value);
+  }
+  /** A number input yields '' when cleared; '' is "no bound", not 0. */
+  onRateBoundChange(bound: 'min' | 'max', raw: unknown): void {
+    const target = bound === 'min' ? this.rateMin : this.rateMax;
+    const n = typeof raw === 'number' ? raw : Number(raw);
+    target.set(raw === null || raw === '' || !Number.isFinite(n) ? null : n);
+  }
+
+  /** Reset every facet, disclosed or not — the escape hatch for a filter the
+   *  user cannot see because the panel is collapsed. */
+  clearAllFilters(): void {
+    this.searchQuery.set('');
+    this.capabilityFilter.set('');
+    this.practiceFilter.set('');
+    this.competenceFilter.set('');
+    this.managerFilter.set('');
+    this.kindFilter.set('');
+    this.vendorFilter.set('');
+    this.jobRoleFilter.set('');
+    this.skillFilter.set('');
+    this.minSkillLevel.set(null);
+    this.skillCatalogFilter.set('');
+    this.rateMin.set(null);
+    this.rateMax.set(null);
+  }
+
+  // ---------------------------------------------------------------------------
+  // RPT "Disponibilità futura" (manual §3.2.2): the 6-month BENCH/PARTIAL/
+  // ALLOCATED traffic light, on the card where the choice is made.
+  //
+  // The rollup, the 3 states and the fixed 6-month window already exist
+  // server-side for /bench; this consumes them unchanged. `/bench` reads are
+  // gated to exactly the roles that may read `/resources`, so no role can reach
+  // this screen's candidate list and be refused its availability.
+  // ---------------------------------------------------------------------------
+  private benchRes = rxResource<BenchRollup, boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getBenchMonthly() : of(EMPTY_BENCH)),
+    defaultValue: EMPTY_BENCH,
+  });
+
+  /**
+   * READ-FAILURE GUARD for the rollup — `.value()` throws while the status is
+   * 'error', and it is dereferenced once per candidate card.
+   *
+   * This is NOT the banned `status()==='error' ? [] : value()`: emptiness is
+   * never the ANSWER here. `availabilityState()` below is what the strip reads,
+   * and on 'error' it renders "unavailable" with a Retry and draws no dots at
+   * all — the empty envelope exists only so the signal graph can settle behind
+   * that panel. Six green dots derived from a failed read would be exactly the
+   * confident-zero defect this codebase keeps re-fixing.
+   */
+  private benchRollup = computed<BenchRollup>(() =>
+    this.benchRes.status() === 'error' ? EMPTY_BENCH : this.benchRes.value(),
+  );
+
+  protected readonly availabilityState = computed<AvailabilityReadState>(() => {
+    if (this.benchRes.status() === 'error') return 'error';
+    if (!this.auth.authReady() || this.benchRes.isLoading()) return 'loading';
+    return 'ready';
+  });
+
+  /** The rollup's own months — server-fixed at six, never re-derived here. */
+  protected readonly availabilityMonths = computed<string[]>(() => this.benchRollup().months);
+
+  /** Rollup rows by resource id. Internal and subco rows are one lookup: which
+   *  half a candidate came from is a /bench grouping, not a fact about their
+   *  availability. A DUMMY appears in neither — placeholders are excluded from
+   *  the rollup by design — which is exactly the "no row" case the strip renders
+   *  as explicitly untracked. */
+  private benchRowById = computed<Map<string, BenchRow>>(() => {
+    const rollup = this.benchRollup();
+    return new Map([...rollup.internalRows, ...rollup.subcoRows].map(r => [r.resourceId, r]));
+  });
+
+  protected benchRowFor(resourceId: string): BenchRow | undefined {
+    return this.benchRowById().get(resourceId);
+  }
+
+  protected reloadAvailability(): void {
+    this.benchRes.reload();
+  }
+
+  private static readonly MONTH_FMT = new Intl.DateTimeFormat('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
+  /** Window label for the legend, e.g. "Apr 26 – Sep 26". */
+  protected readonly availabilityWindowLabel = computed(() => {
+    const months = this.availabilityMonths();
+    if (months.length === 0) return '';
+    const fmt = (m: string) => StaffingComponent.MONTH_FMT.format(new Date(m + '-01T00:00:00Z'));
+    return `${fmt(months[0])} – ${fmt(months[months.length - 1])}`;
+  });
 
   assigningResourceId = signal<string | null>(null);
 
@@ -555,34 +1004,22 @@ export class StaffingComponent {
   });
 
   /**
-   * Resources after applying the free-text search box (name / role / skills)
-   * AND the D (Task 8) capability/practice/competence/People Manager filters —
-   * the single filtering computed both `rankedCandidates` and
-   * `displayedResources` derive from, so a filter narrows the pool the same
-   * way whether or not a request is selected.
+   * Resources after applying EVERY facet — the free-text box, the four org/
+   * manager dimensions and the RPT advanced facets — the single filtering
+   * computed both `rankedCandidates` and `displayedResources` derive from, so a
+   * facet narrows the pool the same way whether or not a request is selected.
+   *
+   * The predicate itself lives in `candidate-filter.util.ts`, unit-tested
+   * without a TestBed: with thirteen facets ANDing together, one `||` slipped in
+   * between two of them widens the result set in a way that still looks
+   * plausible on a small pool.
    */
-  private searchedResources = computed(() => {
-    const resources = this.staffableResources();
-    const query = this.searchQuery().trim().toLowerCase();
-    const cap = this.capabilityFilter();
-    const pra = this.practiceFilter();
-    const com = this.competenceFilter();
-    const mgr = this.managerFilter();
-    const nodes = this.orgOptions();
-    return resources.filter(r => {
-      const dims = dimensionsOf(r, nodes);
-      if (cap && dims.capability !== cap) return false;
-      if (pra && dims.practice !== pra) return false;
-      if (com && dims.competence !== com) return false;
-      if (mgr && r.managerId !== mgr) return false;
-      if (!query) return true;
-      return (
-        r.name.toLowerCase().includes(query) ||
-        r.role.toLowerCase().includes(query) ||
-        r.skills.some(s => s.name.toLowerCase().includes(query))
-      );
-    });
-  });
+  private searchedResources = computed(() =>
+    filterCandidates(this.staffableResources(), this.facets(), {
+      orgNodes: this.orgOptions(),
+      skills: this.catalogs().skills,
+    }),
+  );
 
   /**
    * When a request is selected, rank the searched resources by match score (desc) using the
