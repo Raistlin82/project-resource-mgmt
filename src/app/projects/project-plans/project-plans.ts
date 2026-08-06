@@ -165,9 +165,10 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
                       {{ milestone.date | date:'mediumDate' }}
                     </div>
                     @if (milestone.status === 'Pending') {
-                      <button (click)="achieveMilestone(milestone)" class="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-positive-tint ring-1 ring-positive px-3 py-1.5 text-xs font-bold text-positive-text hover:bg-[color-mix(in_oklch,var(--color-positive)_16%,var(--color-surface))] transition-colors">
+                      <!-- Opens the confirm below; the ellipsis is the signal that a dialog follows. -->
+                      <button type="button" (click)="requestAchieveMilestone(milestone)" [attr.aria-label]="'Mark ' + milestone.name + ' achieved'" data-test="achieve-milestone" class="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-positive-tint ring-1 ring-positive px-3 py-1.5 text-xs font-bold text-positive-text hover:bg-[color-mix(in_oklch,var(--color-positive)_16%,var(--color-surface))] transition-colors">
                         <mat-icon class="text-[14px] w-[14px] h-[14px]">check_circle</mat-icon>
-                        Approve
+                        Mark achieved&hellip;
                       </button>
                     } @else if (milestone.approvedBy) {
                       <p class="mt-2 text-[11px] text-[var(--cc-muted)]">Approved by {{ milestone.approvedBy }}</p>
@@ -370,6 +371,46 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
           </div>
         </div>
       }
+
+      <!--
+        ACHIEVE CONFIRMATION — this chip RELEASES MONEY, so it gets the repo's
+        confirm shape (deletingId + modal, projects.ts:270-286) with the
+        consequence spelled out the way manage-rate-cards.component.ts does it.
+        server.ts's own MILESTONE_FIELDS comment calls a milestone reaching
+        'Achieved' "a document that RELEASES MONEY": the PUT flips every linked
+        fixed-price BillingPlanItem from 'Planned' to 'Ready', which is precisely
+        what un-gates /billing's "Generate invoice" row action. The old label said
+        "Approve" and none of that, on a single unconfirmed click — and the button
+        then vanishes with the Pending branch above, so there is no reversal
+        affordance here OR on /billing. Copy therefore has to name the milestone,
+        say the linked conditions become invoiceable, and admit the reversal does
+        not exist rather than implying one.
+      -->
+      @if (pendingAchieve(); as pending) {
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+             appModal ariaLabelledby="milestoneAchieveTitle" (dismiss)="cancelAchieveMilestone()">
+          <div class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col" data-test="achieve-milestone-confirm">
+            <div class="p-6 sm:p-8 text-center">
+              <div class="w-16 h-16 bg-caution-tint ring-1 ring-caution rounded-full flex items-center justify-center mx-auto mb-4">
+                <mat-icon class="text-caution-text text-3xl">payments</mat-icon>
+              </div>
+              <h3 id="milestoneAchieveTitle" class="font-display text-lg font-bold text-[var(--cc-ink)] mb-2">Mark &ldquo;{{ pending.name }}&rdquo; achieved?</h3>
+              <p class="text-[var(--cc-muted)] text-sm">
+                Achieving <strong class="text-[var(--cc-ink)]">{{ pending.name }}</strong> makes every fixed-price billing
+                condition linked to it invoiceable: each one moves from Planned to Ready, and finance can then raise an
+                invoice against it. This cannot be undone from this screen &mdash; nothing here, or on Billing, moves the
+                milestone back to Pending or those conditions back to Planned.
+              </p>
+            </div>
+            <div class="p-4 sm:p-5 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
+              <button type="button" (click)="cancelAchieveMilestone()" class="command-button secondary">Cancel</button>
+              <button type="button" (click)="confirmAchieveMilestone()" data-test="achieve-milestone-confirm-action" class="px-4 py-2 bg-caution text-white rounded-lg text-sm font-semibold hover:bg-caution-strong transition-colors shadow-sm">
+                Release for invoicing
+              </button>
+            </div>
+          </div>
+        </div>
+      }
     </div>
   `
 })
@@ -554,14 +595,45 @@ export class ProjectPlans {
     this.closeEditWpForm();
   }
 
-  achieveMilestone(milestone: Milestone) {
-    this.api.updateMilestone(milestone.id, {
-      status: 'Achieved',
-      approvedBy: this.auth.userId(),
-      approvedAt: new Date().toISOString(),
-    }).subscribe(() => {
-      this.milestoneRes.reload();
-      this.notificationService.show('Milestone approved', 'success');
-    });
+  /**
+   * The milestone awaiting confirmation. Holds the WHOLE milestone, not just an
+   * id, so the dialog can name it without re-finding it in a list that may have
+   * reloaded underneath.
+   */
+  pendingAchieve = signal<Milestone | null>(null);
+
+  /** First click: arm the confirm ONLY. No PUT goes out from here. */
+  requestAchieveMilestone(milestone: Milestone) {
+    this.pendingAchieve.set(milestone);
+  }
+
+  cancelAchieveMilestone() {
+    this.pendingAchieve.set(null);
+  }
+
+  confirmAchieveMilestone() {
+    const milestone = this.pendingAchieve();
+    if (!milestone) return;
+    // Cleared BEFORE the request so a double-click on the confirm control cannot
+    // issue the money-releasing PUT twice.
+    this.pendingAchieve.set(null);
+    this.achieveMilestone(milestone);
+  }
+
+  private achieveMilestone(milestone: Milestone) {
+    // `status` ONLY. `approvedBy`/`approvedAt` are deliberately NOT sent: they are
+    // absent from server.ts's MILESTONE_FIELDS allow-list and pinned to the verified
+    // principal by `milestoneApprovalPatch` on the transition itself, so a body
+    // carrying them was both inert and a standing invitation to forge an approver.
+    this.api.updateMilestone(milestone.id, { status: 'Achieved' })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => {
+        this.milestoneRes.reload();
+        // Names what was released, not just that something was approved.
+        this.notificationService.show(
+          `Milestone “${milestone.name}” achieved — linked fixed-price billing conditions are now invoiceable.`,
+          'success',
+        );
+      });
   }
 }

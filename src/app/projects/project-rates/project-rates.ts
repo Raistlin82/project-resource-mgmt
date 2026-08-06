@@ -70,7 +70,7 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
                   <button type="button" (click)="openRateForm(rate)" [attr.aria-label]="'Edit override for ' + rate.role" class="text-ink-muted hover:text-accent-text p-1.5 rounded-lg transition-colors">
                     <mat-icon class="text-[18px] w-[18px] h-[18px]">edit</mat-icon>
                   </button>
-                  <button type="button" (click)="deleteRate(rate)" [attr.aria-label]="'Delete override for ' + rate.role" class="text-ink-muted hover:text-critical-text p-1.5 rounded-lg transition-colors ml-1">
+                  <button type="button" (click)="requestDeleteRate(rate)" [attr.aria-label]="'Delete override for ' + rate.role" class="text-ink-muted hover:text-critical-text p-1.5 rounded-lg transition-colors ml-1">
                     <mat-icon class="text-[18px] w-[18px] h-[18px]">delete</mat-icon>
                   </button>
                 </td>
@@ -153,6 +153,54 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
             <button type="button" (click)="closeRateForm()" class="command-button secondary">Cancel</button>
             <button type="button" (click)="saveRate()" [disabled]="!rateFormValid()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
               Save Rate
+            </button>
+          </div>
+        </div>
+      </div>
+    }
+
+    <!--
+      DELETE CONFIRMATION — a negotiated sell rate is a PRICE, and the DELETE used
+      to go out on the first click with the figure recoverable from nowhere in the
+      UI. Same shape as projects.ts's delete confirm, with the consequence sentence
+      manage-rate-cards.component.ts uses.
+
+      THE FALLBACK IS TWO-LEVEL, NOT ONE. sellRateFor (sell-rate.util.ts:106-150)
+      resolves project override -> the contract-level rate for that role, for hours
+      dated INSIDE the contract period -> the resource's own reference bill rate. So
+      the honest sentence depends on whether this project's contract carries a rate
+      for the same role: promising "the rate-card rate" would be wrong on both
+      branches. The branch is computed, not guessed — see pendingDeleteFallback.
+    -->
+    @if (pendingDelete(); as pending) {
+      <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+           appModal ariaLabelledby="projectRateDeleteTitle" (dismiss)="cancelDeleteRate()">
+        <div class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col" data-test="negotiated-rate-delete-confirm">
+          <div class="p-6 sm:p-8 text-center">
+            <div class="w-16 h-16 bg-critical-tint ring-1 ring-critical rounded-full flex items-center justify-center mx-auto mb-4">
+              <mat-icon class="text-critical-text text-3xl">warning</mat-icon>
+            </div>
+            <h3 id="projectRateDeleteTitle" class="font-display text-lg font-bold text-[var(--cc-ink)] mb-2">
+              Delete the {{ pending.role }} override?
+            </h3>
+            <p class="text-[var(--cc-muted)] text-sm">
+              This project's negotiated <strong class="text-[var(--cc-ink)]">{{ pending.role }}</strong> sell price of
+              <strong class="text-[var(--cc-ink)]">{{ pending.billRate | number:'1.0-2' }} {{ pending.currency }}/day</strong>
+              @if (pendingDeleteFallback(); as fallback) {
+                is removed, and Time &amp; Materials revenue reverts to the contract rate of
+                <strong class="text-[var(--cc-ink)]">{{ fallback.billRate | number:'1.0-2' }} {{ fallback.currency }}/day</strong>
+                for hours dated inside the contract period.
+              } @else {
+                is removed. This project's contract carries no {{ pending.role }} rate to fall back to, so Time &amp;
+                Materials revenue reverts to each assigned resource's own reference bill rate.
+              }
+              This cannot be undone &mdash; the negotiated figure is not shown anywhere else once it is gone.
+            </p>
+          </div>
+          <div class="p-4 sm:p-5 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
+            <button type="button" (click)="cancelDeleteRate()" class="command-button secondary">Cancel</button>
+            <button type="button" (click)="confirmDeleteRate()" data-test="negotiated-rate-delete-confirm-action" class="px-4 py-2 bg-critical text-white rounded-lg text-sm font-semibold hover:bg-critical-strong transition-colors shadow-sm">
+              Delete rate
             </button>
           </div>
         </div>
@@ -349,10 +397,51 @@ export class ProjectRates {
     }
   }
 
-  deleteRate(rate: NegotiatedRate): void {
+  /**
+   * The override awaiting confirmation. Holds the WHOLE rate so the dialog can quote
+   * the role and the figure without re-finding a row the list may have reloaded.
+   */
+  pendingDelete = signal<NegotiatedRate | null>(null);
+
+  /**
+   * The contract-level rate that would take over if the pending override were
+   * deleted, or `null` when the contract has none for that role — the second level
+   * of sellRateFor's chain. Matched on ROLE and `usable`-ness (a BASE_CURRENCY row
+   * with a finite non-negative rate), exactly as sell-rate.util.ts:143-146 does;
+   * matching on currency as well would claim a fallback that pricing would not
+   * actually use.
+   */
+  pendingDeleteFallback = computed<NegotiatedRate | null>(() => {
+    const pending = this.pendingDelete();
+    if (!pending) return null;
+    return this.contractRatesForProject().find(
+      r => r.role === pending.role
+        && (r.currency ?? BASE_CURRENCY) === BASE_CURRENCY
+        && Number.isFinite(r.billRate) && r.billRate >= 0,
+    ) ?? null;
+  });
+
+  /** First click: arm the confirm ONLY. No DELETE goes out from here. */
+  requestDeleteRate(rate: NegotiatedRate): void {
+    this.pendingDelete.set(rate);
+  }
+
+  cancelDeleteRate(): void {
+    this.pendingDelete.set(null);
+  }
+
+  confirmDeleteRate(): void {
+    const rate = this.pendingDelete();
+    if (!rate) return;
+    // Cleared BEFORE the request so a double-click cannot issue two DELETEs.
+    this.pendingDelete.set(null);
+    this.deleteRate(rate);
+  }
+
+  private deleteRate(rate: NegotiatedRate): void {
     this.api.deleteNegotiatedRate(rate.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => {
       this.negotiatedRatesRes.reload();
-      this.notification.show('Negotiated rate deleted', 'success');
+      this.notification.show(`${rate.role} override deleted — this project reverts to the inherited price.`, 'success');
     });
   }
 }

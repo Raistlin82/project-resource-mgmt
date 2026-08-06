@@ -267,6 +267,16 @@ export class Orders {
   showForm = signal(false);
   saving = signal(false);
   private orderSubmissionKey: string | null = null;
+  /**
+   * The payload the current `orderSubmissionKey` was minted for. The server derives
+   * the order id FROM the key (orderIdsForRequest, commercial-write.util.ts) and
+   * 409s 'idempotencyKey is already used by a different order' whenever the stored
+   * order under that key differs from the candidate — so a key held across an EDIT
+   * refuses the corrected figure forever. Rotating on a payload change is what makes
+   * a correction submittable; holding the key when the payload is UNCHANGED is what
+   * preserves the replay dedup the same function relies on.
+   */
+  private orderSubmissionFingerprint: string | null = null;
 
   orderForm = new FormGroup({
     contractId: new FormControl('', { nonNullable: true, validators: Validators.required }),
@@ -380,17 +390,30 @@ export class Orders {
       payload.partnerId = raw.partnerId;
     }
 
-    this.orderSubmissionKey ??= globalThis.crypto?.randomUUID?.()
-      ?? `order-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const line = {
+      projectId: raw.projectId,
+      description: raw.lineDescription || `${raw.type} order imputation`,
+      amount: raw.amount ?? 0,
+    };
+
+    // ROTATE THE KEY ONLY WHEN THE PAYLOAD ACTUALLY CHANGED. `??=` alone pinned one
+    // key to the whole dialog session: after a lost response the user would correct
+    // the amount, resubmit, and be 409ed on every click thereafter, with no way to
+    // record the correction. Always minting a fresh key is the opposite error — it
+    // destroys the replay dedup, so a genuine retry of the SAME payload would create
+    // a second order.
+    const fingerprint = Orders.submissionFingerprint(payload, line);
+    if (this.orderSubmissionKey === null || this.orderSubmissionFingerprint !== fingerprint) {
+      this.orderSubmissionKey = globalThis.crypto?.randomUUID?.()
+        ?? `order-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      this.orderSubmissionFingerprint = fingerprint;
+    }
+
     this.saving.set(true);
     this.api.createOrderWithLine({
       idempotencyKey: this.orderSubmissionKey,
       order: payload,
-      line: {
-        projectId: raw.projectId,
-        description: raw.lineDescription || `${raw.type} order imputation`,
-        amount: raw.amount ?? 0,
-      },
+      line,
     }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: () => {
         this.ordersRes.reload();
@@ -401,15 +424,39 @@ export class Orders {
       },
       error: () => {
         this.saving.set(false);
-        this.notifications.show('Failed to create order. You can safely retry.', 'error');
+        // RELOAD ON FAILURE. The response being lost (proxy 504, suspended tab) does
+        // NOT mean the write was refused — the order may well have committed. Without
+        // this the list behind the dialog kept showing the pre-submit state, so the
+        // committed order was invisible and the user's only evidence was an error.
+        this.ordersRes.reload();
+        this.orderLinesRes.reload();
+        this.notifications.show('Failed to create order. Check the list behind this dialog before retrying — it may already have been created.', 'error');
       },
     });
+  }
+
+  /**
+   * A stable, total fingerprint of everything the server compares under a key
+   * (sameOrder / sameOrderLine). Field order is fixed by these literals, and every
+   * field is listed explicitly so an absent `partnerId` cannot make two different
+   * payloads fingerprint alike.
+   */
+  private static submissionFingerprint(
+    order: Partial<Order>,
+    line: { projectId: string; description: string; amount: number },
+  ): string {
+    return JSON.stringify([
+      order.contractId ?? '', order.type ?? '', order.partnerId ?? '', order.amount ?? 0,
+      order.currency ?? '', order.status ?? '', order.orderDate ?? '',
+      line.projectId, line.description, line.amount,
+    ]);
   }
 
   closeForm(): void {
     if (this.saving()) return;
     this.showForm.set(false);
     this.orderSubmissionKey = null;
+    this.orderSubmissionFingerprint = null;
     this.orderForm.reset({ contractId: '', type: 'Customer', partnerId: '', amount: null, projectId: '', lineDescription: '', currency: BASE_CURRENCY, status: 'Open', orderDate: '' });
   }
 }

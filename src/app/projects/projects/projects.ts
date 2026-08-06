@@ -53,7 +53,22 @@ const REMOTE_LOCATION = 'Remote';
               <div class="flex justify-between items-start mb-4 gap-4">
                 <div class="flex-1 min-w-0">
                   <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-1 truncate group-hover:text-accent-text transition-colors">
-                    <a [routerLink]="['/projects', project.id]" class="focus:outline-none before:absolute before:inset-0">{{ project.name }}</a>
+                    <!--
+                      LINK ONLY WHERE THE ROUTE WILL ACTUALLY OPEN. /projects/:id is
+                      guarded by roleGuard(a => a.canReadStaffing()) (app.routes.ts:21),
+                      which for employee and sales parseUrl('/')s them back to the
+                      Dashboard with no toast and no message. Because this anchor
+                      stretches over the whole card (before:absolute before:inset-0)
+                      there was no non-link region to click either, so every row on
+                      the page read as broken rather than read-only. Dropping the
+                      anchor takes the stretched pseudo-element with it, so the card
+                      stops advertising itself as clickable.
+                    -->
+                    @if (canReadStaffing()) {
+                      <a [routerLink]="['/projects', project.id]" class="focus:outline-none before:absolute before:inset-0">{{ project.name }}</a>
+                    } @else {
+                      <span>{{ project.name }}</span>
+                    }
                   </h3>
                   <p class="text-xs text-accent-text font-mono bg-accent-tint ring-1 ring-accent inline-block px-2 py-0.5 rounded-md">{{ project.id }}</p>
                 </div>
@@ -305,6 +320,8 @@ export class ProjectsComponent {
   contracts = this.contractsRes.value;
   readonly canManageProjects = this.auth.canManageProjects;
   readonly canReadCommercial = this.auth.canReadCommercial;
+  /** Mirrors /projects/:id's own route guard, so a card only links where it opens. */
+  readonly canReadStaffing = this.auth.canReadStaffing;
   showForm = signal(false);
   editingId = signal<string | null>(null);
   deletingId = signal<string | null>(null);
