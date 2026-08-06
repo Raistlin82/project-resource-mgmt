@@ -5791,6 +5791,200 @@ async function checkBillingPaymentLifecycle() {
 }
 
 /**
+ * SERVER-OWNED WRITES THAT ONLY AN HTTP CHECK CAN REACH.
+ *
+ * Three route-level guards whose pure halves are unit-tested but whose WIRING is
+ * not reachable from Vitest (src/server.ts instantiates the Angular SSR engine at
+ * load, so it cannot be imported):
+ *
+ *   1. `/project-documents` upload provenance is server-derived, not body-pinned.
+ *   2. `/work-packages` `progress` is a bounded 0..100 number.
+ *   3. `DELETE /vendors/:id` refuses a vendor a resource still references.
+ *
+ * Every positive case is paired with the case that must STILL BE ALLOWED: a guard
+ * that always refuses passes every negative assertion, which is the blind-green
+ * shape this suite exists to catch.
+ *
+ * SELF-CONTAINED: creates its own vendor, work package and documents and removes
+ * them again, so it can run anywhere in the order and leaves no seed row altered.
+ */
+async function checkServerOwnedWrites() {
+  // Two DIFFERENT verified principals. The differentiation is the load-bearing
+  // part: with one actor, both assertions below pass on a fixture whose identities
+  // happen to resolve to the same value — the exact failure this project already
+  // paid for (a fixture that lied about identity certified an inert feature).
+  const ACTOR_A = { 'X-User-Id': '1', 'X-User-Role': 'admin' };   // Julie Armstrong
+  const ACTOR_B = { 'X-User-Id': '2', 'X-User-Role': 'pm' };      // John Miller
+  const FORGED = { author: 'Marco Bianchi', authorInitials: 'MB', uploadedAt: '2020-01-01' };
+
+  // --- 1. project-document provenance ---------------------------------------
+  const createdDocumentIds = [];
+  {
+    const first = await req('POST', '/project-documents', {
+      headers: ACTOR_A,
+      body: { projectId: '1', name: 'Signed change order.pdf', type: 'pdf', size: '1.0 MB', ...FORGED },
+    });
+    check('POST /api/project-documents (actor A, forged provenance) -> 200', first.status === 200, `status=${first.status}`);
+    if (first.body?.id) createdDocumentIds.push(first.body.id);
+
+    // THE ASSERTION OF ABSENCE: the forged values must appear nowhere on the row.
+    check(
+      'project-document author is NOT the client-supplied "Marco Bianchi"',
+      first.body?.author !== undefined && first.body.author !== 'Marco Bianchi',
+      `author=${first.body?.author}`,
+    );
+    check(
+      'project-document authorInitials are NOT the client-supplied "MB"',
+      first.body?.authorInitials !== undefined && first.body.authorInitials !== 'MB',
+      `authorInitials=${first.body?.authorInitials}`,
+    );
+    check(
+      'project-document uploadedAt is NOT the client-supplied "2020-01-01" and parses as a date',
+      first.body?.uploadedAt !== '2020-01-01' && !Number.isNaN(Date.parse(first.body?.uploadedAt ?? '')),
+      `uploadedAt=${first.body?.uploadedAt}`,
+    );
+
+    // NON-VACUITY: the identical body as a DIFFERENT actor must attribute
+    // differently. Without this, both assertions above pass on a server that pins
+    // one hardcoded name.
+    const second = await req('POST', '/project-documents', {
+      headers: ACTOR_B,
+      body: { projectId: '1', name: 'Signed change order.pdf', type: 'pdf', size: '1.0 MB', ...FORGED },
+    });
+    if (second.body?.id) createdDocumentIds.push(second.body.id);
+    check(
+      'the SAME document body filed by a different actor records a DIFFERENT author',
+      second.body?.author !== undefined && first.body?.author !== undefined && second.body.author !== first.body.author,
+      `actorA=${first.body?.author} actorB=${second.body?.author}`,
+    );
+    check(
+      'and different initials, so the avatar cannot disagree with the name beside it',
+      second.body?.authorInitials !== undefined && second.body.authorInitials !== first.body?.authorInitials,
+      `actorA=${first.body?.authorInitials} actorB=${second.body?.authorInitials}`,
+    );
+
+    // THE PUT HALF: crud() shares one allow-list, so provenance must be
+    // unchangeable after create, not merely correct at create.
+    if (first.body?.id) {
+      const put = await req('PUT', `/project-documents/${first.body.id}`, {
+        headers: ACTOR_B,
+        body: { projectId: '1', name: 'Renamed.pdf', type: 'pdf', size: '2.0 MB', ...FORGED },
+      });
+      check('PUT /api/project-documents/:id -> 200 (an ordinary rename still works)', put.status === 200, `status=${put.status}`);
+      check(
+        'PUT cannot rewrite the recorded author/initials/uploadedAt',
+        put.body?.author === first.body.author
+          && put.body?.authorInitials === first.body.authorInitials
+          && put.body?.uploadedAt === first.body.uploadedAt,
+        `author=${put.body?.author} initials=${put.body?.authorInitials} uploadedAt=${put.body?.uploadedAt}`,
+      );
+      // …while the fields that ARE the client's still change, so the allow-list was
+      // narrowed rather than the whole PUT frozen.
+      check('PUT still applies the client-owned name/size', put.body?.name === 'Renamed.pdf' && put.body?.size === '2.0 MB', `name=${put.body?.name} size=${put.body?.size}`);
+    }
+  }
+  for (const id of createdDocumentIds) await req('DELETE', `/project-documents/${id}`, { headers: ACTOR_A });
+
+  // --- 2. work-package progress bounds --------------------------------------
+  {
+    const created = await req('POST', '/work-packages', {
+      headers: ACTOR_B,
+      body: { projectId: '1', name: 'Smoke WP', startDate: '2026-09-01', endDate: '2026-09-30', status: 'Planned', progress: 0, assignee: 'Unassigned' },
+    });
+    check('POST /api/work-packages (progress 0) -> 200', created.status === 200, `status=${created.status}`);
+    const wpId = created.body?.id;
+
+    if (wpId) {
+      // Each refused value is asserted SEPARATELY: 300 and 'nearly done' fail
+      // through different guards (the upper bound vs the numeric check), so one
+      // green assertion must not be creditable to the other.
+      for (const [label, progress] of [['300', 300], ['-1', -1], ['"nearly done"', 'nearly done'], ['null', null]]) {
+        const bad = await req('PUT', `/work-packages/${wpId}`, {
+          headers: ACTOR_B,
+          body: { projectId: '1', name: 'Smoke WP', startDate: '2026-09-01', endDate: '2026-09-30', status: 'Planned', progress, assignee: 'Unassigned' },
+        });
+        check(`PUT /api/work-packages progress ${label} -> 400`, bad.status === 400, `status=${bad.status}`);
+        // READ-BACK, the assertion of absence: a status-only check passes a handler
+        // that 400s AFTER writing, which is what used to happen for 300.
+        const after = await req('GET', '/work-packages', { headers: ACTOR_B });
+        const stored = (after.body || []).find((wp) => wp.id === wpId);
+        check(`…and the stored progress is untouched after the refused ${label}`, stored?.progress === 0, `progress=${stored?.progress}`);
+      }
+
+      // NON-VACUITY: the boundaries must STILL be accepted. A validator that
+      // rejected everything (or only the string) would pass every case above.
+      for (const progress of [0, 50, 100]) {
+        const ok = await req('PUT', `/work-packages/${wpId}`, {
+          headers: ACTOR_B,
+          body: { projectId: '1', name: 'Smoke WP', startDate: '2026-09-01', endDate: '2026-09-30', status: 'Planned', progress, assignee: 'Unassigned' },
+        });
+        check(`PUT /api/work-packages progress ${progress} -> 200 (boundary still allowed)`, ok.status === 200 && ok.body?.progress === progress, `status=${ok.status} progress=${ok.body?.progress}`);
+      }
+      await req('DELETE', `/work-packages/${wpId}`, { headers: ACTOR_B });
+    }
+  }
+
+  // --- 3. DELETE /vendors/:id referential guard -----------------------------
+  {
+    const vendor = await req('POST', '/vendors', { headers: ACTOR_A, body: { name: 'Smoke Subco Ltd', country: 'IT' } });
+    check('POST /api/vendors -> 200', vendor.status === 200, `status=${vendor.status}`);
+    const vendorId = vendor.body?.id;
+
+    if (vendorId) {
+      // An UNREFERENCED vendor must still delete — the case that must be allowed,
+      // and the one a blanket refusal would break. Asserted on a second vendor so
+      // the referenced case below still has its subject.
+      const spare = await req('POST', '/vendors', { headers: ACTOR_A, body: { name: 'Smoke Spare Ltd', country: 'IT' } });
+      const spareDelete = await req('DELETE', `/vendors/${spare.body?.id}`, { headers: ACTOR_A });
+      check('DELETE /api/vendors/:id (unreferenced) -> 204', spareDelete.status === 204, `status=${spareDelete.status}`);
+
+      // Now bind a resource to the vendor and re-try.
+      // `hireDate` is REQUIRED on create (employmentWindowError). Supplying it is
+      // not incidental: without it this POST 400s, the subco is never created, and
+      // the vendor guard below has nothing to refuse — so the 409 assertion would
+      // "pass" as a 204 and certify an inert guard. The 201 is asserted for exactly
+      // that reason, before the guard is exercised at all.
+      const subco = await req('POST', '/resources', {
+        headers: ACTOR_A,
+        body: {
+          name: 'Smoke Subco Person', role: 'Developer', capacity: 100, location: 'Remote',
+          kind: 'subco', vendorId, hireDate: '2026-01-01',
+        },
+      });
+      check('POST /api/resources (subco bound to the vendor) -> 201', subco.status === 201, `status=${subco.status}`);
+      check('…and the created subco really carries that vendorId (the guard has a subject)', subco.body?.vendorId === vendorId, `vendorId=${subco.body?.vendorId}`);
+
+      const refused = await req('DELETE', `/vendors/${vendorId}`, { headers: ACTOR_A });
+      check('DELETE /api/vendors/:id while a resource references it -> 409', refused.status === 409, `status=${refused.status}`);
+      // READ-BACK: the refusal must not have removed the row anyway.
+      const stillThere = await req('GET', '/vendors', { headers: ACTOR_A });
+      check(
+        '…and the vendor row survives the refusal',
+        (stillThere.body || []).some((v) => v.id === vendorId),
+        `found=${(stillThere.body || []).some((v) => v.id === vendorId)}`,
+      );
+
+      // A missing id is a 404, never "still referenced" — the two refusals must not
+      // be confused, or a typo'd id reads as a live dependency.
+      const missing = await req('DELETE', '/vendors/NO-SUCH-VENDOR', { headers: ACTOR_A });
+      check('DELETE /api/vendors/NO-SUCH-VENDOR -> 404', missing.status === 404, `status=${missing.status}`);
+
+      // THE GUARD MUST RELEASE once the last reference is gone, or it is a
+      // permanent refusal dressed as a referential check. The unbind is a PUT off
+      // 'subco' (which clears the stale vendorId with an explicit null) — there is
+      // deliberately no DELETE /resources/:id route, and this is exactly the
+      // "edit the vendor field first" path the finding describes.
+      if (subco.body?.id) {
+        const unbound = await req('PUT', `/resources/${subco.body.id}`, { headers: ACTOR_A, body: { kind: 'internal' } });
+        check('PUT /api/resources/:id kind=internal clears the stale vendorId', unbound.status === 200 && !unbound.body?.vendorId, `status=${unbound.status} vendorId=${unbound.body?.vendorId}`);
+      }
+      const allowedNow = await req('DELETE', `/vendors/${vendorId}`, { headers: ACTOR_A });
+      check('DELETE /api/vendors/:id after the last reference is removed -> 204', allowedNow.status === 204, `status=${allowedNow.status}`);
+    }
+  }
+}
+
+/**
  * D task 4 — refuse a `Resource.managerId` assignment that would close a
  * cycle in the ORG CHART (distinct from the ORG TREE cycle guard exercised
  * above — see org-scope.util's module doc for the two axes). Uses
@@ -6548,6 +6742,18 @@ async function main() {
     await checkBillingPaymentLifecycle();
   } catch (err) {
     console.log(`FAIL  billing payment lifecycle — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the server-owned-writes
+  // flow never masks or blocks any of the prior section results. Safe anywhere in
+  // the order: it creates and removes its own vendor, subco resource, work
+  // package and documents, and alters no seed row. Placed BEFORE the
+  // resource-manager-cycle flow, which must stay last.
+  try {
+    await checkServerOwnedWrites();
+  } catch (err) {
+    console.log(`FAIL  server-owned writes flow — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 

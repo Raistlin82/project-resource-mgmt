@@ -7,9 +7,11 @@ import {
   changeRequestDeleteError,
   changeRequestMutationError,
   deriveTimeEntryLinks,
+  hasGlobalApprovalRole,
   hasGlobalTimeEntryCollectionAccess,
   isBillingMoneyActionPath,
   pinnedChangeRequestCreateFields,
+  stepRoleMatch,
   type TimeEntryPolicyContext,
 } from './route-policy.util';
 
@@ -91,9 +93,40 @@ describe('canSubmitOwnTime', () => {
   });
 });
 
+describe('approval step role matching', () => {
+  it('admits an approver who holds the step role alongside a higher-ranked one', () => {
+    // THE DEFECT. The engine compared `primaryRole(roles)` to `step.role`, so a
+    // finance controller whose account also carries 'delivery-executive' collapsed
+    // to 'delivery-executive' (priority 5 > finance's 4) and was refused the very
+    // finance step routed to them — and `crossStepSoDError` bars the admin who
+    // cleared the earlier step, so a 120k invoice had no legal approver at all.
+    expect(stepRoleMatch(['finance', 'delivery-executive'], 'finance')).toBe(true);
+    expect(stepRoleMatch(['resource-manager', 'finance'], 'resource-manager')).toBe(true);
+    // admin decides any step (SoD is enforced separately and binds admin too).
+    expect(stepRoleMatch(['admin'], 'finance')).toBe(true);
+  });
+
+  it('refuses an actor whose roles do not include the step role', () => {
+    // ASSERTIONS OF ABSENCE: without them a predicate returning true for
+    // everything — silently handing every step to every role — passes above.
+    expect(stepRoleMatch(['pm'], 'finance')).toBe(false);
+    expect(stepRoleMatch(['employee', 'sales'], 'finance')).toBe(false);
+    expect(stepRoleMatch([], 'finance')).toBe(false);
+  });
+
+  it('treats admin and delivery-executive as global regardless of rank order', () => {
+    expect(hasGlobalApprovalRole(['finance', 'delivery-executive'])).toBe(true);
+    expect(hasGlobalApprovalRole(['admin'])).toBe(true);
+    // Absence twin: a scope-bound role set is not global.
+    expect(hasGlobalApprovalRole(['finance'])).toBe(false);
+    expect(hasGlobalApprovalRole(['pm', 'resource-manager'])).toBe(false);
+    expect(hasGlobalApprovalRole([])).toBe(false);
+  });
+});
+
 function context(overrides: Partial<TimeEntryPolicyContext> = {}): TimeEntryPolicyContext {
   return {
-    role: 'resource-manager',
+    roles: ['resource-manager'],
     actorResourceId: 'manager-1',
     managedResourceIds: new Set(['worker-1']),
     ownedProjectIds: new Set(),
@@ -103,26 +136,26 @@ function context(overrides: Partial<TimeEntryPolicyContext> = {}): TimeEntryPoli
 
 describe('global time-entry policy', () => {
   it('forces employees through the /self boundary for every global action', () => {
-    const employee = context({ role: 'employee', actorResourceId: 'worker-1' });
+    const employee = context({ roles: ['employee'], actorResourceId: 'worker-1' });
 
-    expect(hasGlobalTimeEntryCollectionAccess('employee', 'read')).toBe(false);
-    expect(hasGlobalTimeEntryCollectionAccess('employee', 'write')).toBe(false);
+    expect(hasGlobalTimeEntryCollectionAccess(['employee'], 'read')).toBe(false);
+    expect(hasGlobalTimeEntryCollectionAccess(['employee'], 'write')).toBe(false);
     expect(canAccessGlobalTimeEntry(employee, target, 'read')).toBe(false);
     expect(canAccessGlobalTimeEntry(employee, target, 'write')).toBe(false);
     expect(canAccessGlobalTimeEntry(employee, target, 'decide')).toBe(false);
   });
 
   it('keeps sales read-only and limits PM/resource-manager access to their scope', () => {
-    expect(canAccessGlobalTimeEntry(context({ role: 'sales' }), target, 'read')).toBe(true);
-    expect(canAccessGlobalTimeEntry(context({ role: 'sales' }), target, 'write')).toBe(false);
+    expect(canAccessGlobalTimeEntry(context({ roles: ['sales'] }), target, 'read')).toBe(true);
+    expect(canAccessGlobalTimeEntry(context({ roles: ['sales'] }), target, 'write')).toBe(false);
 
     expect(canAccessGlobalTimeEntry(context({
-      role: 'pm',
+      roles: ['pm'],
       actorResourceId: 'pm-1',
       ownedProjectIds: new Set(['project-1']),
     }), target, 'write')).toBe(true);
     expect(canAccessGlobalTimeEntry(context({
-      role: 'pm',
+      roles: ['pm'],
       actorResourceId: 'pm-1',
       ownedProjectIds: new Set(['other-project']),
     }), target, 'write')).toBe(false);
@@ -134,11 +167,62 @@ describe('global time-entry policy', () => {
   it('allows decisions only to approver roles, in scope, and never by the owner', () => {
     expect(canAccessGlobalTimeEntry(context(), target, 'decide')).toBe(true);
     expect(canAccessGlobalTimeEntry(context({ actorResourceId: 'worker-1' }), target, 'decide')).toBe(false);
-    expect(canAccessGlobalTimeEntry(context({ role: 'pm', ownedProjectIds: new Set(['project-1']) }), target, 'decide')).toBe(false);
-    expect(canAccessGlobalTimeEntry(context({ role: 'finance', actorResourceId: 'finance-1' }), target, 'decide')).toBe(true);
+    expect(canAccessGlobalTimeEntry(context({ roles: ['pm'], ownedProjectIds: new Set(['project-1']) }), target, 'decide')).toBe(false);
+    expect(canAccessGlobalTimeEntry(context({ roles: ['finance'], actorResourceId: 'finance-1' }), target, 'decide')).toBe(true);
     // If the decider cannot be mapped into the resource namespace, SoD cannot be
     // proven and the decision must fail closed.
-    expect(canAccessGlobalTimeEntry(context({ role: 'finance', actorResourceId: undefined }), target, 'decide')).toBe(false);
+    expect(canAccessGlobalTimeEntry(context({ roles: ['finance'], actorResourceId: undefined }), target, 'decide')).toBe(false);
+  });
+
+  it('admits a multi-role principal on the scope their OWN role is granted', () => {
+    // THE DEFECT. The context carried `primaryRole(roles)`, so a PM who also holds
+    // 'sales' collapsed to 'sales' and lost every write and decision on their own
+    // projects (403 "Role sales cannot write global time entries"), and a
+    // ['resource-manager','sales'] people manager lost the timesheet decision path
+    // for their own reports.
+    expect(hasGlobalTimeEntryCollectionAccess(['pm', 'sales'], 'write')).toBe(true);
+    expect(hasGlobalTimeEntryCollectionAccess(['resource-manager', 'sales'], 'decide')).toBe(true);
+    expect(canAccessGlobalTimeEntry(context({
+      roles: ['pm', 'sales'],
+      actorResourceId: 'pm-1',
+      ownedProjectIds: new Set(['project-1']),
+    }), target, 'write')).toBe(true);
+    expect(canAccessGlobalTimeEntry(context({
+      roles: ['resource-manager', 'sales'],
+    }), target, 'decide')).toBe(true);
+  });
+
+  it('does NOT widen a multi-role principal past the scope of the role that grants the action', () => {
+    // THE OVER-GRANT THIS FIX MUST NOT INTRODUCE. 'sales' is in the org-wide set,
+    // so a set-wide "is any held role org-wide" test would give this PM WRITE on
+    // every project in the company. The action gate is per role: 'sales' admits no
+    // write at all, so only pm scope applies.
+    const pmPlusSales = context({
+      roles: ['pm', 'sales'],
+      actorResourceId: 'pm-1',
+      ownedProjectIds: new Set(['other-project']),
+      managedResourceIds: new Set(),
+    });
+    expect(canAccessGlobalTimeEntry(pmPlusSales, target, 'write')).toBe(false);
+    expect(canAccessGlobalTimeEntry(pmPlusSales, target, 'decide')).toBe(false);
+    // …while the sales READ it legitimately holds is untouched (READ_RULES admits
+    // sales to GET /time-entries; narrowing it would break the documented read).
+    expect(canAccessGlobalTimeEntry(pmPlusSales, target, 'read')).toBe(true);
+  });
+
+  it('still refuses roles the sets never admitted, so the union admits nobody new', () => {
+    // ASSERTIONS OF ABSENCE. Without these a union that returned true for every
+    // non-empty role set would satisfy every positive case above.
+    expect(hasGlobalTimeEntryCollectionAccess(['sales'], 'write')).toBe(false);
+    expect(hasGlobalTimeEntryCollectionAccess(['employee'], 'write')).toBe(false);
+    expect(hasGlobalTimeEntryCollectionAccess(['employee', 'sales'], 'decide')).toBe(false);
+    expect(hasGlobalTimeEntryCollectionAccess([], 'read')).toBe(false);
+    // And the one that stops a union from admitting every role: a PM out of scope.
+    expect(canAccessGlobalTimeEntry({
+      roles: ['pm'],
+      actorResourceId: '3',
+      ownedProjectIds: new Set(['P1']),
+    }, { resourceId: '9', projectId: 'P2' }, 'read')).toBe(false);
   });
 
   it('derives every ownership/FK field from the assignment chain', () => {

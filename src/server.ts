@@ -44,8 +44,10 @@ import {
   canAccessGlobalTimeEntry,
   canSubmitOwnTime,
   deriveTimeEntryLinks,
+  hasGlobalApprovalRole,
   hasGlobalTimeEntryCollectionAccess,
   pinnedChangeRequestCreateFields,
+  stepRoleMatch,
   changeRequestMutationError,
   changeRequestDeleteError,
   type GlobalTimeEntryAction,
@@ -67,6 +69,11 @@ import {
   type BillingPaymentResult,
   type OrderWithLineRequest,
 } from './server/commercial-write.util';
+import {
+  applyGiveBackDays,
+  applySubstitutionDays,
+  closeSubstitutionLink,
+} from './server/substitution-write.util';
 import { InvoiceNumberCoordinator, type InvoiceNumberTransactionRunner } from './server/invoice-number.util';
 import {
   AllocationLifecycleError,
@@ -86,6 +93,8 @@ import {
   buildMilestoneCreate,
   buildProjectWrite,
   contractHoursPerDayError,
+  deleteOrgNodeWrite,
+  documentProvenance,
   employmentWindowError,
   isNotNullViolation,
   issuedOrderLineStructureError,
@@ -99,6 +108,8 @@ import {
   retargetDailyCapacityError,
   signedNumberFieldError,
   stripBlankForeignKeys,
+  writeResourceOrganizationBinding,
+  ORG_TREE_LOCK,
 } from './server/operational-integrity.util';
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
@@ -548,6 +559,22 @@ async function actorResourceId(req: Request): Promise<string | undefined> {
 }
 
 /**
+ * Resolve the request's actor to a DISPLAY NAME through the same users directory
+ * `actorResourceId` walks. Used where a server-owned record has to name the person
+ * (project-document provenance), so the name in the record is the verified
+ * principal's rather than one the body chose.
+ *
+ * Falls back to the raw actor id: unlovely, but true. Labelling an unresolvable
+ * principal with anything friendlier would be inventing an attribution, which is
+ * the very defect this closes.
+ */
+async function actorDisplayName(req: Request): Promise<string> {
+  const id = actorId(req);
+  const user = (await repos.users.list()).find(u => u.id === id || u.name === id);
+  return user?.name ?? id;
+}
+
+/**
  * !!! SECURITY (HIGH) — DEMO-ONLY IDENTITY !!!
  *
  * Authentication/authorization here is derived from the CLIENT-SUPPLIED
@@ -853,6 +880,19 @@ function crud<T extends { id: string }>(
   // Nullable FKs whose blank ('' / null) form must reach the adapter as ABSENT.
   // `''` is a 23503 on Postgres and a stored empty string in memory.
   blankForeignKeys: readonly string[] = [],
+  // SERVER-PINNED fields for a CREATE: columns whose value is derived from the
+  // verified principal or the clock, never from the body. Folded in AFTER the
+  // allow-list pick (so a client value cannot survive) and BEFORE the required
+  // check (so they still satisfy their notNull columns). Deliberately not applied
+  // on UPDATE: keeping them out of `allowed` is what makes them unchangeable
+  // there, and re-pinning on every PUT would rewrite the original provenance.
+  pinnedOnCreate?: (req: Request) => Promise<Record<string, unknown>>,
+  // REFERENTIAL INTEGRITY for the DELETE, which the generic handler cannot express:
+  // returns a 409 message when the row is still referenced, undefined to allow.
+  // The bespoke deletes (/resource-organizations, /contracts, /milestones) all carry
+  // such a check; a crud() collection had no way to declare one, so its rows were a
+  // 204 in dev and a 23503 -> 409 under Postgres — the same request, two outcomes.
+  deleteGuard?: (id: string) => Promise<string | undefined>,
 ) {
   router.get(`/${path}`, async (req, res) => {
     const all = await repo.list();
@@ -864,6 +904,9 @@ function crud<T extends { id: string }>(
     // Blank nullable FKs are dropped BEFORE the required check, so a required
     // column sent as '' is reported as missing rather than reaching the adapter.
     const data = stripBlankForeignKeys(pick(req.body, allowed) as Record<string, unknown>, blankForeignKeys);
+    // AFTER the pick, so the pinned values overwrite nothing a client could have
+    // sent (those keys are not in `allowed` at all), and before the required check.
+    if (pinnedOnCreate) Object.assign(data, await pinnedOnCreate(req));
     const missing = requiredFieldError(data, required, 'create');
     if (missing) { res.status(400).json({ error: missing }); return; }
     const bad = findInvalidNumericField(data, numericFields);
@@ -892,6 +935,14 @@ function crud<T extends { id: string }>(
     res.json(updated);
   });
   router.delete(`/${path}/:id`, async (req, res) => {
+    // The 404 comes first, so a missing id is never reported as "still referenced".
+    if (deleteGuard) {
+      if ((await repo.get(req.params.id)) === undefined) {
+        res.status(404).json({ error: 'Not found' }); return;
+      }
+      const refusal = await deleteGuard(req.params.id);
+      if (refusal !== undefined) { res.status(409).json({ error: refusal }); return; }
+    }
     // AUDIT CORRECTNESS: honor remove()'s boolean so a DELETE of a non-existent
     // id 404s (parity with the bespoke handlers) instead of returning 204 and
     // recording a phantom DELETE audit entry (before/after both undefined).
@@ -1240,6 +1291,31 @@ async function validateCatalogValue(
 
 /** Allowed location sentinel (matches seed.REMOTE_LOCATION). */
 const REMOTE_LOCATION = 'Remote';
+
+/**
+ * Run a `/resources` write inside the ORG-TREE section whenever it names an
+ * organization, re-checking the name there so a concurrent node delete or rename
+ * cannot land between the check and the write (see `ORG_TREE_LOCK` in
+ * src/server/operational-integrity.util.ts for the exhibit and the lock order).
+ *
+ * Writes that do not touch `organization` never take the lock at all: their
+ * binding cannot become dangling, so serializing them would be pure contention on
+ * a global key. Shared by POST and PUT so the two can never diverge.
+ */
+async function bindOrganizationThen<R extends { status?: number; error?: string }>(
+  organization: unknown,
+  write: () => Promise<R>,
+): Promise<R> {
+  if (organization === undefined) return write();
+  const outcome = await writeResourceOrganizationBinding(
+    withLock,
+    repos,
+    organization,
+    write,
+  );
+  if ('refusal' in outcome) return { status: outcome.refusal.status, error: outcome.refusal.error } as R;
+  return outcome.written;
+}
 
 /**
  * Validate a resource body's F2 catalog references: `location` -> cities (name) or
@@ -1903,6 +1979,12 @@ apiRouter.post('/resources', async (req, res) => {
   // worth more than reasoning about which handler's race is "narrow enough"
   // to skip it. Only paid when a manager is actually being set — a POST
   // with no managerId never touches this lock at all.
+  // ORG-TREE BINDING: when this create names an organization, the name check and
+  // the write share the org-tree section, so a concurrent node delete/rename
+  // cannot land between them (see `ORG_TREE_LOCK`). Nested INSIDE 'org-chart' and
+  // OUTSIDE any `res:` lock, which is the documented total order.
+  const finishPostBound = (): Promise<{ status?: number; error?: string; created?: Resource }> =>
+    bindOrganizationThen(body.organization, finishPost);
   const result = body.managerId !== undefined
     ? await withLock('org-chart', async (): Promise<{ status?: number; error?: string; created?: Resource }> => {
         const effectiveManagerId = (body.managerId === '' || body.managerId === null) ? undefined : body.managerId;
@@ -1910,9 +1992,9 @@ apiRouter.post('/resources', async (req, res) => {
         if (wouldCycleInOrgChart(id, effectiveManagerId, all)) {
           return { status: 400, error: 'managerId would close a cycle in the org chart' };
         }
-        return finishPost();
+        return finishPostBound();
       })
-    : await finishPost();
+    : await finishPostBound();
   if (result.error !== undefined) { res.status(result.status ?? 400).json({ error: result.error }); return; }
   // Resolve effective rates so the create response matches the GET shape (Phase E).
   const [resolved] = await resolveResourceRates([result.created as Resource]);
@@ -2113,6 +2195,10 @@ apiRouter.put('/resources/:id', async (req, res) => {
   // express real concurrency; `withLock` itself is a private, non-exported
   // closure in this file with no existing unit coverage at any other call
   // site either).
+  // Same org-tree binding section as POST /resources — the rename guard at
+  // PUT /resource-organizations/:id lost this race in exactly the same way.
+  const finishPutBound = (): Promise<{ status?: number; error?: string; updated?: Resource }> =>
+    bindOrganizationThen(body.organization, finishPut);
   const locked = body.managerId !== undefined
     ? await withLock('org-chart', async (): Promise<{ status?: number; error?: string; updated?: Resource }> => {
         if (body.managerId === '') body.managerId = null as unknown as undefined;
@@ -2121,9 +2207,9 @@ apiRouter.put('/resources/:id', async (req, res) => {
         if (wouldCycleInOrgChart(req.params.id, effectiveManagerId, all)) {
           return { status: 400, error: 'managerId would close a cycle in the org chart' };
         }
-        return finishPut();
+        return finishPutBound();
       })
-    : await finishPut();
+    : await finishPutBound();
   if (locked.error !== undefined) { res.status(locked.status ?? 400).json({ error: locked.error }); return; }
   const [resolved] = await resolveResourceRates([locked.updated as Resource]);
   res.json(resolved);
@@ -2924,10 +3010,19 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
  * every transfer, so `applyToRemainingMonths` widens the window month by month
  * instead of leaving it pinned to the first.
  */
-async function syncSubstitutionBooking(assignmentId: string, dailyCap: number): Promise<void> {
+async function syncSubstitutionBooking(
+  assignmentId: string,
+  dailyCap: number,
+  // Takes the SAME `repositorySet` seam as `recomputeAssignedHours`, so the
+  // window/pct write commits inside the substitution's transaction with the day
+  // rows it is derived from. Reading the day rows through the process-wide
+  // `repos` while the rows were being written through a transaction would derive
+  // the booking from the PRE-transfer picture.
+  repositorySet: Repositories = repos,
+): Promise<void> {
   const round2 = (n: number): number => Math.round(n * 100) / 100;
   const hoursByMonth: Record<string, number> = {};
-  for (const d of await repos.assignmentDays.list()) {
+  for (const d of await repositorySet.assignmentDays.list()) {
     if (d.assignmentId !== assignmentId || !Number.isFinite(d.hours) || d.hours <= 0) continue;
     const m = monthOf(d.date);
     hoursByMonth[m] = round2((hoursByMonth[m] ?? 0) + d.hours);
@@ -2937,14 +3032,14 @@ async function syncSubstitutionBooking(assignmentId: string, dailyCap: number): 
 
   // Capacity over every month the window SPANS, not just the ones carrying hours:
   // the pct is one constant across the whole window (see `planSubstitutionBooking`).
-  const holidays = new Set((await repos.holidays.list()).map(h => h.id));
+  const holidays = new Set((await repositorySet.holidays.list()).map(h => h.id));
   const capacityByMonth: Record<string, number> = {};
   for (const m of monthsInRange(months[0], months[months.length - 1])) {
     capacityByMonth[m] = monthlyTargetHours(dailyCap, m, holidays);
   }
 
   const booking = planSubstitutionBooking(hoursByMonth, capacityByMonth);
-  if (booking !== undefined) await repos.assignments.update(assignmentId, booking);
+  if (booking !== undefined) await repositorySet.assignments.update(assignmentId, booking);
 }
 
 /**
@@ -2979,7 +3074,27 @@ async function transferDummyMonth(
   let cap = dailyCapFor(kindOf(target), targetBaseCap);
 
   const [firstId, secondId] = [dummyAssig.resourceId, target.id].sort();
-  const { plan, targetAssig: lockedTargetAssig, baseline, blocked } = await withLock(`res:${firstId}`, () => withLock(`res:${secondId}`, async (): Promise<{ plan: SubstitutionPlan; targetAssig?: Assignment; baseline: Record<string, number>; blocked?: string }> => {
+  // ONE TRANSACTION FOR THE WHOLE WRITE SECTION, inside both `res:` locks (the
+  // locks stay outside, exactly as PUT /assignments/:id/allocation does).
+  //
+  // The two writes per date — add to the target, then reduce/remove the dummy —
+  // were untransacted, so a failure between them left the same hours booked on
+  // BOTH assignments; and `recomputeAssignedHours` ran only after the loop, so
+  // neither side's total matched its rows. Every aggregate recomputes from
+  // `assignmentDays`, so the phantom copy inflated the target's utilization and
+  // showed the same hours twice on /schedule and /capacity — and the retry then
+  // reported "the target has no capacity left in this month", blaming the target
+  // for a copy of the dummy's own hours. `applySubstitutionDays` journals and
+  // compensates for the in-memory adapter, where
+  // `withRepositoriesTransaction` is a pass-through.
+  //
+  // `createdAssignmentIds` is deliberately mutated only AFTER the transaction
+  // commits: a rolled-back target assignment must not leave its id behind, or a
+  // later month of the same batch would treat a planner's assignment as one this
+  // substitution created and overwrite its booking window.
+  const {
+    plan, targetAssig: lockedTargetAssig, baseline, blocked, createdTargetAssignmentId,
+  } = await withLock(`res:${firstId}`, () => withLock(`res:${secondId}`, () => withRepositoriesTransaction(async (transactionRepos): Promise<{ plan: SubstitutionPlan; targetAssig?: Assignment; baseline: Record<string, number>; blocked?: string; createdTargetAssignmentId?: string }> => {
     // The target's assignment on the SAME request — resolved (never yet
     // CREATED) here, INSIDE both locks. Review finding (Task 3, Important #1):
     // reading the assignment list and finding-or-creating this row BEFORE the
@@ -2991,13 +3106,13 @@ async function transferDummyMonth(
     // the locks. Both `res:` locks are held from here on, so this read (and
     // the eventual create, below) is now inside the exact critical section
     // that must serialize it.
-    const assignments = await repos.assignments.list();
+    const assignments = await transactionRepos.assignments.list();
     const existingTargetAssig = assignments.find(a => a.resourceId === target.id && a.requestId === dummyAssig.requestId);
 
-    const allDays = await repos.assignmentDays.list();
+    const allDays = await transactionRepos.assignmentDays.list();
     const dummyDays = allDays.filter(d => d.assignmentId === dummyAssig.id && monthOf(d.date) === month);
     const dummyByDate = sumHoursByDate(dummyDays);
-    const currentTarget = await repos.resources.get(target.id);
+    const currentTarget = await transactionRepos.resources.get(target.id);
     if (!currentTarget) {
       return {
         plan: planSubstitution(dummyByDate, {}, 0),
@@ -3015,7 +3130,7 @@ async function transferDummyMonth(
         blocked: employmentErr,
       };
     }
-    cap = dailyCapFor(kindOf(currentTarget), await resolveBaseCap(currentTarget));
+    cap = dailyCapFor(kindOf(currentTarget), await resolveBaseCap(currentTarget, transactionRepos));
 
     // What the target already holds on those days, across ALL their
     // assignments (a not-yet-created candidate assignment contributes no
@@ -3036,44 +3151,35 @@ async function transferDummyMonth(
 
     // Created ONLY NOW that something is actually moving onto it. 'Draft':
     // status is derived, never client-set (C1/B3).
-    const targetAssig = existingTargetAssig ?? await repos.assignments.create({
+    const targetAssig = existingTargetAssig ?? await transactionRepos.assignments.create({
       id: newId(), requestId: dummyAssig.requestId, resourceId: target.id,
       assignedHours: 0, status: 'Draft',
     } as Assignment);
-    if (existingTargetAssig === undefined) createdAssignmentIds.add(targetAssig.id);
+    const createdHere = existingTargetAssig === undefined;
 
     // THE PRE-TRANSFER BASELINE, per date: what she already held on that date on
-    // THIS assignment. Captured HERE — at the moment of the write, inside both
-    // locks — because it is the only moment it is knowable. After the transfer her
-    // day row carries her own hours and the loan fused into one number, and the
-    // give-back cannot tell them apart: charging the whole of it against the loan
-    // destroys booked hours on a trim (see `planGiveBack`). Recorded for EVERY date
-    // in the map, zeros included, so the two maps always cover the same dates.
-    const baseline: Record<string, number> = {};
-
-    for (const [date, hours] of Object.entries(p.transfer)) {
-      // Add to the target (merging with anything already booked that day on THIS
-      // assignment), then reduce the dummy — a day that reaches zero is removed,
-      // the same rule the allocation endpoint applies.
-      const targetDayId = `${targetAssig.id}:${date}`;
-      const existing = await repos.assignmentDays.get(targetDayId);
-      const held = Number.isFinite(existing?.hours) ? existing!.hours : 0;
-      baseline[date] = held;
-      const merged = Math.round((held + hours) * 100) / 100;
-      if (existing) await repos.assignmentDays.update(targetDayId, { hours: merged });
-      else await repos.assignmentDays.create({ id: targetDayId, assignmentId: targetAssig.id, date, hours: merged } as AssignmentDay);
-
-      const dummyDayId = `${dummyAssig.id}:${date}`;
-      const left = p.remaining[date] ?? 0;
-      if (left > 0) await repos.assignmentDays.update(dummyDayId, { hours: left });
-      else await repos.assignmentDays.remove(dummyDayId);
-    }
+    // THIS assignment. Captured by `applySubstitutionDays` at the moment of the
+    // write, inside both locks and inside this transaction, because that is the
+    // only moment it is knowable. After the transfer her day row carries her own
+    // hours and the loan fused into one number, and the give-back cannot tell
+    // them apart: charging the whole of it against the loan destroys booked hours
+    // on a trim (see `planGiveBack`). Recorded for EVERY date in the map, zeros
+    // included, so the two maps always cover the same dates.
+    const { baseline } = await applySubstitutionDays(
+      transactionRepos.assignmentDays,
+      p,
+      dummyAssig.id,
+      targetAssig.id,
+    );
 
     // The window + pct for an assignment THIS substitution created — after the day
     // rows are written, so it reads the complete picture, and inside the locks that
     // serialize those rows. Skipped for a planner-created assignment: its own
-    // booking window is not ours to overwrite.
-    if (createdAssignmentIds.has(targetAssig.id)) await syncSubstitutionBooking(targetAssig.id, cap);
+    // booking window is not ours to overwrite. `createdHere` rather than the
+    // caller's Set, which is only updated once this transaction has committed.
+    if (createdHere || createdAssignmentIds.has(targetAssig.id)) {
+      await syncSubstitutionBooking(targetAssig.id, cap, transactionRepos);
+    }
 
     // recomputeAssignedHours is called only now that `p.transfer` is known
     // non-empty (review finding, Important #2): calling it unconditionally
@@ -3081,10 +3187,20 @@ async function transferDummyMonth(
     // day rows even on a zero-transfer attempt — silently zeroing a LEGACY
     // assignment that carries an assignedHours total with no day rows at all
     // (the exact case recomputeAssignedHours's own doc comment calls out).
-    await recomputeAssignedHours(dummyAssig.id);
-    await recomputeAssignedHours(targetAssig.id);
-    return { plan: p, targetAssig, baseline };
-  }));
+    // Inside the transaction, so the totals can never survive a rolled-back
+    // transfer and misstate rows that were put back.
+    await recomputeAssignedHours(dummyAssig.id, transactionRepos);
+    await recomputeAssignedHours(targetAssig.id, transactionRepos);
+    return {
+      plan: p,
+      targetAssig,
+      baseline,
+      createdTargetAssignmentId: createdHere ? targetAssig.id : undefined,
+    };
+  })));
+  // Only now that the transaction has committed does the caller learn this
+  // substitution owns the target's assignment (see the note above the lock).
+  if (createdTargetAssignmentId !== undefined) createdAssignmentIds.add(createdTargetAssignmentId);
 
   if (blocked !== undefined) {
     return { month, transferredHours: 0, remainingHours: plan.remainingHours, skipped: blocked };
@@ -3337,11 +3453,19 @@ apiRouter.post('/assignment-months/:id/substitute', async (req, res) => {
  * over those days strips her own work and credits it to dummy days that never
  * gave up an hour. `replacedDays` exists precisely so that never happens.
  *
- * Both `replacedFromAssignmentMonthId` and `replacedDays` are cleared with
- * explicit `null`s (the documented "clear to absent" patch value on BOTH
- * adapters) on EVERY path — the no-ops, AND a transfer that throws half way, via
- * a `finally`. A decided month must never be mistaken for a pending
- * substitution, or a retry/second decision could return the same hours twice.
+ * All three substitution columns are cleared with explicit `null`s (the
+ * documented "clear to absent" patch value on BOTH adapters) on every path that
+ * COMPLETES — the no-ops included. A decided month must never be mistaken for a
+ * pending substitution, or a retry/second decision could return the same hours
+ * twice; the fresh-read guard in `moveBack` is what makes that safe.
+ *
+ * A give-back that THROWS is the one case that leaves the link intact, on
+ * purpose. It used to be cleared in an unconditional `finally`, which made a
+ * half-completed reversal both permanent (the hours stayed booked on both sides)
+ * and unrepeatable (nothing would ever run the give-back again). The day writes,
+ * the recomputes and the clear now commit together inside one
+ * `withRepositoriesTransaction` (`applyGiveBackDays`), so the month is either
+ * fully settled or fully retryable.
  *
  * CONCURRENCY: touches TWO resources, so it takes both `res:` locks in
  * LEXICOGRAPHIC ORDER OF THE RESOURCE IDS and does its day-row reads inside
@@ -3374,18 +3498,14 @@ async function returnHoursToDummy(
   if (linkId === undefined) return; // the caller guards; belt and braces.
   const month = row.month;
 
-  // Closed on EVERY path below, including the no-ops (see the doc comment). All
-  // THREE substitution columns go together — `replacedDays` and
-  // `replacedBaselineDays` are two halves of one record and a surviving baseline
-  // would misdescribe the next substitution's loan. Cast just these values so a typo
-  // in a neighbouring field is still type-checked.
-  const closeLink = async (): Promise<void> => {
-    await repos.assignmentMonths.update(row.id, {
-      replacedFromAssignmentMonthId: null as unknown as undefined,
-      replacedDays: null as unknown as undefined,
-      replacedBaselineDays: null as unknown as undefined,
-    } as Partial<AssignmentMonth>);
-  };
+  // Closed on the SUCCESS path and on the WRITE-NOTHING no-ops below — never in a
+  // `finally`. It used to be unconditional, which is what made a half-completed
+  // give-back permanent AND unrepeatable: the month stopped looking like a pending
+  // substitution, so no later decision, retarget or delete would run the reversal
+  // again. On the path that DOES write day rows, the clear is issued by
+  // `applyGiveBackDays` inside the same transaction as those writes, because the
+  // two must commit together.
+  const closeLink = (): Promise<void> => closeSubstitutionLink(repos.assignmentMonths, row.id);
 
   const dummyRow = await repos.assignmentMonths.get(linkId);
   const dummyAssig = dummyRow ? await repos.assignments.get(dummyRow.assignmentId) : undefined;
@@ -3401,7 +3521,7 @@ async function returnHoursToDummy(
   // concurrent contract-hours/lifecycle edit cannot make the write stale.
   let dummyCap = dailyCapFor(kindOf(dummyResource), await resolveBaseCap(dummyResource));
 
-  const moveBack = async (): Promise<{ giveBackHours: number; shortfallHours: number }> => {
+  const moveBack = async (): Promise<{ giveBackHours: number; shortfallHours: number; settled: boolean }> => {
     // IDEMPOTENCE UNDER CONCURRENCY — re-read the month row and bail out if the
     // link is already gone. This MUST happen here, inside both `res:` locks, and
     // never before acquiring them: the lock is the only thing that makes the
@@ -3417,16 +3537,15 @@ async function returnHoursToDummy(
     // credit the dummy a SECOND time. The error inflates demand rather than
     // destroying it, so the direction is safe, but the hours are simply wrong.
     //
-    // `closeLink()` in the outer `finally` still runs, unchanged: patching an
-    // already-cleared row with the same explicit `null`s is a harmless no-op on
-    // both adapters.
+    // Nothing left to clear on this path: the concurrent caller already closed the
+    // link, so `settled: true` reports it settled without a second write.
     const fresh = await repos.assignmentMonths.get(row.id);
     if (fresh === undefined || fresh.replacedFromAssignmentMonthId === undefined) {
       // Not silent: this is a real interleaving, not a bug, but "the hours were
       // already returned by someone else" is exactly the kind of thing that must
       // be reconstructable afterwards.
       console.warn(`give-back: month ${row.id} was already unlinked by a concurrent caller — returning nothing`);
-      return { giveBackHours: 0, shortfallHours: 0 };
+      return { giveBackHours: 0, shortfallHours: 0, settled: true };
     }
     // The FRESH map, not the caller's: having re-read the row under the lock, that
     // read is the authoritative one. Identical to the snapshot in every ordinary
@@ -3442,8 +3561,11 @@ async function returnHoursToDummy(
     const currentDummyResource = await repos.resources.get(dummyAssig.resourceId);
     const blockedHours = round2(Object.values(replacedDays).reduce((sum, hours) => sum + hours, 0));
     if (!currentDummyResource) {
+      // WROTE NOTHING, so the caller settles the link itself (`settled: false`):
+      // a retry could not do better, and leaving the month linked would make a
+      // decided month look like a pending substitution forever.
       console.warn(`give-back: dummy resource ${dummyAssig.resourceId} disappeared while settling month ${row.id} — returning no hours`);
-      return { giveBackHours: 0, shortfallHours: blockedHours };
+      return { giveBackHours: 0, shortfallHours: blockedHours, settled: false };
     }
     const employmentErr = bookingOutsideEmploymentError(Object.keys(replacedDays), currentDummyResource);
     if (employmentErr) {
@@ -3451,7 +3573,7 @@ async function returnHoursToDummy(
       // unresolved amount stays on the target side and is surfaced below as a
       // shortfall instead of silently materialising an invalid dummy booking.
       console.warn(`give-back: month ${row.id} cannot return to ${linkId}: ${employmentErr}`);
-      return { giveBackHours: 0, shortfallHours: blockedHours };
+      return { giveBackHours: 0, shortfallHours: blockedHours, settled: false };
     }
     dummyCap = dailyCapFor(kindOf(currentDummyResource), await resolveBaseCap(currentDummyResource));
 
@@ -3469,33 +3591,28 @@ async function returnHoursToDummy(
       allDays.filter(d => dummyAssignmentIds.has(d.assignmentId) && monthOf(d.date) === month));
 
     const plan = planGiveBack(replacedDays, replacedBaselineDays, heldByDate, decided, dummyBooked, dummyCap);
-    if (plan.giveBackHours === 0) return plan;
 
-    for (const [date, hours] of Object.entries(plan.giveBack)) {
-      // Merge onto the dummy's OWN assignment day (the ceiling is per resource,
-      // the row is per assignment), RECREATING it when it is gone — the transfer
-      // removes a day row that reaches zero, so the day the dummy gave everything
-      // from no longer exists.
-      const dummyDayId = `${dummyAssig.id}:${date}`;
-      const existing = await repos.assignmentDays.get(dummyDayId);
-      const merged = round2((existing?.hours ?? 0) + hours);
-      if (existing) await repos.assignmentDays.update(dummyDayId, { hours: merged });
-      else await repos.assignmentDays.create({ id: dummyDayId, assignmentId: dummyAssig.id, date, hours: merged } as AssignmentDay);
-    }
-
-    // Her side. Empty on an approval — what she still holds IS the approved
-    // allocation and deducting it again would destroy hours she was just granted.
-    // On a rejection this carries ONLY the days the transfer touched, each already
-    // reduced by exactly what the dummy received (0 meaning "delete the row").
-    for (const [date, left] of Object.entries(plan.targetHours)) {
-      if (left > 0) await repos.assignmentDays.update(`${assig.id}:${date}`, { hours: left });
-      else await repos.assignmentDays.remove(`${assig.id}:${date}`);
-    }
-
-    // The per-day rows are the source of truth for assignedHours on both sides.
-    await recomputeAssignedHours(dummyAssig.id);
-    if (Object.keys(plan.targetHours).length > 0) await recomputeAssignedHours(assig.id);
-    return plan;
+    // ONE TRANSACTION for the dummy credit, the target debit, both
+    // `recomputeAssignedHours` calls AND the link clear — they were three
+    // untransacted stages plus an unconditional `finally`, so a failure between
+    // the loops left 320h of booked demand where 160 existed and then made that
+    // state permanent by closing the link. `applyGiveBackDays` compensates the
+    // day rows and LEAVES THE LINK OPEN on failure (the in-memory adapter, where
+    // `withRepositoriesTransaction` is a pass-through), so the next decision,
+    // retarget or delete retries the whole reversal. The `res:` locks stay
+    // outside, as everywhere else in this file.
+    await withRepositoriesTransaction(transactionRepos => applyGiveBackDays(
+      {
+        assignmentDays: transactionRepos.assignmentDays,
+        assignmentMonths: transactionRepos.assignmentMonths,
+        recomputeAssignedHours: assignmentId => recomputeAssignedHours(assignmentId, transactionRepos),
+      },
+      plan,
+      assig.id,
+      dummyAssig.id,
+      row.id,
+    ));
+    return { ...plan, settled: true };
   };
 
   // Both `res:` locks, in LEXICOGRAPHIC ORDER OF THE RESOURCE IDS — two crossing
@@ -3509,18 +3626,20 @@ async function returnHoursToDummy(
   // permanently wedged `res:` key that silently hangs every later critical
   // section for that resource.
   const [firstId, secondId] = [assig.resourceId, dummyAssig.resourceId].sort();
-  let outcome = { giveBackHours: 0, shortfallHours: 0 };
-  try {
-    outcome = firstId === secondId
-      ? await withLock(`res:${firstId}`, moveBack)
-      : await withLock(`res:${firstId}`, () => withLock(`res:${secondId}`, moveBack));
-  } finally {
-    // UNCONDITIONALLY, and OUTSIDE both locks: the link must not survive the
-    // decision even when the transfer above threw part-way through. A month left
-    // linked after a half-completed give-back still looks like a pending
-    // substitution, and the next decision (or a retry) would return the same
-    // hours a second time. Its own failure is logged rather than thrown, so it can
-    // never mask the error that brought us into the `finally`.
+  // NO `finally`. A give-back that THREW must leave the link intact, so the next
+  // decision/retarget/delete retries it — the fresh-read guard inside `moveBack`
+  // already makes a successful repeat a no-op, which is what makes retrying safe.
+  // Clearing it unconditionally is what turned a partial reversal into a permanent
+  // one: the hours stayed double-booked and nothing could ever run the give-back
+  // again. The error propagates unchanged, as it did before.
+  const outcome = firstId === secondId
+    ? await withLock(`res:${firstId}`, moveBack)
+    : await withLock(`res:${firstId}`, () => withLock(`res:${secondId}`, moveBack));
+  if (!outcome.settled) {
+    // The two paths that wrote NO day rows (a vanished dummy resource, or a
+    // give-back its employment window refuses) still have to settle the link, and
+    // do it outside both locks. `applyGiveBackDays` owns the clear on every path
+    // that did write, because there it has to commit with those writes.
     await closeLink().catch(err =>
       console.error(`give-back: could not clear the substitution link on ${row.id}:`, err));
   }
@@ -3987,13 +4106,15 @@ apiRouter.get('/allocation-approvals', async (req, res) => {
  * pure policy decides that they do not need either scoped set.
  */
 async function globalTimeEntryPolicyContext(req: Request): Promise<TimeEntryPolicyContext> {
-  const role = trustedRole(req);
+  // THE WHOLE VERIFIED SET, as roleGate authorizes: it had just admitted this
+  // request on the set, and the object-level policy then judged the collapsed
+  // primary role and refused it (see `TimeEntryPolicyContext.roles`).
   const resourceId = await actorResourceId(req);
   const [resources, orgNodes, projects] = await Promise.all([
     repos.resources.list(), repos.resourceOrganizations.list(), repos.projects.list(),
   ]);
   return {
-    role,
+    roles: trustedRoles(req),
     actorResourceId: resourceId,
     managedResourceIds: resourceId ? scopeOf(resourceId, resources, orgNodes) : new Set<string>(),
     ownedProjectIds: new Set(
@@ -4004,19 +4125,26 @@ async function globalTimeEntryPolicyContext(req: Request): Promise<TimeEntryPoli
 
 function sendGlobalTimeEntryDenied(
   res: Response,
-  context: TimeEntryPolicyContext,
+  req: Request,
   action: GlobalTimeEntryAction,
 ): void {
-  res.status(403).json({ error: `Role ${context.role} cannot ${action} global time entries; use the permitted scoped workflow` });
+  // The DISPLAY role is still what the message names — one label reads better
+  // than a set — but it no longer decides anything.
+  res.status(403).json({ error: `Role ${trustedRole(req)} cannot ${action} global time entries; use the permitted scoped workflow` });
 }
 
 apiRouter.get('/time-entries', async (req, res) => {
   const policy = await globalTimeEntryPolicyContext(req);
-  if (!hasGlobalTimeEntryCollectionAccess(policy.role, 'read')) {
-    sendGlobalTimeEntryDenied(res, policy, 'read');
+  if (!hasGlobalTimeEntryCollectionAccess(policy.roles, 'read')) {
+    sendGlobalTimeEntryDenied(res, req, 'read');
     return;
   }
-  if ((policy.role === 'pm' || policy.role === 'resource-manager') && !policy.actorResourceId) {
+  // A SCOPED-ONLY principal with no resource link has no scope to read within.
+  // Asked of the set: a ['pm','sales'] actor is NOT scope-only — 'sales' carries
+  // org-wide read in its own right — so refusing them here would take away a read
+  // the rules grant.
+  const scopedOnly = policy.roles.every(role => role === 'pm' || role === 'resource-manager');
+  if (policy.roles.length > 0 && scopedOnly && !policy.actorResourceId) {
     res.status(403).json({ error: 'The signed-in identity is not linked to a resource scope' });
     return;
   }
@@ -4025,8 +4153,8 @@ apiRouter.get('/time-entries', async (req, res) => {
 });
 apiRouter.post('/time-entries', async (req, res) => {
   const policy = await globalTimeEntryPolicyContext(req);
-  if (!hasGlobalTimeEntryCollectionAccess(policy.role, 'write')) {
-    sendGlobalTimeEntryDenied(res, policy, 'write');
+  if (!hasGlobalTimeEntryCollectionAccess(policy.roles, 'write')) {
+    sendGlobalTimeEntryDenied(res, req, 'write');
     return;
   }
   // B-TIME-ENTRY (status bypass): 'status'/'approvedBy'/'approvedAt' are NOT in
@@ -4058,7 +4186,7 @@ apiRouter.post('/time-entries', async (req, res) => {
     return;
   }
   if (!canAccessGlobalTimeEntry(policy, links, 'write')) {
-    sendGlobalTimeEntryDenied(res, policy, 'write');
+    sendGlobalTimeEntryDenied(res, req, 'write');
     return;
   }
   const item = {
@@ -4076,12 +4204,12 @@ apiRouter.put('/time-entries/:id', async (req, res) => {
   const existing = await repos.timeEntries.get(req.params.id);
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   const policy = await globalTimeEntryPolicyContext(req);
-  if (!hasGlobalTimeEntryCollectionAccess(policy.role, 'write')) {
-    sendGlobalTimeEntryDenied(res, policy, 'write');
+  if (!hasGlobalTimeEntryCollectionAccess(policy.roles, 'write')) {
+    sendGlobalTimeEntryDenied(res, req, 'write');
     return;
   }
   if (!canAccessGlobalTimeEntry(policy, existing, 'write')) {
-    sendGlobalTimeEntryDenied(res, policy, 'write');
+    sendGlobalTimeEntryDenied(res, req, 'write');
     return;
   }
   // Clients cannot rewrite ownership/FKs directly. `assignmentId` is the only
@@ -4157,7 +4285,7 @@ apiRouter.put('/time-entries/:id', async (req, res) => {
     return { status: 200, body: await repos.timeEntries.update(req.params.id, patch) };
   });
   if ('denied' in result) {
-    sendGlobalTimeEntryDenied(res, policy, result.denied);
+    sendGlobalTimeEntryDenied(res, req, result.denied);
     return;
   }
   res.status(result.status).json(result.body);
@@ -4166,9 +4294,9 @@ apiRouter.delete('/time-entries/:id', async (req, res) => {
   const existing = await repos.timeEntries.get(req.params.id);
   if (!existing) { res.status(404).json({ error: 'Not found' }); return; }
   const policy = await globalTimeEntryPolicyContext(req);
-  if (!hasGlobalTimeEntryCollectionAccess(policy.role, 'write')
+  if (!hasGlobalTimeEntryCollectionAccess(policy.roles, 'write')
       || !canAccessGlobalTimeEntry(policy, existing, 'write')) {
-    sendGlobalTimeEntryDenied(res, policy, 'write');
+    sendGlobalTimeEntryDenied(res, req, 'write');
     return;
   }
   if (existing.status === 'Approved') {
@@ -4272,18 +4400,16 @@ apiRouter.get('/resource-organizations', async (_req, res) => { res.json(await r
  * to reason about than a per-node scheme (the invariant spans several nodes, so
  * a per-node lock would have to be taken over an unbounded set anyway).
  *
- * LOCK ORDER, stated explicitly because `withLock` is NOT re-entrant:
- * `'org-tree'` is a LEAF and a ROOT — it is acquired at exactly the three call
- * sites below, each of them the outermost (and only) lock of its handler, and
- * NOTHING inside those sections acquires another lock (they do repo reads and
- * one write; `validateOrgTreeNode`/`validateResourceOrgRefs` are lock-free).
- * It therefore cannot participate in a cycle with any other key, `'org-chart'`
- * included: that one is likewise taken only at the two `/resources` write
- * handlers, and no path from inside it reaches these handlers (Express routes
- * never call one another). A DEADLOCK would require some path to hold one while
- * acquiring the other; no such path exists in either direction.
+ * THE KEY AND ITS TWO WRITES NOW LIVE TOGETHER in
+ * src/server/operational-integrity.util.ts, because the section no longer covers
+ * only this collection: the RESOURCE side of the name binding it guards
+ * (`POST`/`PUT /resources` with an `organization`) joins it via
+ * `bindOrganizationThen`, which closes the race in which a node was deleted or
+ * renamed between a resource's name check and its write. That file states the
+ * full lock order — `org-chart` -> `org-tree` -> `res:<id>` — and why it stays
+ * acyclic; read it before adding any acquisition inside this section, which still
+ * takes no other lock of its own.
  */
-const ORG_TREE_LOCK = 'org-tree';
 apiRouter.post('/resource-organizations', async (req, res) => {
   const body = pick<ResourceOrganization>(req.body, [
     'name', 'description', 'costCenters', 'serviceOrganizationId',
@@ -4409,22 +4535,11 @@ apiRouter.delete('/resource-organizations/:id', async (req, res) => {
   // the still-referenced guards below are a read-check-write over the whole
   // tree, so a concurrent PUT reparenting a node UNDER this one could otherwise
   // commit between the check and the removal.
-  const result = await withLock(ORG_TREE_LOCK, async (): Promise<{ status?: number; error?: string }> => {
-    const node = await repos.resourceOrganizations.get(req.params.id);
-    if (node === undefined) return { status: 404, error: 'Not found' };
-    const all = await repos.resourceOrganizations.list();
-    if (all.some(n => n.parentId === req.params.id)) {
-      return { status: 409, error: 'Cannot delete an organization that has children' };
-    }
-    // Resources bind to a node by NAME (design spec §2.4), so this is a name check.
-    const resources = await repos.resources.list();
-    if (resources.some(r => r.organization === node.name)) {
-      return { status: 409, error: 'Cannot delete an organization that resources still reference' };
-    }
-    await repos.resourceOrganizations.remove(req.params.id);
-    return {};
-  });
-  if (result.error !== undefined) { res.status(result.status ?? 400).json({ error: result.error }); return; }
+  // The guards and the removal live in `deleteOrgNodeWrite`, beside the lock key
+  // and beside the resource-binding write that now shares the section: a lock is
+  // only as good as the agreement between the sections that take it.
+  const refusal = await deleteOrgNodeWrite(withLock, repos, req.params.id);
+  if (refusal !== null) { res.status(refusal.status).json({ error: refusal.error }); return; }
   res.status(204).send();
 });
 
@@ -4484,8 +4599,22 @@ crud(apiRouter, 'partner-roles', repos.partnerRoles, ['name'], [], undefined, []
 // VENDORS — partner/supplier companies. REFERENCE-DATA INTEGRITY (Phase F2):
 // `country` (when supplied) must be a valid ISO-2 country code from the countries
 // catalog (the natural key). Optional; an omitted/empty country passes.
+// DELETE is refused while any resource still points at the vendor. Without it the
+// same request behaved two ways: 204 in dev (DATABASE_URL unset), where the three
+// subco resources bound to "Acme Consulting" were left rendering a raw UUID in the
+// vendor field — and because `vendorId` is a REQUIRED control exactly when
+// `kind === 'subco'`, none of them could be saved again until someone re-picked a
+// vendor — against 409 under Postgres, where `resources.vendor_id` references
+// `vendors.id`. An ID reference, unlike the org-node binding one table over, which
+// is by NAME.
 crud(apiRouter, 'vendors', repos.vendors, ['name', 'vatId', 'country'], [], data =>
-  validateCatalogValue(data['country'], 'country', countryCodes, 'country (ISO-2 code)'), [], ['name']);
+  validateCatalogValue(data['country'], 'country', countryCodes, 'country (ISO-2 code)'), [], ['name'], [], undefined,
+  async vendorId => {
+    const referencing = (await repos.resources.list()).filter(resource => resource.vendorId === vendorId);
+    if (referencing.length === 0) return undefined;
+    return `Cannot delete: ${referencing.length} resource(s) still reference this vendor`;
+  });
+
 
 // RATE CARDS (Phase E) — role-based default cost/bill rates customizing.
 // REFERENCE-DATA INTEGRITY: `role` -> project-roles (name, required), optional
@@ -4674,10 +4803,18 @@ crud(apiRouter, 'project-partners', repos.projectPartners, ['projectId', 'compan
   return validateCatalogValue(data['role'], 'role', partnerRoleNames, 'partner role (catalog name)');
 }, [], ['projectId', 'company', 'role', 'contact', 'status']);
 
+// PROVENANCE IS SERVER-OWNED. `uploadedAt`, `author` and `authorInitials` are
+// deliberately ABSENT from the allow-list — that is what makes them unforgeable on
+// create AND unchangeable by the PUT, which shares the same list. They are still
+// notNull columns, so `documentProvenance` supplies them (see its doc comment for
+// the forged-attribution exhibit). `uploadedAt` becomes a real ISO date: the client
+// used to send the literal string 'Just now', which is a lie the moment a day
+// passes, and the seed rows carry equally frozen '2 days ago'.
 crud(apiRouter, 'project-documents', repos.projectDocuments,
-  ['projectId', 'name', 'type', 'size', 'uploadedAt', 'author', 'authorInitials'], [],
+  ['projectId', 'name', 'type', 'size'], [],
   async data => validateProjectReference(data['projectId']), [],
-  ['projectId', 'name', 'type', 'size', 'uploadedAt', 'author', 'authorInitials']);
+  ['projectId', 'name', 'type', 'size', 'uploadedAt', 'author', 'authorInitials'], [],
+  async req => documentProvenance(await actorDisplayName(req), todayIso()));
 
 // PHASE D — work-package `assignee` is a person reference ('Unassigned' allowed).
 // Phase G — start/end must be ISO (end >= start) when supplied.
@@ -6425,8 +6562,26 @@ async function appendMonthTransitionAudit(
 
 /** The SERVER-VERIFIED principal driving a decision. Never client-supplied: a
  *  client-controlled `by` would defeat the SoD check and forge the recorded
- *  approver. Resolved once by the caller and passed down unchanged. */
-interface DeciderContext { by: string; decidingRole: string; deciderResourceId: string | undefined }
+ *  approver. Resolved once by the caller and passed down unchanged.
+ *
+ *  `decidingRoles` is the WHOLE verified set and is what every authorization
+ *  answer below is computed from. This field used to be a single
+ *  `decidingRole: string` filled from `primaryRole()`, and the step check compared
+ *  it to `step.role` — so an approver holding the step's role PLUS a higher-ranked
+ *  one was refused the step routed to them (see `stepRoleMatch`). Typed as an
+ *  array deliberately: every call site must supply `trustedRoles(req)` or fail to
+ *  compile.
+ *
+ *  There is deliberately no display-role field here. Neither 403 below names the
+ *  actor's role (they name the STEP: "a step assigned to finance"), and the 401
+ *  principal check happens at each route before this context is built, so a
+ *  retained label would be dead state inviting a future authorization check to
+ *  read it. */
+interface DeciderContext {
+  by: string;
+  decidingRoles: readonly UserRole[];
+  deciderResourceId: string | undefined;
+}
 /** What `decideOneApproval` gives back: the HTTP shape the single-request
  *  endpoint returns verbatim, plus the surfaced allocation outcome the
  *  post-decision hook consumes once the approval lock has been released. */
@@ -6484,7 +6639,7 @@ async function decideOneApprovalInRepositories(
   ctx: DeciderContext,
   repositorySet: Repositories,
 ): Promise<DecisionOutcome> {
-  const { by, decidingRole, deciderResourceId } = ctx;
+  const { by, decidingRoles, deciderResourceId } = ctx;
     const ar = await repositorySet.approvalRequests.get(approvalId) as ApprovalRequestEntry | undefined;
     if (ar === undefined) return { status: 404, body: { error: 'Not found' } };
     if (ar.status !== 'Pending') return { status: 400, body: { error: `approval request already ${ar.status}` } };
@@ -6582,9 +6737,15 @@ async function decideOneApprovalInRepositories(
     // `ORG_TREE_LOCK`) and is exactly how a deadlock gets introduced. It also
     // means those two writers are never held off by a decision, which is the
     // right trade for a read that only informs an authorization answer.
-    const roleMatch = decidingRole === step.role || decidingRole === 'admin';
+    // ASKED OF THE WHOLE SET, not the collapsed display role: an approver who
+    // holds the step's role AND a higher-ranked one was refused the step routed to
+    // them, and `crossStepSoDError` had already barred the admin who cleared the
+    // previous step — so a high-value chain could reach a state no one could
+    // legally clear. Same reasoning for `globalRole`: holding a global role must
+    // not depend on it outranking every other role the principal carries.
+    const roleMatch = stepRoleMatch(decidingRoles, step.role);
     const managerMatch = step.approverId !== undefined && deciderResourceId === step.approverId;
-    const globalRole = decidingRole === 'admin' || decidingRole === 'delivery-executive';
+    const globalRole = hasGlobalApprovalRole(decidingRoles);
     let scopeMatch = roleMatch;
     // Rule 2 — accountable-manager, role-independent (see above).
     let accountableMatch = false;
@@ -6942,7 +7103,9 @@ apiRouter.put('/approval-requests/:id/decision', async (req, res) => {
   // above, also computed before the lock).
   const deciderResourceId = await actorResourceId(req);
 
-  const ctx: DeciderContext = { by, decidingRole, deciderResourceId };
+  // The SET drives every authorization answer; `decidingRole` above is only the
+  // 401 principal check.
+  const ctx: DeciderContext = { by, decidingRoles: trustedRoles(req), deciderResourceId };
   const approval = await repos.approvalRequests.get(req.params.id);
   const monthRef = approval?.kind === 'Allocation' ? parseMonthRowId(approval.refId) : undefined;
   const result = monthRef
@@ -6998,7 +7161,11 @@ apiRouter.post('/allocation-approvals/decide', async (req, res) => {
     res.status(400).json({ error: `items must contain at most ${DECIDE_BATCH_MAX} entries` }); return;
   }
 
-  const ctx: DeciderContext = { by: actorId(req), decidingRole, deciderResourceId: await actorResourceId(req) };
+  const ctx: DeciderContext = {
+    by: actorId(req),
+    decidingRoles: trustedRoles(req),
+    deciderResourceId: await actorResourceId(req),
+  };
   const results: { assignmentMonthId: string; status: string; error?: string }[] = [];
   // EXPENSIVE + IDEMPOTENT work is deduplicated per distinct entity and run
   // AFTER the loop (spec §4.4): the status rollup per assignment, then the

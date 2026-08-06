@@ -546,3 +546,171 @@ export function resourceRequestUpdateError(
   }
   return null;
 }
+
+/**
+ * SERVER-DERIVED UPLOAD PROVENANCE for `/project-documents`.
+ *
+ * `author`, `authorInitials` and `uploadedAt` sat in the `pick()` allow-list, so
+ * they were pinned only by the client: a pm could POST
+ * `{author:'Marco Bianchi', authorInitials:'MB', uploadedAt:'2020-01-01'}` and the
+ * Documents tab rendered the MB avatar and Marco's name as the person who filed
+ * that document, on a date the actor chose. Nothing in the record contradicts it —
+ * only the separate append-only audit entry holds the real actor, and that log is
+ * admin/delivery-executive-readable only, so EVERY project-level reader sees an
+ * attribution that is false.
+ *
+ * `resolvedName` is the principal's display name from the users directory (the same
+ * resolution `actorResourceId` performs); it falls back to the raw actor id, which
+ * is unlovely but true — an unresolvable principal must not be labelled as somebody
+ * else. Initials come from the name here rather than from the body, so the avatar
+ * can never disagree with the name beside it.
+ */
+export function documentProvenance(
+  resolvedName: string,
+  uploadedAtIso: string,
+): { author: string; authorInitials: string; uploadedAt: string } {
+  return {
+    author: resolvedName,
+    authorInitials: initialsOf(resolvedName),
+    uploadedAt: uploadedAtIso,
+  };
+}
+
+/** First letters of the first two words, upper-cased; '?' for an empty name. */
+function initialsOf(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  return parts.slice(0, 2).map(part => part[0]!.toUpperCase()).join('');
+}
+
+// --- The org-tree critical section ------------------------------------------
+
+/**
+ * THE ORG-TREE LOCK KEY, and the two writes that must share it.
+ *
+ * Every `/resource-organizations` MUTATION is a read-validate-write over the
+ * WHOLE tree, so all three are serialized on one global key (node edits are rare,
+ * human-scale admin operations, and the invariant spans several nodes, so a
+ * per-node lock would have to be taken over an unbounded set anyway).
+ *
+ * WHAT THE KEY DID NOT COVER, and this section now does: the RESOURCE SIDE of the
+ * binding it guards. Resources bind to a node BY NAME (design spec §2.4), so the
+ * delete guard is a name check over `resources.list()` — and the resource write
+ * that creates such a name sat outside the section entirely. Interleaved:
+ * `DELETE /resource-organizations/ORG9` lists resources, finds nobody bound to
+ * "Cloud Practice", and removes the node; concurrently
+ * `PUT /resources/42 {"organization":"Cloud Practice"}` — which passed
+ * `validateResourceCatalogRefs` moments earlier, while the node still existed —
+ * commits under `res:42`. Both answer 200, and resource 42 now carries an
+ * organization name no node has. `dimensionsOf` resolves no capability/practice
+ * for her, so she vanishes from every org-scoped filter and from reporting, and
+ * `pickRateCard` (walked via `withEffectiveRates`) finds no node to walk and falls
+ * back to the generic card — her effective cost/bill rate, and therefore every
+ * margin, planned-cost and baseline figure derived from it, changes with no error
+ * anywhere. The rename guard lost the same race the same way.
+ *
+ * The KEY lives here, with the writes, rather than at the call site: a lock is
+ * only as good as the agreement between the sections that take it, and a key
+ * defined next to one of two participants is a key the other can drift away from.
+ *
+ * LOCK ORDER, stated explicitly because the serializer is NOT re-entrant. The
+ * total order is `org-chart` -> `org-tree` -> `res:<id>`:
+ *   - `org-chart` is acquired at exactly the two `/resources` write handlers,
+ *     each at the top of its handler.
+ *   - `org-tree` is acquired at the three `/resource-organizations` handlers
+ *     (outermost and only lock there — nothing inside acquires anything) and, via
+ *     this section, inside the `/resources` handlers, ABOVE their `res:<id>`
+ *     write and never below it.
+ *   - `res:<id>` is innermost.
+ * No path holds `org-tree` while acquiring `org-chart`, and none holds `res:`
+ * while acquiring `org-tree`, so the order stays total and acyclic. Note in
+ * particular that the approval engine's org reads take NO lock: acquiring
+ * `org-chart` or `org-tree` from inside an `approval:` section would create an
+ * `approval:` -> `org-*` order no other call site uses, which is exactly how a
+ * deadlock gets introduced.
+ */
+export const ORG_TREE_LOCK = 'org-tree';
+
+/** The serializer both writes share. Structurally a `CriticalSectionRunner`. */
+export type OrgTreeSerializer = <R>(key: string, fn: () => Promise<R>) => Promise<R>;
+
+export interface OrgTreeNodeRow { id: string; name: string; parentId?: string }
+export interface OrgBoundResourceRow { id: string; organization?: string }
+
+export interface OrgTreeStore {
+  resources: { list: () => Promise<OrgBoundResourceRow[]> };
+  resourceOrganizations: {
+    get: (id: string) => Promise<OrgTreeNodeRow | undefined>;
+    list: () => Promise<OrgTreeNodeRow[]>;
+    remove: (id: string) => Promise<boolean>;
+  };
+}
+
+export interface OrgTreeWriteRefusal { status: 400 | 404 | 409; error: string }
+
+/**
+ * `DELETE /resource-organizations/:id`, inside the org-tree section: refuse a node
+ * with children, refuse a node any resource still names, then remove it. Returns
+ * null when the node was removed.
+ */
+export async function deleteOrgNodeWrite(
+  runner: OrgTreeSerializer,
+  store: OrgTreeStore,
+  nodeId: string,
+): Promise<OrgTreeWriteRefusal | null> {
+  return runner(ORG_TREE_LOCK, async (): Promise<OrgTreeWriteRefusal | null> => {
+    const node = await store.resourceOrganizations.get(nodeId);
+    if (node === undefined) return { status: 404, error: 'Not found' };
+    const all = await store.resourceOrganizations.list();
+    if (all.some(candidate => candidate.parentId === nodeId)) {
+      return { status: 409, error: 'Cannot delete an organization that has children' };
+    }
+    // Resources bind to a node by NAME (design spec §2.4), so this is a name check.
+    // Read INSIDE the section — and the resource write that could create such a
+    // name is now inside it too, which is the whole point.
+    const resources = await store.resources.list();
+    if (resources.some(resource => resource.organization === node.name)) {
+      return { status: 409, error: 'Cannot delete an organization that resources still reference' };
+    }
+    await store.resourceOrganizations.remove(nodeId);
+    return null;
+  });
+}
+
+/**
+ * Bind a resource to an organization node, inside the SAME org-tree section the
+ * delete and rename guards hold.
+ *
+ * The name is re-validated against the live node list HERE, not by the caller's
+ * earlier preflight: only a check that runs inside this section, immediately in
+ * front of the write, can still be true when the write lands.
+ *
+ * `write` is the caller's own resource write (it takes `res:<id>` itself, which is
+ * why this section must be acquired above it — see the lock order above). It runs
+ * only when the name resolves, so a refused binding writes nothing at all.
+ */
+export async function writeResourceOrganizationBinding<R>(
+  runner: OrgTreeSerializer,
+  store: Pick<OrgTreeStore, 'resourceOrganizations'>,
+  organizationName: unknown,
+  write: () => Promise<R>,
+): Promise<{ refusal: OrgTreeWriteRefusal } | { written: R }> {
+  return runner(ORG_TREE_LOCK, async (): Promise<{ refusal: OrgTreeWriteRefusal } | { written: R }> => {
+    // Absent / cleared bindings have nothing to resolve; the caller's allow-list
+    // has already decided whether the field is being written at all.
+    if (organizationName !== undefined && organizationName !== null && organizationName !== '') {
+      const names = new Set((await store.resourceOrganizations.list()).map(node => node.name));
+      if (typeof organizationName !== 'string' || !names.has(organizationName)) {
+        // Byte-identical to `validateCatalogValue`'s message for this field, so the
+        // refusal a client sees does not change with where the check runs.
+        return {
+          refusal: {
+            status: 400,
+            error: 'organization must reference an existing resource organization (catalog name)',
+          },
+        };
+      }
+    }
+    return { written: await write() };
+  });
+}
