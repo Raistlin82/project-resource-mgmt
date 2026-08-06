@@ -11,6 +11,7 @@ import { catchError } from 'rxjs/operators';
 import { scopeOf } from '../services/org-scope.util';
 import { kindOf, countsTowardInternalCapacity } from '../services/resource-kind.util';
 import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
+import { todayLocalIso } from '../services/local-date.util';
 import { ListStateComponent } from '../shared/list-state.component';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 
@@ -485,7 +486,23 @@ export class UtilizationComponent {
   // so the badge can never desynchronise from the rows it decorates: there is
   // no second independent read, hence no way for this page to be "half
   // loaded" with rows present but bench state still in flight.
-  private readonly currentBenchMonth = computed(() => this.dataResource.value().benchRollup.months[0] ?? '');
+  /**
+   * The month the badge speaks about: TODAY's month, and only if the fetched bench
+   * window contains it — the same rule bench.component.ts and the dashboard tile use.
+   *
+   * It used to be `months[0]`, which the server anchors on the OLDEST Open planning
+   * period (four months in the past with the shipped seed), so the badge decorating a
+   * row of present-tense utilisation figures reported a state from last spring.
+   * `todayLocalIso()`, not `new Date().toISOString()` — the UTC form names the wrong
+   * month around midnight on the 1st east of UTC and on the last of the month west
+   * of it. When the window has no present tense the badge falls back to '', which
+   * this class already documents as "genuinely no bench state here" (see
+   * {@link benchBadge}) and never to 'Not applicable'.
+   */
+  private readonly currentBenchMonth = computed(() => {
+    const now = todayLocalIso().slice(0, 7);
+    return this.dataResource.value().benchRollup.months.includes(now) ? now : '';
+  });
   private readonly benchByResourceId = computed(() => {
     const roll = this.dataResource.value().benchRollup;
     return new Map([...roll.internalRows, ...roll.subcoRows].map(r => [r.resourceId, r]));

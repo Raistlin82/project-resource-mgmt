@@ -7,7 +7,26 @@ import { NEVER, of } from 'rxjs';
 import { DashboardComponent } from './dashboard.component';
 import { ApiService, UserRole, type BenchRollup, type Issue } from '../services/api.service';
 import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
+import { todayLocalIso } from '../services/local-date.util';
 import { AuthService } from '../services/auth.service';
+
+/**
+ * Set (or clear) the process time zone. `process.env['TZ']` is honoured by V8 for
+ * every subsequent Date operation, so this genuinely relocates the runner's local
+ * calendar — the only way to make a local-vs-UTC disagreement deterministic instead
+ * of a property of whatever machine happens to run the suite.
+ */
+function setTz(tz: string | undefined): void {
+  if (tz === undefined) delete process.env['TZ'];
+  else process.env['TZ'] = tz;
+}
+
+/** 'YYYY-MM' `delta` months from `month`, normalising the year. */
+function shiftMonth(month: string, delta: number): string {
+  const [y, m] = month.split('-').map(Number);
+  const zeroBased = y * 12 + (m - 1) + delta;
+  return `${Math.floor(zeroBased / 12)}-${String((zeroBased % 12) + 1).padStart(2, '0')}`;
+}
 
 const DASHBOARD_METHODS = [
   'getFxRates',
@@ -138,14 +157,20 @@ describe('Dashboard capability-aware loading', () => {
  * stay exactly 2 and 1 despite the extra non-bench rows sharing the same
  * `monthly` map shape, and only a filter that reads the real `state` value
  * agrees.
+ *
+ * The cells are keyed on the CURRENT month and the window deliberately opens four
+ * months earlier — the shape the server actually sends, since it anchors the bench
+ * window on the oldest OPEN planning period. This fixture used to key everything on
+ * `months[0]`, which is what let the tile read a four-month-old column as the
+ * present tense with the whole suite green.
  */
 function makeBenchFixture(): BenchRollup {
-  const month = '2026-04';
+  const month = todayLocalIso().slice(0, 7);
   const bench = { state: 'BENCH' as const, upcomingUnallocated: false };
   const partial = { state: 'PARTIAL' as const, upcomingUnallocated: false };
   const allocated = { state: 'ALLOCATED' as const, upcomingUnallocated: false };
   return {
-    months: [month],
+    months: [shiftMonth(month, -4), shiftMonth(month, -3), shiftMonth(month, -2), shiftMonth(month, -1), month],
     internalRows: [
       { resourceId: 'int-1', resourceName: 'Internal Bench One', kind: 'internal', monthly: { [month]: bench }, availabilityDate: { kind: 'date', date: month + '-01' } },
       { resourceId: 'int-2', resourceName: 'Internal Bench Two', kind: 'internal', monthly: { [month]: bench }, availabilityDate: { kind: 'date', date: month + '-01' } },
@@ -210,6 +235,94 @@ describe('Dashboard "In Bench" tile (Block F, Task 9)', () => {
     const comp = fixture.componentInstance;
     expect(comp.internalBenchCount()).toBe(0);
     expect(comp.subcoBenchCount()).toBe(0);
+  });
+});
+
+/**
+ * The tile's anchor month, under a clock pinned to an instant where UTC and the local
+ * civil date DISAGREE, in a window that does not start at the current month.
+ *
+ * Three wrong implementations all survive a TZ-blind version of this test, and this
+ * project has recorded that failure nine times: `months[0]` (what shipped — the
+ * server anchors the window on the oldest Open planning period, four months back with
+ * the seed), `new Date().toISOString().slice(0, 7)` (names September while the local
+ * calendar says 1 October), and an anchor that always answers '' (which satisfies
+ * every "must be absent" assertion on its own).
+ *
+ * TZ is forced, not sniffed: on a UTC runner nothing can make local and UTC disagree,
+ * and a test that silently skips its own point is a green gate.
+ */
+describe('Dashboard "In Bench" tile — the anchor month is TODAY, in the LOCAL calendar', () => {
+  const ORIGINAL_TZ = process.env['TZ'];
+  /** UTC+14, no DST ever: 2026-09-30T23:00Z is 2026-10-01T13:00 local. */
+  const LOCAL_MONTH = '2026-10';
+  const UTC_MONTH = '2026-09';
+  const bench = { state: 'BENCH' as const, upcomingUnallocated: false };
+  const allocated = { state: 'ALLOCATED' as const, upcomingUnallocated: false };
+
+  beforeAll(() => {
+    setTz('Pacific/Kiritimati');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.UTC(2026, 8, 30, 23, 0)));
+  });
+  afterAll(() => {
+    vi.useRealTimers();
+    setTz(ORIGINAL_TZ);
+    TestBed.resetTestingModule();
+  });
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('has a fixture whose local and UTC months genuinely differ (the precondition, not an assumption)', () => {
+    expect(todayLocalIso().slice(0, 7)).toBe(LOCAL_MONTH);
+    expect(new Date().toISOString().slice(0, 7)).toBe(UTC_MONTH);
+  });
+
+  it('counts the LOCAL current month, not months[0] and not the UTC month (the case that must still be ALLOWED)', async () => {
+    const rollup: BenchRollup = {
+      months: ['2026-08', UTC_MONTH, LOCAL_MONTH],
+      internalRows: [{
+        resourceId: 'int-1', resourceName: 'Anchor Person', kind: 'internal',
+        monthly: { '2026-08': allocated, [UTC_MONTH]: allocated, [LOCAL_MONTH]: bench },
+        availabilityDate: { kind: 'date', date: '2026-10-01' },
+      }],
+      subcoRows: [{
+        resourceId: 'sub-1', resourceName: 'Anchor Subco', kind: 'subco',
+        monthly: { '2026-08': allocated, [UTC_MONTH]: allocated, [LOCAL_MONTH]: bench },
+        availabilityDate: { kind: 'date', date: '2026-10-01' },
+      }],
+      hiringDemand: [],
+    };
+    const { fixture } = await render('finance', { getBenchMonthly: vi.fn(() => of(rollup)) });
+    const comp = fixture.componentInstance;
+    // RED three ways: months[0] and the UTC month both read ALLOCATED, and an
+    // always-empty anchor reads nothing.
+    expect(comp.internalBenchCount()).toBe(1);
+    expect(comp.subcoBenchCount()).toBe(1);
+    const tile = (fixture.nativeElement as HTMLElement).querySelector('[data-test="bench-tile"]');
+    expect(tile!.querySelector('[data-test="bench-tile-month"]')!.textContent).toContain('Oct 26');
+  });
+
+  it('counts nothing — and says the window has no present tense — when the window stops short of today', async () => {
+    const rollup: BenchRollup = {
+      months: ['2026-07', '2026-08', UTC_MONTH],
+      internalRows: [{
+        resourceId: 'int-1', resourceName: 'Stale Judgement Person', kind: 'internal',
+        monthly: { '2026-07': bench, [UTC_MONTH]: bench },
+        availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: UTC_MONTH },
+      }],
+      subcoRows: [],
+      hiringDemand: [],
+    };
+    const { fixture } = await render('finance', { getBenchMonthly: vi.fn(() => of(rollup)) });
+    const comp = fixture.componentInstance;
+    expect(comp.internalBenchCount()).toBe(0);
+    // THE ABSENCE TWIN: today this reads 1, from a July cell presented as now.
+    const tile = (fixture.nativeElement as HTMLElement).querySelector('[data-test="bench-tile"]')!;
+    expect(tile.textContent).toContain('0');
+    // ...and a bare "0 / 0" must not be allowed to pass for "nobody is benched":
+    // only the `includes()` form can tell those apart.
+    expect(tile.querySelector('[data-test="bench-tile-month"]')!.textContent)
+      .toContain('Current month not in window');
   });
 });
 

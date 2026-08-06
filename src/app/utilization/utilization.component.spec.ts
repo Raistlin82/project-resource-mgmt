@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { afterAll, beforeAll, describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
 import { of, throwError } from 'rxjs';
@@ -18,6 +18,27 @@ import {
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
+import { todayLocalIso } from '../services/local-date.util';
+
+/**
+ * The month the bench badge speaks about. Fixtures key their cells on THIS, not on
+ * `months[0]`: the server anchors the bench window on the oldest OPEN planning
+ * period (four months back with the shipped seed), and reading its first entry as
+ * "now" made the badge report a state from last spring next to a present-tense
+ * utilisation figure.
+ */
+const BENCH_MONTH = todayLocalIso().slice(0, 7);
+
+/**
+ * Set (or clear) the process time zone. `process.env['TZ']` is honoured by V8 for
+ * every subsequent Date operation, so this genuinely relocates the runner's local
+ * calendar — the only way to make a local-vs-UTC disagreement deterministic instead
+ * of a property of whatever machine happens to run the suite.
+ */
+function setTz(tz: string | undefined): void {
+  if (tz === undefined) delete process.env['TZ'];
+  else process.env['TZ'] = tz;
+}
 
 // Tree: CAP 'Engineering' (managed by m1) > PRA 'Platform' > COM 'Backend'
 const ORGS: ResourceOrganization[] = [
@@ -319,10 +340,10 @@ describe('UtilizationComponent — bench badge', () => {
 
   it('shows a BENCH badge for an internal/subco team member on bench this month', async () => {
     const rollup: BenchRollup = {
-      months: ['2026-04'],
+      months: [BENCH_MONTH],
       internalRows: [{
         resourceId: 'd1', resourceName: 'Direct Dana', kind: 'internal',
-        monthly: { '2026-04': { state: 'BENCH', upcomingUnallocated: false } },
+        monthly: { [BENCH_MONTH]: { state: 'BENCH', upcomingUnallocated: false } },
         availabilityDate: { kind: 'date', date: '2026-04-01' },
       }],
       subcoRows: [],
@@ -344,15 +365,15 @@ describe('UtilizationComponent — bench badge', () => {
     // in the test proves the COMPONENT gates on kindOf(res) itself, not
     // merely on the (incidental, in real data) absence of a row for that id.
     const rollup: BenchRollup = {
-      months: ['2026-04'],
+      months: [BENCH_MONTH],
       internalRows: [{
         resourceId: 'd1', resourceName: 'Direct Dana', kind: 'internal',
-        monthly: { '2026-04': { state: 'BENCH', upcomingUnallocated: false } },
+        monthly: { [BENCH_MONTH]: { state: 'BENCH', upcomingUnallocated: false } },
         availabilityDate: { kind: 'date', date: '2026-04-01' },
       }],
       subcoRows: [{
         resourceId: 'p2', resourceName: 'Direct Dummy', kind: 'subco',
-        monthly: { '2026-04': { state: 'BENCH', upcomingUnallocated: false } },
+        monthly: { [BENCH_MONTH]: { state: 'BENCH', upcomingUnallocated: false } },
         availabilityDate: { kind: 'date', date: '2026-04-01' },
       }],
       hiringDemand: [],
@@ -372,15 +393,15 @@ describe('UtilizationComponent — bench badge', () => {
       { ...base, id: 'p2', name: 'Direct Dummy', role: 'Developer', utilization: 0, kind: 'dummy', managerId: 'm1' },
     ] as Resource[];
     const rollup: BenchRollup = {
-      months: ['2026-04'],
+      months: [BENCH_MONTH],
       internalRows: [{
         resourceId: 'd1', resourceName: 'Direct Dana', kind: 'internal',
-        monthly: { '2026-04': { state: 'BENCH', upcomingUnallocated: false } },
+        monthly: { [BENCH_MONTH]: { state: 'BENCH', upcomingUnallocated: false } },
         availabilityDate: { kind: 'date', date: '2026-04-01' },
       }],
       subcoRows: [{
         resourceId: 'p2', resourceName: 'Direct Dummy', kind: 'subco',
-        monthly: { '2026-04': { state: 'BENCH', upcomingUnallocated: false } },
+        monthly: { [BENCH_MONTH]: { state: 'BENCH', upcomingUnallocated: false } },
         availabilityDate: { kind: 'date', date: '2026-04-01' },
       }],
       hiringDemand: [],
@@ -429,6 +450,88 @@ describe('UtilizationComponent — bench badge', () => {
     const avg = host.querySelector('[data-test="team-average"]');
     expect(avg?.textContent).toContain('Unavailable');
     expect(avg?.textContent).not.toContain('—');
+  });
+});
+
+/**
+ * The badge's anchor month, under a clock pinned to an instant where UTC and the
+ * local civil date DISAGREE, in a window that does not start at the current month.
+ *
+ * Three wrong implementations survive a TZ-blind version of this test, and this
+ * project has recorded that failure nine times: `months[0]` (what shipped — the
+ * server anchors the bench window on the oldest Open planning period, four months
+ * back with the seed), `new Date().toISOString().slice(0, 7)` (names September while
+ * the local calendar already says 1 October), and an anchor that always answers ''
+ * (which satisfies every "must be absent" assertion by itself).
+ *
+ * TZ is forced, not sniffed: on a UTC runner no instant makes local and UTC disagree,
+ * and a test that quietly skips its own point is a green gate.
+ */
+describe('UtilizationComponent — the bench badge reads TODAY, in the LOCAL calendar', () => {
+  const ORIGINAL_TZ = process.env['TZ'];
+  /** UTC+14, no DST ever: 2026-09-30T23:00Z is 2026-10-01T13:00 local. */
+  const LOCAL_MONTH = '2026-10';
+  const UTC_MONTH = '2026-09';
+  const bench = { state: 'BENCH' as const, upcomingUnallocated: false };
+  const allocated = { state: 'ALLOCATED' as const, upcomingUnallocated: false };
+
+  beforeAll(() => {
+    setTz('Pacific/Kiritimati');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.UTC(2026, 8, 30, 23, 0)));
+  });
+  afterAll(() => {
+    vi.useRealTimers();
+    setTz(ORIGINAL_TZ);
+    TestBed.resetTestingModule();
+  });
+  beforeEach(() => TestBed.resetTestingModule());
+
+  it('has a fixture whose local and UTC months genuinely differ (the precondition, not an assumption)', () => {
+    expect(todayLocalIso().slice(0, 7)).toBe(LOCAL_MONTH);
+    expect(new Date().toISOString().slice(0, 7)).toBe(UTC_MONTH);
+  });
+
+  it('shows the LOCAL current month\'s state, not months[0]\'s and not the UTC month\'s (the case that must still be ALLOWED)', async () => {
+    const rollup: BenchRollup = {
+      months: ['2026-08', UTC_MONTH, LOCAL_MONTH],
+      internalRows: [{
+        resourceId: 'd1', resourceName: 'Direct Dana', kind: 'internal',
+        monthly: { '2026-08': allocated, [UTC_MONTH]: allocated, [LOCAL_MONTH]: bench },
+        availabilityDate: { kind: 'date', date: '2026-10-01' },
+      }],
+      subcoRows: [],
+      hiringDemand: [],
+    };
+    const { fixture, host } = setup({ benchRollup: rollup });
+    await flush(fixture);
+    // RED three ways: months[0] and the UTC month both say ALLOCATED, and an
+    // always-empty anchor says nothing at all.
+    expect(benchBadgeText(host, 'Direct Dana')).toBe('BENCH');
+  });
+
+  it('shows no state — and never a past month\'s — when the window stops short of today', async () => {
+    const rollup: BenchRollup = {
+      months: ['2026-07', '2026-08', UTC_MONTH],
+      internalRows: [{
+        resourceId: 'd1', resourceName: 'Direct Dana', kind: 'internal',
+        monthly: { '2026-07': bench, [UTC_MONTH]: allocated },
+        availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: UTC_MONTH },
+      }],
+      subcoRows: [],
+      hiringDemand: [],
+    };
+    const { fixture, host } = setup({ benchRollup: rollup });
+    await flush(fixture);
+    const badge = benchBadgeText(host, 'Direct Dana');
+    // THE ABSENCE TWIN: today this reads 'BENCH', from a July cell rendered beside a
+    // present-tense utilisation figure. The two distinct wrong answers are named
+    // separately so a fix that lands on the UTC month cannot pass either.
+    expect(badge).toBe('');
+    expect(badge).not.toBe('BENCH');
+    expect(badge).not.toBe('ALLOCATED');
+    // ...and blank must still mean "no bench state here", never "dummy".
+    expect(badge).not.toBe('Not applicable');
   });
 });
 
@@ -551,17 +654,17 @@ describe('UtilizationComponent — the row\'s accessible name carries what role=
   const ANNA = { ...base, id: 'an', name: 'Anna Rossi', role: 'Developer', utilization: 87, kind: 'internal', managerId: 'm1' } as Resource;
   const BRUNO = { ...base, id: 'br', name: 'Bruno Bianchi', role: 'Developer', utilization: 12, kind: 'internal', managerId: 'm1' } as Resource;
   const TWO_ROWS: BenchRollup = {
-    months: ['2026-04'],
+    months: [BENCH_MONTH],
     internalRows: [
       {
         resourceId: 'an', resourceName: 'Anna Rossi', kind: 'internal',
-        monthly: { '2026-04': { state: 'BENCH', upcomingUnallocated: false } },
+        monthly: { [BENCH_MONTH]: { state: 'BENCH', upcomingUnallocated: false } },
         availabilityDate: { kind: 'date', date: '2026-04-01' },
       },
       {
         resourceId: 'br', resourceName: 'Bruno Bianchi', kind: 'internal',
-        monthly: { '2026-04': { state: 'ALLOCATED', upcomingUnallocated: false } },
-        availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: '2026-04' },
+        monthly: { [BENCH_MONTH]: { state: 'ALLOCATED', upcomingUnallocated: false } },
+        availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: BENCH_MONTH },
       },
     ],
     subcoRows: [],

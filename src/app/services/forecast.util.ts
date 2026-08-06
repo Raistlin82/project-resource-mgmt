@@ -1,7 +1,8 @@
 import { Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, Holiday } from './api.service';
 import { countsTowardDeliveryCapacity, kindOf } from './resource-kind.util';
 import { DayHours, MonthStatus, monthRowId, monthlyAggregateHours } from './allocation-month.util';
-import { isActiveInMonth, semaphoreBand } from './capacity.util';
+import { employedWorkingDays, monthsInRange, semaphoreBand } from './capacity.util';
+import { workingDaysInMonth } from './calendar.util';
 
 /**
  * Capacity / demand forecasting — a pure, framework-free module.
@@ -13,12 +14,13 @@ import { isActiveInMonth, semaphoreBand } from './capacity.util';
  *    count toward DELIVERY capacity (C1: `internal` + `subco`, excluding `dummy`
  *    — a dummy is a placeholder for a hole to be filled, not capacity the
  *    organisation can staff work with today; a subco IS deliverable capacity,
- *    just not internal — see `countsTowardDeliveryCapacity`) **and were employed
- *    in that period's month** (`isActiveInMonth`). Supply is therefore
- *    PER-PERIOD, not a constant: a leaver stops contributing after they go and a
- *    future hire only starts contributing once they arrive. For a monthly
- *    horizon the weekly capacity is scaled up by WEEKS_PER_MONTH so supply and
- *    demand share the same per-period unit.
+ *    just not internal — see `countsTowardDeliveryCapacity`), each **pro-rated to
+ *    the working days of that period they were actually employed for**
+ *    (`employedWorkingDays`, the same helper `rollupMonthly`/`benchRollup` use).
+ *    Supply is therefore PER-PERIOD, not a constant: a leaver stops contributing
+ *    the day they go and a future hire starts contributing the day she arrives.
+ *    For a monthly horizon the weekly capacity is scaled up by WEEKS_PER_MONTH so
+ *    supply and demand share the same per-period unit.
  *  - COMMITTED DEMAND = each assignment's CONFIRMED hours — aggregated from its
  *    day rows weighted by the status of the MONTH each day falls in
  *    (`monthlyAggregateHours`, the server's single definition of confirmed) —
@@ -204,6 +206,30 @@ function periodLengthDays(granularity: ForecastGranularity): number {
 }
 
 /**
+ * The days inside a window (BOTH bounds inclusive) that `monthDays` reports for
+ * the calendar months the window touches.
+ *
+ * A forecast period is a rolling 7- (or 30-) day run from the horizon start, so it
+ * is NOT a calendar month and can straddle two of them — hence the per-month walk.
+ * `monthDays` is one of exactly two landed helpers, never a re-derived interval
+ * test: `workingDaysInMonth` (the window's own working days) or
+ * `employedWorkingDays` bound to one person (the subset of those she was employed
+ * for). Calling them means /forecast measures employment against the very calendar
+ * /capacity and /bench measure it against.
+ */
+function windowDays(
+  firstIso: string,
+  lastIso: string,
+  monthDays: (month: string) => readonly string[],
+): string[] {
+  const out: string[] = [];
+  for (const month of monthsInRange(firstIso.slice(0, 7), lastIso.slice(0, 7))) {
+    for (const d of monthDays(month)) if (d >= firstIso && d <= lastIso) out.push(d);
+  }
+  return out;
+}
+
+/**
  * Fraction of [bookStart, bookEnd] that overlaps [periodStart, periodEnd).
  * A zero-length (or inverted) booking window contributes its whole weight to the
  * period that contains its start instant. Returns a value in [0, 1].
@@ -318,6 +344,9 @@ export function capacityForecast(
   // a dummy has no capacity to deliver with yet; a subco does.
   const supplyScale = granularity === 'monthly' ? WEEKS_PER_MONTH : 1;
   const deliveryResources = data.resources.filter(r => countsTowardDeliveryCapacity(kindOf(r)));
+  // The same calendar `rollupMonthly`/`benchRollup` use, and the reason
+  // `ForecastData.holidays` exists: it used to be fetched and then never read here.
+  const holidaySet: ReadonlySet<string> = new Set(data.holidays.map(h => h.id));
 
   const requestById = new Map<string, ResourceRequest>();
   for (const r of data.requests) requestById.set(r.id, r);
@@ -346,22 +375,42 @@ export function capacityForecast(
     const pStart = horizonStart + i * lenMs;
     const pEnd = pStart + lenMs;
 
-    // Supply is resolved INSIDE the loop and gated on employment in the period's
-    // month, so people who have left (or have not joined yet) stop inflating it.
-    // The forecast used to sum every deliverable resource once, for every period:
-    // a colleague terminated five months ago still advertised 40h/week of supply
-    // that the API refuses to book, while the Bench table on the very same screen
-    // correctly omitted her — two halves of one page disagreeing.
+    // Supply is resolved INSIDE the loop, PRO-RATED to the working days of this
+    // period each person was actually employed for. Employment is measured in
+    // DAYS, not months, because that is the only granularity that can agree with
+    // the API: the server accepts or refuses a booked day against employment ONE
+    // DAY AT A TIME (`bookingOutsideEmploymentError`), and /capacity and /bench
+    // already measure it that way through this same `employedWorkingDays`.
     //
-    // Granularity is the MONTH, matching `isActiveInMonth` and the call
-    // bench.util.ts makes, so a week straddling a mid-month leaving date still
-    // counts in full. Prorating a partial month is B2 spec §4's open product
-    // question (see capacity.util's `employedWorkingDays`) — deliberately not
-    // decided here.
-    const pMonth = toIsoDate(pStart).slice(0, 7);
-    const supply =
-      sum(deliveryResources.filter(r => isActiveInMonth(r, pMonth)).map(r => finite(r.capacity))) *
-      supplyScale;
+    // Both ends were wrong under the previous month-granular presence test, and a
+    // week is the sharpest place to see it:
+    //  - JOINER: `isActiveInMonth` compared `hireDate` with the month's START, so
+    //    someone hired on the 17th contributed NOTHING for any week of her hire
+    //    month — including the weeks she works, whose hours /allocation-calendar
+    //    happily books. Merely admitting the month instead would have flipped that
+    //    into the opposite lie: a full 40h/week of supply for the weeks that ended
+    //    BEFORE she arrived.
+    //  - LEAVER: the whole month counted in full, so someone who went on the 15th
+    //    still advertised 40h/week for the weeks after they left.
+    // Pro-rating answers both with one rule, and it is the rule `rollupMonthly`
+    // already settled on (capacity.util.ts:178-183) — not a second convention.
+    const pFirstIso = toIsoDate(pStart);
+    const pLastIso = toIsoDate(pEnd - MS_PER_DAY);
+    const periodWorkingDays = windowDays(pFirstIso, pLastIso, m => workingDaysInMonth(m, holidaySet));
+    const supply = sum(
+      deliveryResources.map(r => {
+        const employed = windowDays(pFirstIso, pLastIso, m => employedWorkingDays(r, m, holidaySet));
+        // `employed` is a subset of `periodWorkingDays` (same months, same window
+        // filter, and employedWorkingDays filters workingDaysInMonth), so a
+        // non-empty `employed` guarantees a non-zero denominator here. A person
+        // employed for every working day of the period keeps EXACTLY her capacity:
+        // the ratio is 1, integer over identical integer, so a full-time team's
+        // supply is untouched to the last bit — and holidays cancel out of both
+        // sides, as they do in `rollupMonthly`'s FTE.
+        if (employed.length === 0) return 0;
+        return finite(r.capacity) * supplyScale * (employed.length / periodWorkingDays.length);
+      }),
+    );
 
     const committed = sum(
       committedBookings.map(b => b.hours * overlapFraction(b.win.start, b.win.end, pStart, pEnd)),
@@ -456,8 +505,15 @@ export function skillGap(data: ForecastData, asOfMonth: string): SkillGapEntry[]
   const openRequests = data.requests.filter(isOpenRequest);
 
   // Supply: employed resources possessing each skill (case-insensitive match).
+  // Employment is measured in DAYS here too (`employedWorkingDays`), so somebody
+  // hired on the 17th covers her skill in her hire month — she can be booked on
+  // every one of those days. The month-granular test used to answer "no", which
+  // reported a shortage the org had just hired against. This is a COUNT of people,
+  // not a sum of hours, so there is nothing to pro-rate: the question is only
+  // whether the person can work at all in the month.
+  const holidaySet: ReadonlySet<string> = new Set(data.holidays.map(h => h.id));
   const covering = data.resources.filter(
-    r => countsTowardDeliveryCapacity(kindOf(r)) && isActiveInMonth(r, asOfMonth),
+    r => countsTowardDeliveryCapacity(kindOf(r)) && employedWorkingDays(r, asOfMonth, holidaySet).length > 0,
   );
   const supplyBySkill = new Map<string, number>();
   for (const res of covering) {
