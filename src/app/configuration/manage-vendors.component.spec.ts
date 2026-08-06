@@ -107,18 +107,41 @@ describe('ManageVendorsComponent delete confirmation copy', () => {
     expect(text).not.toContain('Acme Consulting');
   });
 
-  it('does NOT promise a refusal the API does not implement', async () => {
-    // The register's preferred fix adds a reference check to the vendors DELETE so a
-    // referenced vendor is refused in BOTH adapters. src/server.ts is out of this
-    // batch's ownership, so the copy must describe what actually happens today.
-    // This assertion is what stops the wording drifting ahead of the API.
+  it('promises the refusal the API now enforces, and no longer describes the orphaning it prevents', async () => {
+    // REWRITTEN, and the comment that certified the old wording is gone with it. This
+    // case previously asserted `not.toMatch(/will be refused/i)` — correct only while
+    // the vendors DELETE had no reference check. That guard has since landed
+    // (src/server.ts:4610-4616: a vendor any resource still points at is refused 409,
+    // in BOTH adapters), so the old assertion pinned copy that UNDERSTATED the server
+    // and left the admin expecting a delete that cannot happen.
+    //
+    // The orphaning sentence has to go for the same reason: with the guard in place a
+    // referenced vendor is never removed, so "keeps a raw id in its vendor field" now
+    // describes an unreachable outcome.
     const { fixture } = setup();
     await flush(fixture);
 
     trashFor(fixture, 'Acme Consulting').click();
     fixture.detectChanges();
 
-    expect(deleteOverlay(fixture)!.textContent ?? '').not.toMatch(/will be refused/i);
+    const text = deleteOverlay(fixture)!.textContent ?? '';
+    expect(text).toMatch(/refused/i);
+    expect(text).not.toMatch(/raw id/i);
+  });
+
+  it('keeps the refusal CONDITIONAL — an unreferenced vendor is still deletable', async () => {
+    // ABSENCE TWIN for the sentence above. Copy reading "this vendor will be refused"
+    // flat out would satisfy the /refused/i match while telling the admin the button
+    // never works: the guard only refuses a vendor a resource still references, and
+    // the delete-path suite below proves the unreferenced case still issues the DELETE.
+    // So the claim must be attached to that condition, not to the vendor itself.
+    const { fixture } = setup();
+    await flush(fixture);
+
+    trashFor(fixture, 'Acme Consulting').click();
+    fixture.detectChanges();
+
+    expect(deleteOverlay(fixture)!.textContent ?? '').toMatch(/still references|still referenced/i);
   });
 });
 
