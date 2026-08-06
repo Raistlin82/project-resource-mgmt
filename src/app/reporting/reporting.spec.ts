@@ -5,6 +5,7 @@ import { Reporting } from './reporting';
 import { ApiService, BillingPlanItem, Contract, NegotiatedRate, Project, Resource, TimeEntry } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
+import { XlsxSheet } from '../services/export.util';
 
 /** Cast an Angular fixture host to a typed element so `.querySelector<T>` compiles. */
 function host(fixture: { nativeElement: unknown }): HTMLElement {
@@ -385,4 +386,116 @@ describe('Reporting — the multi-endpoint load window announces itself', () => 
     // loading text" cannot be satisfied by a page that rendered nothing at all.
     expect(page.textContent ?? '').toContain('Portfolio Financials');
   });
+});
+
+/**
+ * RPT .xlsx reports (docs/rpt-comparison.md rows 24 + 44). The sheet-shaping rules are
+ * pinned in `src/app/services/rpt-xlsx.util.spec.ts`; what is pinned HERE is the
+ * WIRING — that this screen hands the builders its own loaded plan, so the workbook
+ * carries the figures the page carries and not an empty envelope.
+ */
+describe('Reporting — RPT xlsx exports', () => {
+  const PLANNED_RESOURCES: Resource[] = [
+    { id: '1', name: 'Julie Armstrong', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 90, capacity: 40, kind: 'internal', organization: 'Delivery / Cloud', costRate: 50 },
+  ];
+
+  const PROJECTS: Project[] = [
+    { id: 'P1', name: 'Alpha Migration', location: 'Milan', startDate: '2026-01-01', endDate: '2026-06-30', status: 'In Execution' },
+    { id: 'P2', name: 'Beta Rollout', location: 'Rome', startDate: '2026-01-01', endDate: '2026-03-31', status: 'In Planning' },
+  ];
+
+  /**
+   * ONE resource on TWO commesse in the SAME month — the shape that separates
+   * `Allocazione - Dettaglio` (2 rows) from `Allocazione - Testata` (1 summed row),
+   * and the only fixture shape in which a Testata that merely copies Dettaglio fails.
+   */
+  const planned = {
+    getProjects: () => of(PROJECTS),
+    getRequests: () => of([
+      { id: 'Q1', name: 'Q1', requiredRole: 'Developer', requiredEffort: 40, status: 'Open', skills: [], projectId: 'P1' },
+      { id: 'Q2', name: 'Q2', requiredRole: 'Developer', requiredEffort: 40, status: 'Open', skills: [], projectId: 'P2' },
+    ]),
+    getAssignments: () => of([
+      { id: 'A1', requestId: 'Q1', resourceId: '1', assignedHours: 8, status: 'Allocated' },
+      { id: 'A2', requestId: 'Q2', resourceId: '1', assignedHours: 2, status: 'Allocated' },
+    ]),
+    getAssignmentDays: () => of([
+      { id: 'D1', assignmentId: 'A1', date: '2026-01-15', hours: 8 },
+      { id: 'D2', assignmentId: 'A2', date: '2026-01-20', hours: 2 },
+    ]),
+    getAssignmentMonths: () => of([
+      { id: 'A1:2026-01', assignmentId: 'A1', month: '2026-01', status: 'Allocated' },
+      { id: 'A2:2026-01', assignmentId: 'A2', month: '2026-01', status: 'Allocated' },
+    ]),
+  } as unknown as Partial<ApiService>;
+
+  /** Column position from the sheet's own header, never a fixed index. */
+  function columnOf(sheet: XlsxSheet, header: string): number {
+    const i = sheet.header.indexOf(header);
+    expect(i, `the "${header}" column must exist in ${sheet.name}`).toBeGreaterThanOrEqual(0);
+    return i;
+  }
+
+  it('offers both RPT workbook buttons in the header', async () => {
+    const fixture = await setup(PLANNED_RESOURCES, planned);
+    await flush(fixture);
+    const page = host(fixture);
+    const planning = page.querySelector<HTMLButtonElement>('[data-test="export-planning-xlsx"]');
+    const allocation = page.querySelector<HTMLButtonElement>('[data-test="export-allocation-xlsx"]');
+    expect(planning?.textContent ?? '').toContain('Pianificazione');
+    expect(allocation?.textContent ?? '').toContain('Allocazione');
+    expect(planning?.disabled).toBe(false);
+    expect(allocation?.disabled).toBe(false);
+  });
+
+  it('builds the Pianificazione sheet from the plan this screen loaded', async () => {
+    const fixture = await setup(PLANNED_RESOURCES, planned);
+    await flush(fixture);
+    const sheet = fixture.componentInstance['buildPlanningSheet']();
+    expect(sheet.name).toBe('Pianificazione');
+    const nameCol = columnOf(sheet, 'Commessa');
+    expect(sheet.rows.map(r => r[nameCol])).toEqual(['Alpha Migration', 'Beta Rollout']);
+    const jan = columnOf(sheet, 'Jan 26 Cost (EUR)');
+    expect(sheet.rows[0][jan]).toBe(400); // 8h x 50 EUR/h on Alpha
+    expect(sheet.rows[1][jan]).toBe(100); // 2h x 50 EUR/h on Beta
+  });
+
+  it('builds the two Allocazione sheets, Testata summing what Dettaglio splits', async () => {
+    const fixture = await setup(PLANNED_RESOURCES, planned);
+    await flush(fixture);
+    const [detail, head] = fixture.componentInstance['buildAllocationSheets']();
+    expect([detail.name, head.name]).toEqual(['Allocazione - Dettaglio', 'Allocazione - Testata']);
+    expect(detail.rows).toHaveLength(2);
+    expect(head.rows).toHaveLength(1);
+    expect(detail.rows.map(r => r[columnOf(detail, 'Jan 26 Cost (EUR)')])).toEqual([400, 100]);
+    expect(head.rows[0][columnOf(head, 'Jan 26 Cost (EUR)')]).toBe(500);
+  });
+
+  it('builds declared-EMPTY workbooks when there is no plan at all', async () => {
+    // ASSERTION OF ABSENCE: with the default (all-empty) stubs the builders must
+    // produce their sheets with no rows and no month columns — never rows, and never a
+    // month axis, conjured out of nothing.
+    const fixture = await setup();
+    await flush(fixture);
+    const planning = fixture.componentInstance['buildPlanningSheet']();
+    const [detail, head] = fixture.componentInstance['buildAllocationSheets']();
+    expect(planning.rows).toEqual([]);
+    expect(detail.rows).toEqual([]);
+    expect(head.rows).toEqual([]);
+    expect(detail.header).not.toContain('Jan 26 Hours');
+  });
+
+  /**
+   * NOT COVERED, and deliberately not faked: both buttons carry
+   * `[disabled]="dataError()"` and both handlers return early on it, because a workbook
+   * built from an errored envelope is a file of confident zeros — worse than no file,
+   * since it looks authoritative once it is off the screen. That guard cannot be
+   * exercised from a spec today: this component's `financeData()`/`concentration()`
+   * dereference `dataRes.value()` unguarded, and `value()` THROWS in the error state,
+   * so the render aborts before any assertion (the Concentration KPI `@defer` block
+   * around reporting.ts:617 is the unguarded reader — it sits outside every
+   * `dataError()` gate and every ListState). Verified against the unmodified component:
+   * the throw predates the xlsx work. The fix is `capacity.component.ts`'s `envelope()`
+   * short-circuit applied here, which is a change of its own.
+   */
 });
