@@ -42,6 +42,14 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const MS_PER_WEEK = 7 * MS_PER_DAY;
 /** A booking can never be shorter than one whole week (resize floor). */
 const MIN_DURATION_DAYS = 7;
+/**
+ * Pointer travel (px, in any direction) below which a gesture counts as a
+ * click/tap rather than a drag, so nothing is previewed. Load-bearing now that
+ * the bar is `touch-action: pan-x`: a tap or a small nudge must never preview a
+ * week shift, and must never reassign the booking to whichever lane the finger
+ * happened to drift over.
+ */
+const DRAG_THRESHOLD_PX = 3;
 
 /**
  * What kind of drag is in flight.
@@ -61,6 +69,12 @@ interface DragState {
   pointerId: number;
   /** Client-X where the drag began (px). */
   originClientX: number;
+  /**
+   * Client-Y where the drag began (px). Only the movement threshold uses it: a
+   * reassign drag can be purely VERTICAL, so a horizontal-only threshold would
+   * refuse to start it.
+   */
+  originClientY: number;
   /** Pre-drag snapshot of the dragged assignment (for rollback + no-op check). */
   before: Assignment;
   /** Whole-week delta currently previewed (move + resize). */
@@ -154,11 +168,14 @@ interface WeekColumn {
             window and labelled with its allocation; bookings that push a resource past 100%
             in an overlapping window are flagged as conflicts.
           </p>
-          <!-- Drag affordance hint (interactive timeline). -->
-          <p class="mt-2 inline-flex items-center gap-1.5 text-xs text-ink-muted">
+          <!-- Drag affordance hint (interactive timeline). Every pointer gesture
+               named here has a key equivalent, and the hint states them all. -->
+          <p class="mt-2 inline-flex flex-wrap items-center gap-1.5 text-xs text-ink-muted">
             <mat-icon class="text-[16px] w-[16px] h-[16px]">drag_indicator</mat-icon>
             Drag a booking to reschedule, drop it on another resource to reassign, or drag its
-            edges to resize. Focus a bar and use arrow keys (Shift+arrows to resize).
+            edges to resize. Or focus a bar: arrows move it by a week, Shift+arrows resize the
+            end, Alt+Shift+arrows resize the start, up/down reassign it to the resource above or
+            below.
           </p>
         </div>
         <div class="flex flex-col items-stretch gap-2 sm:items-end">
@@ -267,26 +284,38 @@ interface WeekColumn {
         } @else {
           <div class="command-card overflow-hidden">
             <div class="overflow-x-auto">
-              <!-- Timeline grid: a leading lane-label column + one column per visible week. -->
+              <!-- Timeline grid: a leading lane-label column + one column per visible week.
+
+                   role="group", NOT role="table": an ARIA table is only valid when
+                   its headers and cells are owned by role="row" elements, and the
+                   geometry here is ONE flat grid (a single grid-template-columns
+                   spanning lane + every week), so there is no element that could
+                   own a row without a restructure. Wrapping in display:contents
+                   rows is not a way out either — such elements generate no box and
+                   are unreliably exposed to AT, which would re-issue the same false
+                   promise. So the structural roles are dropped: the week labels and
+                   lane text are ordinary content, and each booking carries its own
+                   full name via barAriaLabel(), which is where the per-bar
+                   semantics actually live. -->
               <div
                 class="command-schedule-grid"
-                role="table"
+                role="group"
                 aria-label="Resource schedule timeline"
                 [class.is-dragging]="drag() !== null"
                 [style.--lane-col]="laneColWidth"
                 [style.--week-col]="weekColWidth"
                 [style.grid-template-columns]="gridTemplate()">
-                <!-- Header row: empty corner + week labels. -->
-                <div class="command-schedule-corner" role="columnheader">Resource</div>
+                <!-- Header strip: empty corner + week labels. -->
+                <div class="command-schedule-corner">Resource</div>
                 @for (col of weekColumns(); track col.index) {
-                  <div class="command-schedule-weekhead" role="columnheader">
+                  <div class="command-schedule-weekhead">
                     <span class="font-mono tabular-nums">{{ col.label }}</span>
                   </div>
                 }
 
-                <!-- One row per resource: sticky lane label + a bar track spanning all weeks. -->
+                <!-- One lane per resource: sticky lane label + a bar track spanning all weeks. -->
                 @for (row of rows(); track row.resourceId) {
-                  <div class="command-schedule-lane" role="rowheader" [class.is-conflict]="row.hasConflict">
+                  <div class="command-schedule-lane" [class.is-conflict]="row.hasConflict">
                     <div class="min-w-0">
                       <div class="truncate font-semibold text-ink">{{ row.resourceName }}</div>
                       <div class="truncate text-[11px] uppercase tracking-wide text-ink-muted">{{ row.role }}</div>
@@ -306,7 +335,6 @@ interface WeekColumn {
                        data-resource-id lets a move-drop detect which lane the pointer is over. -->
                   <div
                     class="command-schedule-track"
-                    role="cell"
                     [class.is-drop-target]="drag()?.hoverResourceId === row.resourceId && drag()?.mode === 'move'"
                     [attr.data-resource-id]="row.resourceId"
                     [style.grid-template-columns]="'repeat(' + horizonWeeks + ', var(--week-col))'">
@@ -464,23 +492,39 @@ interface WeekColumn {
         font-weight: 600;
         line-height: 1.2;
         white-space: nowrap;
-        color: #fff;
-        background: var(--bar-color, var(--color-accent));
-        box-shadow: 0 1px 2px rgb(0 0 0 / 0.18);
+        /* CONTRAST: the label is the only per-bar identification, and the fill is
+           a project-cycled --color-series-N. White on those solid fills measures
+           3.19:1 (light, series-4) down to 2.05:1 (dark) — under AA for 12px
+           semibold text. So the series colour becomes a 22% TINT of the surface
+           and carries the identity as a left edge stripe, while the label uses the
+           body ink token: 10.7–14.8:1 for all seven series in both themes.
+           Note --color-ink is theme-aware (near-black on light, near-white on
+           dark), which is why keeping the solid fill and only swapping the ink
+           would NOT have worked — dark ink on a dark series fill is 1.83–2.58:1. */
+        color: var(--color-ink);
+        background: color-mix(in oklch, var(--bar-color, var(--color-accent)) 22%, var(--color-surface));
+        box-shadow: inset 3px 0 0 var(--bar-color, var(--color-accent));
         /* The bar body itself moves the booking. */
         cursor: grab;
-        touch-action: none; /* let pointermove drive the drag, not a scroll/pan */
+        /* pan-x, not none: press-and-hold still starts the drag (pointermove is
+           what drives it), but a horizontal swipe that begins on a bar reaches
+           the timeline's own x-scroller — at narrow widths a bar can cover the
+           whole visible strip, and touch-action:none made those lanes
+           unpannable by touch. */
+        touch-action: pan-x;
         transition: box-shadow 120ms ease, transform 120ms ease, opacity 120ms ease;
       }
       .command-schedule-bar:active {
         cursor: grabbing;
       }
-      /* The bar currently being dragged/resized: slight lift + translucency. */
+      /* The bar currently being dragged/resized: slight lift + translucency.
+         The inset stripe is repeated so the lift shadow does not erase the
+         project's identity colour mid-drag. */
       .command-schedule-bar.is-dragging {
         z-index: 3;
         opacity: 0.92;
         transform: translateY(-1px);
-        box-shadow: 0 6px 16px rgb(0 0 0 / 0.28);
+        box-shadow: inset 3px 0 0 var(--bar-color, var(--color-accent)), 0 6px 16px rgb(0 0 0 / 0.28);
         cursor: grabbing;
       }
       .command-schedule-bar.is-conflict {
@@ -490,27 +534,45 @@ interface WeekColumn {
         outline-offset: -2px;
         box-shadow: none;
       }
-      /* Edge grab handles: thin hit-targets at each end of the bar. */
+      /* Edge grab handles: the resize hit-target is 24px wide (WCAG 2.2 SC 2.5.8
+         minimum pointer target — these handles are the only way to change a
+         booking's start/end with a pointer), while the visible grip stays the
+         original 9px and is painted by ::before, so the look is unchanged. */
       .command-schedule-handle {
         position: absolute;
         top: 0;
         bottom: 0;
-        width: 9px;
+        width: 24px;
         cursor: col-resize;
         touch-action: none;
-        /* A faint translucent grip so the affordance is visible without colour tokens. */
-        background: rgb(255 255 255 / 0.28);
+        background: transparent;
         z-index: 2;
       }
-      .command-schedule-bar.is-conflict .command-schedule-handle {
+      .command-schedule-handle::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 9px;
+        /* The grip reads against the bar's own tint (a white wash would be
+           invisible on it), so it is a stronger mix of the same series colour. */
+        background: color-mix(in oklch, var(--bar-color, var(--color-accent)) 55%, transparent);
+      }
+      .command-schedule-bar.is-conflict .command-schedule-handle::before {
         background: color-mix(in oklch, var(--color-critical) 35%, transparent);
       }
       .command-schedule-handle--start {
+        left: 0;
+      }
+      .command-schedule-handle--start::before {
         left: 0;
         border-top-left-radius: 6px;
         border-bottom-left-radius: 6px;
       }
       .command-schedule-handle--end {
+        right: 0;
+      }
+      .command-schedule-handle--end::before {
         right: 0;
         border-top-right-radius: 6px;
         border-bottom-right-radius: 6px;
@@ -521,6 +583,17 @@ interface WeekColumn {
         font-size: 11px;
         font-style: italic;
         color: var(--cc-muted);
+      }
+      /* Narrow viewports: shrink the week column so at least one whole week fits
+         beside the (already viewport-capped) lane column. At 320px that gives
+         288 − 144 = 144px of track, i.e. two full 4rem weeks instead of 80px of
+         a 5.5rem one. The !important is load-bearing, not laziness: the template
+         sets --week-col as an INLINE custom property (it is also the value the
+         drag math parses), and an inline declaration otherwise beats this rule. */
+      @media (max-width: 480px) {
+        .command-schedule-grid {
+          --week-col: 4rem !important;
+        }
       }
       /* Honour reduced-motion: drop the snap/lift animation entirely. */
       @media (prefers-reduced-motion: reduce) {
@@ -544,7 +617,19 @@ export class ScheduleComponent {
 
   // Visible-horizon configuration surfaced to the template.
   protected readonly horizonWeeks = HORIZON_WEEKS;
-  protected readonly laneColWidth = '13rem';
+  /**
+   * Sticky lane column width. Viewport-aware on purpose: a flat 13rem pinned 208
+   * of the 288px content box at a 320px viewport, leaving 80px — less than one
+   * week column — so no week label and its bar were ever visible together. The
+   * lane's inner block already truncates (`min-w-0`), so it takes the squeeze.
+   */
+  protected readonly laneColWidth = 'min(13rem, 45vw)';
+  /**
+   * Default week-column width. Stays a plain rem value because
+   * {@link fallbackWeekColPx} parses it for the drag's px→week math; the narrow
+   * viewport override lives in the styles block below (a media query), which
+   * `measureWeekColumn()` reads back from the rendered track.
+   */
   protected readonly weekColWidth = '5.5rem';
   // Legend swatch uses the first series colour as a representative sample.
   protected readonly legendColor = 'var(--color-series-1)';
@@ -744,14 +829,20 @@ export class ScheduleComponent {
 
   // --- accessibility -------------------------------------------------------
 
-  /** Descriptive aria-label for a bar: who/what, dates, allocation, conflict. */
+  /**
+   * Descriptive aria-label for a bar: who/what, dates, allocation, conflict —
+   * then the FULL key list, since these keys are the only pointer-free route to
+   * each edit and nothing else on the screen announces them.
+   */
   protected barAriaLabel(row: TimelineRow, bar: PositionedBar): string {
     const b = bar.booking;
     const conflict = bar.conflict ? ', over-allocated' : '';
     return (
       `${b.label}, ${Math.round(b.allocationPct)}% allocation, assigned to ${row.resourceName}, ` +
       `${b.startDate} to ${b.endDate}${conflict}. ` +
-      `Drag to reschedule; arrow keys move by one week, Shift plus arrows resize.`
+      `Drag to reschedule; left and right arrows move by one week, ` +
+      `Shift plus arrows resize the end, Alt plus Shift plus arrows resize the start, ` +
+      `up and down arrows reassign to the previous or next resource.`
     );
   }
 
@@ -812,6 +903,7 @@ export class ScheduleComponent {
       fromResourceId: resourceId,
       pointerId: event.pointerId,
       originClientX: event.clientX,
+      originClientY: event.clientY,
       before: { ...before },
       weekDelta: 0,
       hoverResourceId: resourceId,
@@ -825,10 +917,17 @@ export class ScheduleComponent {
     const d = this.drag();
     if (!d || event.pointerId !== d.pointerId) return;
 
+    // Movement threshold FIRST: below it nothing is previewed at all — neither the
+    // week shift nor the lane hover. Measured as total travel (not just X) because
+    // a reassign drag can be purely vertical, and a horizontal-only threshold
+    // would silently disable it.
+    const dx = event.clientX - d.originClientX;
+    const dy = event.clientY - d.originClientY;
+    if (!d.moved && Math.hypot(dx, dy) <= DRAG_THRESHOLD_PX) return;
+
     // px → whole-week delta using the SAME column width the layout renders with.
     const px = this.weekColPx > 0 ? this.weekColPx : this.fallbackWeekColPx();
-    const rawWeeks = (event.clientX - d.originClientX) / px;
-    const weekDelta = Math.round(rawWeeks);
+    const weekDelta = Math.round(dx / px);
 
     // For a MOVE, also figure out which lane the pointer is currently over so a
     // drop can reassign. Uses elementFromPoint (browser-only) + the lane's
@@ -838,14 +937,13 @@ export class ScheduleComponent {
       hoverResourceId = this.laneUnderPointer(event) ?? d.fromResourceId;
     }
 
-    const moved = d.moved || Math.abs(event.clientX - d.originClientX) > 3;
-    if (weekDelta === d.weekDelta && hoverResourceId === d.hoverResourceId && moved === d.moved) {
+    if (d.moved && weekDelta === d.weekDelta && hoverResourceId === d.hoverResourceId) {
       return; // nothing meaningfully changed since the last move
     }
 
-    this.drag.set({ ...d, weekDelta, hoverResourceId, moved });
+    this.drag.set({ ...d, weekDelta, hoverResourceId, moved: true });
     // Preview the change in the working copy so the model + conflicts re-render.
-    this.applyPreview({ ...d, weekDelta, hoverResourceId, moved });
+    this.applyPreview({ ...d, weekDelta, hoverResourceId, moved: true });
   }
 
   /** Commit (or no-op) on release. */
@@ -863,30 +961,72 @@ export class ScheduleComponent {
     this.drag.set(null);
   }
 
-  /** Keyboard scheduling: ←/→ move by ±1 week; Shift+←/→ resize the end by ±1 week. */
+  /**
+   * Keyboard scheduling — the pointer-free route to EVERY edit the drag offers,
+   * because reassigning a booking to another person exists nowhere else in the
+   * app, and a booking entered on the wrong resource would otherwise be
+   * uncorrectable without a mouse:
+   *  - ←/→               move the whole booking by ∓1 week
+   *  - Shift+←/→         resize the END by ∓1 week
+   *  - Alt+Shift+←/→     resize the START by ∓1 week (the end stays put)
+   *  - ↑/↓               REASSIGN to the adjacent resource lane
+   *
+   * Alt+←/→ alone is deliberately NOT used: it is Back/Forward on Windows and
+   * Linux browsers, so it is a hostile binding even with preventDefault().
+   */
   protected onBarKeydown(event: KeyboardEvent, bar: PositionedBar): void {
-    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-    event.preventDefault();
+    const key = event.key;
+    const horizontal = key === 'ArrowLeft' || key === 'ArrowRight';
+    const vertical = key === 'ArrowUp' || key === 'ArrowDown';
+    if (!horizontal && !vertical) return;
 
     const before = this.working().find(a => a.id === bar.booking.assignmentId);
     if (!before) return;
-
-    const dir = event.key === 'ArrowRight' ? 1 : -1;
     const snapshot: Assignment = { ...before };
 
     let next: Assignment | null;
-    if (event.shiftKey) {
-      // Resize the END by ±1 week (Shift+arrows), enforcing the 1-week floor.
-      next = this.resizedEnd(before, dir);
+    if (vertical) {
+      // REASSIGN: step to the neighbouring lane in roster order. At either end of
+      // the roster there is nowhere to go — return WITHOUT preventDefault so the
+      // key keeps its normal scrolling behaviour instead of dying silently.
+      const neighbour = this.neighbourResourceId(before.resourceId, key === 'ArrowDown' ? 1 : -1);
+      if (neighbour === null) return;
+      event.preventDefault();
+      next = { ...before, resourceId: neighbour };
     } else {
-      // Move the whole booking by ±1 week.
-      next = this.movedBy(before, dir);
+      event.preventDefault();
+      const dir = key === 'ArrowRight' ? 1 : -1;
+      if (event.altKey && event.shiftKey) {
+        // Resize the START (Alt+Shift+arrows), enforcing the 1-week floor.
+        next = this.resizedStart(before, dir);
+      } else if (event.shiftKey) {
+        // Resize the END by ±1 week (Shift+arrows), enforcing the 1-week floor.
+        next = this.resizedEnd(before, dir);
+      } else {
+        // Move the whole booking by ±1 week.
+        next = this.movedBy(before, dir);
+      }
     }
     if (!next || !this.changed(snapshot, next)) return;
 
-    // Optimistic write, then commit with rollback on failure.
+    // Optimistic write, then commit with rollback on failure. `commit` adds
+    // resourceId to the payload exactly when it moved, so the reassign travels
+    // through the same PUT the drop does.
     this.writeWorking(next);
     this.commit(next, snapshot);
+  }
+
+  /**
+   * The resource id one lane above (-1) or below (+1) `resourceId` in the
+   * rendered roster order, or null when there is no such lane (top/bottom, or the
+   * lane is not currently rendered). Reads `rows()` so keyboard reassign lands on
+   * the same neighbour the eye sees, including when the roster is filtered.
+   */
+  private neighbourResourceId(resourceId: string, step: -1 | 1): string | null {
+    const ids = this.rows().map(r => r.resourceId);
+    const idx = ids.indexOf(resourceId);
+    if (idx < 0) return null;
+    return ids[idx + step] ?? null;
   }
 
   // --- preview + commit helpers -------------------------------------------
