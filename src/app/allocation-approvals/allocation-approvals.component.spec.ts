@@ -1,6 +1,6 @@
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { AllocationApprovalsComponent } from './allocation-approvals.component';
 import { AllocationApprovalFeed, ApiService, ResourceOrganization } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
@@ -27,13 +27,15 @@ function setup(ready: boolean, overrides: {
   feed?: AllocationApprovalFeed;
   /** For status-aware fixtures: supply the whole mock instead of a static feed. */
   getAllocationApprovals?: ReturnType<typeof vi.fn>;
+  /** F4: to fail the org-tree read independently of the feed. */
+  getResourceOrganizations?: ReturnType<typeof vi.fn>;
 } = {}) {
   // D (Task 8, round 2): `AllocationApprovalRow` now carries `organization`
   // straight from the server (the handler already has the resource record in
   // hand when it builds the row) — there is no second getResources() load to
   // stub here any more. Only the org tree (getResourceOrganizations) remains.
   const getAllocationApprovals = overrides.getAllocationApprovals ?? vi.fn(() => of(overrides.feed ?? FEED));
-  const getResourceOrganizations = vi.fn(() => of(overrides.orgNodes ?? []));
+  const getResourceOrganizations = overrides.getResourceOrganizations ?? vi.fn(() => of(overrides.orgNodes ?? []));
   const apiStub = { getAllocationApprovals, getResourceOrganizations } as unknown as ApiService;
   // `role`/`userId` are read by the embedded ApprovalModalComponent's
   // decidability check; an admin can decide any step, so the modal cases below
@@ -58,6 +60,19 @@ async function flush(fixture: { detectChanges: () => void; whenStable: () => Pro
   fixture.detectChanges();
   await fixture.whenStable();
   fixture.detectChanges();
+}
+
+/** The role-denied wording of `accessNotice()`, quoted once. */
+const ROLE_NOTICE = 'Your role does not have access to allocation approvals';
+/** The signed-out wording — the branch that must NOT fire for a signed-in actor. */
+const SIGNIN_NOTICE = 'Sign in to view allocation approvals';
+/** `ListStateComponent`'s error-panel heading for this screen's `label`. */
+const LIST_STATE_ERROR = "Couldn't load allocation approvals";
+/** The benign "loaded fine, nothing matched" copy — a failed read must never show it. */
+const EMPTY_FEED_COPY = 'No allocation requests for the selected range and status.';
+
+function retryButton(host: HTMLElement): HTMLButtonElement | undefined {
+  return [...host.querySelectorAll('button')].find(b => /Retry/.test(b.textContent ?? ''));
 }
 
 describe('AllocationApprovalsComponent', () => {
@@ -383,6 +398,127 @@ describe('AllocationApprovalsComponent', () => {
       fixture.detectChanges();
       expect(rows().length).toBe(1);
       expect(rows()[0].textContent).toContain('Priya Pending');
+    });
+  });
+
+  describe('failed reads (F4)', () => {
+    const ORG_NODES: ResourceOrganization[] = [
+      { id: '2', name: 'Engineering', description: '', costCenters: [], level: 'capability' },
+      { id: '5', name: 'Platform', description: '', costCenters: [], level: 'practice', parentId: '2' },
+      { id: '6', name: 'Backend', description: '', costCenters: [], level: 'competence', parentId: '5' },
+    ];
+
+    it('renders the access notice and a Retry control instead of throwing when the FEED read fails', async () => {
+      // `setup(true, ...)` makes authReady AND isAuthenticated true, which is
+      // what puts accessNotice() on its role-denied branch — a fixture with
+      // authReady false would never fetch (so never error) and one with
+      // isAuthenticated false would exercise the other wording, certifying
+      // nothing about the failure being reproduced.
+      const getAllocationApprovals = vi.fn(() => throwError(() => new Error('403 Forbidden')));
+      const { fixture } = setup(true, { orgNodes: ORG_NODES, getAllocationApprovals });
+
+      // THE defect this pins: managerFilterOptions()/monthOptions() in the
+      // header and the KPI strip all dereference an rxResource `.value()` that
+      // THROWS while erroring, and the constructor's two effects read the same
+      // throwing value. The throw aborted the change-detection pass, leaving
+      // the notice below and the ListState Retry panel below that as
+      // unreachable code.
+      expect(() => fixture.detectChanges()).not.toThrow();
+      await fixture.whenStable();
+      expect(() => fixture.detectChanges()).not.toThrow();
+
+      const host = fixture.nativeElement as HTMLElement;
+      expect(getAllocationApprovals).toHaveBeenCalled();
+
+      expect(host.textContent).toContain(ROLE_NOTICE);
+      expect(host.textContent).not.toContain(SIGNIN_NOTICE);
+      expect(host.textContent).toContain(LIST_STATE_ERROR);
+      expect(retryButton(host)).toBeDefined();
+
+      // A failed read is NOT "nothing to approve": neither the benign
+      // empty-feed copy nor a confident zero KPI may appear.
+      expect(host.textContent).not.toContain(EMPTY_FEED_COPY);
+      // The band legend is static markup with no data dependency at all, so its
+      // absence can only come from the error gate.
+      expect(host.textContent).not.toContain('Utilisation band:');
+      expect(host.querySelector('[data-test="kpi-pending-resources"]')).toBeNull();
+      expect(host.querySelector('[data-test="kpi-pending-months"]')).toBeNull();
+      expect(host.querySelector('[data-test="status-filter"]')).toBeNull();
+      expect(host.querySelector('[data-test="manager-filter"]')).toBeNull();
+      expect(host.querySelector('[data-test="multi-approve"]')).toBeNull();
+      expect(host.querySelectorAll('[data-test="approval-row"]').length).toBe(0);
+    });
+
+    it('keeps the approvals list working when only the ORG-TREE read fails, and says the filters are gone', async () => {
+      // EVIDENCE CORRECTION: capabilityOptions/practiceOptions/competenceOptions
+      // hang off `orgsRes`, NOT the feed — a separate ungated `.value()` deref
+      // with its own error state. The feed here is fine, so the approvals must
+      // still be reviewable; only the three dimension filters are unavailable,
+      // and they say so rather than offering an empty list that would read as
+      // "this organization has no capabilities".
+      const getResourceOrganizations = vi.fn(() => throwError(() => new Error('500')));
+      const { fixture } = setup(true, { getResourceOrganizations });
+
+      expect(() => fixture.detectChanges()).not.toThrow();
+      await fixture.whenStable();
+      expect(() => fixture.detectChanges()).not.toThrow();
+
+      const host = fixture.nativeElement as HTMLElement;
+
+      // The org filters are withdrawn and explained...
+      expect(host.querySelector('[data-test="org-filters-unavailable"]')).not.toBeNull();
+      expect(host.querySelector('[data-test="capability-filter"]')).toBeNull();
+      expect(host.querySelector('[data-test="practice-filter"]')).toBeNull();
+      expect(host.querySelector('[data-test="competence-filter"]')).toBeNull();
+
+      // ...while everything the SUCCESSFUL feed read powers is still there.
+      // This is the case that must still be ALLOWED: a guard that blanked the
+      // page on any failed read would pass the feed test above and fail here.
+      expect(host.textContent).not.toContain(ROLE_NOTICE);
+      expect(host.textContent).not.toContain(LIST_STATE_ERROR);
+      expect(host.querySelectorAll('[data-test="approval-row"]').length).toBe(2);
+      expect(host.querySelector('[data-test="manager-filter"]')).not.toBeNull();
+      expect(host.querySelector('[data-test="status-filter"]')).not.toBeNull();
+      expect(host.querySelector('[data-test="kpi-pending-resources"]')?.textContent?.trim()).toBe('1');
+    });
+
+    it('clicking Retry re-issues the failed feed read', async () => {
+      const getAllocationApprovals = vi.fn(() => throwError(() => new Error('403 Forbidden')));
+      const { fixture } = setup(true, { getAllocationApprovals });
+      await flush(fixture);
+
+      const host = fixture.nativeElement as HTMLElement;
+      const before = getAllocationApprovals.mock.calls.length;
+      retryButton(host)!.click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+
+      expect(getAllocationApprovals.mock.calls.length).toBeGreaterThan(before);
+    });
+
+    it('shows none of the failure affordances once both reads resolve', async () => {
+      // The companion assertion of ABSENCE: a template that printed the notice,
+      // the error panel or the "filters unavailable" note unconditionally would
+      // satisfy both failure cases above. This also re-asserts the regions that
+      // must still render, so an always-refusing guard cannot pass.
+      const { fixture } = setup(true, { orgNodes: ORG_NODES });
+      await flush(fixture);
+
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.textContent).not.toContain(ROLE_NOTICE);
+      expect(host.textContent).not.toContain(SIGNIN_NOTICE);
+      expect(host.textContent).not.toContain(LIST_STATE_ERROR);
+      expect(retryButton(host)).toBeUndefined();
+      expect(host.querySelector('[data-test="org-filters-unavailable"]')).toBeNull();
+
+      expect(host.textContent).toContain('Utilisation band:');
+      expect(host.querySelector('[data-test="capability-filter"]')).not.toBeNull();
+      expect(host.querySelector('[data-test="practice-filter"]')).not.toBeNull();
+      expect(host.querySelector('[data-test="competence-filter"]')).not.toBeNull();
+      expect(host.querySelector('[data-test="manager-filter"]')).not.toBeNull();
+      expect(host.querySelector('[data-test="kpi-pending-resources"]')).not.toBeNull();
+      expect(host.querySelector('[data-test="multi-approve"]')).not.toBeNull();
+      expect(host.querySelectorAll('[data-test="approval-row"]').length).toBe(2);
     });
   });
 });

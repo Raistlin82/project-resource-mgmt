@@ -1,6 +1,6 @@
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { CapacityComponent } from './capacity.component';
 import { ApiService, CapacityMonthly } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
@@ -70,10 +70,53 @@ function setup(ready: boolean, envelope: CapacityMonthly = ENVELOPE) {
   return { fixture, getCapacityMonthly, authStub };
 }
 
+/**
+ * The same component wired to a `/capacity/monthly` read that FAILS — the
+ * finance user whose bearer expired (401) or an under-privileged role (403).
+ *
+ * `authReady` AND `isAuthenticated` are both true on purpose: those are the
+ * signals `accessNotice()` branches on, and a fixture that left `authReady`
+ * false would never fetch at all (so never error), while one that left
+ * `isAuthenticated` false would exercise the "Sign in" wording instead of the
+ * role-denied one. Either mistake would certify nothing — the identity in the
+ * fixture has to be the identity in the failure being reproduced.
+ */
+function setupFailingRead() {
+  const getCapacityMonthly = vi.fn(() => throwError(() => new Error('403 Forbidden')));
+  const apiStub = { getCapacityMonthly } as unknown as ApiService;
+  const authStub = {
+    authReady: signal(true),
+    isAuthenticated: signal(true),
+  } as unknown as AuthService;
+
+  TestBed.configureTestingModule({
+    imports: [CapacityComponent],
+    providers: [
+      { provide: ApiService, useValue: apiStub },
+      { provide: AuthService, useValue: authStub },
+    ],
+  });
+
+  return { fixture: TestBed.createComponent(CapacityComponent), getCapacityMonthly };
+}
+
 async function flush(fixture: { detectChanges: () => void; whenStable: () => Promise<unknown> }) {
   fixture.detectChanges();
   await fixture.whenStable();
   fixture.detectChanges();
+}
+
+/** The role-denied wording of `accessNotice()`, quoted once. */
+const ROLE_NOTICE = 'Your role does not have access to the capacity data';
+/** The signed-out wording of `accessNotice()` — the branch that must NOT fire for a signed-in actor. */
+const SIGNIN_NOTICE = 'Sign in to view the capacity dashboard';
+/** `ListStateComponent`'s error-panel heading for this screen's `label`. */
+const LIST_STATE_ERROR = "Couldn't load capacity";
+/** The benign "loaded fine, nothing in range" copy — a failed read must never show it. */
+const EMPTY_RANGE_COPY = 'No capacity data for the selected range.';
+
+function retryButton(host: HTMLElement): HTMLButtonElement | undefined {
+  return [...host.querySelectorAll('button')].find((b) => /Retry/.test(b.textContent ?? ''));
 }
 
 describe('CapacityComponent', () => {
@@ -208,6 +251,106 @@ describe('CapacityComponent', () => {
 
     // And the file that comes out actually carries the demand block.
     expect(fixture.componentInstance['buildCsv']()).toContain('Uncovered demand,Dummy SAP');
+  });
+
+  describe('failed capacity read (F4)', () => {
+    it('renders the access notice and a Retry control instead of throwing out of change detection', async () => {
+      const { fixture, getCapacityMonthly } = setupFailingRead();
+
+      // THE defect this pins: every resource-derived binding above the error
+      // affordances (monthOptions/hasExportableRows in the header, the KPI
+      // strip) dereferences an rxResource `.value()` that THROWS while the
+      // resource is erroring. That throw aborts the change-detection pass, so
+      // the hand-written notice below it and the ListState Retry panel below
+      // that were unreachable code — the screen rendered a header and nothing.
+      // The constructor's range-seeding effect read the same throwing value.
+      expect(() => fixture.detectChanges()).not.toThrow();
+      await fixture.whenStable();
+      expect(() => fixture.detectChanges()).not.toThrow();
+
+      const host = fixture.nativeElement as HTMLElement;
+      expect(getCapacityMonthly).toHaveBeenCalled();
+
+      // 1. The hand-written access notice, in its role-denied wording.
+      expect(host.textContent).toContain(ROLE_NOTICE);
+      // ...and NOT the signed-out wording: this actor is authenticated, so the
+      // other branch of accessNotice() must stay shut (a notice that printed
+      // both would satisfy a bare "contains something" assertion).
+      expect(host.textContent).not.toContain(SIGNIN_NOTICE);
+      expect(host.querySelector('[role="alert"]')).not.toBeNull();
+
+      // 2. The ListState error panel and its Retry affordance, which the
+      //    aborted pass never reached.
+      expect(host.textContent).toContain(LIST_STATE_ERROR);
+      expect(retryButton(host)).toBeDefined();
+
+      // 3. A failed read is NOT "no data": neither the benign empty-range copy
+      //    nor any confident zero may appear. The KPI strip and the
+      //    range/export controls are gated on the error state precisely so the
+      //    error short-circuit inside the accessors can never surface as 0.0
+      //    FTE of demand against 0.0 FTE of capacity.
+      expect(host.textContent).not.toContain(EMPTY_RANGE_COPY);
+      // The band legend is static markup with no data dependency at all, so its
+      // absence can only come from the error gate — it is the one region here
+      // whose gate nothing else could have hidden.
+      expect(host.textContent).not.toContain('Utilisation band:');
+      expect(host.querySelector('[data-test="kpi-planned"]')).toBeNull();
+      expect(host.querySelector('[data-test="kpi-capacity"]')).toBeNull();
+      expect(host.querySelector('[data-test="kpi-over"]')).toBeNull();
+      expect(host.querySelector('[data-test="kpi-uncovered"]')).toBeNull();
+      expect(host.querySelector('select[aria-label="Range start month"]')).toBeNull();
+      expect(host.querySelector('select[aria-label="Range end month"]')).toBeNull();
+      expect([...host.querySelectorAll('button')].filter((b) => /CSV|JSON/.test(b.textContent ?? ''))).toEqual([]);
+      // No grid rows either — the table region must be the error panel, not an
+      // empty table with a totals footer of zeros.
+      expect(host.querySelectorAll('[data-test="band-cell"]').length).toBe(0);
+      expect(host.querySelectorAll('[data-test="demand-row"]').length).toBe(0);
+    });
+
+    it('clicking Retry re-issues the failed read', async () => {
+      const { fixture, getCapacityMonthly } = setupFailingRead();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      fixture.detectChanges();
+
+      const host = fixture.nativeElement as HTMLElement;
+      const before = getCapacityMonthly.mock.calls.length;
+      retryButton(host)!.click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+
+      // The Retry control is wired, not decoration: an unreachable panel could
+      // never have been proven either way.
+      expect(getCapacityMonthly.mock.calls.length).toBeGreaterThan(before);
+    });
+
+    it('shows none of the failure affordances once the read resolves', async () => {
+      // The companion assertion of ABSENCE. Without it a template that printed
+      // the notice (or the error panel) unconditionally would satisfy the
+      // failure case above, and a guard that always refused to render the data
+      // region would satisfy it too — so this also asserts the region that
+      // must still be ALLOWED.
+      const { fixture } = setup(true);
+      await flush(fixture);
+
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.textContent).not.toContain(ROLE_NOTICE);
+      expect(host.textContent).not.toContain(SIGNIN_NOTICE);
+      expect(host.textContent).not.toContain(LIST_STATE_ERROR);
+      expect(retryButton(host)).toBeUndefined();
+      expect(host.querySelector('[role="alert"]')).toBeNull();
+
+      // Still allowed: the KPI strip, the legend, the range selectors, the
+      // export buttons and the grid itself all render on a successful load.
+      expect(host.textContent).toContain('Utilisation band:');
+      expect(host.querySelector('[data-test="kpi-planned"]')).not.toBeNull();
+      expect(host.querySelector('[data-test="kpi-uncovered"]')).not.toBeNull();
+      expect(host.querySelector('select[aria-label="Range start month"]')).not.toBeNull();
+      expect(host.querySelector('select[aria-label="Range end month"]')).not.toBeNull();
+      expect([...host.querySelectorAll('button')].filter((b) => /CSV|JSON/.test(b.textContent ?? '')).length).toBe(2);
+      expect(host.querySelectorAll('[data-test="band-cell"]').length).toBeGreaterThan(0);
+      expect(host.querySelectorAll('[data-test="demand-row"]').length).toBe(1);
+    });
   });
 
   it('disables the exports only when both blocks are empty', async () => {
