@@ -501,7 +501,7 @@ interface RequestsData {
             </div>
             <div class="p-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
               <button type="button" (click)="cancelDeleteRequest()" class="command-button secondary">Cancel</button>
-              <button type="button" (click)="confirmDeleteRequest()" data-test="request-delete-confirm-action" class="px-4 py-2 bg-critical text-white rounded-lg text-sm font-semibold hover:bg-critical-strong transition-colors shadow-sm">
+              <button type="button" (click)="confirmDeleteRequest()" data-test="request-delete-confirm-action" class="px-4 py-2 bg-critical text-ink-inverse rounded-lg text-sm font-semibold hover:bg-critical-strong transition-colors shadow-sm">
                 Delete request
               </button>
             </div>
