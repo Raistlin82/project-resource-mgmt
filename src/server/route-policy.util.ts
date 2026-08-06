@@ -9,7 +9,26 @@ export type TrustedRole = UserRole | 'unknown';
 export type GlobalTimeEntryAction = 'read' | 'write' | 'decide';
 
 export interface TimeEntryPolicyContext {
-  role: TrustedRole;
+  /**
+   * The WHOLE verified role set, never a collapsed primary role.
+   *
+   * This field used to be `role: TrustedRole`, filled from `primaryRole()` —
+   * which is a DISPLAY concern (`ROLE_PRIORITY` picks the highest-ranked role so
+   * the UI has one label to show). roleGate authorizes on the SET
+   * (`hasAnyAllowedRole`), so the object-level policy disagreed with the gate
+   * that had just admitted the request: a PM whose Keycloak roles are
+   * `['pm','sales']` collapsed to 'sales' and lost every write and decision on
+   * their OWN projects — 403 "Role sales cannot write global time entries" on a
+   * correction only they own. A `['resource-manager','sales']` people manager
+   * lost the timesheet decision path for their own reports the same way.
+   *
+   * Renaming the field (and changing its type to an array) is deliberate: it
+   * makes passing a single role a COMPILE ERROR at every call site, the same
+   * discipline `canSubmitOwnTime` already enforces. Not reproducible under
+   * AUTH_TRUST_HEADERS, which parses exactly one `X-User-Role` — which is why
+   * no existing check caught it.
+   */
+  roles: readonly TrustedRole[];
   actorResourceId?: string;
   managedResourceIds?: ReadonlySet<string>;
   ownedProjectIds?: ReadonlySet<string>;
@@ -104,14 +123,34 @@ const GLOBAL_TIME_ENTRY_DECISION_ROLES = new Set<TrustedRole>([
   'resource-manager', 'finance', 'delivery-executive', 'admin',
 ]);
 
-/** Employees deliberately have no access here: their boundary is `/self/time-entries`. */
-export function hasGlobalTimeEntryCollectionAccess(
-  role: TrustedRole,
-  action: GlobalTimeEntryAction,
-): boolean {
+/**
+ * Roles whose time-entry reach is ORGANIZATION-WIDE for the actions they are
+ * admitted to at all. `sales` belongs here and must STAY here: it is org-wide
+ * READ by design (READ_RULES admits it to GET /time-entries) and appears in no
+ * other action set, so the per-action gate is what keeps it read-only. Narrowing
+ * it would break the documented sales read.
+ */
+const ORG_WIDE_TIME_ENTRY_ROLES = new Set<TrustedRole>([
+  'admin', 'delivery-executive', 'finance', 'sales',
+]);
+
+/** Does ONE role admit `action` at the collection level? */
+function roleAdmitsTimeEntryAction(role: TrustedRole, action: GlobalTimeEntryAction): boolean {
   if (action === 'read') return GLOBAL_TIME_ENTRY_READ_ROLES.has(role);
   if (action === 'write') return GLOBAL_TIME_ENTRY_WRITE_ROLES.has(role);
   return GLOBAL_TIME_ENTRY_DECISION_ROLES.has(role);
+}
+
+/**
+ * Employees deliberately have no access here: their boundary is
+ * `/self/time-entries`. Evaluated over the WHOLE role set — see
+ * `TimeEntryPolicyContext.roles` for what the collapsed form cost.
+ */
+export function hasGlobalTimeEntryCollectionAccess(
+  roles: readonly TrustedRole[],
+  action: GlobalTimeEntryAction,
+): boolean {
+  return roles.some(role => roleAdmitsTimeEntryAction(role, action));
 }
 
 /**
@@ -123,32 +162,64 @@ export function hasGlobalTimeEntryCollectionAccess(
  * Decisions additionally fail closed unless the actor can be resolved into the
  * same resource namespace as the entry owner, because otherwise SoD cannot be
  * proven.
+ *
+ * A PER-ROLE UNION, not "org-wide if any held role is org-wide": the two are
+ * different, and the difference is an over-grant. A `['pm','sales']` principal
+ * writing a time entry passes the collection gate through 'pm', and 'sales' is in
+ * the org-wide set — so a set-wide org test would hand that PM WRITE access to
+ * every project in the company. Each held role is therefore asked the whole
+ * question (does it admit this action, and does its own scope cover this target),
+ * and the answers are OR'd. The PM keeps pm scope for writes and gains sales'
+ * org-wide READ, which is exactly the documented semantics.
  */
 export function canAccessGlobalTimeEntry(
   context: TimeEntryPolicyContext,
   target: TimeEntryPolicyTarget,
   action: GlobalTimeEntryAction,
 ): boolean {
-  if (!hasGlobalTimeEntryCollectionAccess(context.role, action)) return false;
+  if (!hasGlobalTimeEntryCollectionAccess(context.roles, action)) return false;
   if (action === 'decide') {
     if (!context.actorResourceId || context.actorResourceId === target.resourceId) return false;
   }
 
-  switch (context.role) {
-    case 'admin':
-    case 'delivery-executive':
-    case 'finance':
-    case 'sales':
-      return true;
-    case 'pm':
-      return context.actorResourceId !== undefined
-        && (context.ownedProjectIds?.has(target.projectId) ?? false);
-    case 'resource-manager':
-      return context.actorResourceId !== undefined
-        && (context.managedResourceIds?.has(target.resourceId) ?? false);
-    default:
-      return false;
-  }
+  const grants = (role: TrustedRole): boolean => {
+    if (!roleAdmitsTimeEntryAction(role, action)) return false;
+    if (ORG_WIDE_TIME_ENTRY_ROLES.has(role)) return true;
+    if (context.actorResourceId === undefined) return false;
+    if (role === 'pm') return context.ownedProjectIds?.has(target.projectId) ?? false;
+    if (role === 'resource-manager') return context.managedResourceIds?.has(target.resourceId) ?? false;
+    return false;
+  };
+  return context.roles.some(grants);
+}
+
+/**
+ * Does the actor hold the role an approval STEP was routed to?
+ *
+ * The engine compared `primaryRole(roles)` to `step.role`, so a finance
+ * controller whose Keycloak account also carries 'delivery-executive' — a normal
+ * grant for a CFO on the delivery board — collapsed to 'delivery-executive'
+ * (priority 5 beats finance's 4) and was refused the finance step routed to
+ * them: "Actor cannot decide a step assigned to finance", worded as though they
+ * did not hold the role they hold. A high-value invoice then had no approver at
+ * all, since `crossStepSoDError` also bars the admin who cleared the earlier
+ * step. Symmetrically a `['resource-manager','finance']` people manager could
+ * never decide a TimeEntry step routed to 'resource-manager'.
+ *
+ * `admin` matches every step, as it did before — SoD is enforced separately and
+ * binds every role, including admin.
+ */
+export function stepRoleMatch(decidingRoles: readonly UserRole[], stepRole: string): boolean {
+  return decidingRoles.some(role => role === stepRole || role === 'admin');
+}
+
+/**
+ * Roles that are never narrowed by allocation SCOPE (§3.3). Set-based for the
+ * same reason as `stepRoleMatch`: holding a global role must not depend on it
+ * happening to outrank every other role the principal carries.
+ */
+export function hasGlobalApprovalRole(decidingRoles: readonly UserRole[]): boolean {
+  return decidingRoles.some(role => role === 'admin' || role === 'delivery-executive');
 }
 
 export interface DerivedTimeEntryLinks {

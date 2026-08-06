@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Assignment, Order, ResourceRequest } from '../app/services/api.service';
+import { createCriticalSectionRunner } from './critical-section.util';
 import {
   MONEY_DEFINING_AUDIT_SEGMENTS,
   assignmentRetargetError,
@@ -10,6 +11,8 @@ import {
   buildMilestoneCreate,
   buildProjectWrite,
   contractHoursPerDayError,
+  deleteOrgNodeWrite,
+  documentProvenance,
   employmentWindowError,
   isNotNullViolation,
   issuedOrderLineStructureError,
@@ -22,6 +25,10 @@ import {
   resourceRequestUpdateError,
   retargetDailyCapacityError,
   signedNumberFieldError,
+  writeResourceOrganizationBinding,
+  type OrgBoundResourceRow,
+  type OrgTreeNodeRow,
+  type OrgTreeStore,
 } from './operational-integrity.util';
 
 const assignment: Assignment = {
@@ -429,5 +436,200 @@ describe('audit target resolution', () => {
     // ABSENCE TWIN: a complete registry reports NO gap — without this the function
     // could return every segment unconditionally and still pass the two cases above.
     expect(auditRegistryGaps([...MONEY_DEFINING_AUDIT_SEGMENTS, 'resources'])).toEqual([]);
+  });
+});
+
+describe('documentProvenance', () => {
+  it('names the resolved principal and derives the initials from that same name', () => {
+    expect(documentProvenance('Julie Armstrong', '2026-08-06')).toStrictEqual({
+      author: 'Julie Armstrong',
+      authorInitials: 'JA',
+      uploadedAt: '2026-08-06',
+    });
+  });
+
+  it('gives two different principals two different attributions', () => {
+    // NON-VACUITY, and the exact failure this project has already paid for: a
+    // fixture whose two identities resolve to the SAME value certifies an inert
+    // feature. The avatar and the name must move together, and must move with the
+    // actor.
+    const first = documentProvenance('Julie Armstrong', '2026-08-06');
+    const second = documentProvenance('Marco Bianchi', '2026-08-06');
+    expect(second.author).not.toBe(first.author);
+    expect(second.authorInitials).not.toBe(first.authorInitials);
+    expect(second.authorInitials).toBe('MB');
+  });
+
+  it('never carries a body-supplied author, initials or date through', () => {
+    // THE ASSERTION OF ABSENCE. The forged values from the register's exhibit must
+    // appear nowhere in the produced record, and the function must not accept them
+    // at all — it takes only the resolved name and the clock.
+    const pinned = documentProvenance('Julie Armstrong', '2026-08-06');
+    expect(pinned.author).not.toBe('Marco Bianchi');
+    expect(pinned.authorInitials).not.toBe('MB');
+    expect(pinned.uploadedAt).not.toBe('2020-01-01');
+    expect(pinned.uploadedAt).not.toBe('Just now');
+    // Exactly these three keys: an extra one would be a column the client could
+    // still reach through the allow-list.
+    expect(Object.keys(pinned).sort()).toStrictEqual(['author', 'authorInitials', 'uploadedAt']);
+  });
+
+  it('falls back to the raw actor id rather than inventing a name', () => {
+    // An unresolvable principal is labelled with something true and ugly, never
+    // with a friendly placeholder that would be a false attribution.
+    expect(documentProvenance('service-account-42', '2026-08-06').author).toBe('service-account-42');
+    expect(documentProvenance('', '2026-08-06').authorInitials).toBe('?');
+    // A single-word name yields one initial, not a crash or a duplicated letter.
+    expect(documentProvenance('Cher', '2026-08-06').authorInitials).toBe('C');
+  });
+});
+
+describe('org-tree critical section', () => {
+  const NODE = 'ORG9';
+  const NODE_NAME = 'Cloud Practice';
+
+  function store(): OrgTreeStore & { nodes: OrgTreeNodeRow[]; resourceRows: OrgBoundResourceRow[] } {
+    const nodes: OrgTreeNodeRow[] = [{ id: NODE, name: NODE_NAME }];
+    const resourceRows: OrgBoundResourceRow[] = [{ id: '42' }];
+    return {
+      nodes,
+      resourceRows,
+      resources: {
+        list: async () => resourceRows.map(row => ({ ...row })),
+      },
+      resourceOrganizations: {
+        get: async id => nodes.find(node => node.id === id),
+        list: async () => nodes.map(node => ({ ...node })),
+        remove: async id => {
+          const index = nodes.findIndex(node => node.id === id);
+          if (index === -1) return false;
+          nodes.splice(index, 1);
+          return true;
+        },
+      },
+    };
+  }
+
+  it('never leaves a resource bound to an organization no node has', async () => {
+    // THE INVARIANT, asserted over the OUTCOME rather than over "both call sites use
+    // the same constant" — the class-string tautology this project has been burned
+    // by.
+    //
+    // THE INTERLEAVING. The binding is suspended BETWEEN its name check and its
+    // write (the window in which the pre-fix code held no lock at all), then the
+    // delete is started and given a full macrotask to run to completion, and only
+    // then is the binding's write released. If the binding is inside the org-tree
+    // section, the delete is queued behind it and cannot observe the tree between
+    // those two instants; if it is outside — the pre-fix shape — the delete finds
+    // nobody bound, removes the node, and the binding then commits a name no node
+    // has. Both requests answered 200.
+    const shared = store();
+    const runner = createCriticalSectionRunner();
+    let releaseWrite = (): void => undefined;
+    const writeGate = new Promise<void>(resolve => { releaseWrite = () => resolve(); });
+
+    const binding = writeResourceOrganizationBinding(runner, shared, NODE_NAME, async () => {
+      await writeGate;
+      shared.resourceRows[0] = { id: '42', organization: NODE_NAME };
+      return 'written';
+    });
+    // Let the binding reach its suspended write.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const deleting = deleteOrgNodeWrite(runner, shared, NODE);
+    // A macrotask boundary drains every microtask the delete needs, so in the
+    // unlocked shape it is fully committed before the binding resumes.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    releaseWrite();
+    const [deleteResult, bindResult] = await Promise.all([deleting, binding]);
+
+    const nodeNames = new Set(shared.nodes.map(node => node.name));
+    const bound = shared.resourceRows.filter(row => row.organization !== undefined);
+    expect(bound.every(row => nodeNames.has(row.organization as string))).toBe(true);
+    // NON-VACUITY, half one: the invariant must not hold merely because nothing was
+    // written. Exactly one of the two must have succeeded, and whichever it is, the
+    // other must have been refused rather than silently dropped.
+    const nodeSurvived = shared.nodes.some(node => node.id === NODE);
+    if (nodeSurvived) {
+      expect(deleteResult).toStrictEqual({
+        status: 409,
+        error: 'Cannot delete an organization that resources still reference',
+      });
+      expect(bindResult).toStrictEqual({ written: 'written' });
+      expect(shared.resourceRows[0].organization).toBe(NODE_NAME);
+    } else {
+      expect(deleteResult).toBeNull();
+      expect(bindResult).toStrictEqual({
+        refusal: {
+          status: 400,
+          error: 'organization must reference an existing resource organization (catalog name)',
+        },
+      });
+      expect(shared.resourceRows[0].organization).toBeUndefined();
+    }
+  });
+
+  it('refuses the delete when the binding is already committed (the guard is reachable)', async () => {
+    // NON-VACUITY, half two: the sequential control. A fixture whose name did not
+    // actually match the node would make the whole test above inert while still
+    // satisfying the invariant, so prove the name really binds and the delete guard
+    // really fires on it.
+    const shared = store();
+    const runner = createCriticalSectionRunner();
+    await writeResourceOrganizationBinding(runner, shared, NODE_NAME, async () => {
+      shared.resourceRows[0] = { id: '42', organization: NODE_NAME };
+      return 'written';
+    });
+    expect(await deleteOrgNodeWrite(runner, shared, NODE)).toStrictEqual({
+      status: 409,
+      error: 'Cannot delete an organization that resources still reference',
+    });
+    expect(shared.nodes.some(node => node.id === NODE)).toBe(true);
+  });
+
+  it('still deletes an unreferenced node and still permits a valid binding', async () => {
+    // THE CASE THAT MUST STILL BE ALLOWED. A guard that always refused would pass
+    // every assertion above; these two are what stop it.
+    const shared = store();
+    const runner = createCriticalSectionRunner();
+    expect(await deleteOrgNodeWrite(runner, shared, NODE)).toBeNull();
+    expect(shared.nodes).toStrictEqual([]);
+
+    const fresh = store();
+    expect(await writeResourceOrganizationBinding(runner, fresh, NODE_NAME, async () => 'ok'))
+      .toStrictEqual({ written: 'ok' });
+    // An absent or cleared binding resolves nothing and must not be refused either
+    // — a partial PUT that never mentions `organization` must not 400.
+    expect(await writeResourceOrganizationBinding(runner, fresh, undefined, async () => 'ok'))
+      .toStrictEqual({ written: 'ok' });
+    expect(await writeResourceOrganizationBinding(runner, fresh, '', async () => 'ok'))
+      .toStrictEqual({ written: 'ok' });
+  });
+
+  it('refuses a node that still has children, and 404s an id that never existed', async () => {
+    const shared = store();
+    shared.nodes.push({ id: 'ORG10', name: 'Sub', parentId: NODE });
+    const runner = createCriticalSectionRunner();
+    expect(await deleteOrgNodeWrite(runner, shared, NODE)).toStrictEqual({
+      status: 409,
+      error: 'Cannot delete an organization that has children',
+    });
+    expect(await deleteOrgNodeWrite(runner, shared, 'NOPE')).toStrictEqual({
+      status: 404,
+      error: 'Not found',
+    });
+  });
+
+  it('does not run the resource write at all when the name does not resolve', async () => {
+    // The refusal must be a refusal, not a rollback: `write` is the caller's real
+    // resource write and running it before the check would persist the bad binding.
+    const shared = store();
+    const runner = createCriticalSectionRunner();
+    let ran = false;
+    const result = await writeResourceOrganizationBinding(runner, shared, 'No Such Node', async () => {
+      ran = true;
+      return 'written';
+    });
+    expect(ran).toBe(false);
+    expect('refusal' in result).toBe(true);
   });
 });
