@@ -372,7 +372,14 @@ describe('Theme palette — a -text tone cannot double as a white-text fill', ()
    * fail this): a new offender fails, and so does a fixed one, with a message
    * saying to delete the entry.
    */
-  const OFFENDERS = ['src/app/projects/projects/projects.ts'];
+  // EMPTY, and that is the point: projects.ts:299 was the last one, and it was
+  // closed at the call site (hover:bg-critical-text -> hover:bg-critical-strong).
+  // Hover now goes DARKER, which is the only direction that keeps a white label
+  // legible; the previous rule sent the fill to the LIGHT text tone, where white
+  // measured 2.03:1 — below even the large-text floor. The list stays here so a
+  // future regression has a place to be caught, and the assertion below still
+  // proves WHY no token value could have fixed it.
+  const OFFENDERS: readonly string[] = [];
 
   it('has exactly the known call sites left, and they are not fixable here', () => {
     const files = [...new Set(PAIRINGS.filter(p => isTextTone(p.fill)).map(p => p.at.split(':')[0]))].sort();

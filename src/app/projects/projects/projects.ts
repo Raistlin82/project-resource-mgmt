@@ -296,7 +296,7 @@ const REMOTE_LOCATION = 'Remote';
           </div>
           <div class="p-5 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
             <button (click)="cancelDelete()" class="command-button secondary">Cancel</button>
-            <button (click)="confirmDelete()" class="px-6 py-2.5 bg-critical text-white rounded-xl text-sm font-semibold hover:bg-critical-text hover:shadow-lg hover:-translate-y-0.5 transition-all">Delete</button>
+            <button (click)="confirmDelete()" class="px-6 py-2.5 bg-critical text-white rounded-xl text-sm font-semibold hover:bg-critical-strong hover:shadow-lg hover:-translate-y-0.5 transition-all">Delete</button>
           </div>
         </div>
       </div>
