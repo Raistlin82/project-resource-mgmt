@@ -207,7 +207,8 @@ describe('JsonFeedBiAdapter', () => {
       expect(row['ownerId']).toBe('u9');
       expect(row['startDate']).toBe('2026-01-01');
       expect(row['endDate']).toBe('2026-12-31');
-      // Financial columns from the pre-computed row, passed through verbatim.
+      // Financial columns from the pre-computed row (rounded to 2 decimals on
+      // emission — these fixture values are already clean).
       expect(row['revenue']).toBe(100_000);
       expect(row['actualCost']).toBe(60_000);
       expect(row['margin']).toBe(40_000);
@@ -278,6 +279,113 @@ describe('JsonFeedBiAdapter', () => {
       );
       expect(doc.rowCount).toBe(2);
       expect(doc.rows.map((r) => r['revenue']).sort()).toEqual([1, 2]);
+    });
+  });
+
+  describe('money and percentages leave the feed at 2 decimals', () => {
+    // The shipped seed needs NO configuration change to hit this: project '1'
+    // has revenue 200,000 and actualCost 59,600, so computeProjectFinancials'
+    // `(margin / revenue) * 100` lands on 70.19999999999999 — 14 significant
+    // decimals of percentage handed straight to a BI tool.
+    const SEED_MARGIN_PCT = ((200_000 - 59_600) / 200_000) * 100;
+
+    it('the seed-derived fixture really is unrounded (this block is vacuous without it)', () => {
+      // Guards every assertion below: on an input that was already 70.2, a
+      // `toBe(70.2)` would pass with or without the fix.
+      expect(SEED_MARGIN_PCT).toBe(70.19999999999999);
+      expect(SEED_MARGIN_PCT).not.toBe(70.2);
+    });
+
+    it('rounds marginPct as the shipped seed produces it (70.19999999999999 -> 70.2)', () => {
+      const doc = parseDocument(
+        adapter.buildFeed(
+          input({
+            projects: [project('1')],
+            financials: [financials('1', { revenue: 200_000, actualCost: 59_600, margin: 140_400, marginPct: SEED_MARGIN_PCT })],
+          }),
+        ).content,
+      );
+      const row = doc.rows.find((r) => r['projectId'] === '1');
+      expect(row).toBeDefined();
+      expect(row?.['marginPct']).toBe(70.2);
+    });
+
+    it('rounds a fabricated ratio artifact too (31.000000000000004 -> 31)', () => {
+      const doc = parseDocument(
+        adapter.buildFeed(input({ financials: [financials('p1', { marginPct: 31.000000000000004 })] })).content,
+      );
+      expect(doc.rows[0]['marginPct']).toBe(31);
+    });
+
+    it('rounds all six money columns, not just marginPct', () => {
+      const doc = parseDocument(
+        adapter
+          .buildFeed(
+            input({
+              financials: [
+                financials('p1', {
+                  revenue: 1194.6666666666667,
+                  actualCost: 0.005,
+                  margin: 1194.6616666666666,
+                  budget: 1000.129,
+                  eac: 2000.001,
+                  vac: -1000.128,
+                }),
+              ],
+            }),
+          ).content,
+      );
+      const row = doc.rows[0];
+      expect(row['revenue']).toBe(1194.67);
+      expect(row['actualCost']).toBe(0.01);
+      expect(row['margin']).toBe(1194.66);
+      expect(row['budget']).toBe(1000.13);
+      expect(row['eac']).toBe(2000);
+      expect(row['vac']).toBe(-1000.13);
+    });
+
+    it('emits no >2-decimal numeral in any financial column of the serialized feed', () => {
+      // Scoped to the financial columns rather than the whole JSON on purpose:
+      // every row carries `generatedAt` as an ISO timestamp ('...T12:00:00.000Z'),
+      // so a document-wide /\d+\.\d{3,}/ would fail on correct output.
+      const doc = parseDocument(
+        adapter
+          .buildFeed(
+            input({
+              financials: [
+                financials('p1', { revenue: 1194.6666666666667, marginPct: SEED_MARGIN_PCT, vac: -0.3333333333 }),
+              ],
+            }),
+          ).content,
+      );
+      for (const col of ['revenue', 'actualCost', 'margin', 'marginPct', 'budget', 'eac', 'vac']) {
+        expect(String(doc.rows[0][col]), `column "${col}" carries >2 decimals`).not.toMatch(/\d+\.\d{3,}/);
+      }
+    });
+
+    it('still maps non-finite financials to null rather than rounding them to 0', () => {
+      // The absence twin for the rounding: a coerced 0 would read downstream as a
+      // real figure. What this pins is exactly "null, not 0" — it CANNOT catch a
+      // NaN passed straight through, because JSON.stringify(NaN) is already the
+      // token `null`. That is why `num2` delegates to `cell()` rather than
+      // rounding unconditionally: the guard is at the value, not the serializer.
+      const doc = parseDocument(
+        adapter
+          .buildFeed(
+            input({
+              financials: [financials('p1', { marginPct: Number.NaN, vac: Number.POSITIVE_INFINITY })],
+            }),
+          ).content,
+      );
+      expect(doc.rows[0]['marginPct']).toBeNull();
+      expect(doc.rows[0]['vac']).toBeNull();
+    });
+
+    it('leaves clean integers as integers (no toFixed-style reformatting)', () => {
+      const doc = parseDocument(adapter.buildFeed(input()).content);
+      expect(doc.rows[0]['revenue']).toBe(100_000);
+      expect(doc.rows[0]['marginPct']).toBe(0.4);
+      expect(adapter.buildFeed(input()).content).not.toContain('"revenue": "100000.00"');
     });
   });
 

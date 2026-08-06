@@ -34,7 +34,8 @@ export type {
 export type EInvoiceErrorCode =
   | 'INELIGIBLE_ORDER'
   | 'MISSING_INVOICE_NUMBER'
-  | 'MISSING_SUPPLIER_VAT';
+  | 'MISSING_SUPPLIER_VAT'
+  | 'ORDER_TOTAL_MISMATCH';
 
 /** Typed validation error thrown by {@link FatturaPaAdapter.buildInvoiceXml}. */
 export class EInvoiceValidationError extends Error {
@@ -141,6 +142,9 @@ function progressivoInvio(invoiceNumber: string): string {
  *
  * Totals: ImponibileImporto = rounded sum of line amounts; Imposta = 22% of the
  * imponibile, rounded to 2 decimals; ImportoTotaleDocumento = imponibile + imposta.
+ * The imponibile is then RECONCILED against `order.amount` and a divergence is
+ * refused as `ORDER_TOTAL_MISMATCH` — the lines alone are self-consistent even
+ * when they no longer describe the invoice they are numbered under.
  */
 export class FatturaPaAdapter implements EInvoiceAdapter {
   describe(): IntegrationDescriptor {
@@ -194,6 +198,33 @@ export class FatturaPaAdapter implements EInvoiceAdapter {
     const normalized = normalizeLines(order, contract, lines)
       .map(line => isCreditNote ? { ...line, amount: Math.abs(line.amount) } : line);
     const imponibile = round2(normalized.reduce((sum, l) => sum + l.amount, 0));
+
+    // RECONCILIATION against the order this document is issued FOR.
+    //
+    // The lines are the document BODY, but `order.amount` is the figure the
+    // invoice was ISSUED for — server-pinned alongside `invoiceNumber` — and the
+    // one the ledger records. The two can diverge AFTER issue (a line added,
+    // edited or deleted on an already-invoiced order), and nothing else in the
+    // app notices: the adapter stays internally self-consistent either way,
+    // because its own Σ-lines invariant for SDI check 00422 still holds. It is
+    // only wrong about the document it claims to represent. Refuse rather than
+    // emit a total that contradicts the invoice number it carries.
+    //
+    // Absolute values on both sides: a credit note is stored with a negative
+    // `order.amount` and rendered with positive line amounts (see `isCreditNote`
+    // above), so a signed comparison would reject every TD04.
+    // 0.005 is half a cent — below the 2-decimal resolution of the document, so
+    // per-line rounding drift can never trip this.
+    const orderTotal = Math.abs(round2(order.amount));
+    if (Math.abs(imponibile - orderTotal) > 0.005) {
+      throw new EInvoiceValidationError(
+        'ORDER_TOTAL_MISMATCH',
+        `Order ${order.id} is issued for ${money(orderTotal)} ${order.currency} but its ${lines.length} order ` +
+          `line(s) sum to ${money(imponibile)}: refusing to emit invoice ${invoiceNumber} with a total that ` +
+          'contradicts the order it is issued for.',
+      );
+    }
+
     const imposta = round2(imponibile * (FATTURAPA_VAT_RATE_PCT / 100));
     const importoTotale = round2(imponibile + imposta);
     const aliquota = FATTURAPA_VAT_RATE_PCT.toFixed(2);

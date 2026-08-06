@@ -59,6 +59,24 @@ function cell(value: string | number | boolean | null | undefined): BiFeedCellVa
   return value;
 }
 
+/**
+ * A money or percentage cell: `cell()` semantics, then rounded to 2 decimals.
+ *
+ * The feed is an EXPORT, so the 2-decimal rule for money/percentages applies on
+ * the way out. `marginPct` is the reason this is not cosmetic: it is a computed
+ * ratio ×100, so it reaches the feed as `70.19999999999999` / `31.000000000000004`
+ * on the seed as shipped — no configuration change needed — and a BI tool
+ * renders whatever it is handed.
+ *
+ * Non-finite values are still `null` (via `cell`), never 0: `Math.round(NaN)` is
+ * NaN, which JSON cannot represent, and a fabricated 0 would read as a real
+ * figure downstream.
+ */
+function num2(value: number | undefined): BiFeedCellValue {
+  const c = cell(value);
+  return typeof c === 'number' ? Math.round((c + Number.EPSILON) * 100) / 100 : c;
+}
+
 /** Financial columns emitted as `null` when a project has no financials row. */
 const NULL_FINANCIALS: Readonly<Record<string, null>> = {
   revenue: null,
@@ -72,13 +90,13 @@ const NULL_FINANCIALS: Readonly<Record<string, null>> = {
 
 function financialCells(f: ProjectFinancialsRow): BiFeedRow {
   return {
-    revenue: cell(f.revenue),
-    actualCost: cell(f.actualCost),
-    margin: cell(f.margin),
-    marginPct: cell(f.marginPct),
-    budget: cell(f.budget),
-    eac: cell(f.eac),
-    vac: cell(f.vac),
+    revenue: num2(f.revenue),
+    actualCost: num2(f.actualCost),
+    margin: num2(f.margin),
+    marginPct: num2(f.marginPct),
+    budget: num2(f.budget),
+    eac: num2(f.eac),
+    vac: num2(f.vac),
   };
 }
 

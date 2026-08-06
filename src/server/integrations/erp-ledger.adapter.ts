@@ -12,11 +12,15 @@
  *   • CSV  — one row per journal LINE (`date,memo,account,debit,credit`),
  *            header row first, trailing TOTALS row, RFC-4180 quoting and a
  *            formula-injection guard on every cell (via `escapeCsv`).
- *   • JSON — the journal entries verbatim plus the debit/credit totals.
+ *   • JSON — the journal entries plus the debit/credit totals.
  *
  * Invariant: an ERP must NEVER receive an unbalanced batch. When
  * `journalTotals(entries).balanced === false` the builder throws a typed
  * {@link UnbalancedJournalError} instead of producing an artifact.
+ *
+ * Invariant: every money figure LEAVES this adapter at 2 decimals (`money2`),
+ * in both formats. The rounding sits at the emission boundary only — the
+ * balance check above runs on the exact figures first.
  */
 
 import { JournalEntry, journalTotals } from '../../app/services/finance.util';
@@ -77,6 +81,23 @@ function csvRow(cells: readonly unknown[]): string {
   return cells.map(escapeCsv).join(',');
 }
 
+/**
+ * Round a money figure to 2 decimals for EMISSION.
+ *
+ * Applied ONLY where a number becomes a cell of the artifact, never before the
+ * balance assertion in `buildJournalExport`: an unbalanced batch must still be
+ * rejected on the EXACT figures. Rounding first could both mask a real
+ * sub-cent imbalance and let the rounding migrate upstream into the journal
+ * math, where it would compound across postings.
+ *
+ * Non-finite input is passed through untouched. `journalTotals` already
+ * sanitises NaN/Infinity; coercing them to 0 here would fabricate a
+ * balanced-looking cell out of a broken one.
+ */
+function money2(n: number): number {
+  return Number.isFinite(n) ? Math.round((n + Number.EPSILON) * 100) / 100 : n;
+}
+
 /** Sanitise a free-form date/period string for use inside a filename. */
 function filenameToken(value: string): string {
   const safe = value.replace(/[^0-9A-Za-z-]+/g, '-').replace(/^-+|-+$/g, '');
@@ -135,6 +156,10 @@ export class GenericLedgerExportAdapter implements ErpExportAdapter {
    * Σ debit / Σ credit in the `account = TOTALS` row. Lines joined with CRLF
    * (RFC 4180), every cell passed through `escapeCsv` so a memo or account
    * starting with `=`, `+`, `-`, `@`, TAB or CR cannot inject a formula.
+   *
+   * Every money cell goes through `money2`: this file is destined for import
+   * into an accounting system, so 13-decimal float residue (a rate card divided
+   * by a non-integral hours-per-day, say) must not reach it.
    */
   private buildCsv(
     entries: readonly JournalEntry[],
@@ -143,10 +168,10 @@ export class GenericLedgerExportAdapter implements ErpExportAdapter {
     const rows: string[] = [csvRow(GL_CSV_HEADER)];
     for (const entry of entries) {
       for (const line of entry.lines) {
-        rows.push(csvRow([entry.date, entry.memo, line.account, line.debit, line.credit]));
+        rows.push(csvRow([entry.date, entry.memo, line.account, money2(line.debit), money2(line.credit)]));
       }
     }
-    rows.push(csvRow(['', '', GL_CSV_TOTALS_LABEL, totals.debit, totals.credit]));
+    rows.push(csvRow(['', '', GL_CSV_TOTALS_LABEL, money2(totals.debit), money2(totals.credit)]));
 
     return {
       filename: `${filenameStem(entries)}.csv`,
@@ -155,15 +180,25 @@ export class GenericLedgerExportAdapter implements ErpExportAdapter {
     };
   }
 
-  /** JSON: the entries verbatim plus the (already validated) totals. */
+  /**
+   * JSON: the entries plus the (already validated) totals, money rounded to
+   * cents at the same emission boundary as the CSV — the JSON is equally an
+   * accounting artifact, so the 2-decimal rule cannot depend on `format`.
+   *
+   * The entries are COPIED, never mutated: the caller's journal keeps the exact
+   * figures the balance assertion was made on.
+   */
   private buildJson(
     entries: readonly JournalEntry[],
     totals: { debit: number; credit: number; balanced: boolean },
   ): ExportArtifact {
     const payload = {
       format: 'GenericLedgerExport',
-      entries,
-      totals,
+      entries: entries.map((e) => ({
+        ...e,
+        lines: e.lines.map((l) => ({ ...l, debit: money2(l.debit), credit: money2(l.credit) })),
+      })),
+      totals: { ...totals, debit: money2(totals.debit), credit: money2(totals.credit) },
     };
     return {
       filename: `${filenameStem(entries)}.json`,

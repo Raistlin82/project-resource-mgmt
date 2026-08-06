@@ -4,6 +4,7 @@ import {
   EInvoiceValidationError,
   escapeXml,
   PLACEHOLDER_VAT,
+  type EInvoiceErrorCode,
   type SupplierInfo,
 } from './fatturapa.adapter';
 import type { Contract, Customer, Order, OrderLine } from '../../app/services/api.service';
@@ -264,9 +265,17 @@ describe('FatturaPaAdapter.buildInvoiceXml() — XML escaping', () => {
   });
 });
 
+/**
+ * NOTE on the fixtures below: every one sets `order.amount` to the sum of its
+ * own lines. That is not decoration — `buildInvoiceXml` reconciles the two and
+ * refuses ORDER_TOTAL_MISMATCH otherwise, so an order whose amount contradicts
+ * its lines can no longer be exported at all. The assertions themselves
+ * (Imponibile/Imposta/Totale numerals) are unchanged.
+ */
 describe('FatturaPaAdapter.buildInvoiceXml() — lines and totals math', () => {
   it('numbers DettaglioLinee sequentially with per-line PrezzoTotale', () => {
     const xml = build({
+      order: { amount: 1100 },
       lines: [makeLine('l1', 'Phase 1', 600.5), makeLine('l2', 'Phase 2', 399.5), makeLine('l3', 'Expenses', 100)],
     });
     expect(countOpen(xml, 'DettaglioLinee')).toBe(3);
@@ -281,6 +290,7 @@ describe('FatturaPaAdapter.buildInvoiceXml() — lines and totals math', () => {
   it('computes Imposta at 22% of the imponibile with 2-decimal rounding', () => {
     // imponibile = 600.50 + 399.50 + 100 = 1100.00; imposta = 242.00; total = 1342.00
     const xml = build({
+      order: { amount: 1100 },
       lines: [makeLine('l1', 'Phase 1', 600.5), makeLine('l2', 'Phase 2', 399.5), makeLine('l3', 'Expenses', 100)],
     });
     expect(xml).toContain('<AliquotaIVA>22.00</AliquotaIVA>');
@@ -290,7 +300,7 @@ describe('FatturaPaAdapter.buildInvoiceXml() — lines and totals math', () => {
   });
 
   it('rounds Imposta to 2 decimals (150.01 -> 33.0022 -> 33.00)', () => {
-    const xml = build({ lines: [makeLine('l1', 'A', 100.005), makeLine('l2', 'B', 50.0)] });
+    const xml = build({ order: { amount: 150.01 }, lines: [makeLine('l1', 'A', 100.005), makeLine('l2', 'B', 50.0)] });
     // sum = 150.005 -> imponibile rounds to 150.01 (round half up at 2 decimals)
     expect(xml).toContain('<ImponibileImporto>150.01</ImponibileImporto>');
     expect(xml).toContain('<Imposta>33.00</Imposta>');
@@ -298,14 +308,14 @@ describe('FatturaPaAdapter.buildInvoiceXml() — lines and totals math', () => {
   });
 
   it('rounds Imposta up when the third decimal is >= 5 (47.50 -> 10.45)', () => {
-    const xml = build({ lines: [makeLine('l1', 'A', 47.5)] });
+    const xml = build({ order: { amount: 47.5 }, lines: [makeLine('l1', 'A', 47.5)] });
     expect(xml).toContain('<ImponibileImporto>47.50</ImponibileImporto>');
     expect(xml).toContain('<Imposta>10.45</Imposta>');
     expect(xml).toContain('<ImportoTotaleDocumento>57.95</ImportoTotaleDocumento>');
   });
 
   it('handles floating-point sums cleanly (0.1 + 0.2)', () => {
-    const xml = build({ lines: [makeLine('l1', 'A', 0.1), makeLine('l2', 'B', 0.2)] });
+    const xml = build({ order: { amount: 0.3 }, lines: [makeLine('l1', 'A', 0.1), makeLine('l2', 'B', 0.2)] });
     expect(xml).toContain('<ImponibileImporto>0.30</ImponibileImporto>');
     expect(xml).toContain('<Imposta>0.07</Imposta>'); // 0.066 -> 0.07
   });
@@ -373,6 +383,120 @@ describe('FatturaPaAdapter.buildInvoiceXml() — validation', () => {
   });
 });
 
+describe('FatturaPaAdapter.buildInvoiceXml() — reconciliation against the order (ORDER_TOTAL_MISMATCH)', () => {
+  /** Run the builder and return the EInvoiceValidationError code it threw, or null. */
+  function codeThrownBy(overrides: Parameters<typeof build>[0]): EInvoiceErrorCode | null {
+    try {
+      build(overrides);
+      return null;
+    } catch (e) {
+      expect(e).toBeInstanceOf(EInvoiceValidationError);
+      return (e as EInvoiceValidationError).code;
+    }
+  }
+
+  /** The document total as EMITTED — the numeral, never the tag's presence. */
+  function importoTotale(xml: string): string {
+    return /<ImportoTotaleDocumento>([^<]*)<\/ImportoTotaleDocumento>/.exec(xml)?.[1] ?? '';
+  }
+
+  // --- the failure this closes -------------------------------------------------
+
+  it('refuses to emit when a line added after issue pushes the lines above the order amount', () => {
+    // Seed O1: issued for 200,000 EUR under INV-2026-0001. A 500,000 "Change
+    // request" line is POSTed to the already-invoiced order; the lines then sum
+    // to 700,000 and the adapter used to emit ImportoTotaleDocumento 854000.00
+    // under the invoice number the customer already holds.
+    expect(
+      codeThrownBy({
+        order: { amount: 200_000, invoiceNumber: 'INV-2026-0001' },
+        lines: [makeLine('l1', 'Initial scope', 200_000), makeLine('l2', 'Change request', 500_000)],
+      }),
+    ).toBe('ORDER_TOTAL_MISMATCH');
+  });
+
+  it('refuses to emit when a line is edited DOWN after issue (the guard is symmetric)', () => {
+    // PUT /order-lines/L9 {"amount": 1} on an issued 120,000 order. Under-billing
+    // must be refused exactly like over-billing — a one-sided check would let the
+    // customer be invoiced 1.00 EUR under an issued number.
+    expect(
+      codeThrownBy({ order: { amount: 120_000 }, lines: [makeLine('l1', 'Delivery', 1)] }),
+    ).toBe('ORDER_TOTAL_MISMATCH');
+  });
+
+  it('refuses a divergence of a single cent (the tolerance is half a cent, not a slush fund)', () => {
+    expect(
+      codeThrownBy({ order: { amount: 200_000 }, lines: [makeLine('l1', 'Delivery', 200_000.01)] }),
+    ).toBe('ORDER_TOTAL_MISMATCH');
+  });
+
+  it('names both figures in the message so the divergence is actionable', () => {
+    try {
+      build({ order: { amount: 200_000 }, lines: [makeLine('l1', 'Delivery', 700_000)] });
+      expect.unreachable('expected buildInvoiceXml to refuse the mismatch');
+    } catch (e) {
+      const message = (e as EInvoiceValidationError).message;
+      expect(message).toContain('200000.00');
+      expect(message).toContain('700000.00');
+      expect(message).toContain('INV-2026-0042');
+    }
+  });
+
+  // --- the ABSENCE side: what must STILL be emitted ----------------------------
+  //
+  // A guard that always refused would pass every test above. These five cases
+  // are the ones that must keep working, and each asserts the emitted total
+  // NUMERAL — a tag-presence assertion would pass on a wrong total too.
+
+  it('emits normally when the lines sum exactly to the order amount', () => {
+    const xml = build({ order: { amount: 200_000 }, lines: [makeLine('l1', 'Delivery', 200_000)] });
+    expect(importoTotale(xml)).toBe('244000.00'); // 200000 + 22%
+  });
+
+  it('emits normally for a multi-line order whose lines sum to the order amount', () => {
+    const xml = build({
+      order: { amount: 200_000 },
+      lines: [makeLine('l1', 'Phase 1', 120_000), makeLine('l2', 'Phase 2', 80_000)],
+    });
+    expect(countOpen(xml, 'DettaglioLinee')).toBe(2);
+    expect(importoTotale(xml)).toBe('244000.00');
+  });
+
+  it('keeps the documented empty-lines fallback working (it can never diverge)', () => {
+    // The synthetic line IS order.amount, so reconciliation is a no-op here. This
+    // is the case a naive "lines must exist" guard would have broken.
+    const xml = build({ order: { amount: 200_000 }, lines: [] });
+    expect(countOpen(xml, 'DettaglioLinee')).toBe(1);
+    expect(importoTotale(xml)).toBe('244000.00');
+  });
+
+  it('emits a credit note whose negative amount matches its negative line (compared in absolute value)', () => {
+    // TD04 carries a negative order.amount and positive line amounts, so a signed
+    // comparison would have refused every credit note.
+    const xml = build({ order: { amount: -1500 }, lines: [makeLine('l1', 'Credit for overbilling', -1500)] });
+    expect(xml).toContain('<TipoDocumento>TD04</TipoDocumento>');
+    expect(importoTotale(xml)).toBe('1830.00'); // 1500 + 22%
+  });
+
+  it('tolerates sub-cent float residue on the order amount (both sides are rounded to cents first)', () => {
+    const xml = build({ order: { amount: 1000.0000000000002 }, lines: [makeLine('l1', 'Consulting', 1000)] });
+    expect(importoTotale(xml)).toBe('1220.00');
+  });
+
+  // --- precedence --------------------------------------------------------------
+
+  it('still reports the more fundamental failure first when the order is also ineligible', () => {
+    // Reconciliation runs AFTER eligibility/invoice-number/VAT: a draft order with
+    // mismatching lines is INELIGIBLE_ORDER, not ORDER_TOTAL_MISMATCH.
+    expect(
+      codeThrownBy({ order: { amount: 200_000, status: 'Open' }, lines: [makeLine('l1', 'x', 700_000)] }),
+    ).toBe('INELIGIBLE_ORDER');
+    expect(
+      codeThrownBy({ order: { amount: 200_000, invoiceNumber: '  ' }, lines: [makeLine('l1', 'x', 700_000)] }),
+    ).toBe('MISSING_INVOICE_NUMBER');
+  });
+});
+
 describe('FatturaPaAdapter.buildInvoiceXml() — currency and dates', () => {
   it('propagates the order currency into Divisa', () => {
     expect(build({ order: { currency: 'USD' } })).toContain('<Divisa>USD</Divisa>');
@@ -410,7 +534,10 @@ describe('FatturaPaAdapter.buildInvoiceXml() — FPR12 schema-validity regressio
 
   it('keeps ImponibileImporto identical to the sum of the rendered PrezzoTotale values (no per-line rounding drift, SDI 00422)', () => {
     const lines = [1, 2, 3, 4, 5].map(n => makeLine(`l${n}`, `Item ${n}`, 10.125));
-    const xml = build({ lines });
+    // order.amount is 50.65, the sum of the ROUNDED lines — not the raw 50.625.
+    // The reconciliation compares against the figure the document emits, which
+    // is by construction the sum of the rendered PrezzoTotale values.
+    const xml = build({ order: { amount: 50.65 }, lines });
     // Each 10.125 line renders as 10.13; the riepilogo must sum the ROUNDED amounts.
     expect((xml.match(/<PrezzoTotale>10\.13<\/PrezzoTotale>/g) ?? []).length).toBe(5);
     expect(xml).toContain('<ImponibileImporto>50.65</ImponibileImporto>');
