@@ -6,6 +6,8 @@ import {
   inject,
   signal,
 } from '@angular/core';
+import { ActivatedRoute } from '@angular/router';
+import { SEARCH_FOCUS_PARAM } from '../services/search-target.util';
 import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { of } from 'rxjs';
 import { DecimalPipe } from '@angular/common';
@@ -712,9 +714,22 @@ export class ResourcesComponent {
     this.editingLocation.set(this.form.controls.location.value ?? '');
   }
 
-  search = signal('');
-  /** "Active only" filter toggle — true by default (terminated rows hidden). */
-  activeOnly = signal(true);
+  /**
+   * Seeds this list's filter from `?q=`, so a /search hit can land on the row it
+   * named instead of on an unfiltered list (search-target.util).
+   *
+   * Read ONCE in a field initialiser, not subscribed: this seeds a starting value
+   * the user is then free to change, and a live subscription would fight every
+   * keystroke by writing the stale param back. A blank or whitespace-only `q` is
+   * ignored, so `?q=` alone cannot look like a filter already cleared.
+   */
+  private seededQuery = inject(ActivatedRoute).snapshot.queryParamMap.get(SEARCH_FOCUS_PARAM)?.trim() ?? '';
+  search = signal(this.seededQuery);
+  /** "Active only" filter toggle — true by default (terminated rows hidden),
+   *  EXCEPT when arriving from /search with a named person: a terminated
+   *  resource is a legitimate hit, so defaulting this on would hide exactly
+   *  the row that was asked for and show an empty list instead. */
+  activeOnly = signal(this.seededQuery === '');
   /** Kind filter (C1): '' = all kinds; otherwise isolate internal/dummy/subco rows. */
   kindFilter = signal<'' | ResourceKind>('');
   /** Kind `<select>` option list (value + readable label), shared by the kind filter and the form's kind select. */
@@ -868,6 +883,8 @@ export class ResourcesComponent {
 
   // Live kind value drives the vendor field's visibility in the template (C1).
   protected readonly kindValue = toSignal(this.form.controls.kind.valueChanges, { initialValue: this.form.controls.kind.value });
+
+
 
   constructor() {
     // C1: vendorId must be required exactly when kind === 'subco', and react

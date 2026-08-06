@@ -1,4 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, signal } from '@angular/core';
+import { ActivatedRoute } from '@angular/router';
+import { SEARCH_FOCUS_PARAM } from '../../services/search-target.util';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
 import { rxResource, toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
@@ -194,7 +196,18 @@ export class Customers {
   // resources.component.ts's own filter (no server round-trip needed for a
   // list this small; the server-side q/limit/offset from Block G's other
   // tasks exists for the dedicated /search page, not this screen).
-  protected customerQuery = signal('');
+  /**
+   * Seeds this list's filter from `?q=`, so a /search hit can land on the row it
+   * named instead of on an unfiltered list (search-target.util).
+   *
+   * Read ONCE from the snapshot in a field initialiser, not subscribed: this
+   * seeds a starting value the user is then free to change, and a live
+   * subscription would fight every keystroke by writing the stale param back.
+   * A blank or whitespace-only `q` is ignored, so `?q=` alone cannot look like a
+   * filter the user had already cleared.
+   */
+  private seededQuery = inject(ActivatedRoute).snapshot.queryParamMap.get(SEARCH_FOCUS_PARAM)?.trim() ?? '';
+  protected customerQuery = signal(this.seededQuery);
   protected filteredCustomers = computed(() => {
     const q = this.customerQuery().trim().toLowerCase();
     const all = this.customers();

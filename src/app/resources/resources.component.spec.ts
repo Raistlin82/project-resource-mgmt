@@ -1,5 +1,6 @@
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
+import { provideRouter } from '@angular/router';
 import { of, Subject, throwError, type Observable } from 'rxjs';
 import { ResourcesComponent } from './resources.component';
 import { ApiService, Resource, ResourceOrganization, RateCard, Assignment, Vendor } from '../services/api.service';
@@ -72,6 +73,8 @@ function setup(
   TestBed.configureTestingModule({
     imports: [ResourcesComponent],
     providers: [
+        // ?q= seeding reads ActivatedRoute; /search rows render RouterLink.
+        provideRouter([]),
       { provide: ApiService, useValue: apiStub },
       { provide: AuthService, useValue: authStub },
       { provide: NotificationService, useValue: notifyStub },
@@ -483,6 +486,8 @@ describe('ResourcesComponent', () => {
       TestBed.configureTestingModule({
         imports: [ResourcesComponent],
         providers: [
+        // ?q= seeding reads ActivatedRoute; /search rows render RouterLink.
+        provideRouter([]),
           { provide: ApiService, useValue: apiStub },
           { provide: AuthService, useValue: authStub },
           { provide: NotificationService, useValue: notifyStub },

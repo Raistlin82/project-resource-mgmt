@@ -1,4 +1,5 @@
 import { TestBed } from '@angular/core/testing';
+import { provideRouter } from '@angular/router';
 import { PLATFORM_ID, provideZonelessChangeDetection } from '@angular/core';
 import { delay, of, throwError } from 'rxjs';
 import { HttpErrorResponse } from '@angular/common/http';
@@ -28,10 +29,18 @@ describe('SearchComponent', () => {
     await TestBed.configureTestingModule({
       imports: [SearchComponent],
       providers: [
+        // ?q= seeding reads ActivatedRoute; /search rows render RouterLink.
+        provideRouter([]),
         provideZonelessChangeDetection(),
         { provide: PLATFORM_ID, useValue: platform },
         { provide: ApiService, useValue: apiStub(apiOverrides) },
-        { provide: AuthService, useValue: { authReady: () => true, canReadStaffing: () => true, canReadCommercial: () => true, ...authOverrides } },
+        { provide: AuthService, useValue: {
+          authReady: () => true, canReadStaffing: () => true, canReadCommercial: () => true,
+          // Row LINKING gates on the target route's guard, not on the section
+          // pre-filter, so these three are what decide whether a row is a link.
+          // Defaulted permissive here; the linking describe overrides them.
+          canManageStaffing: () => true, canManageCommercial: () => true, role: () => 'admin',
+          ...authOverrides } },
       ],
     }).compileComponents();
     const fixture = TestBed.createComponent(SearchComponent);
@@ -305,6 +314,111 @@ describe('SearchComponent', () => {
       });
       expect(hintIn(fixture, 'resources')).toBeTruthy();
       expect(hintIn(fixture, 'projects')).toBeFalsy();
+    });
+  });
+
+  // ===========================================================================
+  // Row navigation. Every assertion here is PAIRED, because the whole risk is
+  // one-sided: a component that links unconditionally satisfies "is a link", and
+  // one that never links satisfies "is not a link". Only both together pin it.
+  //
+  // The gate is the TARGET ROUTE's guard, not this screen's section pre-filter.
+  // The two disagree for all six sections, and `projects` is the extreme — the
+  // section is open to any authenticated principal while /projects/:id demands
+  // staffing read, so an unconditional link would advertise a route the router
+  // refuses.
+  // ===========================================================================
+  describe('result rows navigate, and only where the target route would admit the caller', () => {
+    const ROWS = {
+      getResources: () => of([{ id: 'R1', name: 'Julie Armstrong', role: 'Developer', kind: 'internal' }]),
+      getRequests: () => of([{ id: 'RQ1', name: 'Julie backfill', requiredRole: 'Developer', requiredEffort: 10, status: 'Open', skills: [] }]),
+      getProjects: () => of([{ id: 'P1', name: 'Julie Alpha', location: 'Berlin' }]),
+      getCustomers: () => of([{ id: 'C1', name: 'Julie Industries' }]),
+      getContracts: () => of([{ id: 'CT1', name: 'Julie MSA' }]),
+      getOrders: () => of([{ id: 'O1', invoiceNumber: 'INV-JULIE-1' }]),
+    };
+
+    /** Every identity a row could be rendered for, at full privilege. */
+    const ALL = {
+      canReadStaffing: () => true, canReadCommercial: () => true,
+      canManageStaffing: () => true, canManageCommercial: () => true,
+      role: () => 'admin' as const,
+    };
+
+    const linkIn = (fixture: { nativeElement: unknown }, section: string) =>
+      (fixture.nativeElement as HTMLElement).querySelector<HTMLAnchorElement>(`[data-test="search-hit-${section}"]`);
+
+    const sectionText = (fixture: { nativeElement: unknown }, section: string) =>
+      (fixture.nativeElement as HTMLElement).querySelector(`[data-test="section-${section}"]`)?.textContent ?? '';
+
+    it('the two detail sections link to the item itself, by id', async () => {
+      const fixture = await setupAndSubmit(ROWS, ALL);
+      expect(linkIn(fixture, 'projects')?.getAttribute('href')).toBe('/projects/P1');
+      expect(linkIn(fixture, 'contracts')?.getAttribute('href')).toBe('/contracts/CT1');
+    });
+
+    it('the list sections link to their list, filtered on the label the row shows', async () => {
+      const fixture = await setupAndSubmit(ROWS, ALL);
+      expect(linkIn(fixture, 'resources')?.getAttribute('href')).toBe('/resources?q=Julie%20Armstrong');
+      expect(linkIn(fixture, 'customers')?.getAttribute('href')).toBe('/customers?q=Julie%20Industries');
+      // Orders are labelled by invoice number, which is also what /orders filters
+      // on — seeding a `name` it does not have would dead-end on an empty list.
+      expect(linkIn(fixture, 'orders')?.getAttribute('href')).toBe('/orders?q=INV-JULIE-1');
+    });
+
+    it('requests stay inert for EVERY identity: /requests cannot show another user request', async () => {
+      const fixture = await setupAndSubmit(ROWS, ALL);
+      expect(linkIn(fixture, 'requests'), 'a link here would be a lie').toBeNull();
+      // ABSENCE HALF: the row must still be RENDERED, just not as a link.
+      expect(sectionText(fixture, 'requests')).toContain('Julie backfill');
+    });
+
+    // --- The gate, section by section: denied identity, then granted. ---
+
+    it('projects: NO link without staffing read, even though the section itself is open', async () => {
+      const fixture = await setupAndSubmit(ROWS, { ...ALL, canReadStaffing: () => false });
+      expect(linkIn(fixture, 'projects')).toBeNull();
+      // The row is still visible — that is precisely why the gate is needed.
+      expect(sectionText(fixture, 'projects')).toContain('Julie Alpha');
+    });
+
+    it('projects: link once staffing read is granted', async () => {
+      const fixture = await setupAndSubmit(ROWS, ALL);
+      expect(linkIn(fixture, 'projects')).not.toBeNull();
+    });
+
+    it('contracts, customers, orders: NO link on commercial READ alone — the routes demand manage', async () => {
+      const fixture = await setupAndSubmit(ROWS, { ...ALL, canManageCommercial: () => false });
+      for (const section of ['contracts', 'customers', 'orders']) {
+        expect(linkIn(fixture, section), section).toBeNull();
+      }
+      expect(sectionText(fixture, 'contracts')).toContain('Julie MSA');
+    });
+
+    it('contracts, customers, orders: link once commercial manage is granted', async () => {
+      const fixture = await setupAndSubmit(ROWS, ALL);
+      for (const section of ['contracts', 'customers', 'orders']) {
+        expect(linkIn(fixture, section), section).not.toBeNull();
+      }
+    });
+
+    it('resources: NO link for a role outside the three /resources admits', async () => {
+      const fixture = await setupAndSubmit(ROWS, { ...ALL, role: () => 'pm' as const });
+      expect(linkIn(fixture, 'resources')).toBeNull();
+      expect(sectionText(fixture, 'resources')).toContain('Julie Armstrong');
+    });
+
+    it('resources: link for a role the route admits', async () => {
+      const fixture = await setupAndSubmit(ROWS, { ...ALL, role: () => 'resource-manager' as const });
+      expect(linkIn(fixture, 'resources')).not.toBeNull();
+    });
+
+    it('an inert row is plain text, never a disabled or href-less anchor', async () => {
+      // An <a> with no href is unreachable by keyboard and announced as a link
+      // that goes nowhere; the row must not be an anchor at all.
+      const fixture = await setupAndSubmit(ROWS, { ...ALL, canReadStaffing: () => false });
+      const projects = (fixture.nativeElement as HTMLElement).querySelector('[data-test="section-projects"]')!;
+      expect(projects.querySelectorAll('a').length).toBe(0);
     });
   });
 });

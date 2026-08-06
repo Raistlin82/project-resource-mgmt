@@ -5,7 +5,9 @@ import { HttpErrorResponse } from '@angular/common/http';
 import { catchError, forkJoin, map, of, type Observable } from 'rxjs';
 import { ApiService } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
+import { RouterLink } from '@angular/router';
 import { ListStateComponent } from '../shared/list-state.component';
+import { searchFocusLabel, searchTargetFor, type SearchTarget, type SearchSectionKey } from '../services/search-target.util';
 import { SEARCH_MAX_LIMIT } from '../services/search.util';
 import type { Resource, ResourceRequest, Project, Customer, Contract, Order } from '../services/api.service';
 
@@ -127,7 +129,7 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
 @Component({
   selector: 'app-search',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [ListStateComponent],
+  imports: [ListStateComponent, RouterLink],
   template: `
     <div class="command-page space-y-6">
       <header class="command-header">
@@ -170,7 +172,15 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
                 <app-list-state [loading]="state.kind === 'loading'" [error]="state.kind === 'error'" label="resources" (retry)="reload()">
                   <ng-template>
                     @if (state.kind === 'ok') {
-                      @for (r of state.rows; track r.id) { <div>{{ r.name }}</div> }
+                      @for (r of state.rows; track r.id) {
+                        @if (targetFor('resources', r); as t) {
+                          <a [routerLink]="t.link" [queryParams]="t.queryParams ?? null"
+                             data-test="search-hit-resources"
+                             class="block rounded px-2 py-1 -mx-2 text-[var(--cc-primary)] hover:bg-surface-muted hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--cc-primary)]">{{ r.name }}</a>
+                        } @else {
+                          <div class="px-2 py-1 -mx-2">{{ r.name }}</div>
+                        }
+                      }
                       @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('resources') }}" in Resources.</p> }
                       @if (isTruncated(state.rows)) { <p data-test="truncation-hint" class="mt-3 text-sm text-[var(--cc-muted)]">Showing the first {{ pageLimit }} matches — there may be more. Refine the query to narrow the results.</p> }
                     }
@@ -189,7 +199,15 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
                 <app-list-state [loading]="state.kind === 'loading'" [error]="state.kind === 'error'" label="projects" (retry)="reload()">
                   <ng-template>
                     @if (state.kind === 'ok') {
-                      @for (p of state.rows; track p.id) { <div>{{ p.name }}</div> }
+                      @for (p of state.rows; track p.id) {
+                        @if (targetFor('projects', p); as t) {
+                          <a [routerLink]="t.link" [queryParams]="t.queryParams ?? null"
+                             data-test="search-hit-projects"
+                             class="block rounded px-2 py-1 -mx-2 text-[var(--cc-primary)] hover:bg-surface-muted hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--cc-primary)]">{{ p.name }}</a>
+                        } @else {
+                          <div class="px-2 py-1 -mx-2">{{ p.name }}</div>
+                        }
+                      }
                       @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('projects') }}" in Projects.</p> }
                       @if (isTruncated(state.rows)) { <p data-test="truncation-hint" class="mt-3 text-sm text-[var(--cc-muted)]">Showing the first {{ pageLimit }} matches — there may be more. Refine the query to narrow the results.</p> }
                     }
@@ -208,7 +226,15 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
                 <app-list-state [loading]="state.kind === 'loading'" [error]="state.kind === 'error'" label="requests" (retry)="reload()">
                   <ng-template>
                     @if (state.kind === 'ok') {
-                      @for (r of state.rows; track r.id) { <div>{{ r.name }}</div> }
+                      @for (r of state.rows; track r.id) {
+                        @if (targetFor('requests', r); as t) {
+                          <a [routerLink]="t.link" [queryParams]="t.queryParams ?? null"
+                             data-test="search-hit-requests"
+                             class="block rounded px-2 py-1 -mx-2 text-[var(--cc-primary)] hover:bg-surface-muted hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--cc-primary)]">{{ r.name }}</a>
+                        } @else {
+                          <div class="px-2 py-1 -mx-2">{{ r.name }}</div>
+                        }
+                      }
                       @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('requests') }}" in Requests.</p> }
                       @if (isTruncated(state.rows)) { <p data-test="truncation-hint" class="mt-3 text-sm text-[var(--cc-muted)]">Showing the first {{ pageLimit }} matches — there may be more. Refine the query to narrow the results.</p> }
                     }
@@ -227,7 +253,15 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
                 <app-list-state [loading]="state.kind === 'loading'" [error]="state.kind === 'error'" label="customers" (retry)="reload()">
                   <ng-template>
                     @if (state.kind === 'ok') {
-                      @for (c of state.rows; track c.id) { <div>{{ c.name }}</div> }
+                      @for (c of state.rows; track c.id) {
+                        @if (targetFor('customers', c); as t) {
+                          <a [routerLink]="t.link" [queryParams]="t.queryParams ?? null"
+                             data-test="search-hit-customers"
+                             class="block rounded px-2 py-1 -mx-2 text-[var(--cc-primary)] hover:bg-surface-muted hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--cc-primary)]">{{ c.name }}</a>
+                        } @else {
+                          <div class="px-2 py-1 -mx-2">{{ c.name }}</div>
+                        }
+                      }
                       @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('customers') }}" in Customers.</p> }
                       @if (isTruncated(state.rows)) { <p data-test="truncation-hint" class="mt-3 text-sm text-[var(--cc-muted)]">Showing the first {{ pageLimit }} matches — there may be more. Refine the query to narrow the results.</p> }
                     }
@@ -246,7 +280,15 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
                 <app-list-state [loading]="state.kind === 'loading'" [error]="state.kind === 'error'" label="contracts" (retry)="reload()">
                   <ng-template>
                     @if (state.kind === 'ok') {
-                      @for (c of state.rows; track c.id) { <div>{{ c.name }}</div> }
+                      @for (c of state.rows; track c.id) {
+                        @if (targetFor('contracts', c); as t) {
+                          <a [routerLink]="t.link" [queryParams]="t.queryParams ?? null"
+                             data-test="search-hit-contracts"
+                             class="block rounded px-2 py-1 -mx-2 text-[var(--cc-primary)] hover:bg-surface-muted hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--cc-primary)]">{{ c.name }}</a>
+                        } @else {
+                          <div class="px-2 py-1 -mx-2">{{ c.name }}</div>
+                        }
+                      }
                       @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('contracts') }}" in Contracts.</p> }
                       @if (isTruncated(state.rows)) { <p data-test="truncation-hint" class="mt-3 text-sm text-[var(--cc-muted)]">Showing the first {{ pageLimit }} matches — there may be more. Refine the query to narrow the results.</p> }
                     }
@@ -265,7 +307,15 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
                 <app-list-state [loading]="state.kind === 'loading'" [error]="state.kind === 'error'" label="orders" (retry)="reload()">
                   <ng-template>
                     @if (state.kind === 'ok') {
-                      @for (o of state.rows; track o.id) { <div>{{ o.invoiceNumber ?? o.id }}</div> }
+                      @for (o of state.rows; track o.id) {
+                        @if (targetFor('orders', o); as t) {
+                          <a [routerLink]="t.link" [queryParams]="t.queryParams ?? null"
+                             data-test="search-hit-orders"
+                             class="block rounded px-2 py-1 -mx-2 text-[var(--cc-primary)] hover:bg-surface-muted hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--cc-primary)]">{{ o.invoiceNumber ?? o.id }}</a>
+                        } @else {
+                          <div class="px-2 py-1 -mx-2">{{ o.invoiceNumber ?? o.id }}</div>
+                        }
+                      }
                       @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('orders') }}" in Orders.</p> }
                       @if (isTruncated(state.rows)) { <p data-test="truncation-hint" class="mt-3 text-sm text-[var(--cc-muted)]">Showing the first {{ pageLimit }} matches — there may be more. Refine the query to narrow the results.</p> }
                     }
@@ -282,6 +332,37 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
 export class SearchComponent {
   private api = inject(ApiService);
   protected auth = inject(AuthService);
+
+  /**
+   * Where this row navigates, or `null` to leave it inert text.
+   *
+   * Reads the capabilities REACTIVELY, inside the call — never snapshotted at
+   * field init, or a deep-link into /search freezes the anonymous default and
+   * every row renders inert for the rest of the session.
+   *
+   * The gate is `search-target.util`'s, which mirrors each TARGET ROUTE's own
+   * `canMatch` guard rather than this component's `sectionAllowed()`. The two
+   * disagree for all six sections, and `projects` is the extreme: its section is
+   * open to any authenticated principal while `/projects/:id` demands staffing
+   * read. Gating the link on `sectionAllowed()` would advertise a route the
+   * router then refuses — the defect already corrected once on the project
+   * cards. The full table lives in that util's header.
+   */
+  protected targetFor(
+    section: SearchSectionKey,
+    item: { id: string; name?: string; invoiceNumber?: string },
+  ): SearchTarget | null {
+    return searchTargetFor(
+      section,
+      { id: item.id, name: searchFocusLabel(section, item) },
+      {
+        canReadStaffing: this.auth.canReadStaffing(),
+        canManageStaffing: this.auth.canManageStaffing(),
+        canManageCommercial: this.auth.canManageCommercial(),
+        roles: this.auth.role() ? [this.auth.role()] : [],
+      },
+    );
+  }
   private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
   private readonly destroyRef = inject(DestroyRef);
 

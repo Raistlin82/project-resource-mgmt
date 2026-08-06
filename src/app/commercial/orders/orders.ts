@@ -1,4 +1,6 @@
 import { ChangeDetectionStrategy, Component, inject, signal, computed, DestroyRef, effect } from '@angular/core';
+import { ActivatedRoute } from '@angular/router';
+import { SEARCH_FOCUS_PARAM } from '../../services/search-target.util';
 import { MatIconModule } from '@angular/material/icon';
 import { CurrencyPipe, DatePipe } from '@angular/common';
 import { ReactiveFormsModule, FormControl, FormGroup, Validators, AbstractControl, ValidationErrors } from '@angular/forms';
@@ -257,7 +259,18 @@ export class Orders {
   // falling back to `id`, the SAME field choice server.ts's own /orders?q=
   // handler makes (Task 2 Step 7) and spec §11's field table records, so a
   // search that matches here matches the same way through /orders?q= too.
-  protected orderQuery = signal('');
+  /**
+   * Seeds this list's filter from `?q=`, so a /search hit can land on the row it
+   * named instead of on an unfiltered list (search-target.util).
+   *
+   * Read ONCE from the snapshot in a field initialiser, not subscribed: this
+   * seeds a starting value the user is then free to change, and a live
+   * subscription would fight every keystroke by writing the stale param back.
+   * A blank or whitespace-only `q` is ignored, so `?q=` alone cannot look like a
+   * filter the user had already cleared.
+   */
+  private seededQuery = inject(ActivatedRoute).snapshot.queryParamMap.get(SEARCH_FOCUS_PARAM)?.trim() ?? '';
+  protected orderQuery = signal(this.seededQuery);
   protected filteredOrders = computed(() => {
     const q = this.orderQuery().trim().toLowerCase();
     const all = this.orders();

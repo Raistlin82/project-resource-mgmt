@@ -1,4 +1,5 @@
 import { TestBed } from '@angular/core/testing';
+import { provideRouter } from '@angular/router';
 import { provideZonelessChangeDetection } from '@angular/core';
 import { of, throwError } from 'rxjs';
 import { Orders } from './orders';
@@ -37,6 +38,8 @@ async function setup() {
   await TestBed.configureTestingModule({
     imports: [Orders],
     providers: [
+        // ?q= seeding reads ActivatedRoute; /search rows render RouterLink.
+        provideRouter([]),
       provideZonelessChangeDetection(),
       { provide: ApiService, useValue: apiStub() },
       { provide: AuthService, useValue: { authReady: () => true } },
@@ -107,6 +110,8 @@ describe('Orders idempotency key tracks the payload', () => {
     await TestBed.configureTestingModule({
       imports: [Orders],
       providers: [
+        // ?q= seeding reads ActivatedRoute; /search rows render RouterLink.
+        provideRouter([]),
         provideZonelessChangeDetection(),
         { provide: ApiService, useValue: api },
         { provide: AuthService, useValue: { authReady: () => true } },

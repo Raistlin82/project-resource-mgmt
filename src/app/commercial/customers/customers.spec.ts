@@ -1,4 +1,5 @@
 import { TestBed } from '@angular/core/testing';
+import { provideRouter } from '@angular/router';
 import { provideZonelessChangeDetection } from '@angular/core';
 import { NEVER, of } from 'rxjs';
 import { Customers } from './customers';
@@ -36,6 +37,8 @@ async function setup(opts: { authReady?: boolean; customers?: Customer[]; pendin
   await TestBed.configureTestingModule({
     imports: [Customers],
     providers: [
+        // ?q= seeding reads ActivatedRoute; /search rows render RouterLink.
+        provideRouter([]),
       provideZonelessChangeDetection(),
       { provide: ApiService, useValue: apiStub(opts.customers, opts.pending) },
       { provide: AuthService, useValue: { authReady: () => opts.authReady ?? true } },
