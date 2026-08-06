@@ -121,77 +121,101 @@ function shiftMonth(month: string, delta: number): string {
           <h1 class="command-title">Allocation Approvals</h1>
           <p class="command-subtitle">Per-month allocation requests awaiting a People Manager decision, by resource. Booked-hours totals always reflect the full month regardless of the status filter below.</p>
         </div>
-        <div class="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-3 w-full sm:w-auto">
-          <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
-            <span class="text-ink-muted">Status</span>
-            <select [value]="statusFilter()" (change)="onStatusChange($event)" aria-label="Status filter" data-test="status-filter" class="command-select">
-              <option value="Requested">Pending</option>
-              <option value="Allocated">Approved</option>
-              <option value="all">All</option>
+        <!-- F4: the whole control cluster is gated on the feed's error state, and
+             the gate is load-bearing twice over. It stops a failed read from
+             offering filters and an "Approve selected (0)" button over rows that
+             were never fetched; and it is the half that keeps feed()'s error
+             short-circuit honest, since an EMPTY envelope must never be
+             *rendered* as though there were simply nothing pending. A 401/403
+             gets the notice below plus the ListState error panel and its Retry. -->
+        @if (!dataError()) {
+          <div class="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-3 w-full sm:w-auto">
+            <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
+              <span class="text-ink-muted">Status</span>
+              <select [value]="statusFilter()" (change)="onStatusChange($event)" aria-label="Status filter" data-test="status-filter" class="command-select">
+                <option value="Requested">Pending</option>
+                <option value="Allocated">Approved</option>
+                <option value="all">All</option>
+              </select>
+            </label>
+            <!-- Capability / Practice / Competence / People Manager filters (D, Task 8).
+                 Derived through dimensionsOf, so a capability filter also matches a
+                 resource attached BELOW it (e.g. a competence two levels down) — never
+                 a raw equality check against the resource's organization. These
+                 <select>s load their <option>s from an async rxResource, so per the
+                 established trap they use (change) + per-option [selected] rather
+                 than [value]/[ngModel] on the <select> itself. Explicit min-widths
+                 (this row now packs 7 controls + a button) so the label text never
+                 shrink-wraps down to an unreadable sliver — the sm:flex-wrap above
+                 lets the row spill onto a second line rather than fight them for space. -->
+            <!-- F4: the three dimension filters hang off orgsRes, a SEPARATE read
+                 from the feed with its own error state. When the org tree fails we
+                 withdraw them and say so, rather than render three <select>s whose
+                 only option is "All capabilities" — an empty option list asserts
+                 "this organization has no capabilities", which is a different and
+                 worse claim than "the tree could not be loaded". The feed is
+                 unaffected, so the approvals themselves stay reviewable. -->
+            @if (orgsError()) {
+              <p role="alert" data-test="org-filters-unavailable"
+                 class="flex items-center gap-2 text-sm font-medium text-[var(--cc-ink)]">
+                <mat-icon class="text-[18px] w-[18px] h-[18px] text-[var(--cc-amber-text)] shrink-0">filter_alt_off</mat-icon>
+                Capability / practice / competence filters unavailable — the organization tree could not be loaded.
+              </p>
+            } @else {
+              <select (change)="onCapabilityChange($event)" aria-label="Filter by capability"
+                      data-test="capability-filter" class="command-select sm:min-w-[9rem]">
+                <option value="" [selected]="capabilityFilter() === ''">All capabilities</option>
+                @for (name of capabilityOptions(); track name) {
+                  <option [value]="name" [selected]="name === capabilityFilter()">{{ name }}</option>
+                }
+              </select>
+              <select (change)="onPracticeChange($event)" aria-label="Filter by practice"
+                      data-test="practice-filter" class="command-select sm:min-w-[9rem]">
+                <option value="" [selected]="practiceFilter() === ''">All practices</option>
+                @for (name of practiceOptions(); track name) {
+                  <option [value]="name" [selected]="name === practiceFilter()">{{ name }}</option>
+                }
+              </select>
+              <select (change)="onCompetenceChange($event)" aria-label="Filter by competence"
+                      data-test="competence-filter" class="command-select sm:min-w-[9rem]">
+                <option value="" [selected]="competenceFilter() === ''">All competences</option>
+                @for (name of competenceOptions(); track name) {
+                  <option [value]="name" [selected]="name === competenceFilter()">{{ name }}</option>
+                }
+              </select>
+            }
+            <select (change)="onManagerFilterChange($event)" aria-label="Filter by People Manager"
+                    data-test="manager-filter" class="command-select sm:min-w-[10rem]">
+              <option value="" [selected]="managerFilter() === ''">All people managers</option>
+              @for (m of managerFilterOptions(); track m.id) {
+                <option [value]="m.id" [selected]="m.id === managerFilter()">{{ m.name }}</option>
+              }
             </select>
-          </label>
-          <!-- Capability / Practice / Competence / People Manager filters (D, Task 8).
-               Derived through dimensionsOf, so a capability filter also matches a
-               resource attached BELOW it (e.g. a competence two levels down) — never
-               a raw equality check against the resource's organization. These
-               <select>s load their <option>s from an async rxResource, so per the
-               established trap they use (change) + per-option [selected] rather
-               than [value]/[ngModel] on the <select> itself. Explicit min-widths
-               (this row now packs 7 controls + a button) so the label text never
-               shrink-wraps down to an unreadable sliver — the sm:flex-wrap above
-               lets the row spill onto a second line rather than fight them for space. -->
-          <select (change)="onCapabilityChange($event)" aria-label="Filter by capability"
-                  data-test="capability-filter" class="command-select sm:min-w-[9rem]">
-            <option value="" [selected]="capabilityFilter() === ''">All capabilities</option>
-            @for (name of capabilityOptions(); track name) {
-              <option [value]="name" [selected]="name === capabilityFilter()">{{ name }}</option>
+            @if (monthOptions().length > 0) {
+              <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
+                <span class="text-ink-muted">From</span>
+                <select (change)="onFromChange($event)" aria-label="Range start month" class="command-select">
+                  @for (m of monthOptions(); track m) {
+                    <option [value]="m" [selected]="m === from()">{{ monthLabel(m) }}</option>
+                  }
+                </select>
+              </label>
+              <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
+                <span class="text-ink-muted">To</span>
+                <select (change)="onToChange($event)" aria-label="Range end month" class="command-select">
+                  @for (m of monthOptions(); track m) {
+                    <option [value]="m" [selected]="m === to()">{{ monthLabel(m) }}</option>
+                  }
+                </select>
+              </label>
             }
-          </select>
-          <select (change)="onPracticeChange($event)" aria-label="Filter by practice"
-                  data-test="practice-filter" class="command-select sm:min-w-[9rem]">
-            <option value="" [selected]="practiceFilter() === ''">All practices</option>
-            @for (name of practiceOptions(); track name) {
-              <option [value]="name" [selected]="name === practiceFilter()">{{ name }}</option>
-            }
-          </select>
-          <select (change)="onCompetenceChange($event)" aria-label="Filter by competence"
-                  data-test="competence-filter" class="command-select sm:min-w-[9rem]">
-            <option value="" [selected]="competenceFilter() === ''">All competences</option>
-            @for (name of competenceOptions(); track name) {
-              <option [value]="name" [selected]="name === competenceFilter()">{{ name }}</option>
-            }
-          </select>
-          <select (change)="onManagerFilterChange($event)" aria-label="Filter by People Manager"
-                  data-test="manager-filter" class="command-select sm:min-w-[10rem]">
-            <option value="" [selected]="managerFilter() === ''">All people managers</option>
-            @for (m of managerFilterOptions(); track m.id) {
-              <option [value]="m.id" [selected]="m.id === managerFilter()">{{ m.name }}</option>
-            }
-          </select>
-          @if (monthOptions().length > 0) {
-            <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
-              <span class="text-ink-muted">From</span>
-              <select (change)="onFromChange($event)" aria-label="Range start month" class="command-select">
-                @for (m of monthOptions(); track m) {
-                  <option [value]="m" [selected]="m === from()">{{ monthLabel(m) }}</option>
-                }
-              </select>
-            </label>
-            <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
-              <span class="text-ink-muted">To</span>
-              <select (change)="onToChange($event)" aria-label="Range end month" class="command-select">
-                @for (m of monthOptions(); track m) {
-                  <option [value]="m" [selected]="m === to()">{{ monthLabel(m) }}</option>
-                }
-              </select>
-            </label>
-          }
-          <button type="button" (click)="openMultiApprove()" [disabled]="selectedResourceIds().size <= 1"
-                  data-test="multi-approve" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
-            <mat-icon class="text-[18px] w-[18px] h-[18px]">done_all</mat-icon>
-            Approve selected ({{ selectedResourceIds().size }})
-          </button>
-        </div>
+            <button type="button" (click)="openMultiApprove()" [disabled]="selectedResourceIds().size <= 1"
+                    data-test="multi-approve" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
+              <mat-icon class="text-[18px] w-[18px] h-[18px]">done_all</mat-icon>
+              Approve selected ({{ selectedResourceIds().size }})
+            </button>
+          </div>
+        }
       </div>
 
       @if (accessNotice(); as notice) {
@@ -201,30 +225,39 @@ function shiftMonth(month: string, delta: number): string {
         </div>
       }
 
-      <!-- KPI strip. -->
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
-        <div class="command-kpi" [class.danger]="pendingResourceCount() > 0">
-          <p class="command-kpi-label">Resources Pending</p>
-          <p class="command-kpi-value font-mono tabular-nums" data-test="kpi-pending-resources">{{ pendingResourceCount() }}</p>
+      <!-- KPI strip. F4: gated on the error state for the same reason as the
+           controls above — "0 Resources Pending / 0 Pending Project-Months" is
+           the most damaging thing this page could tell an approver whose read
+           just 403'd, because it is indistinguishable from an empty queue. -->
+      @if (!dataError()) {
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
+          <div class="command-kpi" [class.danger]="pendingResourceCount() > 0">
+            <p class="command-kpi-label">Resources Pending</p>
+            <p class="command-kpi-value font-mono tabular-nums" data-test="kpi-pending-resources">{{ pendingResourceCount() }}</p>
+          </div>
+          <div class="command-kpi">
+            <!-- One (assignment, month) item, not one month: a resource with three
+                 projects booked in September contributes three. -->
+            <p class="command-kpi-label">Pending Project-Months</p>
+            <p class="command-kpi-value font-mono tabular-nums" data-test="kpi-pending-months">{{ pendingMonths() }}</p>
+          </div>
         </div>
-        <div class="command-kpi">
-          <!-- One (assignment, month) item, not one month: a resource with three
-               projects booked in September contributes three. -->
-          <p class="command-kpi-label">Pending Project-Months</p>
-          <p class="command-kpi-value font-mono tabular-nums" data-test="kpi-pending-months">{{ pendingMonths() }}</p>
-        </div>
-      </div>
+      }
 
-      <!-- Legend — band meaning is text + colour, never colour alone (WCAG 1.4.1). -->
-      <div class="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs font-semibold text-ink-muted">
-        <span class="uppercase tracking-wider">Utilisation band:</span>
-        @for (b of legend; track b.band) {
-          <span class="inline-flex items-center gap-1.5">
-            <span class="w-3 h-3 rounded-sm ring-1 {{ b.meta.cell }} {{ b.meta.ring }}"></span>
-            <span [class]="b.meta.text">{{ b.meta.label }}</span>
-          </span>
-        }
-      </div>
+      <!-- Legend — band meaning is text + colour, never colour alone (WCAG 1.4.1).
+           F4: it belongs to the grid, so it goes with the grid — a band key above
+           an error panel describes tints that are nowhere on the page. -->
+      @if (!dataError()) {
+        <div class="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs font-semibold text-ink-muted">
+          <span class="uppercase tracking-wider">Utilisation band:</span>
+          @for (b of legend; track b.band) {
+            <span class="inline-flex items-center gap-1.5">
+              <span class="w-3 h-3 rounded-sm ring-1 {{ b.meta.cell }} {{ b.meta.ring }}"></span>
+              <span [class]="b.meta.text">{{ b.meta.label }}</span>
+            </span>
+          }
+        </div>
+      }
 
       <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="6" [columns]="4" label="allocation approvals" (retry)="reload()">
         <ng-template>
@@ -381,7 +414,31 @@ export class AllocationApprovalsComponent {
     stream: ({ params: ready }) => (ready ? this.api.getResourceOrganizations() : of<ResourceOrganization[]>([])),
     defaultValue: [] as ResourceOrganization[],
   });
-  private orgNodes = this.orgsRes.value;
+
+  /** Whether the org-tree read failed. Its OWN error state: `orgsRes` is a
+   *  separate request from the feed, so the feed's `dataError()` says nothing
+   *  about it and vice versa. */
+  protected orgsError = computed(() => this.orgsRes.status() === 'error');
+
+  /**
+   * F4 — the ONE place `orgsRes.value()` is dereferenced.
+   *
+   * This used to be `this.orgsRes.value` handed out raw, so the three dimension
+   * <select>s in the header read a `.value()` that THROWS while the org read is
+   * erroring — a second ungated dereference, independent of the feed's, and one
+   * that aborted the change-detection pass before the notice and the ListState
+   * Retry panel further down could render.
+   *
+   * Falling back to `[]` is safe only because `orgsError()` withdraws the three
+   * filters and says so (see the template): an empty option list left on screen
+   * would claim "this organization has no capabilities", which is a different
+   * and worse lie than "the tree could not be loaded". With the selects gone the
+   * filters cannot be set either, so `filteredFeedRows` never asks
+   * `dimensionsOf` to resolve a dimension against a tree that is not there.
+   */
+  private orgNodes = computed<ResourceOrganization[]>(() =>
+    this.orgsError() ? [] : this.orgsRes.value(),
+  );
 
   /** Option lists filtered by level, in tree order (node names are unique across the whole tree). */
   capabilityOptions = computed<string[]>(() => this.orgNodes().filter(n => n.level === 'capability').map(n => n.name));
@@ -438,8 +495,12 @@ export class AllocationApprovalsComponent {
     // Seed the range selectors from the FIRST loaded window (server default).
     // Guarded on null so it runs once and never fights a later user choice; the
     // writes are untracked so this effect reacts only to the resource value.
+    // F4: reads through `feed` (which short-circuits the error state) — an
+    // effect that throws is reported as an unhandled error and, unlike a
+    // template binding, no amount of markup reordering can protect it. A failed
+    // read yields no months, so this simply does not seed.
     effect(() => {
-      const months = this.feedRes.value().months;
+      const months = this.feed().months;
       if (months.length === 0) return;
       untracked(() => {
         if (this.from() === null) this.from.set(months[0]);
@@ -450,6 +511,9 @@ export class AllocationApprovalsComponent {
     // Selection belongs to the visible result set. Whenever a range, status,
     // organization or manager filter removes a row, prune its id so the toolbar
     // count and multi-approve payload cannot include an invisible resource.
+    // F4: safe in the error state because `filteredFeedRows` reads BOTH guarded
+    // accessors (`feed` and `orgNodes`) and nothing else — it used to throw here
+    // for either failed read.
     effect(() => {
       const visibleIds = new Set(this.filteredFeedRows().map(row => row.resourceId));
       untracked(() => {
@@ -460,7 +524,29 @@ export class AllocationApprovalsComponent {
     });
   }
 
-  protected feed = computed(() => this.feedRes.value() ?? EMPTY);
+  /**
+   * F4 — the ONE place `feedRes.value()` is dereferenced.
+   *
+   * `rxResource.value()` THROWS while the resource is in its error state (the
+   * previous `?? EMPTY` never fired: with a `defaultValue` set, `value()` is
+   * never nullish — it either has data or throws). Every accessor below reads
+   * this, and the bindings that consume them — `managerFilterOptions()` and
+   * `monthOptions()` in the header, the two KPI tiles — sit ABOVE the access
+   * notice and the ListState error panel, so the first of them aborted the whole
+   * change-detection pass and left both affordances as unreachable code. The two
+   * constructor effects read the same value from OUTSIDE the view, where no
+   * template reordering could have protected them at all.
+   *
+   * Short-circuiting to EMPTY is NOT the forbidden "a failed read means nothing
+   * to approve": `dataError()` gates the entire control cluster and the KPI
+   * strip, ListState swaps the table for its error panel, and the "No allocation
+   * requests for the selected range and status" empty state is already gated on
+   * `!dataError()`. Nothing derived from this envelope reaches the screen while
+   * the read is failing — the spec asserts that region by region.
+   */
+  protected feed = computed<AllocationApprovalFeed>(() =>
+    this.feedRes.status() === 'error' ? EMPTY : this.feedRes.value(),
+  );
   protected months = computed(() => this.feed().months);
 
   protected dataLoading = computed(() => this.feedRes.isLoading());

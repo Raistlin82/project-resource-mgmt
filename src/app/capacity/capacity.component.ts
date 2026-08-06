@@ -143,38 +143,47 @@ function shiftMonth(month: string, delta: number): string {
           <h1 class="command-title">Monthly FTE Capacity</h1>
           <p class="command-subtitle">Resource-by-month view of planned demand against capacity, banded by utilisation. Confirmed (approved) load is marked within each planned figure.</p>
         </div>
-        <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
-          @if (monthOptions().length > 0) {
-            <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
-              <span class="text-ink-muted">From</span>
-              <select (change)="onFromChange($event)" aria-label="Range start month" class="command-select">
-                @for (m of monthOptions(); track m) {
-                  <option [value]="m" [selected]="m === fromSel()">{{ monthLabel(m) }}</option>
-                }
-              </select>
-            </label>
-            <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
-              <span class="text-ink-muted">To</span>
-              <select (change)="onToChange($event)" aria-label="Range end month" class="command-select">
-                @for (m of monthOptions(); track m) {
-                  <option [value]="m" [selected]="m === toSel()">{{ monthLabel(m) }}</option>
-                }
-              </select>
-            </label>
-          }
-          <!-- C1: a window whose only content is uncovered demand (every planned
-               hour on dummies, nobody internal in range) is still exportable —
-               gating on the internal rows alone made the one figure the
-               forecast block needs unreachable. -->
-          <div class="flex items-center gap-2">
-            <button type="button" (click)="exportCsv()" [disabled]="!hasExportableRows()" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
-              <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> CSV
-            </button>
-            <button type="button" (click)="exportJson()" [disabled]="!hasExportableRows()" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
-              <mat-icon class="text-[18px] w-[18px] h-[18px]">data_object</mat-icon> JSON
-            </button>
+        <!-- F4: gated on the error state, and this gate is load-bearing twice
+             over. It stops a failed read from offering a range selector and two
+             export buttons over data that does not exist; and it is the half
+             that keeps the accessors' error short-circuit honest, since an
+             EMPTY envelope must never be *rendered* as though the window were
+             simply quiet. What a 401/403 gets instead is the notice below plus
+             the ListState error panel and its Retry. -->
+        @if (!dataError()) {
+          <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
+            @if (monthOptions().length > 0) {
+              <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
+                <span class="text-ink-muted">From</span>
+                <select (change)="onFromChange($event)" aria-label="Range start month" class="command-select">
+                  @for (m of monthOptions(); track m) {
+                    <option [value]="m" [selected]="m === fromSel()">{{ monthLabel(m) }}</option>
+                  }
+                </select>
+              </label>
+              <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
+                <span class="text-ink-muted">To</span>
+                <select (change)="onToChange($event)" aria-label="Range end month" class="command-select">
+                  @for (m of monthOptions(); track m) {
+                    <option [value]="m" [selected]="m === toSel()">{{ monthLabel(m) }}</option>
+                  }
+                </select>
+              </label>
+            }
+            <!-- C1: a window whose only content is uncovered demand (every planned
+                 hour on dummies, nobody internal in range) is still exportable —
+                 gating on the internal rows alone made the one figure the
+                 forecast block needs unreachable. -->
+            <div class="flex items-center gap-2">
+              <button type="button" (click)="exportCsv()" [disabled]="!hasExportableRows()" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
+                <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> CSV
+              </button>
+              <button type="button" (click)="exportJson()" [disabled]="!hasExportableRows()" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
+                <mat-icon class="text-[18px] w-[18px] h-[18px]">data_object</mat-icon> JSON
+              </button>
+            </div>
           </div>
-        </div>
+        }
       </div>
 
       @if (accessNotice(); as notice) {
@@ -184,8 +193,10 @@ function shiftMonth(month: string, delta: number): string {
         </div>
       }
 
-      <!-- KPI strip — first month in the range. -->
-      @if (firstMonth(); as fm) {
+      <!-- KPI strip — first month in the range, and null on a failed read (see
+           kpiMonth) so the whole strip is gated on the error state exactly like
+           the controls above. -->
+      @if (kpiMonth(); as fm) {
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
           <div class="command-kpi">
             <p class="command-kpi-label">Planned Demand — {{ monthLabel(fm) }}</p>
@@ -206,17 +217,21 @@ function shiftMonth(month: string, delta: number): string {
         </div>
       }
 
-      <!-- Legend — band meaning is text + colour, never colour alone (WCAG 1.4.1). -->
-      <div class="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs font-semibold text-ink-muted">
-        <span class="uppercase tracking-wider">Utilisation band:</span>
-        @for (b of legend; track b.band) {
-          <span class="inline-flex items-center gap-1.5">
-            <span class="w-3 h-3 rounded-sm ring-1 {{ b.meta.cell }} {{ b.meta.ring }}"></span>
-            <span [class]="b.meta.text">{{ b.meta.label }}</span>
-            <span class="text-ink-muted font-normal normal-case">{{ b.range }}</span>
-          </span>
-        }
-      </div>
+      <!-- Legend — band meaning is text + colour, never colour alone (WCAG 1.4.1).
+           F4: it belongs to the grid, so it goes with the grid: a band key above
+           an error panel describes tints that are nowhere on the page. -->
+      @if (!dataError()) {
+        <div class="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs font-semibold text-ink-muted">
+          <span class="uppercase tracking-wider">Utilisation band:</span>
+          @for (b of legend; track b.band) {
+            <span class="inline-flex items-center gap-1.5">
+              <span class="w-3 h-3 rounded-sm ring-1 {{ b.meta.cell }} {{ b.meta.ring }}"></span>
+              <span [class]="b.meta.text">{{ b.meta.label }}</span>
+              <span class="text-ink-muted font-normal normal-case">{{ b.range }}</span>
+            </span>
+          }
+        </div>
+      }
 
       <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="6" [columns]="4" label="capacity" (retry)="reload()">
         <ng-template>
@@ -296,7 +311,7 @@ function shiftMonth(month: string, delta: number): string {
            this section shows what is booked against them instead, plainly, with
            no band tint (mirrors how allocation-approvals.component.ts suppresses
            the band for the same kinds). -->
-      @if (demandRows().length > 0) {
+      @if (!dataError() && demandRows().length > 0) {
         <div class="space-y-3">
           <div>
             <h2 class="text-lg font-bold text-ink">Uncovered demand</h2>
@@ -374,12 +389,44 @@ export class CapacityComponent {
     defaultValue: EMPTY,
   });
 
+  /**
+   * F4 — the ONE place `capacityRes.value()` is dereferenced.
+   *
+   * `rxResource.value()` THROWS while the resource is in its error state, and
+   * every accessor below used to read it unconditionally. Because bindings that
+   * consume them (the range selector, the export buttons' disabled state, the
+   * KPI strip) sit ABOVE the access notice and the ListState error panel in the
+   * template, the first such binding aborted the whole change-detection pass —
+   * making the notice and the Retry button written for exactly this failure
+   * unreachable code. A finance user whose bearer expired got the header and
+   * then nothing at all. Reordering the template does not fix it: the abort
+   * simply moves to whichever binding is now first, and the constructor effect
+   * below (which reads the same value from OUTSIDE the view) is not covered by
+   * any reordering at all.
+   *
+   * Short-circuiting to EMPTY here is NOT the forbidden "a failed read means no
+   * data" accessor: nothing derived from this envelope is ever rendered during
+   * the error state. `dataError()` gates the controls, the KPI strip, the legend
+   * and the demand block; ListState replaces the grid with its error panel; and
+   * the grid's own "No capacity data for the selected range" empty state is
+   * already gated on `!dataError()`. The empty envelope exists only so the
+   * signal graph can settle without throwing while the error surfaces are the
+   * things on screen — and the spec asserts that absence tile by tile.
+   */
+  private envelope = computed<CapacityMonthly>(() =>
+    this.capacityRes.status() === 'error' ? EMPTY : this.capacityRes.value(),
+  );
+
   constructor() {
     // Seed the range selectors from the FIRST loaded window (server default).
     // Guarded on null so it runs once and never fights a later user choice; the
     // writes are untracked so this effect reacts only to the resource value.
+    // F4: reads through `envelope` — an effect that throws is reported as an
+    // unhandled error and, unlike a template binding, no amount of markup
+    // reordering can protect it. A failed read yields no months, so this simply
+    // does not seed, leaving the selectors unrendered rather than half-seeded.
     effect(() => {
-      const months = this.capacityRes.value().months;
+      const months = this.envelope().months;
       if (months.length === 0) return;
       untracked(() => {
         if (this.fromSel() === null) this.fromSel.set(months[0]);
@@ -388,11 +435,28 @@ export class CapacityComponent {
     });
   }
 
-  protected months = computed(() => this.capacityRes.value().months);
+  protected months = computed(() => this.envelope().months);
   protected firstMonth = computed<string | null>(() => this.months()[0] ?? null);
 
   protected dataLoading = computed(() => this.capacityRes.isLoading());
   protected dataError = computed(() => this.capacityRes.status() === 'error');
+
+  /**
+   * The month the KPI strip summarises, or null when there is nothing to
+   * summarise — four tiles reading 0.0 FTE of demand against 0.0 FTE of capacity
+   * is the single most misleading thing this screen could show a user whose read
+   * just 403'd.
+   *
+   * F4: the `dataError()` term is deliberately belt-and-braces. It is redundant
+   * TODAY — the guarded `envelope()` yields no months during an error, so
+   * `firstMonth()` is already null and the strip is already hidden, which is why
+   * neutralising this term alone leaves the spec green. It stays because that
+   * chain is an implicit coupling: it silently depends on EMPTY having no months
+   * and on the short-circuit returning EMPTY rather than, say, the last good
+   * envelope. Stating the error condition here means a later change to either
+   * cannot resurrect a strip of confident zeros.
+   */
+  protected kpiMonth = computed<string | null>(() => (this.dataError() ? null : this.firstMonth()));
 
   /**
    * ACCESS FEEDBACK: the gated read 401s until signed in and 403s for an
@@ -412,7 +476,7 @@ export class CapacityComponent {
 
   /** Grid rows (view models) — one per resource, cells across every month in range. */
   protected rows = computed<RowVm[]>(() => {
-    const value = this.capacityRes.value();
+    const value = this.envelope();
     const months = value.months;
     return value.rows.map((r) => ({
       resourceId: r.resourceId,
@@ -424,7 +488,7 @@ export class CapacityComponent {
   /** C1: dummy/subco rows — same monthly cells as `rows`, but rendered
    *  without a semaphore band (see `toDemandCellVm`). */
   protected demandRows = computed<DemandRowVm[]>(() => {
-    const value = this.capacityRes.value();
+    const value = this.envelope();
     const months = value.months;
     return value.demandRows.map((r) => ({
       resourceId: r.resourceId,
@@ -438,7 +502,7 @@ export class CapacityComponent {
 
   /** Per-month totals row: confirmed/planned demand vs capacity FTE. */
   protected totalsRow = computed<TotalsVm[]>(() => {
-    const value = this.capacityRes.value();
+    const value = this.envelope();
     return value.months.map((m) => {
       const t = value.totals[m];
       return {
@@ -453,21 +517,21 @@ export class CapacityComponent {
   // --- KPI strip (first month in range) ------------------------------------
   protected kpiPlanned = computed(() => {
     const fm = this.firstMonth();
-    return fm ? this.capacityRes.value().totals[fm]?.demandFtePlanned ?? 0 : 0;
+    return fm ? this.envelope().totals[fm]?.demandFtePlanned ?? 0 : 0;
   });
   protected kpiCapacity = computed(() => {
     const fm = this.firstMonth();
-    return fm ? this.capacityRes.value().totals[fm]?.capacityFte ?? 0 : 0;
+    return fm ? this.envelope().totals[fm]?.capacityFte ?? 0 : 0;
   });
   protected kpiOver = computed(() => {
     const fm = this.firstMonth();
     if (!fm) return 0;
-    return this.capacityRes.value().rows.filter((r) => r.monthly[fm]?.band === 'over').length;
+    return this.envelope().rows.filter((r) => r.monthly[fm]?.band === 'over').length;
   });
   /** C1: planned FTE booked on dummy/subco for the first month — capacity that does not exist yet. */
   protected kpiUncovered = computed(() => {
     const fm = this.firstMonth();
-    return fm ? this.capacityRes.value().totals[fm]?.demandFteUncovered ?? 0 : 0;
+    return fm ? this.envelope().totals[fm]?.demandFteUncovered ?? 0 : 0;
   });
 
   /** Range-selector options: the loaded window padded by ±OPTION_PAD_MONTHS so the user can narrow OR extend. */
@@ -579,7 +643,7 @@ export class CapacityComponent {
 
   /** The exact CSV text `exportCsv()` writes — split out so it is assertable without a DOM download. */
   protected buildCsv(): string {
-    const value = this.capacityRes.value();
+    const value = this.envelope();
     const rows: ExportRow[] = [
       ...value.rows.map((r) => ({ ...r, section: SECTION_INTERNAL })),
       ...value.demandRows.map((r) => ({ ...r, section: SECTION_DEMAND })),
@@ -599,6 +663,6 @@ export class CapacityComponent {
 
   protected exportJson(): void {
     if (!isPlatformBrowser(this.platformId)) return;
-    downloadJson('capacity-monthly.json', toJson(this.capacityRes.value()));
+    downloadJson('capacity-monthly.json', toJson(this.envelope()));
   }
 }
