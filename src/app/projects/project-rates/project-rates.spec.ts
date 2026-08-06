@@ -277,4 +277,127 @@ describe('ProjectRates — inherited vs override (Task 5)', () => {
     expect(overrideRows.length).toBe(1);
     expect(overrideRows[0].textContent).toContain('Not applied');
   });
+
+  /**
+   * DELETING A NEGOTIATED SELL RATE IS DELETING A PRICE. The DELETE used to fire on
+   * the first click, and the figure is displayed nowhere afterwards, so a mis-click
+   * silently re-prices the project's T&M revenue with no undo.
+   *
+   * The consequence copy has to be right about WHAT it falls back to: sellRateFor
+   * resolves project override -> contract rate (inside the contract period) -> the
+   * resource's reference bill rate, so both branches are asserted below. "It falls
+   * back to the rate-card rate" would be wrong on both.
+   */
+  describe('deleting an override is confirmed, and the copy names the real fallback', () => {
+    const override: NegotiatedRate = { id: 'NR2', projectId: 'P2', role: 'Developer', currency: 'EUR', billRate: 950 };
+
+    function deleteButton(h: HTMLElement): HTMLButtonElement {
+      const btn = h.querySelector<HTMLButtonElement>('[aria-label="Delete override for Developer"]');
+      expect(btn).toBeTruthy();
+      return btn!;
+    }
+
+    it('the FIRST click issues no DELETE and raises a dialog quoting the role and the amount', async () => {
+      const deleteSpy = vi.fn(() => of(undefined));
+      const fixture = await setUp(baseStub({
+        getNegotiatedRates: () => of([contractRate, override]),
+        deleteNegotiatedRate: deleteSpy,
+      }));
+      const h = host(fixture);
+
+      // No dialog before the click — otherwise "a dialog exists" proves nothing.
+      expect(h.querySelector('[data-test="negotiated-rate-delete-confirm"]')).toBeNull();
+
+      deleteButton(h).click();
+      await tick(fixture);
+
+      // THE ASSERTION OF ABSENCE: the price-changing DELETE must not have gone out.
+      expect(deleteSpy).not.toHaveBeenCalled();
+
+      const dialog = h.querySelector('[data-test="negotiated-rate-delete-confirm"]');
+      expect(dialog).toBeTruthy();
+      const text = dialog!.textContent ?? '';
+      // The ROLE and the AMOUNT — a generic "Are you sure?" cannot satisfy both.
+      expect(text).toContain('Developer');
+      expect(text).toContain('950');
+      expect(text).toMatch(/cannot be undone/i);
+    });
+
+    it('with a contract rate for the same role, the copy promises the CONTRACT rate and quotes it', async () => {
+      const fixture = await setUp(baseStub({ getNegotiatedRates: () => of([contractRate, override]) }));
+      const h = host(fixture);
+
+      deleteButton(h).click();
+      await tick(fixture);
+
+      const text = h.querySelector('[data-test="negotiated-rate-delete-confirm"]')!.textContent ?? '';
+      expect(text).toMatch(/contract rate/i);
+      // contractRate.billRate is 1000, rendered through number:'1.0-2'.
+      expect(text).toContain('1,000');
+      // ...and it must NOT reach past the contract to the resource's own rate, which
+      // is the level sellRateFor would only use if the contract had no such rate.
+      expect(text).not.toMatch(/reference bill rate/i);
+    });
+
+    it('with NO contract rate for that role, the copy says the resource reference rate instead', async () => {
+      // The contract carries a Project Manager rate, so the Developer override has
+      // nothing at contract level to fall back to.
+      const otherRoleContractRate: NegotiatedRate = { id: 'NR9', contractId: 'CT1', role: 'Project Manager', currency: 'EUR', billRate: 1400 };
+      const fixture = await setUp(baseStub({ getNegotiatedRates: () => of([otherRoleContractRate, override]) }));
+      const h = host(fixture);
+
+      deleteButton(h).click();
+      await tick(fixture);
+
+      const text = h.querySelector('[data-test="negotiated-rate-delete-confirm"]')!.textContent ?? '';
+      expect(text).toMatch(/reference bill rate/i);
+      // The paired absence: it must NOT claim a contract rate that does not exist,
+      // and must not quote the unrelated Project Manager figure.
+      expect(text).not.toMatch(/contract rate of/i);
+      expect(text).not.toContain('1,400');
+    });
+
+    it('only the confirm control issues the DELETE, exactly once, for the right id', async () => {
+      const deleteSpy = vi.fn(() => of(undefined));
+      const fixture = await setUp(baseStub({
+        getNegotiatedRates: () => of([contractRate, override]),
+        deleteNegotiatedRate: deleteSpy,
+      }));
+      const h = host(fixture);
+
+      deleteButton(h).click();
+      await tick(fixture);
+
+      const confirmAction = h.querySelector<HTMLButtonElement>('[data-test="negotiated-rate-delete-confirm-action"]');
+      expect(confirmAction).toBeTruthy();
+      confirmAction!.click();
+      await tick(fixture);
+
+      // The case that must still be ALLOWED — a confirm wired to nothing would pass
+      // every not.toHaveBeenCalled() above.
+      expect(deleteSpy).toHaveBeenCalledTimes(1);
+      expect(deleteSpy).toHaveBeenCalledWith('NR2');
+    });
+
+    it('Cancel dismisses the dialog and still issues no DELETE', async () => {
+      const deleteSpy = vi.fn(() => of(undefined));
+      const fixture = await setUp(baseStub({
+        getNegotiatedRates: () => of([contractRate, override]),
+        deleteNegotiatedRate: deleteSpy,
+      }));
+      const h = host(fixture);
+
+      deleteButton(h).click();
+      await tick(fixture);
+
+      const cancel = [...h.querySelectorAll<HTMLButtonElement>('[data-test="negotiated-rate-delete-confirm"] button')]
+        .find(b => b.textContent?.trim() === 'Cancel');
+      expect(cancel).toBeTruthy();
+      cancel!.click();
+      await tick(fixture);
+
+      expect(h.querySelector('[data-test="negotiated-rate-delete-confirm"]')).toBeNull();
+      expect(deleteSpy).not.toHaveBeenCalled();
+    });
+  });
 });

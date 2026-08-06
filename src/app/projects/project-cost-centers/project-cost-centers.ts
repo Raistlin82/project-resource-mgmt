@@ -155,6 +155,10 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
                     </select>
                   </div>
                 </div>
+
+                @if (saveError(); as err) {
+                  <p role="alert" data-test="cost-center-save-error" class="text-xs text-critical-text">{{ err }}</p>
+                }
               </form>
             </div>
 
@@ -182,6 +186,8 @@ export class ProjectCostCenters {
   selectedProjectId = signal<string>('');
   showForm = signal(false);
   editingId = signal<string | null>(null);
+  /** The server's own refusal text, shown inline so the dialog staying open is explained. */
+  saveError = signal<string | null>(null);
 
   // The cost-center manager is a PERSON reference bound to the resources (people)
   // catalog by name (Phase D). /resources is a principal-gated read, so key the load
@@ -209,9 +215,19 @@ export class ProjectCostCenters {
   });
   catalogCostCenters = this.catalogRes.value;
 
-  /** Catalog cost centers not already added to the current project (avoid dup ids). */
+  /**
+   * Catalog cost centers still attachable here.
+   *
+   * SUBTRACTS EVERY project cost center, not just THIS project's. The id is the
+   * primary key of /project-cost-centers, not a (projectId, id) pair, so a catalog
+   * entry already attached to another project cannot be attached here either — the
+   * server answers 400 'project cost center CC-1001 already exists'. Filtering on
+   * `filteredCostCenters()` (this project's rows) kept offering exactly the options
+   * guaranteed to be refused, which is what made that 400 a routine occurrence
+   * rather than an edge case.
+   */
   availableCostCenters = computed<CostCenter[]>(() => {
-    const used = new Set(this.filteredCostCenters().map(cc => cc.id));
+    const used = new Set(this.costCenters().map(cc => cc.id));
     return this.catalogCostCenters().filter(cc => !used.has(cc.id));
   });
 
@@ -251,6 +267,7 @@ export class ProjectCostCenters {
       return;
     }
     this.editingId.set(null);
+    this.saveError.set(null);
     this.ccForm.reset({ allocatedBudget: 0 });
     this.ccForm.get('id')?.enable();
     this.showForm.set(true);
@@ -258,6 +275,7 @@ export class ProjectCostCenters {
 
   openEditForm(cc: ProjectCostCenter) {
     this.editingId.set(cc.id);
+    this.saveError.set(null);
     this.ccForm.reset({
       id: cc.id,
       name: cc.name,
@@ -271,6 +289,7 @@ export class ProjectCostCenters {
   closeForm() {
     this.showForm.set(false);
     this.editingId.set(null);
+    this.saveError.set(null);
     this.ccForm.get('id')?.enable();
     this.ccForm.reset({ allocatedBudget: 0 });
   }
@@ -284,12 +303,35 @@ export class ProjectCostCenters {
     const editingId = this.editingId();
     const allocated = Number.isNaN(v.allocatedBudget) ? 0 : (v.allocatedBudget ?? 0);
 
+    // CLOSE ONLY ONCE THE SERVER HAS ACCEPTED IT. `closeForm()` used to run
+    // unconditionally after firing the request, so the dialog closed and
+    // `ccForm.reset()` wiped the typed values while the POST was still in flight.
+    // On the 400 this picker itself invites — 'project cost center CC-1001 already
+    // exists', reachable because a catalog entry attached to ANOTHER project is
+    // still offered here — the user got an error toast over an empty screen and had
+    // to retype the budget and the manager from scratch. Staying open on the error
+    // path is the whole fix: the interceptor's toast carries the server's message,
+    // and the values survive for a corrected retry.
+    this.saveError.set(null);
+    const onSuccess = () => {
+      this.costCentersRes.reload();
+      this.closeForm();
+    };
+    // Rendered INLINE rather than left to the interceptor's toast, because error
+    // toasts in this app auto-dismiss — a dialog that stays open with a vanished
+    // toast is an unexplained refusal. Same shape as project-rates.ts's rateError.
+    const onError = (e: unknown) => {
+      this.saveError.set(
+        (e as { error?: { error?: string } })?.error?.error ?? 'Could not save the cost center.',
+      );
+    };
+
     if (editingId) {
       this.api.updateProjectCostCenter(editingId, {
         name: v.name ?? '',
         manager: v.manager ?? '',
         allocated,
-      }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.costCentersRes.reload());
+      }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({ next: onSuccess, error: onError });
     } else {
       this.api.createProjectCostCenter({
         id: v.id ?? '',
@@ -298,9 +340,7 @@ export class ProjectCostCenters {
         manager: v.manager ?? '',
         allocated,
         actual: 0,
-      }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.costCentersRes.reload());
+      }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({ next: onSuccess, error: onError });
     }
-
-    this.closeForm();
   }
 }
