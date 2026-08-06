@@ -28,7 +28,14 @@ import { maxIdSeq } from './server/id-seq.util';
 import { isUuidV4, newEntityId } from './server/entity-id.util';
 import { isFkViolation } from './server/fk-violation.util';
 import { createCriticalSectionRunner } from './server/critical-section.util';
-import { clientCreatableApprovalKindError, crossStepSoDError, milestoneApprovalPatch } from './server/approval-policy.util';
+import {
+  buildApprovalSteps,
+  clientCreatableApprovalKindError,
+  crossStepSoDError,
+  milestoneApprovalPatch,
+  resolveApprovalRoutingAmount,
+  type ApprovalAmountSources,
+} from './server/approval-policy.util';
 import {
   applicationRoles,
   authorizeRead,
@@ -6401,39 +6408,25 @@ interface ApprovalRequestEntry {
 }
 
 const APPROVAL_KINDS: readonly ApprovalKind[] = ['TimeEntry', 'Expense', 'Milestone', 'ChangeRequest', 'Invoice', 'Allocation'];
-/** Amount above which an approval is escalated to a two-step delivery+finance chain. */
-const APPROVAL_HIGH_VALUE_THRESHOLD = 50000;
 /** SLA target measured in whole days from creation. */
 const APPROVAL_SLA_DAYS = 3;
 
 /**
- * RULES evaluator: build the ordered approver chain for an approval request.
- * Amount-threshold routing takes precedence — a high-value item (> 50k) always
- * routes to delivery-executive then finance (sequential). Otherwise a single
- * approver is chosen by kind.
+ * The row-fetching half of the derived-amount routing rule. The RULE (which kind
+ * reads which field, how a milestone's billing conditions are summed, what the
+ * threshold compares) lives in `resolveApprovalRoutingAmount` where Vitest can
+ * reach it; this adapter is the only part that needs the repositories, and is
+ * deliberately kept to one expression per source so there is no logic here to
+ * leave untested.
  */
-function buildApprovalSteps(kind: ApprovalKind, amount: number | undefined): ApprovalStep[] {
-  const roles: string[] =
-    typeof amount === 'number' && amount > APPROVAL_HIGH_VALUE_THRESHOLD
-      ? ['delivery-executive', 'finance']
-      : approverRolesByKind(kind);
-  return roles.map(role => ({ role, status: 'Pending' }));
-}
-
-/** Single-approver routing by kind (used when no high-value escalation applies). */
-function approverRolesByKind(kind: ApprovalKind): string[] {
-  switch (kind) {
-    case 'TimeEntry':
-    case 'Expense':
-      return ['resource-manager'];
-    case 'Milestone':
-    case 'ChangeRequest':
-      return ['delivery-executive'];
-    case 'Invoice':
-      return ['finance'];
-    default:
-      return ['delivery-executive'];
-  }
+function approvalAmountSources(): ApprovalAmountSources {
+  return {
+    order: id => repos.orders.get(id),
+    changeRequest: id => repos.changeRequests.get(id),
+    milestone: id => repos.milestones.get(id),
+    billingConditionsForMilestone: async id =>
+      (await repos.billingPlanItems.list()).filter(item => item.milestoneId === id),
+  };
 }
 
 function slaDueFrom(createdAtIso: string): string {
@@ -6443,7 +6436,16 @@ function slaDueFrom(createdAtIso: string): string {
 // `requestedBy` is intentionally NOT client-settable: it is the SoD basis the
 // decision endpoint compares the trusted decider against, so it is pinned to the
 // verified actor at creation rather than copied from the (forgeable) body.
-const APPROVAL_REQUEST_FIELDS = ['kind', 'refId', 'projectId', 'amount', 'note'] as const;
+//
+// `amount` IS ABSENT FOR THE SAME REASON, and it is the whole of H2: it used to be
+// allow-listed and handed straight to `buildApprovalSteps`, which never reconciled
+// it with `refId` — so a requester declared `amount: 1` on a €120k invoice and
+// picked the single-approver chain over the two-signature one the
+// APPROVAL_HIGH_VALUE_THRESHOLD control exists to force. The amount is now DERIVED
+// from `refId` per kind and pinned below, so the stored figure is also the one the
+// routing used. A body that still sends `amount` is silently dropped by `pick()`,
+// exactly as it drops a forged `requestedBy`.
+const APPROVAL_REQUEST_FIELDS = ['kind', 'refId', 'projectId', 'note'] as const;
 
 apiRouter.get('/approval-requests', async (_req, res) => { res.json(await repos.approvalRequests.list()); });
 apiRouter.post('/approval-requests', async (req, res) => {
@@ -6466,23 +6468,29 @@ apiRouter.post('/approval-requests', async (req, res) => {
     res.status(400).json({ error: 'refId is required' });
     return;
   }
-  if (body.amount !== undefined && !isNonNegNumber(body.amount)) {
-    res.status(400).json({ error: 'amount must be a non-negative number' });
-    return;
-  }
+  // THE ESCALATION AMOUNT IS DERIVED FROM `refId`, NEVER DECLARED (H2). See
+  // `resolveApprovalRoutingAmount` for the per-kind mapping and for why TimeEntry
+  // and Expense carry no amount at all rather than falling back to the body.
+  // An unresolvable reference on a derivable kind is a 400: it is a bad request,
+  // not a licence to route on a number the requester chose.
+  const routing = await resolveApprovalRoutingAmount(body.kind as string, body.refId, approvalAmountSources());
+  if (routing.outcome === 'unresolved') { res.status(400).json({ error: routing.error }); return; }
   const createdAt = new Date().toISOString();
   const item: ApprovalRequestEntry = {
     id: `AR${newId()}`,
     kind: body.kind as ApprovalKind,
     refId: body.refId,
     projectId: body.projectId,
-    amount: body.amount,
+    // The RECORDED amount is the DERIVED one (signed, as it stands on the
+    // referenced document), so the stored figure is the same figure the chain was
+    // routed on — an approval whose amount and steps disagree is unauditable.
+    amount: routing.outcome === 'derived' ? routing.amount : undefined,
     // SoD basis: pinned to the SERVER-VERIFIED actor, never a client-supplied
     // value (excluded from the create allow-list), so the requester cannot forge
     // a different identity and defeat the self-approval guard at /decision.
     requestedBy: actorId(req),
     status: 'Pending',
-    steps: buildApprovalSteps(body.kind as ApprovalKind, body.amount),
+    steps: buildApprovalSteps(body.kind as string, routing),
     currentStep: 0,
     createdAt,
     slaDueAt: slaDueFrom(createdAt),
