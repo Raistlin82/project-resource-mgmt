@@ -4,7 +4,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { CurrencyPipe, DatePipe, DecimalPipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { of } from 'rxjs';
-import { ApiService, Project, Order, OrderLine, ResourceRequest, Assignment, Resource, FinancialItem, TimeEntry, Issue, ChangeRequest, CostBaseline, AssignmentDay, AssignmentMonth } from '../../services/api.service';
+import { ApiService, Project, Order, OrderLine, ResourceRequest, Assignment, Resource, FinancialItem, TimeEntry, Issue, ChangeRequest, CostBaseline, AssignmentDay, AssignmentMonth, FxRate } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { computeProjectFinancials, costBaselineComparison, CostBaselineComparisonRow, FinanceData } from '../../services/finance.util';
 import { NotificationService } from '../../services/notification.service';
@@ -59,12 +59,29 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
                         [class.text-ink-secondary]="p.status === 'Completed'">
                     {{ p.status }}
                   </span>
-                  <span class="command-status"
-                        [class.green]="deliveryHealth() === 'green'"
-                        [class.amber]="deliveryHealth() === 'amber'"
-                        [class.red]="deliveryHealth() === 'red'">
-                    {{ deliveryHealthLabel() }}
-                  </span>
+                  <!--
+                    deliveryHealth() dereferences three resources whose value()
+                    throws while erroring, and this pill renders ABOVE the money
+                    grid's error branch — so it needs its own gate or the throw
+                    here aborts the pass before that branch can run, blanking
+                    the route (utilization.component.ts:34-52).
+                    While loading, NO pill: an unbadged header is honest, where
+                    a "green / On Track" computed from an empty pre-authReady
+                    envelope is a wrong verdict rendered as authoritative.
+                  -->
+                  @if (healthReady()) {
+                    <span data-test="health-chip" class="command-status"
+                          [class.green]="deliveryHealth() === 'green'"
+                          [class.amber]="deliveryHealth() === 'amber'"
+                          [class.red]="deliveryHealth() === 'red'">
+                      {{ deliveryHealthLabel() }}
+                    </span>
+                  } @else if (overviewErrored()) {
+                    <!-- Its own wording, never a dash: a failed read is a
+                         different fact from "nothing to measure", and this
+                         codebase has already paid for collapsing the two. -->
+                    <span data-test="health-chip" class="command-status red">Health unavailable</span>
+                  }
                 </div>
                 <p class="text-sm text-[var(--cc-muted)] font-mono bg-[var(--cc-panel-muted)] inline-block px-2.5 py-1 rounded-md">{{ p.id }}</p>
               </div>
@@ -116,13 +133,69 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
       <!-- Tab Content -->
       <div class="mt-6">
         @if (activeTab() === 'overview') {
-          @let f = financials();
           <div class="space-y-6">
+            <!--
+              READINESS FIRST, THEN PERMISSION, THEN THE FIGURES.
+              The money grid used to sit outside every gate, with the
+              "@let f = financials()" declaration at the top of this block. Two
+              consequences, both already documented on /reporting
+              (reporting.ts:95-105): pre-authReady it shipped a whole strip of
+              EUR 0 tiles plus a confident "On Track"; and one failed read threw
+              ResourceValueError out of the first tile, aborting the render above
+              every recovery affordance on the page. Error, then loading, then
+              content — and the @let moved inside the resolved branch so it is
+              only evaluated there.
+            -->
+            @if (overviewErrored()) {
+              <app-list-state [error]="true" label="project financials" (retry)="reloadOverview()" />
+            } @else if (overviewLoading()) {
+              <!-- Same ARIA contract as list-state.component.ts:49-50 (role +
+                   aria-live + aria-busy + an sr-only name), so a screen reader
+                   is told the region is busy instead of reading a stale grid.
+                   aria-label duplicates the sr-only text purely so the region is
+                   addressable: it is the only stable handle a test has for "the
+                   MONEY grid is skeletonised", distinct from the Baseline card's
+                   skeleton, which is also on screen in this state. -->
+              <div class="space-y-6" role="status" aria-live="polite" aria-busy="true" aria-label="Loading project financials">
+                <span class="sr-only">Loading project financials</span>
+                <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+                  @for (tile of [1, 2, 3, 4]; track tile) {
+                    <div class="command-skeleton h-28"></div>
+                  }
+                </div>
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+                  @for (tile of [1, 2, 3, 4, 5, 6, 7, 8, 9]; track tile) {
+                    <div class="command-skeleton h-24"></div>
+                  }
+                </div>
+              </div>
+            } @else {
+            @let f = financials();
+            @if (!financeVisible()) {
+              <div role="note" data-test="finance-withheld-notice" class="command-card p-4 flex items-start gap-3">
+                <mat-icon class="text-[var(--cc-muted)] text-[20px] w-[20px] h-[20px] shrink-0">lock</mat-icon>
+                <p class="text-sm text-[var(--cc-muted)]">
+                  Your role does not have access to this project's
+                  @if (commercialWithheld() && financialsWithheld()) {
+                    commercial and financial records
+                  } @else if (commercialWithheld()) {
+                    commercial records
+                  } @else {
+                    financial records
+                  }, so the tiles below marked “—” are withheld rather than zero.
+                  Delivery Health is based on issues and change control only.
+                </p>
+              </div>
+            }
             <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
               <div class="command-kpi" [class.green]="deliveryHealth() === 'green'" [class.warning]="deliveryHealth() === 'amber'" [class.danger]="deliveryHealth() === 'red'">
                 <p class="command-kpi-label">Delivery Health</p>
                 <p class="command-kpi-value">{{ deliveryHealthLabel() }}</p>
-                <p class="command-kpi-note">Based on VAC, burn, risks and change control</p>
+                <!-- The BASIS is stated, not implied: with the money reads
+                     withheld this verdict really is computed from issues and
+                     change control alone, and a note claiming otherwise would
+                     be the same lie the fabricated "Critical" was. -->
+                <p class="command-kpi-note">{{ financeVisible() ? 'Based on VAC, burn, risks and change control' : 'Based on issues and change control — VAC and burn need commercial + financial access' }}</p>
               </div>
               <div class="command-kpi" [class.danger]="openIssues() > 0">
                 <p class="command-kpi-label">Open Critical Issues</p>
@@ -136,78 +209,151 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
               </div>
               <div class="command-kpi info">
                 <p class="command-kpi-label">EAC Basis</p>
-                <p class="command-kpi-value">{{ f.eac | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="command-kpi-note">Actual cost + planned residual</p>
+                @if (financeVisible()) {
+                  <p class="command-kpi-value">{{ f.eac | currency:'EUR':'symbol':'1.0-0' }}</p>
+                  <p class="command-kpi-note">Actual cost + planned residual</p>
+                } @else {
+                  <p class="command-kpi-value">—</p>
+                  <p class="command-kpi-note">needs commercial + financial access</p>
+                }
               </div>
             </div>
             <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
               <div class="command-kpi">
                 <p class="command-kpi-label">Contract Revenue</p>
-                <p class="command-kpi-value font-mono tabular-nums">{{ f.revenue | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="command-kpi-note">Invoiced <span class="font-mono">{{ f.invoiced | currency:'EUR':'symbol':'1.0-0' }}</span></p>
+                @if (!commercialWithheld()) {
+                  <p class="command-kpi-value font-mono tabular-nums">{{ f.revenue | currency:'EUR':'symbol':'1.0-0' }}</p>
+                  <p class="command-kpi-note">Invoiced <span class="font-mono">{{ f.invoiced | currency:'EUR':'symbol':'1.0-0' }}</span></p>
+                } @else {
+                  <p class="command-kpi-value font-mono tabular-nums">—</p>
+                  <p class="command-kpi-note">needs commercial + financial access</p>
+                }
               </div>
+              <!-- Actual Cost is withheld by the COMMERCIAL half even though its
+                   labor term is readable: actualCost = laborCost + externalCost,
+                   and externalCost is a Purchase-order-line sum. Printing the
+                   total would print a silently understated figure, so the value
+                   is withheld and the labor term the role CAN see is surfaced in
+                   the note instead of being thrown away with it. -->
               <div class="command-kpi">
                 <p class="command-kpi-label">Actual Cost</p>
-                <p class="command-kpi-value font-mono tabular-nums">{{ f.actualCost | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="command-kpi-note">Labor <span class="font-mono">{{ f.laborCost | currency:'EUR':'symbol':'1.0-0' }}</span> · External <span class="font-mono">{{ f.externalCost | currency:'EUR':'symbol':'1.0-0' }}</span></p>
+                @if (!commercialWithheld()) {
+                  <p class="command-kpi-value font-mono tabular-nums">{{ f.actualCost | currency:'EUR':'symbol':'1.0-0' }}</p>
+                  <p class="command-kpi-note">Labor <span class="font-mono">{{ f.laborCost | currency:'EUR':'symbol':'1.0-0' }}</span> · External <span class="font-mono">{{ f.externalCost | currency:'EUR':'symbol':'1.0-0' }}</span></p>
+                } @else {
+                  <p class="command-kpi-value font-mono tabular-nums">—</p>
+                  <p class="command-kpi-note">Labor <span class="font-mono">{{ f.laborCost | currency:'EUR':'symbol':'1.0-0' }}</span> · External needs commercial + financial access</p>
+                }
               </div>
-              <div class="command-kpi" [class.danger]="f.margin < 0">
+              <div class="command-kpi" [class.danger]="financeVisible() && f.margin < 0">
                 <p class="command-kpi-label">Margin</p>
-                <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="f.margin >= 0" [class.text-critical-text]="f.margin < 0">{{ f.margin | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="command-kpi-note font-semibold" [class.text-positive-text]="f.margin >= 0" [class.text-critical-text]="f.margin < 0">{{ f.marginPct | number:'1.0-1' }}% margin</p>
+                @if (financeVisible()) {
+                  <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="f.margin >= 0" [class.text-critical-text]="f.margin < 0">{{ f.margin | currency:'EUR':'symbol':'1.0-0' }}</p>
+                  <p class="command-kpi-note font-semibold" [class.text-positive-text]="f.margin >= 0" [class.text-critical-text]="f.margin < 0">{{ f.marginPct | number:'1.0-1' }}% margin</p>
+                } @else {
+                  <p class="command-kpi-value font-mono tabular-nums">—</p>
+                  <p class="command-kpi-note">needs commercial + financial access</p>
+                }
               </div>
               <div class="command-kpi info">
                 <p class="command-kpi-label">Backlog</p>
-                <p class="command-kpi-value font-mono tabular-nums">{{ f.backlog | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="command-kpi-note">Revenue not yet invoiced</p>
+                @if (!commercialWithheld()) {
+                  <p class="command-kpi-value font-mono tabular-nums">{{ f.backlog | currency:'EUR':'symbol':'1.0-0' }}</p>
+                  <p class="command-kpi-note">Revenue not yet invoiced</p>
+                } @else {
+                  <p class="command-kpi-value font-mono tabular-nums">—</p>
+                  <p class="command-kpi-note">needs commercial + financial access</p>
+                }
               </div>
               <div class="command-kpi">
                 <p class="command-kpi-label">Budget</p>
-                <p class="command-kpi-value font-mono tabular-nums">{{ f.budget | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="command-kpi-note">Planned cost</p>
+                @if (!financialsWithheld()) {
+                  <p class="command-kpi-value font-mono tabular-nums">{{ f.budget | currency:'EUR':'symbol':'1.0-0' }}</p>
+                  <p class="command-kpi-note">Planned cost</p>
+                } @else {
+                  <p class="command-kpi-value font-mono tabular-nums">—</p>
+                  <p class="command-kpi-note">needs commercial + financial access</p>
+                }
               </div>
-              <div class="command-kpi" [class.danger]="f.burnPct > 100">
+              <!-- Burn needs BOTH halves: its numerator is actualCost (commercial)
+                   and its denominator the effective budget (financial). Withheld
+                   it rendered 0% with a full-width GREEN bar — the most reassuring
+                   possible presentation of a number nobody computed. -->
+              <div class="command-kpi" [class.danger]="financeVisible() && f.burnPct > 100">
                 <p class="command-kpi-label">Budget Burn</p>
-                <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="f.burnPct <= 100" [class.text-critical-text]="f.burnPct > 100">{{ f.burnPct | number:'1.0-0' }}%</p>
-                <div class="w-full bg-surface-muted rounded-full h-2 overflow-hidden mt-2">
-                  <div class="h-2 rounded-full" [class.bg-gradient-to-r]="f.burnPct <= 100" [class.from-accent]="f.burnPct <= 100" [class.to-accent]="f.burnPct <= 100" [class.bg-critical]="f.burnPct > 100" [style.width.%]="f.burnPct < 100 ? f.burnPct : 100"></div>
-                </div>
+                @if (financeVisible()) {
+                  <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="f.burnPct <= 100" [class.text-critical-text]="f.burnPct > 100">{{ f.burnPct | number:'1.0-0' }}%</p>
+                  <div class="w-full bg-surface-muted rounded-full h-2 overflow-hidden mt-2">
+                    <div class="h-2 rounded-full" [class.bg-gradient-to-r]="f.burnPct <= 100" [class.from-accent]="f.burnPct <= 100" [class.to-accent]="f.burnPct <= 100" [class.bg-critical]="f.burnPct > 100" [style.width.%]="f.burnPct < 100 ? f.burnPct : 100"></div>
+                  </div>
+                } @else {
+                  <p class="command-kpi-value font-mono tabular-nums">—</p>
+                  <p class="command-kpi-note">needs commercial + financial access</p>
+                }
               </div>
               <div class="command-kpi info">
                 <p class="command-kpi-label">EAC</p>
-                <p class="command-kpi-value font-mono tabular-nums">{{ f.eac | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="command-kpi-note">Estimate at completion</p>
+                @if (financeVisible()) {
+                  <p class="command-kpi-value font-mono tabular-nums">{{ f.eac | currency:'EUR':'symbol':'1.0-0' }}</p>
+                  <p class="command-kpi-note">Estimate at completion</p>
+                } @else {
+                  <p class="command-kpi-value font-mono tabular-nums">—</p>
+                  <p class="command-kpi-note">needs commercial + financial access</p>
+                }
               </div>
+              <!-- ETC is DELIBERATELY not withheld. It is
+                   max(0, plannedLaborCost − actualLaborCost): requests,
+                   assignments, resources and time entries only, all of which a
+                   staffing role reads. Dashing it would hide a figure that is
+                   correct — the mirror-image defect of printing one that is not. -->
               <div class="command-kpi">
                 <p class="command-kpi-label">ETC</p>
                 <p class="command-kpi-value font-mono tabular-nums">{{ f.etc | currency:'EUR':'symbol':'1.0-0' }}</p>
                 <p class="command-kpi-note">Estimated remaining cost</p>
               </div>
-              <div class="command-kpi" [class.danger]="f.varianceAtCompletion < 0">
+              <div class="command-kpi" [class.danger]="financeVisible() && f.varianceAtCompletion < 0">
                 <p class="command-kpi-label">VAC</p>
-                <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="f.varianceAtCompletion >= 0" [class.text-critical-text]="f.varianceAtCompletion < 0">{{ f.varianceAtCompletion | currency:'EUR':'symbol':'1.0-0' }}</p>
-                <p class="command-kpi-note">Budget minus EAC</p>
+                @if (financeVisible()) {
+                  <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="f.varianceAtCompletion >= 0" [class.text-critical-text]="f.varianceAtCompletion < 0">{{ f.varianceAtCompletion | currency:'EUR':'symbol':'1.0-0' }}</p>
+                  <p class="command-kpi-note">Budget minus EAC</p>
+                } @else {
+                  <p class="command-kpi-value font-mono tabular-nums">—</p>
+                  <p class="command-kpi-note">needs commercial + financial access</p>
+                }
               </div>
             </div>
 
-            <div class="command-card p-6 sm:p-8">
-              <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] tracking-tight mb-6">Revenue breakdown</h3>
-              @if (f.revenue > 0) {
-                <div class="flex h-9 w-full rounded-xl overflow-hidden text-xs font-bold ring-1 ring-line">
-                  <div class="bg-caution-tint text-caution-text flex items-center justify-center min-w-0" [style.width.%]="f.laborCost / f.revenue * 100">Labor</div>
-                  <div class="bg-caution-tint text-caution-text flex items-center justify-center min-w-0" [style.width.%]="f.externalCost / f.revenue * 100">Ext</div>
-                  <div class="flex items-center justify-center min-w-0" [class.bg-positive-tint]="f.margin >= 0" [class.text-positive-text]="f.margin >= 0" [class.bg-critical-tint]="f.margin < 0" [class.text-critical-text]="f.margin < 0" [style.width.%]="f.marginPct > 0 ? f.marginPct : 0">Margin</div>
-                </div>
-                <div class="flex flex-wrap gap-4 mt-3 text-xs text-[var(--cc-muted)]">
-                  <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-caution"></span> Labor</span>
-                  <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-caution"></span> External</span>
-                  <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-positive"></span> Margin</span>
-                </div>
-              } @else {
-                <p class="text-sm text-[var(--cc-muted)]">No customer revenue recorded for this project yet. Add a Customer order with a line imputed to this project (Commercial → Orders).</p>
-              }
-            </div>
+            <!-- The whole card is commercial: the bar is a proportion OF revenue,
+                 and its @else copy ("Add a Customer order with a line imputed to
+                 this project") was the most actively misleading string on the
+                 page — printed to the one role that cannot read the orders that
+                 already exist. -->
+            @if (!commercialWithheld()) {
+              <div class="command-card p-6 sm:p-8">
+                <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] tracking-tight mb-6">Revenue breakdown</h3>
+                @if (f.revenue > 0) {
+                  <div class="flex h-9 w-full rounded-xl overflow-hidden text-xs font-bold ring-1 ring-line">
+                    <div class="bg-caution-tint text-caution-text flex items-center justify-center min-w-0" [style.width.%]="f.laborCost / f.revenue * 100">Labor</div>
+                    <div class="bg-caution-tint text-caution-text flex items-center justify-center min-w-0" [style.width.%]="f.externalCost / f.revenue * 100">Ext</div>
+                    <div class="flex items-center justify-center min-w-0" [class.bg-positive-tint]="f.margin >= 0" [class.text-positive-text]="f.margin >= 0" [class.bg-critical-tint]="f.margin < 0" [class.text-critical-text]="f.margin < 0" [style.width.%]="f.marginPct > 0 ? f.marginPct : 0">Margin</div>
+                  </div>
+                  <div class="flex flex-wrap gap-4 mt-3 text-xs text-[var(--cc-muted)]">
+                    <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-caution"></span> Labor</span>
+                    <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-caution"></span> External</span>
+                    <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-positive"></span> Margin</span>
+                  </div>
+                } @else {
+                  <p class="text-sm text-[var(--cc-muted)]">No customer revenue recorded for this project yet. Add a Customer order with a line imputed to this project (Commercial → Orders).</p>
+                }
+              </div>
+            }
+            <!-- end of the resolved branch of the readiness gate above -->
+            }
 
+            <!-- The Baseline card stays OUTSIDE that gate on purpose: it carries
+                 its own app-list-state over its own three resources, so a failed
+                 /time-entries or /fx-rates must not take it down with the money
+                 grid, and its error panel must stay reachable. -->
             @if (auth.canReadStaffing()) {
               <div class="command-card p-6 sm:p-8">
                 <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
@@ -391,6 +537,18 @@ export class ProjectDetailsComponent {
 
   private issuesRes = authGatedResource(() => this.api.getProjectIssues(), [] as Issue[]);
   private changesRes = authGatedResource(() => this.api.getChangeRequests(), [] as ChangeRequest[]);
+  // FX is REQUIRED to sum order lines, not an enrichment. An OrderLine carries no
+  // currency of its own — it inherits its parent ORDER's (`lineSum`) — and
+  // `convertToBase` is a no-op when `d.fxRates` is absent, so a multi-currency
+  // project had its lines added together as bare numbers and printed under this
+  // page's hardcoded 'EUR' symbol. On seeded project 2, order O3 is USD with a
+  // 120,000 line and USD→EUR is 0.92: this page read EUR 120,000 for something
+  // worth EUR 110,400 — EUR 9,600 too high — and its Margin subtracted
+  // EUR-denominated cost from a USD revenue. /reporting, which passes the table,
+  // read 110,400 for the same order. Only principal-gated (no capability term):
+  // /fx-rates is readable by any verified actor, and it is reference data, not a
+  // figure of this project's.
+  private fxRatesRes = authGatedResource(() => this.api.getFxRates(), [] as FxRate[]);
 
   private financeData = computed<FinanceData>(() => ({
     requests: this.requestsRes.value(),
@@ -419,8 +577,88 @@ export class ProjectDetailsComponent {
     // read that role never made. A withheld budget must stay withheld, not become
     // the CR adjustment on its own.
     changeRequests: this.auth.canApproveFinancials() ? this.changesRes.value() : [],
+    fxRates: this.fxRatesRes.value(),
   }));
   financials = computed(() => computeProjectFinancials(this.id(), this.financeData()));
+
+  /**
+   * WITHHELD IS NOT ZERO — permission, deliberately NOT readiness.
+   *
+   * `ordersRes`/`orderLinesRes` only fetch for canManageCommercial and
+   * `financialsRes` only for canApproveFinancials (above), so for every other
+   * principal — notably `pm`, whose own route guard is just canReadStaffing()
+   * (app.routes.ts) — those resources resolve SUCCESSFULLY with an empty array.
+   * `computeProjectFinancials` cannot tell "this project has no orders" from
+   * "you may not read the orders", so it returned revenue 0 and budget 0 and
+   * then DERIVED figures from them: a negative Margin, a negative VAC, a 0%
+   * burn with a green bar, and — because `deliveryHealth()` turns red on
+   * varianceAtCompletion < 0 — "Delivery Health: Critical" on a healthy
+   * project, for the one role that acts on Delivery Health.
+   *
+   * These flags let the template print "withheld" where it would otherwise
+   * print a fabrication. They must never be collapsed with
+   * `overviewLoading()`/`overviewErrored()` below: a withheld read rendered as
+   * a skeleton spins forever, and a failed read rendered as an access notice
+   * blames the user for a 500.
+   */
+  protected commercialWithheld = computed(() => !this.auth.canManageCommercial());
+  protected financialsWithheld = computed(() => !this.auth.canApproveFinancials());
+  /** Every money figure on the Overview is real only when BOTH halves are readable. */
+  protected financeVisible = computed(() => !this.commercialWithheld() && !this.financialsWithheld());
+
+  /**
+   * READINESS of the Overview money grid — the gate the grid never had.
+   *
+   * reporting.ts:95-105 documents the identical shape on the portfolio screen:
+   * (1) before `authReady` every gated resource resolves with an EMPTY
+   * envelope, so SSR and the whole pre-hydration window shipped a strip of
+   * EUR 0 tiles plus a confident "On Track" that then jumped; (2) on the error
+   * path `financials()` dereferences a resource whose `value()` THROWS, which
+   * aborted the render inside the FIRST tile — above the Baseline card's own
+   * error panel — and blanked the entire route with no message and no Retry.
+   *
+   * Covers every resource the grid and the health verdict dereference,
+   * including `issuesRes`/`changesRes` (the two count tiles live in the same
+   * grid and `deliveryHealth()` reads both) and `fxRatesRes` (a failed FX read
+   * must suppress the strip, not silently render unconverted amounts under a
+   * base-currency symbol). Deliberately EXCLUDES the three Baseline-card
+   * resources: that card carries its own app-list-state and must keep
+   * rendering when only a finance read failed.
+   */
+  protected overviewLoading = computed(() => !this.auth.authReady()
+    || this.requestsRes.isLoading() || this.assignmentsRes.isLoading() || this.resourcesRes.isLoading()
+    || this.ordersRes.isLoading() || this.orderLinesRes.isLoading() || this.financialsRes.isLoading()
+    || this.timeEntriesRes.isLoading() || this.fxRatesRes.isLoading()
+    || this.issuesRes.isLoading() || this.changesRes.isLoading());
+  protected overviewErrored = computed(() => this.requestsRes.status() === 'error'
+    || this.assignmentsRes.status() === 'error' || this.resourcesRes.status() === 'error'
+    || this.ordersRes.status() === 'error' || this.orderLinesRes.status() === 'error'
+    || this.financialsRes.status() === 'error' || this.timeEntriesRes.status() === 'error'
+    || this.fxRatesRes.status() === 'error' || this.issuesRes.status() === 'error'
+    || this.changesRes.status() === 'error');
+  /**
+   * `deliveryHealth()` dereferences `financials()`, `openIssues()` and
+   * `openChanges()` — three resource `value()` calls that THROW while erroring.
+   * The header pill that renders it sits ABOVE the money grid's error branch,
+   * so without its own gate the throw there makes that branch unreachable code:
+   * the panel written for the failure can never render. This is the guard shape
+   * utilization.component.ts:34-52 documents.
+   */
+  protected healthReady = computed(() => !this.overviewLoading() && !this.overviewErrored());
+
+  /** Retry for the Overview money grid; every resource its figures are built from. */
+  reloadOverview(): void {
+    this.requestsRes.reload();
+    this.assignmentsRes.reload();
+    this.resourcesRes.reload();
+    this.ordersRes.reload();
+    this.orderLinesRes.reload();
+    this.financialsRes.reload();
+    this.timeEntriesRes.reload();
+    this.fxRatesRes.reload();
+    this.issuesRes.reload();
+    this.changesRes.reload();
+  }
 
   protected baselineLoading = computed(() => !this.auth.authReady()
     || this.requestsRes.isLoading() || this.assignmentsRes.isLoading() || this.resourcesRes.isLoading()
@@ -500,8 +738,17 @@ export class ProjectDetailsComponent {
   );
   deliveryHealth = computed<'green' | 'amber' | 'red'>(() => {
     const f = this.financials();
-    if (f.varianceAtCompletion < 0 || this.openIssues() > 0) return 'red';
-    if (f.burnPct > 85 || this.openChanges() > 0) return 'amber';
+    // The variance and burn terms are built from the commercial + financial
+    // reads. When those are withheld both are 0-based fabrications, and
+    // `varianceAtCompletion < 0` pinned this at 'red' — so the header pill and
+    // the first tile BOTH announced "Critical" on a healthy project while the
+    // money tiles beside them were explicitly marked unavailable. Dropping the
+    // two withheld terms lets the verdict fall through to the terms this
+    // principal genuinely can read (issues and change control); the tile's note
+    // states that reduced basis rather than leaving it implied.
+    const moneyKnown = this.financeVisible();
+    if ((moneyKnown && f.varianceAtCompletion < 0) || this.openIssues() > 0) return 'red';
+    if ((moneyKnown && f.burnPct > 85) || this.openChanges() > 0) return 'amber';
     return 'green';
   });
 
