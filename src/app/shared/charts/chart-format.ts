@@ -94,7 +94,13 @@ export function niceScale(
   // Degenerate: flat data. Produce a [0, max||1] band so bars/lines still render.
   if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) {
     const top = Number.isFinite(max) && max !== 0 ? Math.abs(max) : 1;
-    const lo = min < 0 ? min : 0;
+    // `min` reaches here non-finite too, and `min < 0` is TRUE for -Infinity — so
+    // the old `min < 0 ? min : 0` handed buildTicks a -Infinity floor, spacing
+    // came out NaN, and EVERY tick was NaN: the branch that exists to keep the
+    // chart renderable was the one destroying the axis. Only a finite negative
+    // floor may pass; anything else falls back to the 0 baseline this branch's
+    // contract promises.
+    const lo = Number.isFinite(min) && min < 0 ? min : 0;
     return buildTicks(lo, lo === 0 ? top : top + lo, tickCount);
   }
   const range = niceNum(max - min, false);
