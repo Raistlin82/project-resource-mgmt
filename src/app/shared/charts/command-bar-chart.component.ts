@@ -55,11 +55,16 @@ interface AxisTick {
 }
 
 /**
- * Ledger bar chart — vertical or horizontal, single / grouped / stacked.
+ * Ledger bar chart — vertical or horizontal, single / grouped / stacked, with an
+ * optional reference {@link CommandBarChartComponent.overlay} line (supply over
+ * a demand stack).
  *
  * SSR-safe: every coordinate is derived from inputs + a fixed viewBox; no DOM
  * measurement. Themed purely with design tokens. Use for margin bars, A/R aging
  * buckets, capacity supply vs pipeline, etc.
+ *
+ * `height` is a BOX height in px, honoured by the figure itself; the drawing
+ * keeps its aspect ratio inside that box (`preserveAspectRatio`).
  */
 @Component({
   selector: 'command-bar-chart',
@@ -142,6 +147,18 @@ interface AxisTick {
           }
         </g>
 
+        <!-- reference overlay (e.g. supply capacity over a demand stack) -->
+        @if (overlayPoints(); as pts) {
+          <polyline
+            class="ldg-overlay"
+            [attr.points]="pts"
+            [attr.stroke]="overlayColor()"
+            fill="none"
+          >
+            <title>{{ overlay()?.name }}</title>
+          </polyline>
+        }
+
         <!-- category labels -->
         <g class="ldg-cats">
           @for (c of categoryTicks(); track c.label) {
@@ -156,11 +173,13 @@ interface AxisTick {
         </g>
       </svg>
 
-      <!-- legend (multi-series only) -->
-      @if (series().length > 1) {
+      <!-- legend (multi-series, or whenever an overlay needs identifying) -->
+      @if (legend().length > 1) {
         <ul class="ldg-legend" aria-hidden="true">
           @for (s of legend(); track s.name) {
-            <li><span class="ldg-swatch" [style.background]="s.color"></span>{{ s.name }}</li>
+            <li>
+              <span class="ldg-swatch" [class.is-line]="s.isOverlay" [style.background]="s.color"></span>{{ s.name }}
+            </li>
           }
         </ul>
       }
@@ -173,7 +192,7 @@ interface AxisTick {
           <thead>
             <tr>
               <th>Category</th>
-              @for (s of series(); track s.name) {
+              @for (s of srSeries(); track s.name) {
                 <th>{{ s.name }}</th>
               }
             </tr>
@@ -196,11 +215,32 @@ interface AxisTick {
     .ldg-chart {
       margin: 0;
       width: 100%;
+      /* The figure OWNS its box height. --ldg-h (written by the [style] binding
+         from height()) used to be read by nothing at all, so the fixed 720x360
+         viewBox alone decided the box and every [height] call site — 200, 256,
+         300, 300, 320 — was silently discarded.
+         Not max-height on the svg instead: an svg with a viewBox is a replaced
+         element with an intrinsic 2:1 ratio, so capping its height shrinks its
+         WIDTH proportionally (CSS 2.1 section 10.4) and the chart would stop
+         filling its card. Constraining the non-replaced figure is exact, and
+         preserveAspectRatio="xMidYMid meet" keeps the drawing undistorted
+         inside whatever box it is given. */
+      display: flex;
+      flex-direction: column;
+      height: var(--ldg-h, 260px);
+      /* .ldg-sr is position:absolute; now that the figure is the sizing box it
+         must also be the containing block, or the caption escapes to whatever
+         positioned ancestor the host page happens to have. */
+      position: relative;
     }
     .ldg-svg {
       display: block;
       width: 100%;
-      height: auto;
+      /* flex-basis 0 + min-height 0: take exactly the space left after the
+         legend, and stay shrinkable below the intrinsic aspect-ratio height
+         instead of overflowing the figure. */
+      flex: 1 1 0;
+      min-height: 0;
       overflow: visible;
     }
     .ldg-grid line {
@@ -267,6 +307,18 @@ interface AxisTick {
       width: 0.7rem;
       height: 0.7rem;
       border-radius: 3px;
+      flex: none;
+    }
+    /* The overlay is a line, not a filled band — its key must say so. */
+    .ldg-swatch.is-line {
+      height: 0.2rem;
+      border-radius: 999px;
+    }
+    .ldg-overlay {
+      fill: none;
+      stroke-width: 2;
+      stroke-linejoin: round;
+      stroke-linecap: round;
     }
     .ldg-sr {
       position: absolute;
@@ -291,6 +343,19 @@ export class CommandBarChartComponent {
   readonly orientation = input<BarOrientation>('vertical');
   /** Stack multiple series into one bar per category instead of grouping. */
   readonly stacked = input(false);
+  /**
+   * A reference series drawn as a step LINE over the bars instead of as another
+   * bar — e.g. supply capacity over a committed+pipeline demand stack.
+   *
+   * It is a separate input rather than a flagged member of {@link series}
+   * because `stacked` stacks EVERY entry of that list: a supply series left in
+   * there would be added on top of the demand it is supposed to be compared
+   * with. It DOES contribute to the value-axis domain, so a supply above the
+   * tallest stack raises the axis instead of being clipped off the plot — an
+   * overlay outside the domain draws a line that stops at the top gridline and
+   * makes the chart understate capacity while looking correct.
+   */
+  readonly overlay = input<BarSeries | undefined>(undefined);
   /** Render the formatted value next to/inside each bar. */
   readonly showValues = input(false);
   /** Target number of value-axis tick intervals. */
@@ -356,6 +421,7 @@ export class CommandBarChartComponent {
   private readonly domain = computed(() => {
     const series = this.series();
     const cats = this.categories();
+    const overlay = this.overlay();
     let max = 0;
     let min = 0;
     for (let i = 0; i < cats.length; i++) {
@@ -364,6 +430,9 @@ export class CommandBarChartComponent {
         let neg = 0;
         for (const s of series) {
           const v = s.values[i] ?? 0;
+          // A single non-finite datum would poison the accumulator and, through
+          // it, the whole axis — see the rationale on the grouped branch below.
+          if (!Number.isFinite(v)) continue;
           if (v >= 0) pos += v;
           else neg += v;
         }
@@ -372,6 +441,26 @@ export class CommandBarChartComponent {
       } else {
         for (const s of series) {
           const v = s.values[i] ?? 0;
+          /*
+           * Skip non-finite data instead of folding it into the bounds. A NaN (a
+           * 0/0 ratio, a JSON null coerced by a caller's `map`) makes
+           * Math.max(0, NaN) NaN, and in the PINNED branch below that becomes
+           * top = Math.max(pinned, NaN) = NaN -> spacing NaN -> EVERY tick NaN,
+           * so the gridlines and the entire value axis vanish rather than one
+           * bar. (Unpinned it is survivable: niceScale's own degenerate branch
+           * absorbs non-finite bounds and merely collapses to a 0..1 axis.)
+           */
+          if (!Number.isFinite(v)) continue;
+          max = Math.max(max, v);
+          min = Math.min(min, v);
+        }
+      }
+      // The overlay is NOT a bar, but it is inside the plot: if it did not widen
+      // the domain the line would be clipped at the top gridline and the chart
+      // would understate capacity while still looking well-formed.
+      if (overlay) {
+        const v = overlay.values[i] ?? 0;
+        if (Number.isFinite(v)) {
           max = Math.max(max, v);
           min = Math.min(min, v);
         }
@@ -426,9 +515,49 @@ export class CommandBarChartComponent {
     ),
   );
 
-  protected readonly legend = computed(() =>
-    this.series().map((s, i) => ({ name: s.name, color: this.resolvedColors()[i] })),
+  /** Overlay stroke: a neutral ink that reads over any series fill, both themes. */
+  protected readonly overlayColor = computed(
+    () => this.overlay()?.color ?? 'var(--color-ink-secondary)',
   );
+
+  protected readonly legend = computed(() => {
+    const entries = this.series().map((s, i) => ({
+      name: s.name,
+      color: this.resolvedColors()[i],
+      isOverlay: false,
+    }));
+    const overlay = this.overlay();
+    if (overlay) entries.push({ name: overlay.name, color: this.overlayColor(), isOverlay: true });
+    return entries;
+  });
+
+  /**
+   * The overlay as a STEP polyline: two points per category (band start, band
+   * end) at the same value position, so the connecting verticals fall on the
+   * category boundaries. A per-period capacity is flat across its period —
+   * sloping between band centres would imply values the data does not carry.
+   * `null` when there is no overlay, which is what removes the element.
+   */
+  protected readonly overlayPoints = computed<string | null>(() => {
+    const overlay = this.overlay();
+    if (!overlay) return null;
+    const horizontal = this.orientation() === 'horizontal';
+    const cats = this.categories();
+    const p = this.plot();
+    const band = (horizontal ? p.h : p.w) / Math.max(1, cats.length);
+    const pts: string[] = [];
+    for (let ci = 0; ci < cats.length; ci++) {
+      const v = overlay.values[ci] ?? 0;
+      // A gap in the reference data must not drag the line to zero, and NaN
+      // coordinates would silently drop the whole polyline in some renderers.
+      if (!Number.isFinite(v)) continue;
+      const pos = this.valueToPos(v);
+      const start = (horizontal ? p.y : p.x) + ci * band;
+      const end = start + band;
+      pts.push(horizontal ? `${pos},${start} ${pos},${end}` : `${start},${pos} ${end},${pos}`);
+    }
+    return pts.length ? pts.join(' ') : null;
+  });
 
   protected readonly bars = computed<BarRect[]>(() => {
     const horizontal = this.orientation() === 'horizontal';
@@ -452,6 +581,10 @@ export class CommandBarChartComponent {
         let negCursor = 0;
         for (let si = 0; si < series.length; si++) {
           const v = series[si].values[ci] ?? 0;
+          // Same reason as the domain guard: emit NO rect for a non-finite datum
+          // rather than one with x/y/height="NaN", which is invalid geometry and
+          // would also shift every later bar in the stack via the cursor.
+          if (!Number.isFinite(v)) continue;
           const cursorBase = v >= 0 ? posCursor : negCursor;
           const start = this.valueToPos(cursorBase);
           const end = this.valueToPos(cursorBase + v);
@@ -467,6 +600,10 @@ export class CommandBarChartComponent {
         const sub = inner / Math.max(1, series.length);
         for (let si = 0; si < series.length; si++) {
           const v = series[si].values[ci] ?? 0;
+          // See the stacked branch: a non-finite datum yields no rect at all,
+          // never a rect with NaN geometry. The slot it would have occupied is
+          // kept (`si * sub`) so the remaining bars stay under their labels.
+          if (!Number.isFinite(v)) continue;
           const end = this.valueToPos(v);
           const subStart = bandStart + si * sub;
           // Per-datum override wins over the series color when defined.
@@ -559,11 +696,23 @@ export class CommandBarChartComponent {
     });
   });
 
+  /**
+   * Series columns of the screen-reader table — the bars PLUS the overlay. The
+   * overlay is the only carrier of the capacity figure a non-sighted user needs
+   * to compare the stack against, so leaving it out of the table would make the
+   * line sighted-only information.
+   */
+  protected readonly srSeries = computed<readonly BarSeries[]>(() => {
+    const overlay = this.overlay();
+    return overlay ? [...this.series(), overlay] : this.series();
+  });
+
   protected readonly srRows = computed(() => {
     const fmt = this.fmt();
+    const cols = this.srSeries();
     return this.categories().map((category, ci) => ({
       category,
-      cells: this.series().map((s) => fmt(s.values[ci] ?? 0)),
+      cells: cols.map((s) => fmt(s.values[ci] ?? 0)),
     }));
   });
 }

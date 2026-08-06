@@ -29,7 +29,11 @@ const RESOURCES: Resource[] = [
   { id: '6', name: 'Subco — Mediolanum Senior Developer', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, kind: 'subco', vendorId: 'V4' },
 ];
 
-async function setup(resources: Resource[] = RESOURCES, overrides: Partial<ApiService> = {}) {
+// `authReady` defaults to true (every pre-existing test wants a settled
+// principal); pass false to hold the gated multi-endpoint read in flight, which
+// is the first clause dataLoading() keys on (reporting.ts:985) and the real
+// deep-link state before the OIDC bootstrap settles.
+async function setup(resources: Resource[] = RESOURCES, overrides: Partial<ApiService> = {}, authReady = true) {
   const empty = () => of([]);
   const apiStub = {
     getResources: vi.fn(() => of(resources)),
@@ -57,7 +61,7 @@ async function setup(resources: Resource[] = RESOURCES, overrides: Partial<ApiSe
     getHoursPerDay: () => of({ value: 8 }),
     ...overrides,
   } as unknown as ApiService;
-  const authStub = { authReady: signal(true), isAuthenticated: signal(true) } as unknown as AuthService;
+  const authStub = { authReady: signal(authReady), isAuthenticated: signal(true) } as unknown as AuthService;
   const notifyStub = { show: vi.fn() } as unknown as NotificationService;
 
   TestBed.configureTestingModule({
@@ -334,5 +338,51 @@ describe('Reporting — Baseline vs Planned columns (design spec, block E)', () 
     expect(row?.pcpPlanned).toBe(500);
     expect(row?.pcpDelta).toBe(100);
     expect(row?.pcpDeltaPct).toBeCloseTo(25, 5);
+  });
+});
+
+describe('Reporting — the multi-endpoint load window announces itself', () => {
+  /**
+   * A screen reader deep-linking /reporting heard NOTHING for the whole gated
+   * load window: `aria-label` on a role-less generic div names nothing (ARIA
+   * prohibits an accessible name there), so the label was dropped, and aria-busy
+   * carries no announcement outside a live region. The report then filled in
+   * silently — indistinguishable from an empty or broken page.
+   */
+  it('exposes a polite busy live region naming the load while the gated read is in flight', async () => {
+    // authReady false: dataLoading() is true on its FIRST clause, which is the
+    // real deep-link state (the OIDC bootstrap has not settled yet).
+    const fixture = await setup(RESOURCES, {}, false);
+    await flush(fixture);
+    const page = host(fixture);
+
+    // Scoped by its own text, not by document order: the ListState wrappers
+    // further down this page render their OWN [role=status] skeleton regions
+    // ("Loading utilization", …), so a bare querySelector could be satisfied by
+    // one of those and would prove nothing about this container.
+    const regions = Array.from(page.querySelectorAll('[role="status"][aria-live="polite"][aria-busy="true"]'));
+    const region = regions.find(r => (r.textContent ?? '').includes('Loading portfolio analytics'));
+    expect(region, 'the KPI/financials load region must be a named polite live region').toBeDefined();
+
+    // Assertion of ABSENCE: the discarded aria-label must not survive as the
+    // text source, or this could go green by adding a role while leaving the
+    // nameless-generic shape in place.
+    expect(page.querySelector('div[aria-label^="Loading"]:not([role])')).toBeNull();
+  });
+
+  it('does not leave a busy live region behind once the report has resolved', async () => {
+    const fixture = await setup();
+    await flush(fixture);
+    const page = host(fixture);
+
+    // The pair with the test above: the two auth states must DIFFER on this
+    // element. A region hard-coded into the template would satisfy the positive
+    // assertion above and fail here — that is what stops it being a tautology.
+    const stillBusy = Array.from(page.querySelectorAll('[aria-busy="true"]'))
+      .filter(r => (r.textContent ?? '').includes('Loading portfolio analytics'));
+    expect(stillBusy).toEqual([]);
+    // …and the KPI tiles the region stood in for are on screen now, so "no
+    // loading text" cannot be satisfied by a page that rendered nothing at all.
+    expect(page.textContent ?? '').toContain('Portfolio Financials');
   });
 });

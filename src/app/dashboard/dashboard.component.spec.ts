@@ -1,9 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { computed, signal } from '@angular/core';
-import { TestBed } from '@angular/core/testing';
+import { DeferBlockState, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { of } from 'rxjs';
+import { NEVER, of } from 'rxjs';
 import { DashboardComponent } from './dashboard.component';
-import { ApiService, UserRole, type BenchRollup } from '../services/api.service';
+import { ApiService, UserRole, type BenchRollup, type Issue } from '../services/api.service';
 import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
 import { AuthService } from '../services/auth.service';
 
@@ -300,5 +302,290 @@ describe('Dashboard — Baseline vs Planned portfolio tile (design spec, block E
   it('is absent for a pm — portfolio dashboard stays finance/delivery-executive/admin only, unchanged by this block', async () => {
     const { fixture } = await render('pm');
     expect(fixture.nativeElement.textContent).not.toContain('Baseline vs Planned');
+  });
+});
+
+describe('Dashboard — the Risk & Escalation "Issues" chip tracks the queue', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  function issue(over: Partial<Issue> = {}): Issue {
+    return {
+      id: 'I1', projectId: 'P1', title: 'Integration blocked', type: 'Risk',
+      severity: 'Critical', status: 'Open', reportedBy: 'u1', ...over,
+    };
+  }
+
+  /**
+   * The Risk & Escalation card lives inside `@defer (hydrate on viewport)`, and a
+   * defer block never plays through on its own in TestBed — only its placeholder
+   * skeleton renders. Drive the blocks to Complete explicitly, or every assertion
+   * below would be made against a skeleton and pass for the wrong reason (the
+   * chip helper's own not-null check is what surfaces that).
+   */
+  async function renderRiskQueue(issues: Issue[]) {
+    const { fixture } = await render('finance', { getProjectIssues: vi.fn(() => of(issues)) });
+    for (const block of await fixture.getDeferBlocks()) await block.render(DeferBlockState.Complete);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    return fixture;
+  }
+
+  const chip = (fixture: { nativeElement: unknown }): HTMLElement => {
+    const el = (fixture.nativeElement as HTMLElement).querySelector<HTMLElement>('a[href="/project-issues"]');
+    expect(el, 'the Risk & Escalation header chip must exist').not.toBeNull();
+    return el!;
+  };
+
+  /*
+   * BOTH data states are asserted on the SAME element inside ONE test. The chip
+   * used to carry `red` in its static class list, so the green all-clear branch
+   * was dead by cascade order (styles.css declares .command-status.red AFTER
+   * .green) and a clean queue rendered in the same alarm tone as forty open
+   * criticals. Asserting only the populated case is a class-string tautology;
+   * asserting only the empty case would pass against a chip that is never red.
+   */
+  it('is green with an empty queue and red with an unresolved Critical — never both, never neither', async () => {
+    const clear = chip(await renderRiskQueue([]));
+    expect(clear.classList.contains('red')).toBe(false);
+    expect(clear.classList.contains('green')).toBe(true);
+    // The card body already said "No critical escalations currently open." while
+    // the header shouted red — assert the two halves now agree.
+    expect((clear.closest('.command-card') as HTMLElement).textContent)
+      .toContain('No critical escalations currently open.');
+
+    TestBed.resetTestingModule();
+
+    const alarmed = chip(await renderRiskQueue([issue()]));
+    expect(alarmed.classList.contains('red')).toBe(true);
+    expect(alarmed.classList.contains('green')).toBe(false);
+  });
+
+  it('stays green for an issue that is Resolved or below High, matching criticalRisks()', async () => {
+    // The chip must follow the SAME predicate as the queue beneath it: a resolved
+    // Critical and an open Low are both all-clear. Without this row, a chip that
+    // simply went "red when any issue exists" would pass the test above.
+    const fixture = await renderRiskQueue([
+      issue({ id: 'I-done', severity: 'Critical', status: 'Resolved' }),
+      issue({ id: 'I-low', severity: 'Low', status: 'Open' }),
+    ]);
+    expect(fixture.componentInstance.criticalRisks()).toBe(0);
+    const el = chip(fixture);
+    expect(el.classList.contains('red')).toBe(false);
+    expect(el.classList.contains('green')).toBe(true);
+  });
+
+  it('goes red for an escalated issue of any severity — the third clause of criticalRisks()', async () => {
+    const fixture = await renderRiskQueue([issue({ severity: 'Low', escalated: true })]);
+    expect(fixture.componentInstance.criticalRisks()).toBe(1);
+    const el = chip(fixture);
+    expect(el.classList.contains('red')).toBe(true);
+    expect(el.classList.contains('green')).toBe(false);
+  });
+});
+
+describe('Dashboard — the 11-endpoint load window announces itself', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  /**
+   * One leg that never emits keeps the forkJoin — and so isLoading() — pending.
+   * That also means the app is never stable, so this cannot go through the shared
+   * `render()` helper: its `await fixture.whenStable()` would hang on the very
+   * pending task the test is about. Render synchronously instead.
+   */
+  function renderInFlight() {
+    const api = { ...makeApiStub(), getResources: vi.fn(() => NEVER) };
+    TestBed.configureTestingModule({
+      imports: [DashboardComponent],
+      providers: [
+        provideRouter([]),
+        { provide: ApiService, useValue: api },
+        { provide: AuthService, useValue: makeAuthStub('finance') },
+      ],
+    });
+    const fixture = TestBed.createComponent(DashboardComponent);
+    fixture.detectChanges();
+    return fixture;
+  }
+
+  it('exposes a polite busy live region naming the load while the portfolio read is in flight', () => {
+    const fixture = renderInFlight();
+    const page = fixture.nativeElement as HTMLElement;
+
+    // Scoped by its own text: the ListState wrappers elsewhere on this page own
+    // their own [role=status] skeleton regions, so a bare querySelector could be
+    // satisfied by one of those and prove nothing about this container.
+    const regions = Array.from(page.querySelectorAll('[role="status"][aria-live="polite"][aria-busy="true"]'));
+    const region = regions.find(r => (r.textContent ?? '').includes('Loading delivery command center'));
+    expect(region, 'the portfolio load region must be a named polite live region').toBeDefined();
+
+    // Assertion of ABSENCE: aria-label on a role-less div names nothing, so it
+    // must not survive as the text source — otherwise this could go green by
+    // adding a role while leaving the nameless-generic shape in place.
+    expect(page.querySelector('div[aria-label^="Loading"]:not([role])')).toBeNull();
+  });
+
+  it('does not leave a busy live region behind once the portfolio has resolved', async () => {
+    // The pair: the two data states must DIFFER on this element, so a region
+    // hard-coded into the template cannot satisfy both halves.
+    const { fixture } = await render('finance');
+    const page = fixture.nativeElement as HTMLElement;
+    expect(page.textContent ?? '').not.toContain('Loading delivery command center');
+    // …and the tiles it stood in for did render, so this is not green merely
+    // because the page produced nothing.
+    expect(page.textContent ?? '').toContain('Portfolio Financials');
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Token arithmetic for the red FIGURE colour. The ratio is COMPUTED
+// (OKLCH -> linear sRGB -> WCAG relative luminance), never restated as a token
+// name: asserting the name would be green against today's failing 4.47:1, a trap
+// this project has already paid for.
+// -----------------------------------------------------------------------------
+
+const GLOBAL_CSS = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8');
+const DASHBOARD_SRC = readFileSync(resolve(process.cwd(), 'src/app/dashboard/dashboard.component.ts'), 'utf8');
+
+/** The declarations of one flat CSS rule (this stylesheet has no nested braces). */
+function cssBlock(css: string, selector: string): string {
+  const needle = `${selector} {`;
+  const at = css.indexOf(needle);
+  expect(at, `CSS selector not found: ${selector}`).toBeGreaterThanOrEqual(0);
+  return css.slice(at + needle.length, css.indexOf('}', at));
+}
+
+interface Oklch { l: number; c: number; h: number }
+
+function token(block: string, name: string): Oklch {
+  const m = new RegExp(`${name}:\\s*oklch\\(([^)]+)\\)`).exec(block);
+  expect(m, `token not found: ${name}`).not.toBeNull();
+  const [l, c, h] = m![1].trim().split(/\s+/).map(Number);
+  return { l, c, h: h ?? 0 };
+}
+
+/** OKLCH -> OKLab -> linear sRGB (Ottosson) -> WCAG relative luminance Y. */
+function luminance({ l, c, h }: Oklch): number {
+  const rad = (h * Math.PI) / 180;
+  const a = c * Math.cos(rad);
+  const bb = c * Math.sin(rad);
+  const lc = (l + 0.3963377774 * a + 0.2158037573 * bb) ** 3;
+  const mc = (l - 0.1055613458 * a - 0.0638541728 * bb) ** 3;
+  const sc = (l - 0.0894841775 * a - 1.291485548 * bb) ** 3;
+  const clamp = (v: number) => Math.min(1, Math.max(0, v));
+  // Linear sRGB IS the gamma-decoded channel WCAG defines luminance over, so the
+  // clamped values feed the 0.2126/0.7152/0.0722 sum directly.
+  const r = clamp(4.0767416621 * lc - 3.3077115913 * mc + 0.2309699292 * sc);
+  const g = clamp(-1.2684380046 * lc + 2.6097574011 * mc - 0.3413193965 * sc);
+  const b = clamp(-0.0041960863 * lc - 0.7034186147 * mc + 1.707614701 * sc);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrast(x: Oklch, y: Oklch): number {
+  const a = luminance(x);
+  const b = luminance(y);
+  const [hi, lo] = a > b ? [a, b] : [b, a];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+describe('Negative money/hours read at AA in dark theme (computed ratio, not a token name)', () => {
+  const dark = cssBlock(GLOBAL_CSS, ':root[data-theme="dark"]');
+  const aliases = cssBlock(GLOBAL_CSS, ':root');
+
+  /** Sanity-check the conversion itself against two values with known ratios. */
+  it('computes WCAG ratios the arithmetic can be trusted on', () => {
+    // Pure white on pure black is exactly 21:1 by definition; identical colours
+    // are exactly 1:1. Without this row, every ratio below could be wrong in the
+    // same direction and the suite would still look green.
+    expect(contrast({ l: 1, c: 0, h: 0 }, { l: 0, c: 0, h: 0 })).toBeCloseTo(21, 2);
+    expect(contrast({ l: 0.62, c: 0.2, h: 25 }, { l: 0.62, c: 0.2, h: 25 })).toBeCloseTo(1, 6);
+  });
+
+  it('resolves --cc-red-text to a shade that clears 4.5:1 where the raw fill tone does not', () => {
+    const critical = token(dark, '--color-critical');
+    const criticalText = token(dark, '--color-critical-text');
+    const surface = token(dark, '--color-surface');
+    const surfaceMuted = token(dark, '--color-surface-muted');
+
+    // Why the alias had to exist: the fill tone is BELOW AA as text on both the
+    // plain and the zebra row. This half is the assertion of absence — it proves
+    // the -text shade does real work rather than being a second name for one
+    // colour, which is what an equality on token NAMES would have allowed.
+    expect(contrast(critical, surface)).toBeLessThan(4.5);
+    expect(contrast(critical, surfaceMuted)).toBeLessThan(4.5);
+
+    // …and the shade the alias points at clears AA on both.
+    expect(contrast(criticalText, surface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(criticalText, surfaceMuted)).toBeGreaterThanOrEqual(4.5);
+
+    // Ties the ratio to the token the app actually writes: without this the
+    // arithmetic could be green while --cc-red-text aliased something else.
+    expect(aliases).toMatch(/--cc-red-text:\s*var\(--color-critical-text\)/);
+  });
+
+  it('gives the red figure the same treatment as the green one beside it', () => {
+    const surface = token(dark, '--color-surface');
+    // The reported defect was the DISPARITY: a positive VAC at ~10.8:1 next to a
+    // negative VAC at 4.47:1 in the same column. Both must now clear AA.
+    expect(contrast(token(dark, '--color-positive-text'), surface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(token(dark, '--color-critical-text'), surface)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  /*
+   * Source scan, scoped to the two files this batch owns. The register lists
+   * three further TEXT sites — forecast.ts:170 and :247, and what-if.ts:344 —
+   * which belong to another batch's files; add them to SCANNED when they land.
+   */
+  const SCANNED: readonly (readonly [string, string])[] = [
+    ['src/styles.css', GLOBAL_CSS],
+    ['src/app/dashboard/dashboard.component.ts', DASHBOARD_SRC],
+  ];
+
+  /**
+   * Every WHOLE LINE that puts a token in a foreground position: a `color:`
+   * declaration (never `border-top-color:` — that one must keep the fill tone),
+   * a `[style.color]` binding, or a `text-[var(--tok)]` utility class.
+   */
+  function colorLines(tok: string): string[] {
+    const patterns = [
+      new RegExp(`^.*(^|[^-\\w])color:\\s*var\\(${tok}\\).*$`, 'gm'),
+      new RegExp(`^.*\\[style\\.color\\][^\\n]*var\\(${tok}\\).*$`, 'gm'),
+      new RegExp(`^.*text-\\[var\\(${tok}\\)\\].*$`, 'gm'),
+    ];
+    return SCANNED.flatMap(([, src]) => patterns.flatMap(re => src.match(re) ?? []));
+  }
+
+  /** WCAG large text: >=24px, or >=18.66px bold. text-xl is 20px, text-3xl 30px. */
+  const isLargeText = (line: string) =>
+    /text-3xl/.test(line) || (/text-xl/.test(line) && /font-(semi)?bold/.test(line));
+
+  it('uses the raw --cc-red as a foreground ONLY where the large-text 3:1 threshold applies', () => {
+    const uses = colorLines('--cc-red');
+
+    // Not `toEqual([])`: two sites keep the fill tone on purpose (the 30px
+    // overbooked count and the 20px semibold utilization figure), where WCAG's
+    // large-text threshold is 3:1. So the contract is per-site, and the
+    // small-text sites — the figures a finance user reads to spot an overrun —
+    // must all be gone.
+    expect(uses.filter(line => !isLargeText(line))).toEqual([]);
+
+    // The exemption is PROVEN, not assumed: the fill tone must actually clear
+    // 3:1 on both the plain and the zebra row, or those two sites would be a
+    // silent failure hiding behind an allow-list.
+    const critical = token(dark, '--color-critical');
+    expect(contrast(critical, token(dark, '--color-surface'))).toBeGreaterThanOrEqual(3);
+    expect(contrast(critical, token(dark, '--color-surface-muted'))).toBeGreaterThanOrEqual(3);
+
+    // Vacuity control: the identical scan must FIND the -text tokens that are
+    // declared, proving it really reads these declarations, template bindings and
+    // utility classes rather than matching nothing at all.
+    expect(colorLines('--cc-red-text').length).toBeGreaterThan(0);
+    expect(colorLines('--cc-green-text').length).toBeGreaterThan(0);
+    // …and that isLargeText is not simply true for everything: the sites this
+    // batch switched are small text and must be classified as such.
+    expect(colorLines('--cc-red-text').filter(isLargeText)).toEqual([]);
+
+    // The KPI border keeps the fill tone deliberately (a non-text 3:1 target),
+    // so the scan must not have been made green by deleting --cc-red outright.
+    expect(GLOBAL_CSS).toMatch(/border-top-color:\s*var\(--cc-red\)/);
   });
 });
