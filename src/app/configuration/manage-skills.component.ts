@@ -114,9 +114,23 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
                   <button type="button" (click)="toggleRestrict(skill)" class="w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-caution-text hover:border-caution hover:bg-caution-tint transition-all inline-flex items-center justify-center shadow-sm mr-2" [attr.aria-label]="(skill.restricted ? 'Unrestrict ' : 'Restrict ') + skill.name" [title]="skill.restricted ? 'Unrestrict' : 'Restrict'">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">{{ skill.restricted ? 'lock_open' : 'block' }}</mat-icon>
                   </button>
-                  <button type="button" (click)="deleteSkill(skill.id)" class="w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm" [attr.aria-label]="'Delete ' + skill.name" [attr.title]="'Delete ' + skill.name">
-                    <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
-                  </button>
+                  <!-- ARMED STATE IS RENDERED IN THE ROW, not announced in a toast.
+                       The previous shape armed pendingDeleteId invisibly and never
+                       expired it, while its only warning was a toast that auto-dismisses
+                       after 5s: ten minutes later the same trash icon deleted the skill
+                       outright. Confirm/Cancel live inside the armed row, so the armed
+                       object is always the object the admin can see. -->
+                  @if (pendingDeleteId() === skill.id) {
+                    <div class="inline-flex items-center gap-2">
+                      <span class="text-xs font-bold text-[var(--cc-muted)]">Delete {{ skill.name }}?</span>
+                      <button type="button" (click)="confirmDelete(skill.id)" class="px-3 py-1.5 text-xs font-bold text-critical-text bg-critical-tint ring-1 ring-critical rounded-lg hover:bg-[color-mix(in_oklch,var(--color-critical)_16%,var(--color-surface))] transition-all shadow-sm">Confirm</button>
+                      <button type="button" (click)="cancelDelete()" class="px-3 py-1.5 text-xs font-bold text-ink-secondary bg-surface border border-line rounded-lg hover:bg-surface-muted transition-all shadow-sm">Cancel</button>
+                    </div>
+                  } @else {
+                    <button type="button" (click)="requestDelete(skill.id)" class="w-10 h-10 rounded-full bg-surface border border-line text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all inline-flex items-center justify-center shadow-sm" [attr.aria-label]="'Delete ' + skill.name" [attr.title]="'Delete ' + skill.name">
+                      <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
+                    </button>
+                  }
                 </td>
               </tr>
             }
@@ -145,7 +159,8 @@ export class ManageSkillsComponent {
   catalogs = computed(() => this.dataRes.value().catalogs);
   proficiencySets = computed(() => this.dataRes.value().proficiencySets);
   showForm = signal(false);
-  private pendingDeleteId = signal<string | null>(null);
+  /** Read by the template: the armed row renders its own Confirm/Cancel pair. */
+  protected pendingDeleteId = signal<string | null>(null);
 
   skillForm: FormGroup = this.fb.group({
     name: ['', Validators.required],
@@ -187,16 +202,35 @@ export class ManageSkillsComponent {
     });
   }
 
-  deleteSkill(id: string) {
-    if (this.pendingDeleteId() === id) {
+  /**
+   * Arms the row. Deliberately CANNOT delete: the only path to the DELETE is the
+   * Confirm control rendered inside the armed row, so a stale click on a trash
+   * icon — the same one, or another row's — can never destroy anything.
+   *
+   * The toast is now corroboration, not the warning: it names the skill and the
+   * consequence the old copy left out (resources whose profile lists this skill
+   * keep a name that is no longer in the catalog, and POST/PUT of a resource
+   * validates skills against that catalog, so those profiles can no longer be
+   * re-saved as they stand).
+   */
+  requestDelete(id: string) {
+    this.pendingDeleteId.set(id);
+    const name = this.skills().find(s => s.id === id)?.name ?? 'this skill';
+    this.notificationService.show(
+      `Confirm deletion of "${name}". Resource profiles that list it keep a skill name no longer in the catalog and cannot be re-saved until it is removed from them.`,
+      'info',
+    );
+  }
+
+  cancelDelete() {
+    this.pendingDeleteId.set(null);
+  }
+
+  confirmDelete(id: string) {
+    this.api.deleteSkill(id).subscribe(() => {
       this.pendingDeleteId.set(null);
-      this.api.deleteSkill(id).subscribe(() => {
-        this.dataRes.reload();
-      });
-    } else {
-      this.pendingDeleteId.set(id);
-      this.notificationService.show('Click delete again to confirm removing this skill', 'info');
-    }
+      this.dataRes.reload();
+    });
   }
 
   triggerUpload() {

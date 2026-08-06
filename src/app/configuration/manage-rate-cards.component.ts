@@ -100,64 +100,77 @@ const BASE_CURRENCY = 'EUR';
       </div>
 
       @if (showForm()) {
-        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+        <!-- SCROLL-SAFE OVERLAY (the shape billing.ts's overlays use). This panel
+             needs ~508px; on a 320x568 phone about 460px of visual viewport
+             survives the browser chrome. A fixed items-center overlay splits the
+             surplus above and below the centre, so the header went above y=0 and
+             the "Save Rate Card" footer below the fold — and a fixed box cannot be
+             scrolled by the page, so the card could be filled in and never saved.
+             overflow-y-auto gives the overlay its own scroller, items-start
+             anchors the panel at the top on short viewports, and the panel's
+             max-h-[90vh] plus the scrolling body below keep the footer reachable. -->
+        <div data-test="rate-card-form-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
              appModal ariaLabelledby="rateCardModalTitle" (dismiss)="closeForm()">
-          <div class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col">
+          <div data-test="rate-card-form-panel" class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="rateCardModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Rate Card' : 'Add Rate Card' }}</h2>
               <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary transition-colors">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
-            <form [formGroup]="form" (ngSubmit)="save()" class="p-6 space-y-4">
-              <div>
-                <label for="rc-role" class="block text-sm font-medium text-ink-secondary mb-1">Role *</label>
-                <!-- Role is a config FK to the project-roles catalog (store = name). -->
-                <select id="rc-role" formControlName="role" class="command-select">
-                  <option value="" disabled>Select a role...</option>
-                  @for (r of roleOptions(); track r.id) {
-                    <option [value]="r.name">{{ r.name }}</option>
-                  }
-                  @if (orphanRole(); as orphan) {
-                    <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
-                  }
-                </select>
-              </div>
-              <div>
-                <label for="rc-org" class="block text-sm font-medium text-ink-secondary mb-1">Organization</label>
-                <!-- Optional: empty = applies to ALL organizations. An org-specific card wins. -->
-                <select id="rc-org" formControlName="organization" class="command-select">
-                  <option value="">All organizations</option>
-                  @for (o of indentedOrgOptions(); track o.node.id) {
-                    <option [value]="o.node.name">{{ '\u2007'.repeat(o.depth) }}{{ o.node.name }}</option>
-                  }
-                  @if (orphanOrg(); as orphan) {
-                    <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
-                  }
-                </select>
-              </div>
-              <div>
-                <label for="rc-currency" class="block text-sm font-medium text-ink-secondary mb-1">Currency *</label>
-                <select id="rc-currency" formControlName="currency" class="command-select">
-                  @for (c of currencyOptions(); track c) {
-                    <option [value]="c">{{ c }}</option>
-                  }
-                </select>
-              </div>
-              <div class="grid grid-cols-2 gap-4">
+            <!-- The <form> stays the submit boundary (so Enter still submits) and
+                 becomes a column: fields scroll, the footer is pinned. -->
+            <form [formGroup]="form" (ngSubmit)="save()" class="flex flex-col flex-1 min-h-0 overflow-hidden">
+              <div class="p-6 space-y-4 overflow-y-auto flex-1 min-h-0">
                 <div>
-                  <label for="rc-cost" class="block text-sm font-medium text-ink-secondary mb-1">Cost rate (€/day) *</label>
-                  <input id="rc-cost" type="number" min="0" step="1" formControlName="costRate" class="command-input" placeholder="e.g. 600">
+                  <label for="rc-role" class="block text-sm font-medium text-ink-secondary mb-1">Role *</label>
+                  <!-- Role is a config FK to the project-roles catalog (store = name). -->
+                  <select id="rc-role" formControlName="role" class="command-select">
+                    <option value="" disabled>Select a role...</option>
+                    @for (r of roleOptions(); track r.id) {
+                      <option [value]="r.name">{{ r.name }}</option>
+                    }
+                    @if (orphanRole(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
                 </div>
                 <div>
-                  <label for="rc-bill" class="block text-sm font-medium text-ink-secondary mb-1">Bill rate (€/day) *</label>
-                  <input id="rc-bill" type="number" min="0" step="1" formControlName="billRate" class="command-input" placeholder="e.g. 1120">
+                  <label for="rc-org" class="block text-sm font-medium text-ink-secondary mb-1">Organization</label>
+                  <!-- Optional: empty = applies to ALL organizations. An org-specific card wins. -->
+                  <select id="rc-org" formControlName="organization" class="command-select">
+                    <option value="">All organizations</option>
+                    @for (o of indentedOrgOptions(); track o.node.id) {
+                      <option [value]="o.node.name">{{ '\u2007'.repeat(o.depth) }}{{ o.node.name }}</option>
+                    }
+                    @if (orphanOrg(); as orphan) {
+                      <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
+                    }
+                  </select>
                 </div>
+                <div>
+                  <label for="rc-currency" class="block text-sm font-medium text-ink-secondary mb-1">Currency *</label>
+                  <select id="rc-currency" formControlName="currency" class="command-select">
+                    @for (c of currencyOptions(); track c) {
+                      <option [value]="c">{{ c }}</option>
+                    }
+                  </select>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                  <div>
+                    <label for="rc-cost" class="block text-sm font-medium text-ink-secondary mb-1">Cost rate (€/day) *</label>
+                    <input id="rc-cost" type="number" min="0" step="1" formControlName="costRate" class="command-input" placeholder="e.g. 600">
+                  </div>
+                  <div>
+                    <label for="rc-bill" class="block text-sm font-medium text-ink-secondary mb-1">Bill rate (€/day) *</label>
+                    <input id="rc-bill" type="number" min="0" step="1" formControlName="billRate" class="command-input" placeholder="e.g. 1120">
+                  </div>
+                </div>
+                @if (duplicateExists()) {
+                  <p role="alert" class="text-xs text-critical-text">A rate card already exists for this role / organization / currency. Edit that card instead of creating a duplicate.</p>
+                }
               </div>
-              @if (duplicateExists()) {
-                <p role="alert" class="text-xs text-critical-text">A rate card already exists for this role / organization / currency. Edit that card instead of creating a duplicate.</p>
-              }
-              <div class="pt-4 flex justify-end gap-3">
+              <div class="px-6 py-4 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
                 <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
                 <button type="submit" [disabled]="!form.valid || duplicateExists()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save Rate Card</button>
               </div>
@@ -167,7 +180,11 @@ const BASE_CURRENCY = 'EUR';
       }
 
       @if (deletingId()) {
-        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+        <!-- Short warning dialog (icon + title + two lines + footer): it fits the
+             ~460px a 320x568 phone leaves, so it keeps the plain centred overlay.
+             Its spec doubles as the negative control for the scroll-safety
+             predicate — see manage-rate-cards.component.spec.ts. -->
+        <div data-test="rate-card-delete-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
              appModal ariaLabelledby="rateCardDeleteTitle" (dismiss)="cancelDelete()">
           <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col">
             <div class="p-6 text-center">
