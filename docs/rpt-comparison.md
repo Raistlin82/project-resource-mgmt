@@ -1,7 +1,7 @@
 # Lutech RPT vs Delivery Control — comparativa side by side
 
 _Fonte lato RPT: **Manuale Utente Resource Planning Tool (RPT), v04 del 07/07/2026**, 49 pagine, letto integralmente._
-_Fonte lato nostro: **il codice su `main`**, verificato riga per riga il 2026-08-06 — 45 tabelle, 19 migrazioni, 48 rotte, 1852 test unitari, 710 check smoke API. Non la roadmap, non la memoria di sessione (che su due punti si è rivelata già superata)._
+_Fonte lato nostro: **il codice su `main`**, verificato riga per riga il 2026-08-06 e riverificato dopo la prima wave di chiusura il 2026-08-07 — 45 tabelle, 19 migrazioni, 48 rotte, **2026 test unitari** su 108 file, 732 check smoke API. Non la roadmap, non la memoria di sessione (che su due punti si è rivelata già superata)._
 
 ---
 
@@ -50,9 +50,9 @@ Quindi la domanda "chi è meglio" ha **tre risposte diverse** a seconda di cosa 
 | 8 | flusso: Cliente → Commessa → dettaglio commessa → Continua / "Modifica Pianificazione Esistente" | Progetto (→ contratto → cliente) → Request → Assignment. Nessuna singola "griglia di pianificazione per commessa" | PARZIALE |
 | 9 | griglia risorse della commessa: stato per riga, SCR, tot costo/ore pianificate, colonne mese pianificato+costi | gli stessi dati esistono ma distribuiti su `project-details`, `/schedule`, `/capacity` | PARZIALE |
 | 10 | inserimento per **Codice ID digitabile** (`COGNOM` + `NOM` + `00000` + progressivo, es. `ROMSAL000002`) | id UUID v4 con prefissi `TE`/`AL`/`AR`/`OB`: nessuno digita un UUID | **MANCA** — convenzione diversa, ma operativamente peggiore per un pianificatore |
-| 11 | **Ricerca Avanzata a 13 faccette**: cod. risorsa, nome, cognome, anagrafica (INTERNAL/DUMMY/SUBCO), capability, practice, competence, people manager, tariffa, livello professionale, skill matrix, skill capability, job role (+ società per i subco) | `/staffing`: testo libero + **4 faccette** (capability, practice, competence, people manager) | PARZIALE |
+| 11 | **Ricerca Avanzata a 13 faccette**: cod. risorsa, nome, cognome, anagrafica (INTERNAL/DUMMY/SUBCO), capability, practice, competence, people manager, tariffa, livello professionale, skill matrix, skill capability, job role (+ società per i subco) | **13 controlli** su `/staffing`: le 4 esistenti più anagrafica, società, job role, skill, proficiency minima, skill capability e banda di tariffa, in un pannello a scomparsa che dichiara quanti filtri sono attivi | PARZIALE — restano fuori due. Il **codice risorsa** perché non esiste ancora una colonna leggibile; il **livello professionale** perché **non è modellato**: la seniority vive solo dentro il testo libero e nei nomi dei ruoli, quindi una faccetta lì filtrerebbe una convenzione di nomenclatura, non un dato |
 | 12 | card candidato con anagrafica, costi, skill, capability/practice/competence, people manager, ore contratto, tariffa, livello | card con skill, ruolo, org **+ punteggio di match 0–100 pesato con breakdown per dimensione e rilevazione dello skill-gap** (`match.util.ts`) | **AVANTI** sul ranking — RPT filtra, non ordina per idoneità. I campi della card restano meno ricchi dei loro |
-| 13 | semaforo **"Disponibilità futura" a 6 pallini** sulla card (verde BENCH / giallo PARZIALE / rosso ALLOCATO) | il rollup a 6 mesi BENCH/PARTIAL/ALLOCATED esiste ed è identico — ma vive su `/bench`, **non sulla card di staffing** | PARZIALE — dato giusto, posto sbagliato |
+| 13 | semaforo **"Disponibilità futura" a 6 pallini** sulla card (verde BENCH / giallo PARZIALE / rosso ALLOCATO) | sei pallini **sulla card di staffing**, dal rollup server invariato; chi è assente dal rollup (ogni dummy, e chi non è attivo nella finestra) è reso **esplicitamente "non tracciato"**, mai come libero | **AVANTI** — ogni pallino porta anche una lettera e un `aria-label` con mese e stato a parole, quindi non è solo colore (WCAG 1.4.1) |
 | 14 | tasti rapidi Allocazione 100% / 50% / Azzera / Rimuovi risorsa | `allocation-calendar`: 100% / 50% / Clear + rimozione | PARI |
 | 15 | **Dettaglio Calendario** (§3.3): pianificazione giorno per giorno con spinner ore, riga "Capacità max giornaliera", riga TOTALI | `assignment_days` + `PUT /assignments/:id/allocation` con mappa giorno→ore, cap giornaliero *kind-aware*, marker di sforamento con **testo + icona oltre al colore** | **AVANTI** — il loro semaforo è solo colore; il nostro rispetta WCAG 1.4.1 |
 | 16 | semaforo "ore caricate": verde a target, giallo sotto-allocato, rosso sovra-allocato | stato per-mese BENCH/PARTIAL/ALLOCATED + marker `over` per giorno + semaforo in `/capacity` | PARI |
@@ -63,7 +63,7 @@ Quindi la domanda "chi è meglio" ha **tre risposte diverse** a seconda di cosa 
 | 21 | Campo Note del pianificatore per (risorsa, commessa, mese), salvabile solo dopo la bozza | `assignment_months.planner_note` e `approver_note`, editabili nel calendario | PARI (la notifica all'approvatore è riga 43) |
 | 22 | **Dettaglio Storico** per riga: tutte le modifiche alla pianificazione di quella risorsa (§3.4) | audit trail append-only **più ricco** (attore, ruolo, metodo, path, diff before/after per chiave, incluse le master data che muovono denaro) — ma **nessuna schermata lo legge**: `/audit-logs` non ha una rotta Angular | PARZIALE — dato migliore, finestra assente |
 | 23 | **"Visualizza PCP"**: Totale Costi PCP / Totale Costi Pianificato / Delta € / Delta % per mese | `costBaselineComparison`: baseline **congelata** (`cost_baselines`, con `frozenAt`/`frozenBy`) contro piano live, delta e delta% per mese, più flag `outOfBaselineHorizon` per i mesi mai congelati | **AVANTI** — RPT confronta con un PCP letto live; noi con una baseline congelata e attribuita, quindi contestabile a posteriori |
-| 24 | Report PM → **.xlsx**, un foglio "Pianificazione" | export CSV/JSON (protetto contro formula injection, SSR-safe) | **MANCA** — nessun XLSX |
+| 24 | Report PM → **.xlsx**, un foglio "Pianificazione" | **.xlsx nativo** (`rpt-xlsx.util.ts`, foglio unico per commessa con i costi mensili), più CSV/JSON | PARI — in xlsx il tipo di cella sta nel file, quindi `=SUM(A1)` viene scritto come testo (`t="s"`, nessun `<f>`) invece di essere neutralizzato con l'apostrofo del CSV |
 
 ### 3.3 Dummy, Subco, domanda di hiring (manuale §3.2.3–3.2.5, §4.2, §7.3, §8.4, §8.6)
 
@@ -89,11 +89,11 @@ Quindi la domanda "chi è meglio" ha **tre risposte diverse** a seconda di cosa 
 | 37 | tabella: colonne fisse che contano **solo ALLOCATO**, colonne mese dinamiche che contano **ALLOCATO + RICHIESTO**, formato `88 hh / 176 hh`, pallino verde / triangolo rosso sopra / triangolo arancione sotto | `utilization` vs `utilizationPlanned` e `staffedEffort` vs `staffedEffortPlanned` separano già confermato da pendente; semafori in `/capacity` e `/bench` | PARI |
 | 38 | riga espandibile: dettaglio commesse 1..n, anagrafica risorsa e sua organizzazione, delta in testata | `project-details` e `/utilization` per risorsa | PARI |
 | 39 | approvazione per mese: modale calendario multi-commessa, check per commessa, "Approva Mese", da ripetere per ogni mese | `/allocation-approvals`, decisione per coppia (assignment, mese) | PARI |
-| 40 | **Allocazione multipla** (§4.2): N risorse in un'unica schermata, "Approva e Prosegui" **avanza automaticamente al mese successivo tenendo la finestra aperta** | modalità multi-risorsa con "Approve selected" — **senza auto-avanzamento al mese successivo** | PARZIALE |
+| 40 | **Allocazione multipla** (§4.2): N risorse in un'unica schermata, "Approva e Prosegui" **avanza automaticamente al mese successivo tenendo la finestra aperta** | l'avanzamento c'era già ma era **cieco** (`mesi[i+1]`): la finestra del feed è un intervallo, non una lista di lavoro, quindi atterrava su mesi dove i selezionati non avevano nulla da decidere e la sequenza si incagliava. Ora cerca in avanti il primo mese con una riga davvero decidibile, e all'ultimo **dichiara** di aver finito | **AVANTI** — l'auto-close era indistinguibile da un batch interamente rifiutato |
 | 41 | rifiutare = "Azzera Allocazione" e poi approvare (workaround che il manuale documenta come procedura) | stato `Rejected` esplicito + nota dell'approvatore | **AVANTI** — un rifiuto è un rifiuto, non un'approvazione di zero ore |
 | 42 | Note Pianificatore / Note Approvatore; il pulsante note diventa rosso quando ci sono note | `planner_note` / `approver_note` nel calendario | PARI |
 | 43 | **notifica email** ai responsabili alla creazione di dummy, subco e commessa Basket; la nota notifica l'approvatore | nessun canale email; solo toast in-app | **MANCA** |
-| 44 | Report People Manager → **.xlsx a 2 fogli**: "Allocazione - Dettaglio" (per risorsa e per commessa) e "Allocazione - Testata" (per risorsa, commessa-agnostico) | CSV/JSON | **MANCA** |
+| 44 | Report People Manager → **.xlsx a 2 fogli**: "Allocazione - Dettaglio" (per risorsa e per commessa) e "Allocazione - Testata" (per risorsa, commessa-agnostico) | **entrambi i fogli**, dalla stessa riduzione dei dati che alimenta la schermata e ancorati a `plannedCostSchedule`, così il denaro nel file non può divergere da quello a schermo | PARI |
 
 ### 3.5 Unchargeable / bench (manuale §7, §8)
 
@@ -107,7 +107,7 @@ Quindi la domanda "chi è meglio" ha **tre risposte diverse** a seconda di cosa 
 | 50 | **Percentuale Disallocazione mese corrente**: 25% / 50% / 75% / 100% | `BenchCell` ha 3 stati (BENCH/PARTIAL/ALLOCATED) e **nessuna percentuale** | **MANCA** |
 | 51 | storico disallocazione per mese, per risorsa (`2025-03 · disallocato 21 gg · 100%`) | assente come vista storica per risorsa | **MANCA** |
 | 52 | costo giornaliero standard e tariffa in tabella | `cost_rate` / `bill_rate` + rate card + **tariffe di vendita negoziate per progetto** + FX multi-valuta | **AVANTI** |
-| 53 | Report Unchargeable → **.xlsx a 4 fogli, uno per categoria**, con struttura organizzativa, responsabili, codice risorsa, nominativo, job role, 3 technical skill con proficiency, standard cost rate, tariffa, disponibilità | CSV/JSON | **MANCA** |
+| 53 | Report Unchargeable → **.xlsx a 4 fogli, uno per categoria**, con struttura organizzativa, responsabili, codice risorsa, nominativo, job role, 3 technical skill con proficiency, standard cost rate, tariffa, disponibilità | il writer multi-foglio esiste e regge già 4 fogli; **manca il builder** `unchargeableSheets(...)` e il pulsante su `/bench` | PARZIALE |
 
 ### 3.6 Commesse BASKET — il non fatturabile (manuale §1.3, §8.5)
 
@@ -151,34 +151,33 @@ RPT legge le commesse: tutta la catena che le genera e le monetizza è fuori dal
 
 Su **56 capacità di RPT** valutate una per una contro il codice:
 
-| Stato | Righe | Quota |
-|---:|---:|---|
-| **PARI** | 20 | 36% |
-| **AVANTI** | 11 | 20% |
-| **PARZIALE** | 12 | 21% |
-| **MANCA** | 13 | 23% |
+| Stato | Righe | Quota | vs. prima wave |
+|---:|---:|---|---|
+| **PARI** | 22 | 39% | +2 |
+| **AVANTI** | 13 | 23% | +2 |
+| **PARZIALE** | 11 | 20% | −1 |
+| **MANCA** | 10 | 18% | **−3** |
 
-**31 su 56 (55%) coperte o superate. 12 parziali. 13 mancanti.** Più 14 aree che RPT non ha affatto.
+**35 su 56 (63%) coperte o superate. 11 parziali. 10 mancanti.** Più 14 aree che RPT non ha affatto.
 
-I 13 gap, in chiaro:
+_Aggiornato il 2026-08-07, dopo la prima wave di chiusura: XLSX Pianificazione e Allocazione (righe 24 e 44) da MANCA a PARI, Unchargeable (53) da MANCA a PARZIALE, strip disponibilità sulla card (13) e auto-avanzamento dell'approvazione multipla (40) da PARZIALE ad AVANTI. Le faccette (11) restano PARZIALE con due esclusioni motivate._
+
+I 10 gap residui, in chiaro:
 
 | Gap | Peso |
 |---|---|
-| commesse **BASKET** / non fatturabile (+ assenze) | **bloccante** — rende falsa una metrica che già mostriamo |
-| **deleghe** + act-as | **bloccante** — necessità operativa quotidiana (ferie, handover) |
+| commesse **BASKET** / non fatturabile (+ assenze) | **bloccante** — rende falsa una metrica che già mostriamo. Progettato: `docs/superpowers/specs/2026-08-06-h-basket-non-billable-design.md`, con 5 domande di prodotto aperte |
+| **deleghe** + act-as | **bloccante** — necessità operativa quotidiana (ferie, handover), e tocca il confine di autenticazione |
 | **integrazioni live** con Zucchetti / PCP / InforLN / People Portal / ServiceNow | **bloccante** — dipende da terzi, non solo da noi |
 | ServiceNow hiring demand + linkage del codice RES sul dummy | alto |
-| **XLSX** (3 report: pianificazione 1 foglio, allocazione 2 fogli, unchargeable 4 fogli) | alto — i pianificatori Lutech vivono in Excel |
 | i18n **IT/EN** a runtime | alto |
 | % di disallocazione del mese corrente | medio |
 | storico mensile di disallocazione per risorsa | medio |
 | notifiche email | medio |
-| codici risorsa leggibili e digitabili | medio |
+| codici risorsa leggibili e digitabili | medio — è una colonna `code` additiva, **non** un cambio di id: `resources.id` è referenziato per FK da assignment, time entry e mesi di allocazione, e compare nei path dell'audit trail |
 | schermata Storico sull'audit trail che **già abbiamo** | basso — è solo una vista |
-| faccette di ricerca (4 → 13) e strip disponibilità 6 mesi sulla card di staffing | basso — il dato esiste già su `/bench` |
-| auto-avanzamento al mese successivo nell'approvazione multipla | basso |
 
-Dei 13, **due sono progetti veri** (modello BASKET/non fatturabile con le assenze; deleghe con act-as e provisioning), **uno dipende da terzi** (le 5 integrazioni), **dieci sono piccoli e ben delimitati** — e di questi, tre (Storico, strip disponibilità, faccette) sono superfici su dati che già abbiamo.
+Dei 10, **due sono progetti veri** (BASKET/non fatturabile con le assenze; deleghe con act-as e provisioning), **uno dipende da terzi** (le 5 integrazioni), **sette sono piccoli e ben delimitati** — e di questi, uno (Storico) è solo una superficie su dati che già abbiamo.
 
 ---
 
