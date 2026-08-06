@@ -28,6 +28,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { ListStateComponent } from '../../shared/list-state.component';
 import { billingPlanValidationError, customerFacingBillingAmount } from '../../services/billing-validation.util';
 import { authGatedResource } from '../../services/auth-gated-resource.util';
+import { todayLocalIso } from '../../services/local-date.util';
 
 type BillingStatus = BillingPlanItem['status'];
 type Recurrence = NonNullable<BillingPlanItem['recurrence']>;
@@ -800,8 +801,19 @@ export class Billing {
   readonly statuses = ALL_STATUSES;
   readonly recurrences = RECURRENCES;
 
-  /** Snapshot of "today" (ISO) for overdue / aging math; captured once at construction. */
-  private readonly today = new Date().toISOString();
+  /**
+   * Snapshot of "today" for overdue / aging math; captured once at construction.
+   *
+   * P2-21: the user's LOCAL civil date, not `new Date().toISOString()`. That
+   * carried both a UTC calendar date — the user's yesterday or tomorrow for part
+   * of every day — and a time of day, so `daysBetween(dueDate, today)` measured
+   * from the due date's midnight to the current clock time and floored. Both
+   * errors move a days-overdue figure by one day, in either direction depending
+   * on the sign of the offset. A plain YYYY-MM-DD parses to UTC midnight, which
+   * is the same footing every dueDate is on, so the arithmetic in finance.util
+   * stays exactly as it is and counts whole days.
+   */
+  private readonly today = todayLocalIso();
 
   // --- data via rxResource ---
   // Principal-gated reads (billing-plan-items, contracts, customers, orders,

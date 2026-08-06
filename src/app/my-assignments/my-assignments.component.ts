@@ -8,7 +8,7 @@ import { forkJoin, of } from 'rxjs';
 import { FormsModule } from '@angular/forms';
 import { ListStateComponent } from '../shared/list-state.component';
 import { NotificationService } from '../services/notification.service';
-import { todayLocalIso } from '../services/local-date.util';
+import { localIsoDate, todayLocalIso } from '../services/local-date.util';
 
 interface CalendarAssignment {
   id: string;
@@ -466,7 +466,7 @@ export class MyAssignmentsComponent {
 
   // 0 = current period, negative = past, positive = future.
   periodOffset = signal(0);
-  private todayIso = this.toIso(new Date());
+  private todayIso = todayLocalIso();
 
   private weekStart = computed(() => this.addDays(this.startOfWeek(new Date()), this.periodOffset() * 7));
   private monthStart = computed(() => {
@@ -494,7 +494,7 @@ export class MyAssignmentsComponent {
     const labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
     return labels.map((label, index) => {
       const date = this.addDays(start, index);
-      const iso = this.toIso(date);
+      const iso = localIsoDate(date);
       return {
         iso,
         label,
@@ -521,7 +521,7 @@ export class MyAssignmentsComponent {
     const days: CalendarDay[] = [];
 
     for (let date = gridStart; date <= gridEnd; date = this.addDays(date, 1)) {
-      const iso = this.toIso(date);
+      const iso = localIsoDate(date);
       const items = this.periodAssignments()
         .filter(assignment => this.estimatedHoursForDay(assignment, iso) > 0)
         .map(assignment => ({
@@ -558,7 +558,7 @@ export class MyAssignmentsComponent {
     const { start, end } = this.periodRange();
     const days: string[] = [];
     for (let date = start; date <= end; date = this.addDays(date, 1)) {
-      if (this.isBusinessDay(date)) days.push(this.toIso(date));
+      if (this.isBusinessDay(date)) days.push(localIsoDate(date));
     }
     return days;
   });
@@ -643,7 +643,7 @@ export class MyAssignmentsComponent {
     const win = this.assignmentWindow(assignment);
     if (!win) return 'No booking window';
     const suffix = win.source === 'request' ? ' (request dates)' : '';
-    return `${this.toIso(win.start)} to ${this.toIso(win.end)}${suffix}`;
+    return `${localIsoDate(win.start)} to ${localIsoDate(win.end)}${suffix}`;
   }
 
   getRequestName(id: string): string {
@@ -689,14 +689,7 @@ export class MyAssignmentsComponent {
     if (!match) return null;
     const [, y, m, d] = match;
     const date = new Date(Number(y), Number(m) - 1, Number(d));
-    return this.toIso(date) === value ? date : null;
-  }
-
-  private toIso(date: Date): string {
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, '0');
-    const d = String(date.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
+    return localIsoDate(date) === value ? date : null;
   }
 
   private addDays(date: Date, days: number): Date {

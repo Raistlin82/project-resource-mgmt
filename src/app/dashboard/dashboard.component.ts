@@ -47,7 +47,7 @@ import {
   TrendSeries,
 } from '../shared/charts';
 import { ListStateComponent } from '../shared/list-state.component';
-import { todayLocalIso } from '../services/local-date.util';
+import { todayLocalIso, trailingMonths } from '../services/local-date.util';
 import { countsTowardDeliveryCapacity, kindOf } from '../services/resource-kind.util';
 import { DEFAULT_HOURS_PER_DAY } from '../services/sell-rate.util';
 
@@ -790,16 +790,21 @@ export class DashboardComponent {
   // basis in finance.util, so they are intentionally rendered WITHOUT a trend
   // chip rather than with a fabricated one.
 
-  /** Trailing 3 calendar months ending at the current month, as sorted YYYY-MM. */
-  private readonly trendPeriods = ((): string[] => {
-    const now = new Date();
-    const out: string[] = [];
-    for (let back = 2; back >= 0; back--) {
-      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1));
-      out.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
-    }
-    return out;
-  })();
+  /**
+   * Trailing 3 calendar months ending at the current month, as sorted YYYY-MM.
+   *
+   * P2-21: the window closes on the user's LOCAL civil month. It used to read
+   * `new Date().getUTCFullYear()/getUTCMonth()`, so from 22:00 (or 23:00) on the
+   * last day of a month until midnight UTC, a user at a positive offset — already
+   * into the new month — was shown the window ending on the month before, and the
+   * "vs prior period" chip compared two windows both one month stale. The month
+   * walk itself is still UTC arithmetic (see trailingMonths).
+   *
+   * Public: the spec reads it directly. There is no other way to observe the
+   * window — the trend chip renders a percentage, which is identical for two
+   * different windows over empty data.
+   */
+  readonly trendPeriods = trailingMonths(3, todayLocalIso().slice(0, 7));
 
   /**
    * Portfolio recognised-revenue delta: current trailing window vs the prior
@@ -820,16 +825,12 @@ export class DashboardComponent {
   // dated recognitionSchedule that backs the trailing-window trend chip, so the
   // chart and the chip agree by construction.
 
-  /** Trailing 6 calendar months (sorted YYYY-MM) for the recognised-revenue chart. */
-  private readonly chartPeriods = ((): string[] => {
-    const now = new Date();
-    const out: string[] = [];
-    for (let back = 5; back >= 0; back--) {
-      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1));
-      out.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
-    }
-    return out;
-  })();
+  /** Trailing 6 calendar months (sorted YYYY-MM) for the recognised-revenue
+   *  chart, on the same local-civil-month anchor as `trendPeriods` above — the
+   *  chart and the chip must agree about which month is "now". Public for the
+   *  same reason: the rendered x-axis labels only exist once some month has a
+   *  non-zero recognised amount. */
+  readonly chartPeriods = trailingMonths(6, todayLocalIso().slice(0, 7));
 
   /** Per-period recognised revenue over the trailing 6 months (whole portfolio). */
   private readonly recognitionRows = computed(() =>

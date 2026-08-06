@@ -702,3 +702,52 @@ describe('Negative money/hours read at AA in dark theme (computed ratio, not a t
     expect(GLOBAL_CSS).toMatch(/border-top-color:\s*var\(--cc-red\)/);
   });
 });
+
+/**
+ * B12 / P2-21 — the trailing windows behind the "vs prior period" chip and the
+ * recognised-revenue chart close on the USER's current month.
+ *
+ * The clock is faked (Date only, so the runner's own timers and microtasks —
+ * which `render()` awaits — keep working) and the timezone is pinned, because
+ * neither half alone can see this: under TZ=UTC the UTC month and the local
+ * month always agree, and without a fixed instant the assertion would have to be
+ * computed from the same expression under test.
+ *
+ * 2026-08-31T23:30:00Z is 90 minutes before UTC's month end and 90 minutes AFTER
+ * Rome's, which is the whole window in which the two disagree.
+ */
+describe('Dashboard trailing windows use the local civil month (P2-21)', () => {
+  const originalTz = process.env['TZ'];
+  afterEach(() => {
+    vi.useRealTimers();
+    process.env['TZ'] = originalTz;
+    TestBed.resetTestingModule();
+  });
+
+  function pin(tz: string, instant: string): void {
+    process.env['TZ'] = tz;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(instant));
+  }
+
+  it('ends the window on the month the user is already in (positive offset)', async () => {
+    pin('Europe/Rome', '2026-08-31T23:30:00.000Z'); // 01:30 on 1 September in Rome
+    const { fixture } = await render('finance');
+
+    // The pre-fix code read getUTCMonth() — still August — and showed a window
+    // one month stale, with the chip comparing two equally stale windows.
+    expect(fixture.componentInstance.trendPeriods).toEqual(['2026-07', '2026-08', '2026-09']);
+    expect(fixture.componentInstance.chartPeriods).toEqual(
+      ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09']);
+  });
+
+  it('does not advance the window before the user reaches the month (negative offset)', async () => {
+    pin('America/New_York', '2026-09-01T02:30:00.000Z'); // 22:30 on 31 August in New York
+    const { fixture } = await render('finance');
+
+    // The mirror error: UTC has rolled into September, the user has not.
+    expect(fixture.componentInstance.trendPeriods).toEqual(['2026-06', '2026-07', '2026-08']);
+    expect(fixture.componentInstance.chartPeriods).toEqual(
+      ['2026-03', '2026-04', '2026-05', '2026-06', '2026-07', '2026-08']);
+  });
+});

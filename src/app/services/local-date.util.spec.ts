@@ -1,4 +1,4 @@
-import { localIsoDate, todayLocalIso } from './local-date.util';
+import { localIsoDate, todayLocalIso, todayLocalUtcMs, trailingMonths } from './local-date.util';
 
 /**
  * P2-21. The bug this util replaced was `date.toISOString().slice(0, 10)`, which
@@ -66,5 +66,50 @@ describe('local date utilities', () => {
 
   it('uses the provided clock for deterministic date defaults', () => {
     expect(todayLocalIso(() => new Date(2026, 0, 9, 8, 30, 0))).toBe('2026-01-09');
+  });
+});
+
+/**
+ * B12 — the two derivations the schedule anchor and the dashboard trailing
+ * windows are now built on. Both are pinned against a real timezone AND a faked
+ * clock, because that is the only way to make the failure mode reachable: under
+ * TZ=UTC the broken and the fixed code agree on every input.
+ *
+ * `process.env['TZ']` is honoured at runtime by Node (verified in this runner),
+ * and is restored after each case so a later file in the same worker inherits
+ * the machine's own zone.
+ */
+describe('local civil date → UTC arithmetic bridge (P2-21)', () => {
+  const originalTz = process.env['TZ'];
+  afterEach(() => { process.env['TZ'] = originalTz; });
+
+  /** Read back a UTC-ms value as a UTC calendar date, so the assertion compares
+   *  whole date strings rather than epoch numbers nobody can review. */
+  const utcDateOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+
+  it('resolves midnight of the local day, not of the UTC day (positive offset)', () => {
+    process.env['TZ'] = 'Europe/Rome'; // UTC+2 in August
+    // 00:30 on the 4th in Rome. Date.now()'s UTC date here is the 3rd.
+    const ms = todayLocalUtcMs(() => new Date('2026-08-03T22:30:00.000Z'));
+    expect(utcDateOf(ms)).toBe('2026-08-04');
+    // Exactly midnight, so the day/week math it feeds starts on a boundary.
+    expect(ms).toBe(Date.UTC(2026, 7, 4));
+  });
+
+  it('resolves midnight of the local day, not of the UTC day (negative offset)', () => {
+    process.env['TZ'] = 'America/New_York'; // UTC-4 in August
+    // 22:30 on the 3rd in New York. Date.now()'s UTC date here is the 4th.
+    const ms = todayLocalUtcMs(() => new Date('2026-08-04T02:30:00.000Z'));
+    expect(utcDateOf(ms)).toBe('2026-08-03');
+    expect(ms).toBe(Date.UTC(2026, 7, 3));
+  });
+
+  it('walks a trailing window back from the given month, normalising the year underflow', () => {
+    expect(trailingMonths(3, '2026-08')).toEqual(['2026-06', '2026-07', '2026-08']);
+    // The underflow case the UTC arithmetic exists for.
+    expect(trailingMonths(6, '2026-02')).toEqual(['2025-09', '2025-10', '2025-11', '2025-12', '2026-01', '2026-02']);
+    // Ascending and inclusive of the anchor: a window built the other way round
+    // ('2026-08' first) satisfies neither of the two above.
+    expect(trailingMonths(1, '2026-12')).toEqual(['2026-12']);
   });
 });

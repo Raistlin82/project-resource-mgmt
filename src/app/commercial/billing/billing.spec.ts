@@ -863,3 +863,65 @@ describe('Billing — both modal overlays carry the scroll-safe class contract (
     expect(safetyOfOverlay(fixture, '.invoice-overlay')).toStrictEqual(SAFE);
   });
 });
+
+/**
+ * B12 / P2-21 — days-overdue counts against the user's civil date.
+ *
+ * The fixture is one Invoiced item due 2026-08-03 and two instants 4 hours apart,
+ * one on each side of UTC midnight, under two timezones. The chip is read through
+ * its own aria-label with a WHOLE-STRING comparison: the rendered text is
+ * "Overdue 1d", and `toContain('Overdue')` cannot tell 1 from 0-and-absent.
+ *
+ * Neither half of the setup is optional. Under TZ=UTC the local and UTC dates
+ * always agree, so both cases pass against the pre-fix `new Date().toISOString()`
+ * — the vacuous green this file's own header warns about elsewhere. The clock
+ * fakes Date only, leaving the microtask queue `tick()` drains untouched.
+ */
+describe('Billing overdue baseline is the local civil date (P2-21)', () => {
+  const originalTz = process.env['TZ'];
+  afterEach(() => {
+    vi.useRealTimers();
+    process.env['TZ'] = originalTz;
+    TestBed.resetTestingModule();
+  });
+
+  const dueOnThird: BillingPlanItem = {
+    id: 'BP-OD', contractId: 'CT1', projectId: 'P1', type: 'Milestone',
+    label: 'Phase 1', amount: 5_000, currency: 'EUR', status: 'Invoiced',
+    dueDate: '2026-08-03',
+  };
+
+  function pin(tz: string, instant: string): void {
+    process.env['TZ'] = tz;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(instant));
+  }
+
+  /** The one plan row, so no other chip on the page can satisfy the assertion. */
+  function planRow(fixture: ComponentFixture<Billing>): HTMLElement {
+    const row = host(fixture).querySelector('tbody tr');
+    expect(row, 'the billing plan row must be rendered').toBeTruthy();
+    return row as HTMLElement;
+  }
+
+  it('counts the day the user has already entered (positive offset)', async () => {
+    pin('Europe/Rome', '2026-08-03T22:30:00.000Z'); // 00:30 on 4 August in Rome
+    const fixture = await setupSparse({ getBillingPlanItems: () => of([dueOnThird]) });
+    await tick(fixture);
+
+    // Pre-fix, `today` was 2026-08-03T22:30Z: floor(0.94 days) = 0, so an invoice
+    // a day past due showed no chip at all.
+    const chip = planRow(fixture).querySelector('[aria-label^="Overdue by"]');
+    expect(chip?.getAttribute('aria-label')).toBe('Overdue by 1 days');
+  });
+
+  it('does not count a day the user has not reached (negative offset)', async () => {
+    pin('America/New_York', '2026-08-04T02:30:00.000Z'); // 22:30 on 3 August in New York
+    const fixture = await setupSparse({ getBillingPlanItems: () => of([dueOnThird]) });
+    await tick(fixture);
+
+    // The mirror error: pre-fix `today` was already 2026-08-04T02:30Z, so the
+    // page claimed a day overdue while it was still the due date for the user.
+    expect(planRow(fixture).querySelector('[aria-label^="Overdue by"]')).toBeNull();
+  });
+});

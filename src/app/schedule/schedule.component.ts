@@ -29,6 +29,7 @@ import {
   ScheduleBooking,
   ScheduleModel,
 } from '../services/schedule.util';
+import { todayLocalUtcMs } from '../services/local-date.util';
 
 /** The three principal-gated reads the timeline is built from. */
 interface ScheduleData {
@@ -675,11 +676,12 @@ export class ScheduleComponent {
   protected readonly drag = signal<DragState | null>(null);
 
   constructor() {
-    // Browser-only: seed the anchor to the Monday of the current week, computed
-    // in UTC so it matches the util's UTC date math. afterNextRender never runs
-    // on the server, so the server output is the deterministic placeholder.
+    // Browser-only: seed the anchor to the Monday of the user's CURRENT LOCAL
+    // week (P2-21 — see currentWeekAnchorMs), expressed in UTC ms so it matches
+    // the util's UTC date math. afterNextRender never runs on the server, so the
+    // server output is the deterministic placeholder.
     afterNextRender(() => {
-      this.anchorMs.set(mondayUtcMs(Date.now()));
+      this.anchorMs.set(currentWeekAnchorMs());
       this.measureWeekColumn();
     });
   }
@@ -1303,6 +1305,22 @@ export class ScheduleComponent {
     const lane = el?.closest<HTMLElement>('[data-resource-id]');
     return lane?.dataset['resourceId'] ?? null;
   }
+}
+
+/**
+ * P2-21 — the anchor of "this week", as the USER's week rather than UTC's.
+ *
+ * `mondayUtcMs(Date.now())` was wrong by a whole week for part of every day:
+ * Date.now() carries a time of day, so late on a Sunday evening in a positive
+ * offset (or early on a Monday morning in a negative one) its UTC calendar date
+ * falls on the other side of the week boundary, and the grid opened on the
+ * PREVIOUS (or next) week while the user's own calendar said otherwise.
+ *
+ * Only the civil date changes; the Monday walk below is still UTC arithmetic.
+ * Exported and clock-injectable so the rule is testable without a component.
+ */
+export function currentWeekAnchorMs(now: () => Date = () => new Date()): number {
+  return mondayUtcMs(todayLocalUtcMs(now));
 }
 
 /**

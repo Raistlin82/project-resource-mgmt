@@ -3,12 +3,16 @@ import {
   Component,
   DestroyRef,
   ElementRef,
+  PLATFORM_ID,
   afterNextRender,
   computed,
+  effect,
   inject,
+  linkedSignal,
   signal,
   viewChild,
 } from '@angular/core';
+import { isPlatformBrowser } from '@angular/common';
 import { NavigationEnd, Router, RouterOutlet, RouterLink, RouterLinkActive } from '@angular/router';
 import { MatIconModule, MatIconRegistry } from '@angular/material/icon';
 import { CdkTrapFocus } from '@angular/cdk/a11y';
@@ -29,6 +33,35 @@ import { ALLOCATION_APPROVAL_ROLES, CAPACITY_ROLES } from './guards/role.guard';
 import { countsTowardDeliveryCapacity, kindOf } from './services/resource-kind.util';
 
 type NavBadge = 'requests' | 'risks' | 'changes' | 'overbooked';
+
+/**
+ * The single breakpoint at which `#primary-navigation` stops being the mobile
+ * drawer and becomes the desktop sidebar. It MUST stay in lock-step with
+ * Tailwind's `lg:` variant (64rem, the framework default — this workspace
+ * declares no `--breakpoint-*` override in `@theme`) and with the
+ * `.command-drawer` / `.command-drawer-open` rules in `src/styles.css`. Exported
+ * so the spec can assert the stylesheet against this very literal.
+ */
+export const DESKTOP_NAV_QUERY = '(min-width: 64rem)';
+
+/** Class applied to `<html>` to lock document scrolling behind the open drawer. */
+const DRAWER_OPEN_CLASS = 'command-drawer-open';
+
+/**
+ * Platform-aware label and ARIA key sequence for the nav-search shortcut, so the
+ * hint beside the input is honest on a PC keyboard instead of always claiming
+ * `⌘K` (P2-06). Exported as a pure function because it is where the platform
+ * decision actually lives, and therefore where it is unit-tested.
+ *
+ * `platform` is whatever the host reports (`navigator.platform`, falling back to
+ * `navigator.userAgent`); `undefined` means "no navigator", i.e. the server,
+ * which renders the Ctrl form.
+ */
+export function navShortcutHint(platform: string | undefined): { label: string; keys: string } {
+  return /mac|iphone|ipad|ipod/i.test(platform ?? '')
+    ? { label: '⌘K', keys: 'Meta+K' }
+    : { label: 'Ctrl K', keys: 'Control+K' };
+}
 
 interface NavItem {
   label: string;
@@ -103,12 +136,28 @@ interface NavState {
         </div>
       }
 
+      <!--
+        ONE element, two roles — the open/hidden model every shell fix shares.
+
+          isMobileMenuOpen()   meaningful only BELOW lg. Drives the slide-in
+                               transform, the CDK focus trap, main[inert], the
+                               <html> scroll lock, and data-drawer.
+          desktopSidebarOpen() meaningful only AT lg and above. Drives
+                               lg:relative / lg:hidden.
+
+        Whether the drawer's links are in the tab order is decided in
+        src/styles.css off data-drawer, INSIDE a breakpoint scope. Nothing here
+        binds [inert] or [hidden] on this element: at lg+ it is the desktop
+        sidebar, and a blanket attribute would strand desktop navigation
+        entirely — the trap that left P1-23 open.
+      -->
       <aside
         id="primary-navigation"
         aria-label="Primary navigation"
-        class="command-sidebar fixed inset-y-0 left-0 z-50 w-72 flex flex-col transform transition-transform duration-300 ease-in-out lg:translate-x-0 overflow-y-auto shadow-2xl lg:shadow-none"
+        class="command-sidebar command-drawer fixed inset-y-0 left-0 z-50 w-72 flex flex-col transform transition-transform duration-300 ease-in-out lg:translate-x-0 overflow-y-auto shadow-2xl lg:shadow-none"
+        [attr.data-drawer]="isMobileMenuOpen() ? 'open' : 'closed'"
         [cdkTrapFocus]="isMobileMenuOpen()"
-        [cdkTrapFocusAutoCapture]="isMobileMenuOpen()"
+        [cdkTrapFocusAutoCapture]="drawerAutoCapture()"
         tabindex="-1"
         (keydown.escape)="closeMenu(true)"
         [class.-translate-x-full]="!isMobileMenuOpen()"
@@ -173,13 +222,16 @@ interface NavState {
               (input)="onFilterInput($event)"
               (keydown.escape)="clearFilter()"
               placeholder="Find a section…"
+              [attr.aria-keyshortcuts]="shortcut.keys"
               aria-label="Filter navigation" />
             @if (navFilter()) {
               <button type="button" class="command-nav-clear grid size-6 place-items-center" (click)="clearFilter()" aria-label="Clear filter">
                 <mat-icon class="text-[16px] w-[16px] h-[16px]">close</mat-icon>
               </button>
             } @else {
-              <kbd>⌘K</kbd>
+              <!-- Platform-aware: a PC keyboard has no ⌘. Same source as the
+                   aria-keyshortcuts above, so the two can never disagree. -->
+              <kbd data-testid="nav-search-shortcut">{{ shortcut.label }}</kbd>
             }
           </div>
 
@@ -342,6 +394,7 @@ export class App {
   private router = inject(Router);
   private theme = inject(ThemeService);
   private destroyRef = inject(DestroyRef);
+  private isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
 
   // Nav search input, used by the global ⌘K shortcut to focus the filter.
   private navSearch = viewChild<ElementRef<HTMLInputElement>>('navSearch');
@@ -349,6 +402,17 @@ export class App {
 
   // Theme state surfaced to the toggle control (light-first; dark is opt-in).
   readonly isDark = computed(() => this.theme.theme() === 'dark');
+
+  /**
+   * Resolved once, before the first render, so hydration sees the browser's own
+   * answer rather than a value that flips later. The server has no
+   * `navigator.platform` and renders the Ctrl form; on a Mac the browser's
+   * constructor pass renders `⌘K`. Only the interpolated text differs between
+   * the two, never the element structure.
+   */
+  readonly shortcut = navShortcutHint(
+    typeof navigator === 'undefined' ? undefined : navigator.platform || navigator.userAgent,
+  );
 
   constructor() {
     // Ensure EVERY <mat-icon> uses the Material Icons ligature font. Without a
@@ -359,15 +423,13 @@ export class App {
 
     // Browser-only (afterNextRender never runs on the server) global ⌘K / Ctrl+K
     // shortcut that focuses the nav search input, making the kbd hint honest.
+    // Both modifiers are accepted regardless of the hint's platform wording — a
+    // Mac with an external PC keyboard is a real configuration.
     afterNextRender(() => {
       const handler = (event: KeyboardEvent) => {
         if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
           event.preventDefault();
-          const input = this.navSearch()?.nativeElement;
-          if (input) {
-            input.focus();
-            input.select();
-          }
+          this.focusNavSearch();
         }
       };
       document.addEventListener('keydown', handler);
@@ -385,6 +447,20 @@ export class App {
         });
       this.destroyRef.onDestroy(() => navSub.unsubscribe());
     });
+
+    // Scroll lock for the open mobile drawer (P1-23): below lg the document —
+    // not <main> — is the scroll container, so the page would otherwise scroll
+    // away behind the scrim under the user's finger. The class goes on <html>
+    // because that element is outside this component's template, and its effect
+    // is breakpoint-scoped in styles.css (.command-drawer-open) for the same
+    // reason the drawer's visibility is: at lg+ the aside is the desktop sidebar
+    // and the page must keep scrolling.
+    if (this.isBrowser) {
+      effect(() => {
+        document.documentElement.classList.toggle(DRAWER_OPEN_CLASS, this.isMobileMenuOpen());
+      });
+      this.destroyRef.onDestroy(() => document.documentElement.classList.remove(DRAWER_OPEN_CLASS));
+    }
   }
 
   readonly toasts = this.notifications.items;
@@ -588,19 +664,26 @@ export class App {
   readonly role = this.auth.role;
   readonly canReadStaffing = this.auth.canReadStaffing;
 
+  /** Mobile-only (below lg): whether the drawer is open. See the model comment on
+   *  the <aside> — this is never set at lg+, because it also inerts <main>. */
   isMobileMenuOpen = signal(false);
   /** Desktop-only: whether the left nav is expanded (lg+). Toggled by the top-bar
    *  hamburger; when false the sidebar is removed from the layout and the content
    *  pane takes the full width. */
   desktopSidebarOpen = signal(true);
 
+  /**
+   * True for the duration of a ⌘K-initiated drawer open. The drawer's focus trap
+   * auto-captures its first tabbable element — the Close button — whenever it is
+   * armed, which on this one path would fight the focus we are about to place on
+   * the search input. Withheld for that open only, and re-armed on close.
+   */
+  private searchFocusPending = signal(false);
+  /** Whether the drawer's focus trap may capture focus on open. */
+  readonly drawerAutoCapture = computed(() => this.isMobileMenuOpen() && !this.searchFocusPending());
+
   // Live filter for the nav.
   navFilter = signal('');
-
-  // Groups the user has explicitly toggled open (overrides the active-route fallback).
-  private expandedGroups = signal<Set<string>>(new Set());
-  // Whether the user has manually toggled any group yet (controls fallback vs. manual mode).
-  private userHasToggled = signal(false);
 
   // Current router URL, kept in sync with navigation.
   private currentUrl = toSignal(
@@ -626,6 +709,30 @@ export class App {
       }
     }
     return bestLabel;
+  });
+
+  /**
+   * Which accordion groups are open, linked to the active route (P2-05).
+   *
+   * When the active group CHANGES, that group is added to the open set, so a
+   * navigation can never land on a link inside a collapsed group — and the group
+   * bodies carry [inert] when collapsed, so such a link is not merely invisible
+   * but unreachable. The previous model froze on first interaction: one manual
+   * toggle switched the accordion into "manual mode" for the rest of the session
+   * and every later navigation into a different group stayed shut.
+   *
+   * The set stays writable, so `toggleGroup` can still collapse the active group
+   * afterwards — the header button must not become a dead control. It reopens
+   * only when the active group actually changes, so navigating within one group
+   * respects a deliberate collapse.
+   */
+  private expandedGroups = linkedSignal<string | null, ReadonlySet<string>>({
+    source: () => this.activeGroupLabel(),
+    computation: (active, previous) => {
+      const next = new Set(previous?.value ?? []);
+      if (active) next.add(active);
+      return next;
+    },
   });
 
   // Filtered groups; while a query is active, only matching items/groups are shown.
@@ -673,6 +780,9 @@ export class App {
 
   closeMenu(restoreFocus = false) {
     this.isMobileMenuOpen.set(false);
+    // Re-arm the trap's auto-capture for the next ordinary open. Written AFTER
+    // the line above so drawerAutoCapture is never transiently true.
+    this.searchFocusPending.set(false);
     if (restoreFocus) this.mobileMenuButton()?.nativeElement.focus();
   }
 
@@ -680,10 +790,48 @@ export class App {
     this.desktopSidebarOpen.update(v => !v);
   }
 
+  /**
+   * ⌘K / Ctrl+K target. The nav search lives inside the one element that is the
+   * mobile drawer below lg and the desktop sidebar above it, and in both roles it
+   * can be hidden right now — off-canvas and `visibility: hidden` as a closed
+   * drawer, `display: none` as a collapsed sidebar. `focus()` on a non-rendered
+   * element silently no-ops, so the container that governs the CURRENT breakpoint
+   * is opened first and the focus deferred by one frame, after change detection
+   * and a paint have actually revealed it.
+   */
+  focusNavSearch(): void {
+    if (this.isDesktopViewport()) {
+      this.desktopSidebarOpen.set(true);
+    } else {
+      this.searchFocusPending.set(true);
+      this.isMobileMenuOpen.set(true);
+    }
+    requestAnimationFrame(() => {
+      const input = this.navSearch()?.nativeElement;
+      input?.focus();
+      input?.select();
+    });
+  }
+
+  /**
+   * Which role the shared <aside> is playing right now. `matchMedia` is the only
+   * honest source, because Tailwind's `lg:` variant is a media query and not
+   * component state.
+   *
+   * Its absence — the server, or a test environment such as jsdom, which ships no
+   * `matchMedia` at all — is treated as DESKTOP deliberately: the mobile branch
+   * sets `isMobileMenuOpen`, which makes <main> inert, so guessing "mobile" on a
+   * wide viewport would lock the user out of the page. Guessing "desktop" only
+   * ever expands a sidebar.
+   */
+  private isDesktopViewport(): boolean {
+    const query = typeof window === 'undefined' ? undefined : window.matchMedia;
+    return query ? query.call(window, DESKTOP_NAV_QUERY).matches : true;
+  }
+
   toggleGroup(label: string): void {
     this.expandedGroups.update(prev => {
-      // On first manual interaction, seed from the active-route fallback so it feels continuous.
-      const next = this.userHasToggled() ? new Set(prev) : new Set(this.activeGroupLabel() ? [this.activeGroupLabel() as string] : []);
+      const next = new Set(prev);
       if (next.has(label)) {
         next.delete(label);
       } else {
@@ -691,16 +839,14 @@ export class App {
       }
       return next;
     });
-    this.userHasToggled.set(true);
   }
 
   isGroupOpen(label: string): boolean {
     // While filtering, matching groups are force-expanded.
     if (this.navFilter().trim()) return true;
-    // After any manual toggle, the explicit set is authoritative.
-    if (this.userHasToggled()) return this.expandedGroups().has(label);
-    // Default: only the group containing the active route is open.
-    return this.activeGroupLabel() === label;
+    // Otherwise the open set is authoritative; it always contains the active
+    // group (see expandedGroups) unless the user has collapsed it since.
+    return this.expandedGroups().has(label);
   }
 
   navGroupId(label: string): string {
