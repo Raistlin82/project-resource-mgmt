@@ -12,6 +12,23 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
 /** Sentinel value for an explicitly unassigned task assignee (an empty person ref). */
 const UNASSIGNED = 'Unassigned';
 
+/**
+ * Verdict of the Commercial Coverage column.
+ *
+ * The last two are NOT verdicts about the task: they say the data the verdict
+ * needs is not available to this reader (no commercial read capability) or did
+ * not load (the read failed). They exist because the alternative — deriving a
+ * verdict from an envelope that is empty for an authorization reason — reports
+ * 'Missing purchase order' about a subcontractor task that has a valid PO.
+ */
+type CommercialCoverage =
+  | 'Internal capacity'
+  | 'Subco without partner'
+  | 'PO covered'
+  | 'Missing purchase order'
+  | 'Coverage not available'
+  | 'Coverage check failed';
+
 @Component({
   selector: 'app-project-tasks',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -59,23 +76,35 @@ const UNASSIGNED = 'Unassigned';
             </thead>
             <tbody class="divide-y divide-[var(--cc-line)]">
               @for (task of filteredTasks(); track task.id) {
-                <tr>
-                  <td class="px-6 py-4 font-medium text-[var(--cc-ink)]">{{ task.name }}</td>
+                <!-- One evaluation per row: the verdict is read three times (two
+                     class bindings and the label) and it now reads resource
+                     status, so recomputing it per binding is both wasteful and
+                     a chance for the class list to disagree with the text. -->
+                @let coverage = commercialCoverage(task);
+                <tr data-test="task-row">
+                  <td data-test="task-name" class="px-6 py-4 font-medium text-[var(--cc-ink)]">{{ task.name }}</td>
                   <td class="px-6 py-4">
                     <div class="font-medium text-[var(--cc-ink)]">{{ assignmentLabel(task) }}</div>
                     <div class="mt-1 text-xs text-[var(--cc-muted)]">{{ task.assigneeType || 'Internal' }} · {{ task.assignee }}</div>
                   </td>
                   <td class="px-6 py-4">
-                    <span class="command-status"
-                          [class.green]="commercialCoverage(task) === 'PO covered'"
-                          [class.amber]="commercialCoverage(task) === 'Internal capacity'"
-                          [class.red]="commercialCoverage(task) === 'Missing purchase order' || commercialCoverage(task) === 'Subco without partner'">
-                      {{ commercialCoverage(task) }}
+                    <!-- The two UNKNOWN verdicts ('Coverage not available',
+                         'Coverage check failed') deliberately match NEITHER the
+                         red nor the amber/green list: an unknown must not be
+                         painted as a critical finding the user could act on,
+                         and must not be painted as a clean verdict either.
+                         '.neutral' is the muted chip for exactly that. -->
+                    <span data-test="coverage-chip" class="command-status"
+                          [class.green]="coverage === 'PO covered'"
+                          [class.amber]="coverage === 'Internal capacity'"
+                          [class.red]="coverage === 'Missing purchase order' || coverage === 'Subco without partner'"
+                          [class.neutral]="coverage === 'Coverage not available' || coverage === 'Coverage check failed'">
+                      {{ coverage }}
                     </span>
                   </td>
                   <td class="px-6 py-4 text-[var(--cc-ink)] font-mono tabular-nums">{{ task.dueDate }}</td>
                   <td class="px-6 py-4">
-                    <select [ngModel]="task.status" (ngModelChange)="updateStatus(task, $event)"
+                    <select #statusSelect data-test="task-status" [ngModel]="task.status" (ngModelChange)="updateStatus(task, $event, statusSelect)"
                             [attr.aria-label]="'Update status for task ' + task.name"
                             class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border-0 ring-1 focus:ring-2 focus:ring-accent/25 cursor-pointer"
                             [class.bg-positive-tint]="task.status === 'Done'" [class.text-positive-text]="task.status === 'Done'" [class.ring-positive]="task.status === 'Done'"
@@ -242,19 +271,32 @@ export class ProjectTasks {
   private tasksRes = authGatedResource(() => this.api.getProjectTasks(), [] as Task[]);
   tasks = this.tasksRes.value;
   private partnersRes = authGatedResource(() => this.api.getProjectPartners(), [] as Partner[]);
+  // COMMERCIAL-GATED READS. /project-tasks is readable by pm, but READ_RULES in
+  // src/server.ts restricts /orders and /order-lines to the commercial set
+  // (sales/finance/delivery-executive/admin) — canReadCommercial() is exactly
+  // that set. Gating on authReady alone sent a pm's request anyway, took the
+  // 403, and left ordersRes in 'error' — after which every this.orders() in
+  // commercialCoverage() threw ResourceValueError mid-render and the Tasks
+  // table stopped at the first Subcontractor row, with no panel and no Retry.
+  // Fold the capability into params so the refused request never leaves; the
+  // verdict for the missing data is handled in commercialCoverage().
   private ordersRes = rxResource<Order[], boolean>({
-    params: () => this.auth.authReady(),
-    stream: ({ params: ready }) => (ready ? this.api.getOrders() : of<Order[]>([])),
+    params: () => this.auth.authReady() && this.auth.canReadCommercial(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getOrders() : of<Order[]>([])),
     defaultValue: [] as Order[],
   });
   private orderLinesRes = rxResource<OrderLine[], boolean>({
-    params: () => this.auth.authReady(),
-    stream: ({ params: ready }) => (ready ? this.api.getOrderLines() : of<OrderLine[]>([])),
+    params: () => this.auth.authReady() && this.auth.canReadCommercial(),
+    stream: ({ params: canLoad }) => (canLoad ? this.api.getOrderLines() : of<OrderLine[]>([])),
     defaultValue: [] as OrderLine[],
   });
   partners = this.partnersRes.value;
-  orders = this.ordersRes.value;
-  orderLines = this.orderLinesRes.value;
+  // PRIVATE on purpose: `.value()` THROWS in the error state, so the only place
+  // allowed to dereference these two is commercialCoverage(), below its status
+  // guard. A template binding on them would put the throw back above every
+  // guard, which is the shape that made the pm's table unusable.
+  private orders = this.ordersRes.value;
+  private orderLines = this.orderLinesRes.value;
 
   selectedAssigneeType = toSignal(this.taskForm.controls.assigneeType.valueChanges, { initialValue: this.taskForm.controls.assigneeType.value });
   /** The assignee value currently in the form (drives orphan detection). */
@@ -281,8 +323,22 @@ export class ProjectTasks {
     this.showForm.set(true);
   }
 
-  updateStatus(task: Task, status: string) {
-    this.api.updateProjectTask(task.id, { status }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.tasksRes.reload());
+  /**
+   * @param control The row's own <select>. The binding is one-way
+   *   (`[ngModel]`), so when the server refuses the PUT the model never moves
+   *   and Angular has nothing to re-render: the control keeps displaying the
+   *   status the server rejected, for the rest of the session, while the list
+   *   behind it still holds the old value. Snap the element back by hand.
+   */
+  updateStatus(task: Task, status: string, control: HTMLSelectElement) {
+    this.api.updateProjectTask(task.id, { status }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => this.tasksRes.reload(),
+      // Revert to the value the SERVER still holds. errorInterceptor already
+      // raised the toast, so this only repairs the control — and it reverts on
+      // failure only, never unconditionally, or an accepted change would be
+      // undone on screen.
+      error: () => { control.value = task.status; },
+    });
   }
 
   closeForm() {
@@ -323,9 +379,24 @@ export class ProjectTasks {
     return task.assignee || 'Unassigned';
   }
 
-  commercialCoverage(task: Task): 'Internal capacity' | 'Subco without partner' | 'PO covered' | 'Missing purchase order' {
+  commercialCoverage(task: Task): CommercialCoverage {
+    // These two verdicts are derived from the TASK alone, so they stay truthful
+    // for every role and must be answered before the commercial data is needed.
     if (task.assigneeType !== 'Subcontractor') return 'Internal capacity';
     if (!task.partnerId) return 'Subco without partner';
+    // Past this point the verdict DEPENDS on /orders + /order-lines, so say so
+    // when they are not there instead of reading an envelope that is empty for
+    // a reason. Both branches are the opposite of the banned
+    // `status() === 'error' ? [] : value()` shape: absent data must surface as
+    // an explicit unknown, never as the confident 'Missing purchase order' an
+    // empty orders() would produce for a task that IS in fact covered.
+    if (!this.auth.canReadCommercial()) return 'Coverage not available';
+    // Same crash, different cause: a 500 or an expired bearer on /orders errors
+    // the resource for a role that legitimately reads it, and value() throws.
+    // Named distinctly from the capability case ('not available' vs 'check
+    // failed') so "you may not see this" is never confused with "we could not
+    // load this" — in the UI or in an assertion about the UI.
+    if (this.ordersRes.status() === 'error' || this.orderLinesRes.status() === 'error') return 'Coverage check failed';
     const purchaseOrderIds = new Set(
       this.orders()
         .filter(o => o.type === 'Purchase' && o.partnerId === task.partnerId && (o.status === 'Confirmed' || o.status === 'Invoiced' || o.status === 'Paid'))
