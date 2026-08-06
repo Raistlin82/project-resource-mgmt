@@ -8,7 +8,10 @@ import {
   BillingPlanItem,
   Contract,
   Customer,
+  FxRate,
   NegotiatedRate,
+  Order,
+  OrderLine,
   Project,
   Resource,
   TimeEntry,
@@ -513,5 +516,270 @@ describe('ContractDetails — money regions never show a fabricated figure (P1-1
 
     expect(text).toContain('Limited data — per-project figures are unavailable.');
     expect(text).not.toContain('Alpha');
+  });
+});
+
+describe('ContractDetails — derived figures are in the reporting base currency (MF-02)', () => {
+  /** The seed's own table: EUR is the base, so 1 USD is worth 0.92 EUR. */
+  const FX: FxRate[] = [
+    { currency: 'EUR', rateToBase: 1 },
+    { currency: 'USD', rateToBase: 0.92 },
+  ];
+
+  /**
+   * Read a KPI tile's VALUE by its label, so an assertion about one tile cannot
+   * be satisfied by a number rendered somewhere else on this long page. Both the
+   * header block and the strips use the same label/value pair of <p> elements.
+   */
+  function kpi(h: HTMLElement, label: string): string {
+    const el = [...h.querySelectorAll('.command-kpi-label')].find(node => node.textContent?.trim() === label);
+    expect(el, `KPI tile "${label}" is not rendered`).toBeTruthy();
+    return el!.parentElement!.querySelector('.command-kpi-value')!.textContent!.trim();
+  }
+
+  // --- The seed's USD chain, trimmed to what these figures read -------------
+  // CT2 'Initech T&M Framework': USD, totalValue 300000, period 2026-03..2027-02.
+  const usdContract: Contract = {
+    id: 'CT2', customerId: 'C2', name: 'Initech T&M Framework', type: 'T&M', totalValue: 300_000,
+    currency: 'USD', status: 'Active', startDate: '2026-03-01', endDate: '2027-02-28',
+  };
+  const customer: Customer = { id: 'C2', name: 'Initech' };
+  const project: Project = {
+    id: '2', name: 'Project Beta', location: 'Munich', startDate: '2026-05-01',
+    endDate: '2027-05-01', status: 'In Execution', contractId: 'CT2',
+  };
+  // O3/OL3: a USD customer order of 120,000 imputed to project 2.
+  const usdOrder: Order = { id: 'O3', contractId: 'CT2', type: 'Customer', amount: 120_000, currency: 'USD', status: 'Open', orderDate: '2026-03-10' };
+  const usdLine: OrderLine = { id: 'OL3', orderId: 'O3', projectId: '2', description: 'UI/UX work package', amount: 120_000 };
+  // BP2: Monthly Recurring, 12,000 USD, already Invoiced -> recognized in full.
+  const bp2: BillingPlanItem = {
+    id: 'BP2', contractId: 'CT2', projectId: '2', type: 'Recurring', label: 'Monthly retainer',
+    recurrence: 'Monthly', expectedDate: '2026-03-31', issuedDate: '2026-03-31', dueDate: '2026-04-30',
+    amount: 12_000, currency: 'USD', status: 'Invoiced',
+  };
+  // BP3: the as-incurred T&M obligation — its own `amount` is never recognized;
+  // approved hours priced at the negotiated sell rate are, and that price is
+  // EUR-denominated already. This is the item that makes the pre-fix total a sum
+  // of two different units.
+  const bp3: BillingPlanItem = {
+    id: 'BP3', contractId: 'CT2', projectId: '2', type: 'TimeAndMaterials', label: 'T&M consuntivo Q1',
+    expectedDate: '2026-04-15', amount: 28_500, currency: 'USD', status: 'Ready',
+  };
+  const developer: Resource = {
+    id: '1', name: 'Dev One', role: 'Developer', skills: [], projectRoles: [],
+    externalExperience: [], utilization: 80, capacity: 40, billRate: 200, costRate: 100,
+  };
+  // TE4: one 8h approved day on project 2, priced by NR_P2_DEV (1150 EUR/day ÷
+  // 8h = 143.75 EUR/h) = 1,150 EUR — never touched by FX.
+  const te4: TimeEntry = {
+    id: 'TE4', assignmentId: '6', requestId: '6', resourceId: '1',
+    projectId: '2', date: '2026-06-01', hours: 8, status: 'Approved',
+  };
+  const projectRate: NegotiatedRate = { id: 'NR_P2_DEV', projectId: '2', role: 'Developer', currency: 'EUR', billRate: 1150 };
+
+  function usdStub(overrides: Partial<Record<string, () => unknown>> = {}) {
+    return {
+      getContracts: () => of([usdContract]),
+      getCustomers: () => of([customer]),
+      getProjects: () => of([project]),
+      getOrders: () => of([usdOrder]),
+      getOrderLines: () => of([usdLine]),
+      getRequests: () => of([]),
+      getAssignments: () => of([]),
+      getResources: () => of([developer]),
+      getProjectFinancials: () => of([]),
+      getTimeEntries: () => of([te4]),
+      getBillingPlanItems: () => of([bp2, bp3]),
+      getMilestones: () => of([]),
+      getFxRates: () => of(FX),
+      getProjectRoles: () => of([]),
+      getNegotiatedRates: () => of([projectRate]),
+      getHoursPerDay: () => of({ value: 8 }),
+      ...overrides,
+    } as unknown as ApiService;
+  }
+
+  async function render(api: ApiService, contractId: string): Promise<ComponentFixture<ContractDetails>> {
+    const authStub = { authReady: signal(true), canApproveFinancials: signal(true) } as unknown as AuthService;
+    TestBed.configureTestingModule({
+      imports: [ContractDetails],
+      providers: [
+        provideRouter([]),
+        { provide: ApiService, useValue: api },
+        { provide: AuthService, useValue: authStub },
+        { provide: NotificationService, useValue: { show: vi.fn() } as unknown as NotificationService },
+      ],
+    });
+    await TestBed.compileComponents();
+    const fixture: ComponentFixture<ContractDetails> = TestBed.createComponent(ContractDetails);
+    fixture.componentRef.setInput('id', contractId);
+    await tick(fixture);
+    return fixture;
+  }
+
+  afterEach(() => TestBed.resetTestingModule());
+
+  // THE DEFECT. `data()` omitted `fxRates`, and convertToBase with no rate table
+  // is documented to be an exact identity — so 'Total Recognised' printed
+  // 12,000 USD + 1,150 EUR = 13,150 as one number under a '$' symbol: an amount
+  // in no currency at all. Each figure gets its OWN case, so each red is
+  // observable on its own rather than hidden behind an earlier assertion that
+  // aborts the test. Every assertion is on the CONVERSION RATIO, never on a
+  // currency token alone — a token assertion is the class of check this repo has
+  // already been burned by; the token is only ever checked alongside its number.
+
+  it('converts an order line at its ORDER currency before summing into Order Revenue', async () => {
+    const fixture = await render(usdStub(), 'CT2');
+    const cmp = fixture.componentInstance;
+
+    // OL3's 120,000 is denominated in O3's USD.
+    expect(cmp.kpis().revenue).toBeCloseTo(120_000 * 0.92, 6);
+
+    // The envelope actually carries the table. `toStrictEqual` plus the key check
+    // because `toEqual({fxRates: undefined})` is also satisfied by an absent key.
+    expect(cmp['data']().fxRates).toStrictEqual(FX);
+    expect(Object.keys(cmp['data']())).toContain('fxRates');
+
+    // The guard must still ALLOW: fx-rates resolved, so nothing is suppressed.
+    expect(cmp['moneyFiguresState']()).toBe('ready');
+
+    const h = host(fixture);
+    // Value and label together — a base-currency number under a '$' symbol is
+    // the defect, not the fix.
+    expect(kpi(h, 'Order Revenue')).toBe('€110,400.00');
+    // Contract Value is the contract's OWN stored amount, so it STAYS USD. This
+    // is the case that must still be allowed, and the reason a page-wide
+    // "no $ anywhere" assertion would be wrong.
+    expect(kpi(h, 'Contract Value')).toContain('$300,000.00');
+    expect(kpi(h, 'Total Value')).toContain('$300,000.00');
+  });
+
+  it('recognises the USD billing item converted and the as-incurred EUR hours at par', async () => {
+    const fixture = await render(usdStub(), 'CT2');
+    const cmp = fixture.componentInstance;
+
+    // THE SHARPEST ASSERTION IN THIS BATCH: no blanket rescaling of the tile can
+    // produce this number, because only the BP2 half converts — the as-incurred
+    // 1,150 is priced from a EUR/day negotiated rate and is already base
+    // currency. 12,000 USD -> 11,040 EUR, plus 1,150 EUR = 12,190 EUR.
+    expect(cmp.recognitionSummary().totalRecognized).toBeCloseTo(12_000 * 0.92 + 1150, 6);
+    // ...and the pre-fix unit-less sum must be gone, not merely "different".
+    expect(cmp.recognitionSummary().totalRecognized).not.toBeCloseTo(12_000 + 1150, 6);
+    expect(kpi(host(fixture), 'Total Recognized')).toBe('€12,190.00');
+  });
+
+  it('converts the billing-control strip to the base currency too', async () => {
+    const fixture = await render(usdStub(), 'CT2');
+    const cmp = fixture.componentInstance;
+
+    // BP2 + BP3, both USD, both dated in the past so the to-date filter keeps
+    // them for good.
+    expect(cmp.expectedBillingToDate()).toBeCloseTo((12_000 + 28_500) * 0.92, 6);
+    expect(kpi(host(fixture), 'Expected To Date')).toBe('€37,260.00');
+    // The billing-plan strip is the same money: BP3's 28,500 USD is Ready.
+    expect(cmp.billingKpis().ready).toBeCloseTo(28_500 * 0.92, 6);
+    expect(kpi(host(fixture), 'Ready')).toBe('€26,220.00');
+  });
+
+  it('converts an actual invoice at its order currency', async () => {
+    // The other half of the billing-control strip. An order LINE carries no
+    // currency of its own, so the amount is denominated in its parent order's —
+    // the same rule finance.util's lineSum applies, and the reason this cannot be
+    // read off the line alone.
+    const fixture = await render(usdStub({
+      getOrders: () => of([{ ...usdOrder, status: 'Invoiced' } as Order]),
+    }), 'CT2');
+    const cmp = fixture.componentInstance;
+
+    expect(cmp.actualBillingToDate()).toBeCloseTo(120_000 * 0.92, 6);
+    expect(kpi(host(fixture), 'Actual To Date')).toBe('€110,400.00');
+
+    // The header-only fallback (an invoiced order with no lines) reads the SAME
+    // currency off the order, so it needs its own case — otherwise that branch
+    // could stay unconverted with every assertion above still green.
+    TestBed.resetTestingModule();
+    const headerOnly = await render(usdStub({
+      getOrders: () => of([{ ...usdOrder, status: 'Invoiced' } as Order]),
+      getOrderLines: () => of([]),
+    }), 'CT2');
+    expect(headerOnly.componentInstance.actualBillingToDate()).toBeCloseTo(120_000 * 0.92, 6);
+  });
+
+  it('leaves a single-currency EUR contract byte-identical — no blanket rescaling', async () => {
+    // THE ABSENCE ASSERTION, and what makes the case above non-vacuous. The FX
+    // table is present and non-trivial (USD 0.92), but nothing in this fixture is
+    // USD, so every figure must be exactly what it was before fxRates was wired
+    // in. A fix that multiplied by a rate unconditionally fails here.
+    const eurContract: Contract = {
+      id: 'CT1', customerId: 'C1', name: 'Acme Framework', type: 'T&M', totalValue: 250_000,
+      currency: 'EUR', status: 'Active', startDate: '2026-01-01', endDate: '2026-12-31',
+    };
+    const eurProject: Project = {
+      id: '1', name: 'Project Alpha', location: 'Rome', startDate: '2026-01-01',
+      endDate: '2026-12-31', status: 'In Execution', contractId: 'CT1',
+    };
+    // Invoiced, so this fixture also exercises the actuals path (actualBillingEvents).
+    const eurOrder: Order = { id: 'O1', contractId: 'CT1', type: 'Customer', amount: 200_000, currency: 'EUR', status: 'Invoiced', orderDate: '2026-01-10' };
+    const eurLine: OrderLine = { id: 'OL1', orderId: 'O1', projectId: '1', description: 'Phase 1', amount: 200_000 };
+    const eurItem: BillingPlanItem = {
+      id: 'BP1', contractId: 'CT1', projectId: '1', type: 'Recurring', label: 'Monthly retainer',
+      recurrence: 'Monthly', expectedDate: '2026-02-28', issuedDate: '2026-02-28',
+      amount: 5_000, currency: 'EUR', status: 'Invoiced',
+    };
+    // The EUR mirror of BP3, so this fixture exercises BOTH halves of the sum —
+    // the converted (Recurring) half and the never-converted as-incurred half.
+    const eurTm: BillingPlanItem = {
+      id: 'BP1T', contractId: 'CT1', projectId: '1', type: 'TimeAndMaterials', label: 'T&M consuntivo',
+      expectedDate: '2026-03-15', amount: 10_000, currency: 'EUR', status: 'Ready',
+    };
+    const eurEntry: TimeEntry = {
+      id: 'TE1', assignmentId: 'a1', requestId: 'r1', resourceId: '1',
+      projectId: '1', date: '2026-03-01', hours: 10, status: 'Approved',
+    };
+
+    const fixture = await render(usdStub({
+      getContracts: () => of([eurContract]),
+      getCustomers: () => of([{ id: 'C1', name: 'Acme Co' }]),
+      getProjects: () => of([eurProject]),
+      getOrders: () => of([eurOrder]),
+      getOrderLines: () => of([eurLine]),
+      getBillingPlanItems: () => of([eurItem, eurTm]),
+      getTimeEntries: () => of([eurEntry]),
+      getNegotiatedRates: () => of([]),      // priced at the reference 200 €/h
+    }), 'CT1');
+    const cmp = fixture.componentInstance;
+
+    // DELIBERATELY no envelope assertion here: this case must pass IDENTICALLY
+    // before and after the fix, so every assertion in it has to be one the
+    // pre-fix code also satisfies. Checking that `fxRates` is wired in would make
+    // it fail pre-fix and destroy exactly the invariance it exists to prove.
+    expect(cmp.kpis().revenue).toBeCloseTo(200_000, 6);
+    // 5,000 recurring + 10h × 200 €/h = 7,000 — the pre-fix number, unchanged.
+    expect(cmp.recognitionSummary().totalRecognized).toBeCloseTo(7_000, 6);
+    expect(cmp.expectedBillingToDate()).toBeCloseTo(5_000 + 10_000, 6);
+    expect(cmp.actualBillingToDate()).toBeCloseTo(200_000, 6);
+    expect(cmp.billingKpis().ready).toBeCloseTo(10_000, 6);
+    expect(kpi(host(fixture), 'Order Revenue')).toBe('€200,000.00');
+  });
+
+  it('suppresses every money figure when /fx-rates is the ONLY failed read', async () => {
+    // A failed /fx-rates read yields [] through the error-to-empty accessor, and
+    // an empty rate table makes convertToBase an identity — so without fxRatesRes
+    // in the gate the page silently reprints the pre-fix mixed-unit sum under a
+    // '€' label, which is worse than the pre-fix state. Drop this.fxRatesRes from
+    // recognitionInputs() and this test sees the figures instead of the banner.
+    const fixture = await render(usdStub({
+      getFxRates: () => throwError(() => new Error('500 fx-rates unavailable')),
+    }), 'CT2');
+    const cmp = fixture.componentInstance;
+
+    expect(cmp['moneyFiguresState']()).toBe('error');
+    const text = host(fixture).textContent ?? '';
+    expect(text).toContain('Limited data');
+    expect(text).not.toContain('Order Revenue');
+    expect(text).not.toContain('Total Recognized');
+    // The pre-fix unconverted sum must not appear anywhere on the page either.
+    expect(text).not.toContain('13,150.00');
+    expect(text).toContain('Recognition figures are unavailable');
   });
 });
