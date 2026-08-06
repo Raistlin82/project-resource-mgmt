@@ -19,10 +19,22 @@
  */
 import type { Resource, ResourceRequest, Assignment } from './api.service';
 
-/** A booking window resolved to UTC epoch-ms bounds (end exclusive). */
+/**
+ * A booking window resolved to UTC epoch-ms bounds.
+ *
+ * `endDate` is an INCLUSIVE calendar day everywhere in this app (a booking dated
+ * 01→30 September is worked ON the 30th), while the sweep below reasons over
+ * half-open [start, end) intervals. The two are reconciled here, once: `end` is
+ * the instant AFTER the last booked day, and `endInclusive` is the resolved
+ * end as supplied, kept so the view still gets the dates the user typed.
+ */
 interface BookingWindow {
+  /** First instant of the booking (inclusive). */
   start: number;
+  /** Exclusive end = last booked day + 1 day. What the sweep compares against. */
   end: number;
+  /** The resolved INCLUSIVE end, echoed back onto the booking for the view. */
+  endInclusive: number;
 }
 
 /**
@@ -41,7 +53,12 @@ export interface ScheduleBooking {
   label: string;
   /** Resolved ISO booking start (YYYY-MM-DD or full ISO), inclusive. */
   startDate: string;
-  /** Resolved ISO booking end (YYYY-MM-DD or full ISO), exclusive at the instant level. */
+  /**
+   * Resolved ISO booking end (YYYY-MM-DD or full ISO), INCLUSIVE: the last day
+   * the resource is booked. The sweep internally works on [start, end+1day) —
+   * see {@link BookingWindow} — but the dates echoed here are the ones that were
+   * resolved, so the view's bar geometry and tooltips are unchanged by that.
+   */
   endDate: string;
   /** Percentage of weekly capacity this booking consumes (defaults to 100 when unset). */
   allocationPct: number;
@@ -59,7 +76,7 @@ export interface ScheduleConflict {
   peakPct: number;
   /** ISO start of the offending (peak) window, inclusive. */
   windowStart: string;
-  /** ISO end of the offending (peak) window, exclusive. */
+  /** ISO end of the offending (peak) window, EXCLUSIVE (the day after the last over-allocated day). */
   windowEnd: string;
   /** Assignment ids of every booking active during the peak window. */
   bookingIds: string[];
@@ -124,19 +141,21 @@ export function weeksBetween(startISO: string | undefined, endISO: string | unde
  *
  * A window is "usable" only when both bounds parse and end >= start. The
  * assignment's own dates take precedence as a pair; if either is missing the
- * request's dates are tried as a pair. A zero-length window (end === start) is
- * permitted — it represents a same-day point booking.
+ * request's dates are tried as a pair. end === start is permitted — it is a
+ * SAME-DAY booking, which still occupies a whole day of the resource, so it
+ * resolves to the one-day-long interval [start, start + 1 day) and not to the
+ * empty interval a naive half-open reading would give it.
  */
 function resolveWindow(assignment: Assignment, request: ResourceRequest | undefined): BookingWindow | null {
   const aStart = parseMs(assignment.startDate);
   const aEnd = parseMs(assignment.endDate);
   if (aStart !== null && aEnd !== null && aEnd >= aStart) {
-    return { start: aStart, end: aEnd };
+    return { start: aStart, end: aEnd + MS_PER_DAY, endInclusive: aEnd };
   }
   const rStart = parseMs(request?.startDate);
   const rEnd = parseMs(request?.endDate);
   if (rStart !== null && rEnd !== null && rEnd >= rStart) {
-    return { start: rStart, end: rEnd };
+    return { start: rStart, end: rEnd + MS_PER_DAY, endInclusive: rEnd };
   }
   return null;
 }
@@ -155,11 +174,14 @@ interface ResolvedBooking {
 /**
  * Sweep-line over a single resource's bookings. Boundaries are the distinct
  * start/end instants; between consecutive boundaries the set of active bookings
- * is constant. A booking is active over the half-open interval [start, end), so
- * adjacent intervals (end === next start) never overlap. Where the summed
- * allocationPct of the active set exceeds 100%, every active booking is flagged
- * and a conflict window is recorded; contiguous over-allocated segments are
- * merged and reported at their peak.
+ * is constant. A booking is active over the half-open interval [start, end),
+ * where `end` is already the day AFTER its inclusive endDate ({@link
+ * BookingWindow}) — so two bookings that merely TOUCH on the calendar (one ends
+ * 30 Sep, the next starts 30 Sep) are both active on that day and DO overlap,
+ * while genuinely adjacent bookings (one ends 29 Sep, the next starts 30 Sep) do
+ * not. Where the summed allocationPct of the active set exceeds 100%, every
+ * active booking is flagged and a conflict window is recorded; contiguous
+ * over-allocated segments are merged and reported at their peak.
  */
 function sweepResource(resourceId: string, resolved: ResolvedBooking[]): { peakPct: number; conflicts: ScheduleConflict[] } {
   // Distinct, sorted boundary instants.
@@ -254,7 +276,10 @@ export function buildSchedule(
       requestId: a.requestId,
       label: request?.name ?? a.requestId ?? a.id,
       startDate: toIsoDate(window.start),
-      endDate: toIsoDate(window.end),
+      // The INCLUSIVE end, not window.end: the +1 day the sweep needs must not
+      // leak into the view, or every bar grows a day and the tooltip reads an
+      // end one day late.
+      endDate: toIsoDate(window.endInclusive),
       allocationPct: finite(a.allocationPct, DEFAULT_ALLOCATION_PCT),
       conflict: false,
     };

@@ -87,7 +87,11 @@ describe('schedule.util buildSchedule — conflict detection', () => {
     expect(c.resourceId).toBe('R1');
     expect(c.peakPct).toBe(120);
     expect(c.windowStart).toBe('2026-01-10');
-    expect(c.windowEnd).toBe('2026-01-31');
+    // A1's last booked day is 31 Jan, so the over-allocation runs THROUGH the
+    // 31st and windowEnd (exclusive) is 1 Feb. It read '2026-01-31' while the
+    // inclusive end was treated as an exclusive instant — i.e. the 31st was
+    // silently excluded from the conflict.
+    expect(c.windowEnd).toBe('2026-02-01');
     expect(c.bookingIds.sort()).toEqual(['A1', 'A2']);
   });
 
@@ -108,12 +112,36 @@ describe('schedule.util buildSchedule — conflict detection', () => {
     expect(model.conflicts).toHaveLength(0);
   });
 
-  it('treats adjacent intervals (end === next start) as NON-overlapping', () => {
+  // REWRITTEN (was "treats adjacent intervals (end === next start) as
+  // NON-overlapping", asserting hasConflict false / peak 100). endDate is an
+  // INCLUSIVE calendar day: a booking ending 15 Jan and one starting 15 Jan are
+  // BOTH worked on the 15th, so they are double-booked, not adjacent. The old
+  // expectation was the defect's own certificate.
+  it('flags a TOUCHING pair (one ends on the day the next starts) — both are booked that day', () => {
     const resources = [resource('R1')];
     const requests = [request('REQ_A'), request('REQ_B')];
     const assignments = [
-      // A1 ends exactly where A2 starts; with half-open [start,end) they never coexist.
       assignment('A1', { requestId: 'REQ_A', startDate: '2026-01-01', endDate: '2026-01-15', allocationPct: 100 }),
+      assignment('A2', { requestId: 'REQ_B', startDate: '2026-01-15', endDate: '2026-01-31', allocationPct: 100 }),
+    ];
+
+    const model = buildSchedule(resources, assignments, requests);
+    const lane = laneOf(model, 'R1');
+
+    expect(lane.hasConflict).toBe(true);
+    expect(lane.peakAllocationPct).toBe(200);
+    expect(model.conflicts).toHaveLength(1);
+    // The one shared day, and nothing more: 15 Jan inclusive → 16 Jan exclusive.
+    expect(model.conflicts[0].windowStart).toBe('2026-01-15');
+    expect(model.conflicts[0].windowEnd).toBe('2026-01-16');
+  });
+
+  it('does NOT flag a GENUINELY adjacent pair (one ends the day before the next starts)', () => {
+    const resources = [resource('R1')];
+    const requests = [request('REQ_A'), request('REQ_B')];
+    const assignments = [
+      // A1's last booked day is the 14th; A2's first is the 15th. No shared day.
+      assignment('A1', { requestId: 'REQ_A', startDate: '2026-01-01', endDate: '2026-01-14', allocationPct: 100 }),
       assignment('A2', { requestId: 'REQ_B', startDate: '2026-01-15', endDate: '2026-01-31', allocationPct: 100 }),
     ];
 
@@ -278,11 +306,15 @@ describe('schedule.util buildSchedule — allocation & window fallbacks', () => 
 });
 
 describe('schedule.util buildSchedule — same-day edge & lane grouping', () => {
-  it('keeps a same-day (zero-length) booking but never treats it as overlapping a touching window', () => {
+  // REWRITTEN (was "keeps a same-day booking but never treats it as overlapping
+  // a touching window", asserting hasConflict false). A same-day booking occupies
+  // a whole day of the resource; when another booking covers that same day the
+  // resource is double-booked. The old expectation certified the miss.
+  it('flags a same-day booking that lands inside another booking window', () => {
     const resources = [resource('R1')];
     const requests = [request('REQ_A'), request('REQ_B')];
     const assignments = [
-      // A1 is a same-day point at Jan 15. A2 starts the same day -> [Jan15,Jan15) is empty, so no overlap.
+      // A1 is a single day, 15 Jan. A2 covers 15–31 Jan, so both hold the 15th.
       assignment('A1', { requestId: 'REQ_A', startDate: '2026-01-15', endDate: '2026-01-15', allocationPct: 100 }),
       assignment('A2', { requestId: 'REQ_B', startDate: '2026-01-15', endDate: '2026-01-31', allocationPct: 100 }),
     ];
@@ -291,8 +323,70 @@ describe('schedule.util buildSchedule — same-day edge & lane grouping', () => 
     const lane = laneOf(model, 'R1');
 
     expect(lane.bookings).toHaveLength(2);
+    expect(lane.hasConflict).toBe(true);
+    expect(lane.peakAllocationPct).toBe(200);
+    expect(model.conflicts).toHaveLength(1);
+    // The bar still stops on the 15th: the +1 day the sweep needs stays internal.
+    expect(lane.bookings.find((b) => b.assignmentId === 'A1')!.endDate).toBe('2026-01-15');
+  });
+
+  it('measures a lone same-day booking at its real allocation instead of 0%', () => {
+    const resources = [resource('R1')];
+    const requests = [request('REQ_A')];
+    const assignments = [
+      assignment('A1', { requestId: 'REQ_A', startDate: '2026-01-15', endDate: '2026-01-15', allocationPct: 60 }),
+    ];
+
+    const model = buildSchedule(resources, assignments, requests);
+    const lane = laneOf(model, 'R1');
+
+    // A zero-length window produced a single sweep boundary, so the interval loop
+    // body never ran and the lane reported peak 0% no matter how much was booked.
+    expect(lane.peakAllocationPct).toBe(60);
+    // ...and 60% alone is not a conflict — the fix must not be "flag everything".
     expect(lane.hasConflict).toBe(false);
     expect(model.conflicts).toHaveLength(0);
+  });
+
+  it('flags two same-day bookings on the same day at 200%', () => {
+    const resources = [resource('R1')];
+    const requests = [request('REQ_A'), request('REQ_B')];
+    const assignments = [
+      assignment('A1', { requestId: 'REQ_A', startDate: '2026-09-30', endDate: '2026-09-30', allocationPct: 100 }),
+      assignment('A2', { requestId: 'REQ_B', startDate: '2026-09-30', endDate: '2026-09-30', allocationPct: 100 }),
+    ];
+
+    const model = buildSchedule(resources, assignments, requests);
+    const lane = laneOf(model, 'R1');
+
+    expect(lane.peakAllocationPct).toBe(200);
+    expect(lane.hasConflict).toBe(true);
+    expect(model.conflicts).toHaveLength(1);
+    expect(model.conflicts[0].windowStart).toBe('2026-09-30');
+    expect(model.conflicts[0].bookingIds.sort()).toEqual(['A1', 'A2']);
+  });
+
+  it('flags the month-boundary handover the substitution flow writes (Sep 30 booked twice)', () => {
+    const resources = [resource('R1')];
+    const requests = [request('REQ_A', { name: 'Alpha' }), request('REQ_B', { name: 'Beta' })];
+    const assignments = [
+      assignment('A1', { requestId: 'REQ_A', startDate: '2026-09-01', endDate: '2026-09-30', allocationPct: 100 }),
+      assignment('A2', { requestId: 'REQ_B', startDate: '2026-09-30', endDate: '2026-10-30', allocationPct: 100 }),
+    ];
+
+    const model = buildSchedule(resources, assignments, requests);
+    const lane = laneOf(model, 'R1');
+
+    expect(lane.hasConflict).toBe(true);
+    expect(lane.peakAllocationPct).toBe(200);
+    expect(model.conflicts).toHaveLength(1);
+    expect(model.conflicts[0].windowStart).toBe('2026-09-30');
+    expect(model.conflicts[0].windowEnd).toBe('2026-10-01');
+    // Both bars keep the dates that were booked.
+    const byId = new Map(lane.bookings.map((b) => [b.assignmentId, b]));
+    expect(byId.get('A1')!.endDate).toBe('2026-09-30');
+    expect(byId.get('A2')!.startDate).toBe('2026-09-30');
+    expect(byId.get('A2')!.endDate).toBe('2026-10-30');
   });
 
   it('groups bookings per resource and orders each lane by resolved start then end', () => {
