@@ -2,11 +2,14 @@ import { NgTemplateOutlet } from '@angular/common';
 import {
   ChangeDetectionStrategy,
   Component,
+  ElementRef,
   TemplateRef,
+  afterRenderEffect,
   computed,
   contentChild,
   input,
   output,
+  viewChild,
 } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 
@@ -46,7 +49,12 @@ export type ListStateSkeleton = 'block' | 'table-rows' | 'cards';
   imports: [MatIconModule, NgTemplateOutlet],
   template: `
     @if (loading()) {
-      <div class="space-y-3" role="status" aria-live="polite" aria-busy="true">
+      <!-- tabindex="-1" makes this a PROGRAMMATIC focus target only (it stays
+           out of the tab order). It is where focus lands after Retry — see
+           onRetry(). Deliberately NOT named with aria-label/aria-labelledby:
+           the region is already aria-live="polite" with the same sr-only text,
+           so naming it would announce those words twice. -->
+      <div #statusRegion tabindex="-1" class="space-y-3" role="status" aria-live="polite" aria-busy="true">
         <span class="sr-only">{{ loadingLabel() }}</span>
         @switch (skeleton()) {
           @case ('table-rows') {
@@ -95,7 +103,7 @@ export type ListStateSkeleton = 'block' | 'table-rows' | 'cards';
           <h3 class="font-display text-lg font-bold text-[var(--cc-ink)]">Couldn't load {{ label() }}</h3>
           <p class="text-[var(--cc-muted)] text-sm mt-1">Something went wrong while fetching the data.</p>
         </div>
-        <button type="button" (click)="retry.emit()"
+        <button type="button" (click)="onRetry()"
                 class="command-button">
           <mat-icon class="text-[18px] w-[18px] h-[18px]">refresh</mat-icon> Retry
         </button>
@@ -140,6 +148,51 @@ export class ListStateComponent {
 
   /** Emitted when the user clicks Retry; the host should reload the resource. */
   readonly retry = output<void>();
+
+  /**
+   * The loading region, which exists only while `loading()` is true. Queried so
+   * {@link onRetry} can hand focus to it once it has actually been rendered.
+   */
+  private readonly statusRegion = viewChild<ElementRef<HTMLElement>>('statusRegion');
+  /**
+   * Armed by {@link onRetry}, consumed by the post-render focus move below. A
+   * plain field, not a signal: it must NOT be a dependency of the after-render
+   * effect (writing a signal from there would schedule another render pass), and
+   * the viewChild becoming available is the real trigger.
+   */
+  private awaitingRetryFocus = false;
+
+  constructor() {
+    /*
+     * Retry destroys the very button the user activated: the host flips to
+     * loading, the error branch unmounts, and focus fell to <body> on all 38
+     * retry surfaces — the next Tab restarted at the skip link and walked the
+     * whole sidebar instead of returning into the list being operated. Move
+     * focus to the loading region that takes the button's place.
+     *
+     * It has to happen AFTER render, because at click time the region does not
+     * exist yet. Reading the viewChild signal here means this re-runs exactly
+     * when the query result changes (undefined -> ElementRef), i.e. when the
+     * region appears.
+     *
+     * Only the loading branch is handled, and that covers the live path: every
+     * retry site calls `resource.reload()`, which flips isLoading() true. If a
+     * host instead leaves `error` true, the @if branch does not change, the
+     * button is never destroyed, and it keeps focus on its own.
+     */
+    afterRenderEffect(() => {
+      const region = this.statusRegion()?.nativeElement;
+      if (!this.awaitingRetryFocus || !region) return;
+      this.awaitingRetryFocus = false;
+      region.focus();
+    });
+  }
+
+  /** Emit `retry` and keep the keyboard user's place once the view swaps. */
+  protected onRetry(): void {
+    this.awaitingRetryFocus = true;
+    this.retry.emit();
+  }
 
   protected readonly skeletonRows = computed(() =>
     Array.from({ length: Math.max(0, this.rows()) }, (_, i) => i),

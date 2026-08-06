@@ -184,8 +184,15 @@ interface ProjectCommandRow {
           label="the command center"
           (retry)="reload()" />
       } @else if (isLoading()) {
-        <!-- 11-endpoint load in flight: skeletons in place of fabricated zeros. -->
-        <div class="space-y-6" aria-busy="true" aria-label="Loading delivery command center">
+        <!-- 11-endpoint load in flight: skeletons in place of fabricated zeros.
+             role="status" + aria-live="polite" + an sr-only text node, copying
+             list-state.component.ts:49-50. The aria-label alone named NOTHING:
+             ARIA prohibits an accessible name on a role-less generic div, so it
+             was dropped, and aria-busy carries no announcement outside a live
+             region — the whole 11-request window was silent, indistinguishable
+             from an empty or broken page. -->
+        <div class="space-y-6" role="status" aria-live="polite" aria-busy="true">
+          <span class="sr-only">Loading delivery command center</span>
           <div class="command-eyebrow">Portfolio Financials</div>
           <section class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-7 gap-4">
             <div class="command-skeleton h-28 xl:col-span-2"></div>
@@ -428,11 +435,19 @@ interface ProjectCommandRow {
                     </td>
                     <td><span class="command-status" [class.green]="project.health === 'green'" [class.amber]="project.health === 'amber'" [class.red]="project.health === 'red'">{{ healthLabel(project.health) }}</span></td>
                     <td>
-                      <div class="font-mono font-semibold" [style.color]="project.marginPct < 0 ? 'var(--cc-red)' : null">{{ project.marginPct | number:'1.0-1' }}%</div>
+                      <!-- --cc-red-text, not --cc-red: this is a 14px semibold
+                           FIGURE, so AA's 4.5:1 applies and the fill tone only
+                           reaches 4.47:1 against the dark surface (4.16:1 on a
+                           muted row) while the positive figure in the VAC column
+                           beside it already uses the -text shade at ~10.8:1. -->
+                      <div class="font-mono font-semibold" [style.color]="project.marginPct < 0 ? 'var(--cc-red-text)' : null">{{ project.marginPct | number:'1.0-1' }}%</div>
                       <div class="mt-1 command-meter"><span [style.width.%]="meter(project.marginPct, 40)"></span></div>
                     </td>
                     <td class="font-mono">{{ project.eac | currency:'EUR':'symbol':'1.0-0' }}</td>
-                    <td class="font-mono font-semibold" [style.color]="project.vac < 0 ? 'var(--cc-red)' : 'var(--cc-green-text)'">{{ project.vac | currency:'EUR':'symbol':'1.0-0' }}</td>
+                    <!-- Both halves of one signed figure must use the -text
+                         shade; this binding was the clearest instance of the
+                         disparity (negative VAC 4.47:1, positive VAC ~10.8:1). -->
+                    <td class="font-mono font-semibold" [style.color]="project.vac < 0 ? 'var(--cc-red-text)' : 'var(--cc-green-text)'">{{ project.vac | currency:'EUR':'symbol':'1.0-0' }}</td>
                     <td>
                       <span class="font-mono font-semibold">{{ project.openRisks }}</span>
                       <span class="text-[var(--cc-muted)]"> / </span>
@@ -456,7 +471,14 @@ interface ProjectCommandRow {
                 <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Risk & Escalation Queue</h2>
                 <p class="mt-1 text-sm text-[var(--cc-muted)]">Open issues with high or critical severity, or escalated.</p>
               </div>
-              <a routerLink="/project-issues" class="command-status red" [class.green]="criticalRisks() === 0">Issues</a>
+              <!-- BOTH tones are conditional. With "red" in the static class
+                   list the chip carried it unconditionally, and because
+                   styles.css declares .command-status.red AFTER .green the
+                   all-clear branch was dead by cascade order: a queue with zero
+                   criticals rendered in the same alarm tone as forty open ones,
+                   directly contradicting the card body below. Same shape as the
+                   criticalRisks KPI tile at :285. -->
+              <a routerLink="/project-issues" class="command-status" [class.red]="criticalRisks() > 0" [class.green]="criticalRisks() === 0">Issues</a>
             </div>
             <div class="divide-y divide-[var(--cc-line)]">
               @for (risk of riskQueue(); track risk.id) {

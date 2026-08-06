@@ -153,6 +153,13 @@
      borders/backgrounds only. */
   --cc-green-text: var(--color-positive-text);
   --cc-amber-text: var(--color-caution-text);
+  /* The red half of that same pair, which was simply missing. --cc-red is the
+     FILL/BORDER tone: as text it reaches only 4.47:1 against the dark surface
+     and 4.16:1 on a muted/zebra row, so every negative money or hours figure
+     drawn with it sat below AA in dark theme while the POSITIVE figure beside
+     it, using --cc-green-text, read at ~10.8:1. Use this token wherever red
+     renders as small text; keep --cc-red for borders and solid fills. */
+  --cc-red-text: var(--color-critical-text);
   --cc-violet: var(--color-series-3);
 
   /* Elevation + glow (tuned for light; overridden in dark to be subtler) */
@@ -727,7 +734,10 @@ textarea:focus-visible,
 }
 
 .command-kpi.danger .command-kpi-value {
-  color: var(--cc-red);
+  /* TEXT, not a fill — the -text shade, exactly as .warning/.green above do.
+     The border-top tone at .command-kpi.danger keeps --cc-red: a 3:1
+     non-text target, which the fill tone clears. */
+  color: var(--cc-red-text);
 }
 
 .command-kpi.info {

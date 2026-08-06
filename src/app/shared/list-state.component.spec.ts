@@ -56,6 +56,33 @@ class FailedResourceHostComponent {
 })
 class BareContentHostComponent {}
 
+/**
+ * What every one of the 38 retry sites actually does: `resource.reload()` flips
+ * `isLoading()` true synchronously, so the error branch unmounts and the loading
+ * branch takes its place in the same pass — destroying the very Retry button the
+ * user activated. The sibling button exists so a "focus went somewhere sensible"
+ * assertion cannot be satisfied by an unrelated control.
+ */
+@Component({
+  imports: [ListStateComponent],
+  template: `
+    <app-list-state [loading]="loading()" [error]="error()" label="resources" (retry)="onRetry()">
+      <ng-template>
+        <div data-test="content">projected content</div>
+      </ng-template>
+    </app-list-state>
+    <button type="button" data-test="outside">unrelated control</button>
+  `,
+})
+class RetryFocusHostComponent {
+  loading = signal(false);
+  error = signal(true);
+  onRetry(): void {
+    this.error.set(false);
+    this.loading.set(true);
+  }
+}
+
 describe('ListStateComponent', () => {
   function setup() {
     const fixture = TestBed.createComponent(HostComponent);
@@ -153,5 +180,112 @@ describe('ListStateComponent', () => {
     // point, because that is what reintroduces eager binding evaluation.
     expect(fixture.nativeElement.querySelector('[data-test="bare"]')).toBeNull();
     expect((fixture.nativeElement as HTMLElement).textContent).not.toContain('bare projected content');
+  });
+});
+
+describe('ListStateComponent — keyboard focus survives Retry', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  async function setupRetryFocus() {
+    const fixture = TestBed.createComponent(RetryFocusHostComponent);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    return fixture;
+  }
+
+  const q = <T extends Element>(fixture: { nativeElement: unknown }, sel: string): T => {
+    const found = (fixture.nativeElement as HTMLElement).querySelector<T>(sel);
+    expect(found, `expected to find ${sel}`).not.toBeNull();
+    return found!;
+  };
+
+  /**
+   * The pre-click `toBe(button)` is what makes this non-vacuous: without it the
+   * test would also pass in a jsdom run where the button was never focusable at
+   * all — the exact shape of the blind gate the sibling 'emits retry when the
+   * Retry button is clicked' test above already has (it calls `button.click()`
+   * and never touches focus).
+   */
+  it('moves focus to the loading region instead of dropping it to <body>', async () => {
+    const fixture = await setupRetryFocus();
+    const button = q<HTMLButtonElement>(fixture, '[role="alert"] button');
+
+    button.focus();
+    expect(document.activeElement).toBe(button);
+
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    fixture.detectChanges();
+    await fixture.whenStable();
+
+    const region = q<HTMLElement>(fixture, '[role="status"]');
+    // <body> is stated as its own assertion because it is the specific wrong
+    // answer: the next Tab restarts at the skip link and walks the whole sidebar.
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(region);
+    // …and not merely "some other control on the page".
+    expect(document.activeElement).not.toBe(q(fixture, '[data-test="outside"]'));
+  });
+
+  it('does not add a second accessible name to the region it focuses', async () => {
+    const fixture = await setupRetryFocus();
+    q<HTMLButtonElement>(fixture, '[role="alert"] button')
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    fixture.detectChanges();
+    await fixture.whenStable();
+
+    // The region is aria-live="polite" and already carries the sr-only text.
+    // Naming it as well would announce those same words twice — once as the
+    // live-region update and once as the name of the newly focused element.
+    const region = q<HTMLElement>(fixture, '[role="status"]');
+    expect(region.getAttribute('tabindex')).toBe('-1');
+    expect(region.hasAttribute('aria-label')).toBe(false);
+    expect(region.hasAttribute('aria-labelledby')).toBe(false);
+    expect(region.textContent).toContain('Loading resources');
+  });
+
+  /**
+   * The case that must still be ALLOWED, and the reason a focus move cannot be
+   * unconditional: a component that focuses the loading region on every render
+   * passes the test above and would then steal focus on the initial page load
+   * and on every background refresh, yanking the caret out of whatever the user
+   * was typing. Only a user-initiated Retry may move it.
+   */
+  it('leaves focus alone when the loading state was not triggered by Retry', async () => {
+    const fixture = TestBed.createComponent(RetryFocusHostComponent);
+    fixture.componentInstance.error.set(false);
+    fixture.componentInstance.loading.set(true);
+    fixture.detectChanges();
+    await fixture.whenStable();
+
+    const outside = q<HTMLButtonElement>(fixture, '[data-test="outside"]');
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+
+    // A background reload settling and starting again — the loading region is
+    // destroyed and re-created, which is the same viewChild transition Retry
+    // causes, so only the retry flag can distinguish the two.
+    fixture.componentInstance.loading.set(false);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.componentInstance.loading.set(true);
+    fixture.detectChanges();
+    await fixture.whenStable();
+
+    q<HTMLElement>(fixture, '[role="status"]');
+    expect(document.activeElement).toBe(outside);
+  });
+
+  it('still emits retry to the host — the focus move must not replace the reload', async () => {
+    // The guard-that-always-refuses check: swallowing the click would satisfy
+    // every focus assertion above while never reloading anything.
+    const fixture = await setupRetryFocus();
+    const spy = vi.spyOn(fixture.componentInstance, 'onRetry');
+    q<HTMLButtonElement>(fixture, '[role="alert"] button')
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    fixture.detectChanges();
+    await fixture.whenStable();
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(fixture.componentInstance.loading()).toBe(true);
   });
 });

@@ -106,7 +106,14 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
       @if (dataError()) {
         <app-list-state [error]="true" label="portfolio analytics" (retry)="reloadData()" />
       } @else if (dataLoading()) {
-        <div class="space-y-6" aria-busy="true" aria-label="Loading portfolio analytics">
+        <!-- role="status" + aria-live="polite" + an sr-only text node, copying
+             list-state.component.ts:49-50. The former aria-label named NOTHING:
+             ARIA prohibits an accessible name on a role-less generic div, so it
+             was dropped and this whole multi-request window announced silently —
+             a deep-link with a screen reader was indistinguishable from an empty
+             or broken report. aria-busy only announces inside a live region. -->
+        <div class="space-y-6" role="status" aria-live="polite" aria-busy="true">
+          <span class="sr-only">Loading portfolio analytics</span>
           <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
             @for (tile of [1, 2, 3, 4]; track tile) {
               <div class="command-skeleton h-36"></div>
