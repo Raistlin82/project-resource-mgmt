@@ -27,6 +27,7 @@ import {
 import { AuthService } from '../../services/auth.service';
 import {
   computeProjectFinancials,
+  convertToBase,
   FinanceData,
   JournalEntry,
   journalTotals,
@@ -136,18 +137,18 @@ interface BillingControlRow {
           </div>
           <div class="command-kpi">
             <p class="command-kpi-label">Order Revenue</p>
-            <p class="command-kpi-value">{{ kpis().revenue | currency: c.currency }}</p>
+            <p class="command-kpi-value">{{ kpis().revenue | currency: BASE_CURRENCY }}</p>
           </div>
           <div class="command-kpi info">
             <p class="command-kpi-label">Invoiced</p>
-            <p class="command-kpi-value">{{ kpis().invoiced | currency: c.currency }}</p>
+            <p class="command-kpi-value">{{ kpis().invoiced | currency: BASE_CURRENCY }}</p>
           </div>
           <div class="command-kpi" [class.danger]="kpis().margin < 0">
             <p class="command-kpi-label">Margin</p>
             <p class="command-kpi-value"
                [class.text-positive-text]="kpis().margin >= 0"
                [class.text-critical-text]="kpis().margin < 0">
-              {{ kpis().margin | currency: c.currency }}
+              {{ kpis().margin | currency: BASE_CURRENCY }}
             </p>
           </div>
           <div class="command-kpi" [class.danger]="kpis().marginPct < 0">
@@ -160,7 +161,7 @@ interface BillingControlRow {
           </div>
           <div class="command-kpi info">
             <p class="command-kpi-label">EAC</p>
-            <p class="command-kpi-value">{{ kpis().eac | currency: c.currency }}</p>
+            <p class="command-kpi-value">{{ kpis().eac | currency: BASE_CURRENCY }}</p>
           </div>
         </div>
         }
@@ -208,13 +209,13 @@ interface BillingControlRow {
                         {{ row.project.name }}
                       </a>
                     </td>
-                    <td class="text-right text-ink-secondary font-mono tabular-nums">{{ row.fin.revenue | currency: c.currency }}</td>
-                    <td class="text-right text-ink-secondary font-mono tabular-nums">{{ row.fin.actualCost | currency: c.currency }}</td>
-                    <td class="text-right text-ink-secondary font-mono tabular-nums">{{ row.fin.eac | currency: c.currency }}</td>
+                    <td class="text-right text-ink-secondary font-mono tabular-nums">{{ row.fin.revenue | currency: BASE_CURRENCY }}</td>
+                    <td class="text-right text-ink-secondary font-mono tabular-nums">{{ row.fin.actualCost | currency: BASE_CURRENCY }}</td>
+                    <td class="text-right text-ink-secondary font-mono tabular-nums">{{ row.fin.eac | currency: BASE_CURRENCY }}</td>
                     <td class="text-right font-medium font-mono tabular-nums"
                         [class.text-positive-text]="row.fin.margin >= 0"
                         [class.text-critical-text]="row.fin.margin < 0">
-                      {{ row.fin.margin | currency: c.currency }}
+                      {{ row.fin.margin | currency: BASE_CURRENCY }}
                     </td>
                     <td class="text-right font-medium font-mono tabular-nums"
                         [class.text-positive-text]="row.fin.marginPct >= 0"
@@ -384,15 +385,15 @@ interface BillingControlRow {
           <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 p-4">
             <div class="command-kpi info">
               <p class="command-kpi-label">Expected To Date</p>
-              <p class="command-kpi-value">{{ expectedBillingToDate() | currency: c.currency }}</p>
+              <p class="command-kpi-value">{{ expectedBillingToDate() | currency: BASE_CURRENCY }}</p>
             </div>
             <div class="command-kpi green">
               <p class="command-kpi-label">Actual To Date</p>
-              <p class="command-kpi-value">{{ actualBillingToDate() | currency: c.currency }}</p>
+              <p class="command-kpi-value">{{ actualBillingToDate() | currency: BASE_CURRENCY }}</p>
             </div>
             <div class="command-kpi" [class.danger]="billingVarianceToDate() < 0" [class.green]="billingVarianceToDate() >= 0">
               <p class="command-kpi-label">Variance</p>
-              <p class="command-kpi-value">{{ billingVarianceToDate() | currency: c.currency }}</p>
+              <p class="command-kpi-value">{{ billingVarianceToDate() | currency: BASE_CURRENCY }}</p>
             </div>
           </div>
           }
@@ -419,10 +420,10 @@ interface BillingControlRow {
                   <tr>
                     <td class="font-mono font-semibold">{{ row.period }}</td>
                     <td>{{ row.projectName }}</td>
-                    <td class="text-right font-mono">{{ row.expected | currency: c.currency }}</td>
-                    <td class="text-right font-mono">{{ row.actual | currency: c.currency }}</td>
+                    <td class="text-right font-mono">{{ row.expected | currency: BASE_CURRENCY }}</td>
+                    <td class="text-right font-mono">{{ row.actual | currency: BASE_CURRENCY }}</td>
                     <td class="text-right font-mono font-semibold" [class.text-critical-text]="row.variance < 0" [class.text-positive-text]="row.variance >= 0">
-                      {{ row.variance | currency: c.currency }}
+                      {{ row.variance | currency: BASE_CURRENCY }}
                     </td>
                     <td>
                       <span class="command-status"
@@ -478,23 +479,23 @@ interface BillingControlRow {
           <div class="grid grid-cols-2 lg:grid-cols-5 gap-4 p-4">
             <div class="command-kpi info">
               <p class="command-kpi-label">Planned</p>
-              <p class="command-kpi-value">{{ billingKpis().planned | currency: c.currency }}</p>
+              <p class="command-kpi-value">{{ billingKpis().planned | currency: BASE_CURRENCY }}</p>
             </div>
             <div class="command-kpi warning">
               <p class="command-kpi-label">Ready</p>
-              <p class="command-kpi-value">{{ billingKpis().ready | currency: c.currency }}</p>
+              <p class="command-kpi-value">{{ billingKpis().ready | currency: BASE_CURRENCY }}</p>
             </div>
             <div class="command-kpi">
               <p class="command-kpi-label">Invoiced</p>
-              <p class="command-kpi-value">{{ billingKpis().invoiced | currency: c.currency }}</p>
+              <p class="command-kpi-value">{{ billingKpis().invoiced | currency: BASE_CURRENCY }}</p>
             </div>
             <div class="command-kpi green">
               <p class="command-kpi-label">Paid</p>
-              <p class="command-kpi-value">{{ billingKpis().paid | currency: c.currency }}</p>
+              <p class="command-kpi-value">{{ billingKpis().paid | currency: BASE_CURRENCY }}</p>
             </div>
             <div class="command-kpi danger">
               <p class="command-kpi-label">Retention Held</p>
-              <p class="command-kpi-value">{{ billingKpis().retentionHeld | currency: c.currency }}</p>
+              <p class="command-kpi-value">{{ billingKpis().retentionHeld | currency: BASE_CURRENCY }}</p>
             </div>
           </div>
           }
@@ -581,15 +582,15 @@ interface BillingControlRow {
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 p-4">
               <div class="command-kpi green">
                 <p class="command-kpi-label">Recognized To Date</p>
-                <p class="command-kpi-value">{{ recognitionSummary().cumulative | currency: c.currency }}</p>
+                <p class="command-kpi-value">{{ recognitionSummary().cumulative | currency: BASE_CURRENCY }}</p>
               </div>
               <div class="command-kpi info">
                 <p class="command-kpi-label">Total Recognized</p>
-                <p class="command-kpi-value">{{ recognitionSummary().totalRecognized | currency: c.currency }}</p>
+                <p class="command-kpi-value">{{ recognitionSummary().totalRecognized | currency: BASE_CURRENCY }}</p>
               </div>
               <div class="command-kpi" [class.warning]="recognitionSummary().deferred > 0">
                 <p class="command-kpi-label">Deferred (Advance)</p>
-                <p class="command-kpi-value">{{ recognitionSummary().deferred | currency: c.currency }}</p>
+                <p class="command-kpi-value">{{ recognitionSummary().deferred | currency: BASE_CURRENCY }}</p>
               </div>
             </div>
 
@@ -611,7 +612,7 @@ interface BillingControlRow {
                              [style.width.%]="recognizedBarPct(row)"></div>
                       </div>
                       <span class="w-28 shrink-0 text-right font-mono tabular-nums text-xs text-ink-secondary">
-                        {{ row.cumulative | currency: c.currency: 'symbol': '1.0-0' }}
+                        {{ row.cumulative | currency: BASE_CURRENCY: 'symbol': '1.0-0' }}
                       </span>
                     </div>
                   }
@@ -639,13 +640,13 @@ interface BillingControlRow {
                         <td class="text-right font-mono tabular-nums"
                             [class.text-critical-text]="row.recognized < 0"
                             [class.text-ink-secondary]="row.recognized >= 0">
-                          {{ row.recognized | currency: c.currency }}
+                          {{ row.recognized | currency: BASE_CURRENCY }}
                         </td>
-                        <td class="text-right font-mono tabular-nums text-ink-secondary">{{ row.cumulative | currency: c.currency }}</td>
+                        <td class="text-right font-mono tabular-nums text-ink-secondary">{{ row.cumulative | currency: BASE_CURRENCY }}</td>
                         <td class="text-right font-mono tabular-nums"
                             [class.text-caution-text]="row.deferred > 0"
                             [class.text-ink-muted]="row.deferred === 0">
-                          {{ row.deferred | currency: c.currency }}
+                          {{ row.deferred | currency: BASE_CURRENCY }}
                         </td>
                       </tr>
                     }
@@ -653,9 +654,9 @@ interface BillingControlRow {
                   <tfoot>
                     <tr class="border-t-2 border-line">
                       <td class="font-semibold text-ink-secondary">Total</td>
-                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().totalRecognized | currency: c.currency }}</td>
-                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().cumulative | currency: c.currency }}</td>
-                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().deferred | currency: c.currency }}</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().totalRecognized | currency: BASE_CURRENCY }}</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().cumulative | currency: BASE_CURRENCY }}</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().deferred | currency: BASE_CURRENCY }}</td>
                     </tr>
                   </tfoot>
                 </table>
@@ -731,12 +732,12 @@ interface BillingControlRow {
                           <td class="text-right font-mono tabular-nums"
                               [class.text-ink-secondary]="line.debit > 0"
                               [class.text-ink-muted]="line.debit === 0">
-                            {{ line.debit > 0 ? (line.debit | currency: c.currency) : '—' }}
+                            {{ line.debit > 0 ? (line.debit | currency: BASE_CURRENCY) : '—' }}
                           </td>
                           <td class="text-right font-mono tabular-nums"
                               [class.text-ink-secondary]="line.credit > 0"
                               [class.text-ink-muted]="line.credit === 0">
-                            {{ line.credit > 0 ? (line.credit | currency: c.currency) : '—' }}
+                            {{ line.credit > 0 ? (line.credit | currency: BASE_CURRENCY) : '—' }}
                           </td>
                         </tr>
                       }
@@ -745,14 +746,14 @@ interface BillingControlRow {
                   <tfoot>
                     <tr class="border-t-2 border-line-strong">
                       <td class="font-semibold text-ink-secondary" colspan="3">Totals</td>
-                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ journalTotalsRow().debit | currency: c.currency }}</td>
-                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ journalTotalsRow().credit | currency: c.currency }}</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ journalTotalsRow().debit | currency: BASE_CURRENCY }}</td>
+                      <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ journalTotalsRow().credit | currency: BASE_CURRENCY }}</td>
                     </tr>
                   </tfoot>
                 </table>
               </div>
               <p class="command-note px-4 py-3">
-                Σ Debit {{ journalTotalsRow().debit | currency: c.currency }} = Σ Credit {{ journalTotalsRow().credit | currency: c.currency }}.
+                Σ Debit {{ journalTotalsRow().debit | currency: BASE_CURRENCY }} = Σ Credit {{ journalTotalsRow().credit | currency: BASE_CURRENCY }}.
                 These entries are a preview and have not been posted to the ledger.
               </p>
             } @else {
@@ -1140,6 +1141,17 @@ export class ContractDetails {
     contracts: this.contracts(),
     negotiatedRates: this.negotiatedRates(),
     hoursPerDay: this.hoursPerDay(),
+    // MF-02. /fx-rates was already read (it drives the currency picker) but was
+    // NOT in this envelope, and with `d.fxRates === undefined` convertToBase is
+    // documented to be an exact identity — so every figure below summed raw face
+    // values across currencies. On seeded CT2 (USD) 'Total Recognised' printed
+    // 12000 USD + 1150 EUR as one number: an amount in no currency at all.
+    // Supplying the table normalises each amount to BASE_CURRENCY, which is why
+    // every derived tile in the template is labelled BASE_CURRENCY and not
+    // `c.currency` — the pair is one change, not two. Only single-item facts
+    // (`c.totalValue`, an order's `amount`, a billing item's `amount`) stay on
+    // their own currency, because those numbers really are denominated in it.
+    fxRates: this.fxRates(),
   }));
 
   contractProjects = computed(() => this.projects().filter(p => p.contractId === this.id()));
@@ -1267,7 +1279,16 @@ export class ContractDetails {
       .sort((a, b) => (a.expectedDate ?? '').localeCompare(b.expectedDate ?? '')),
   );
 
+  /**
+   * MF-02. `amount` here is in BASE_CURRENCY, because it is only ever SUMMED —
+   * into the Actual/Variance tiles and the per-period rows, all of which are
+   * labelled BASE_CURRENCY. An order line carries no currency of its own, so the
+   * parent order's currency is the denomination (same rule as finance.util's
+   * lineSum). With an empty/absent rate table convertToBase is an identity, so a
+   * single-currency contract reads exactly as it did before.
+   */
   private actualBillingEvents = computed<BillingActualEvent[]>(() => {
+    const rates = this.fxRates();
     const actualOrders = this.contractOrders().filter(o => o.type === 'Customer' && (o.status === 'Invoiced' || o.status === 'Paid'));
     return actualOrders.flatMap(order => {
       const lines = this.orderLines().filter(line => line.orderId === order.id);
@@ -1275,7 +1296,7 @@ export class ContractDetails {
         return [{
           period: this.periodKey(order.orderDate),
           projectId: '',
-          amount: order.amount,
+          amount: convertToBase(order.amount, order.currency, rates),
           orderId: order.id,
           status: order.status,
         }];
@@ -1283,7 +1304,7 @@ export class ContractDetails {
       return lines.map(line => ({
         period: this.periodKey(order.orderDate),
         projectId: line.projectId,
-        amount: line.amount,
+        amount: convertToBase(line.amount, order.currency, rates),
         orderId: order.id,
         status: order.status,
       }));
@@ -1311,9 +1332,14 @@ export class ContractDetails {
       return created;
     };
 
+    // Expected is summed across items that may each carry their own currency, so
+    // it is accumulated in BASE_CURRENCY — the unit the column is labelled in and
+    // the unit `actual` (above) is already in, which is what makes the Variance
+    // subtraction and billingStatus's expected-vs-actual comparison meaningful.
+    const rates = this.fxRates();
     for (const item of this.contractBillingPlan()) {
       const row = ensure(this.periodKey(item.expectedDate ?? ''), item.projectId ?? '');
-      row.expected += item.amount;
+      row.expected += convertToBase(item.amount, item.currency, rates);
       row.expectedLabels = [row.expectedLabels, `${item.label} (${item.type})`].filter(Boolean).join(', ');
     }
 
@@ -1336,11 +1362,13 @@ export class ContractDetails {
       .sort((a, b) => a.period.localeCompare(b.period) || a.projectName.localeCompare(b.projectName));
   });
 
+  /** Σ expected billing due on or before today, in BASE_CURRENCY (see actualBillingEvents). */
   expectedBillingToDate = computed(() => {
     const today = todayLocalIso();
+    const rates = this.fxRates();
     return this.contractBillingPlan()
       .filter(i => !!i.expectedDate && i.expectedDate <= today)
-      .reduce((sum, i) => sum + i.amount, 0);
+      .reduce((sum, i) => sum + convertToBase(i.amount, i.currency, rates), 0);
   });
 
   actualBillingToDate = computed(() =>
@@ -1349,11 +1377,14 @@ export class ContractDetails {
 
   billingVarianceToDate = computed(() => this.actualBillingToDate() - this.expectedBillingToDate());
 
+  /** Billing-plan rollups, all in BASE_CURRENCY (each item's own currency is converted before summing). */
   billingKpis = computed(() => {
     const items = this.contractBillingPlan();
+    const rates = this.fxRates();
+    const inBase = (i: BillingPlanItem) => convertToBase(i.amount, i.currency, rates);
     const sumBy = (status: BillingPlanItem['status']) =>
-      items.filter(i => i.status === status).reduce((sum, i) => sum + i.amount, 0);
-    const retentionHeld = items.reduce((sum, i) => sum + i.amount * ((i.retentionPct ?? 0) / 100), 0);
+      items.filter(i => i.status === status).reduce((sum, i) => sum + inBase(i), 0);
+    const retentionHeld = items.reduce((sum, i) => sum + inBase(i) * ((i.retentionPct ?? 0) / 100), 0);
     return {
       planned: sumBy('Planned'),
       ready: sumBy('Ready'),
@@ -1418,6 +1449,13 @@ export class ContractDetails {
       this.timeEntriesRes,
       this.billingPlanRes,
       this.hoursPerDayRes,
+      // MF-02: fxRates belongs here for exactly the hoursPerDay reason above. A
+      // FAILED /fx-rates read yields [] through the accessor, and an empty rate
+      // table makes convertToBase an IDENTITY — so the figure silently reverts to
+      // the pre-fix mixed-unit sum instead of reporting that it cannot be
+      // computed. A conversion input whose absence changes the number is a money
+      // input, and every money input has to be gated.
+      this.fxRatesRes,
     ];
   }
 
