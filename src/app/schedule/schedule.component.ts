@@ -27,6 +27,7 @@ import {
   buildSchedule,
   ResourceLane,
   ScheduleBooking,
+  ScheduleModel,
 } from '../services/schedule.util';
 
 /** The three principal-gated reads the timeline is built from. */
@@ -214,58 +215,75 @@ interface WeekColumn {
         </div>
       </header>
 
-      <!-- Summary strip: over-allocation pressure across the whole roster. -->
-      <div class="command-card flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between">
-        <div class="flex items-center gap-3">
-          <span
-            class="grid size-10 place-items-center rounded-md ring-1"
-            [class.bg-critical-tint]="overAllocatedCount() > 0"
-            [class.ring-critical]="overAllocatedCount() > 0"
-            [class.text-critical-text]="overAllocatedCount() > 0"
-            [class.bg-surface-muted]="overAllocatedCount() === 0"
-            [class.ring-line]="overAllocatedCount() === 0"
-            [class.text-ink-muted]="overAllocatedCount() === 0">
-            <mat-icon>{{ overAllocatedCount() > 0 ? 'warning' : 'verified' }}</mat-icon>
-          </span>
-          <div>
-            <div
-              class="font-display text-lg font-bold"
-              [class.text-critical-text]="overAllocatedCount() > 0"
-              [class.text-ink]="overAllocatedCount() === 0">
-              @if (overAllocatedCount() > 0) {
-                {{ overAllocatedCount() }} {{ overAllocatedCount() === 1 ? 'resource' : 'resources' }} over-allocated
-              } @else {
-                No over-allocation detected
-              }
-            </div>
-            <p class="text-sm text-ink-muted">
-              Across {{ rows().length }} {{ rows().length === 1 ? 'resource' : 'resources' }} and
-              {{ totalBookings() }} {{ totalBookings() === 1 ? 'booking' : 'bookings' }}.
-            </p>
-          </div>
-        </div>
+      <!-- ONE READ-STATE BOUNDARY OWNS THE SUMMARY STRIP AND THE TIMELINE.
+           The strip used to render ABOVE this wrapper, so for the whole duration
+           of the three-endpoint read the page asserted — in bold, behind a green
+           'verified' badge — "No over-allocation detected" across "0 resources
+           and 0 bookings": a reassuring claim about data that had not been
+           fetched. If a leg then failed, model() threw out of that same strip and
+           aborted the change-detection pass, which made the error panel below
+           unreachable code, so the false all-clear became the TERMINAL state of
+           the screen. Moving the strip inside the ng-template lets one wrapper
+           own loading, error and content, instead of a second copy of the state
+           machine that would drift.
 
-        <!-- Legend explaining bar styling. -->
-        <div class="flex flex-wrap items-center gap-4 text-xs text-ink-muted">
-          <span class="inline-flex items-center gap-2">
-            <span class="h-3 w-5 rounded-sm" [style.background]="legendColor"></span>
-            Booking (coloured by project)
-          </span>
-          <span class="inline-flex items-center gap-2">
-            <span class="h-3 w-5 rounded-sm bg-critical-tint ring-1 ring-critical"></span>
-            Over-allocation conflict
-          </span>
-        </div>
-      </div>
+           The header above stays where it is on purpose: rangeLabel()/anchorMs()
+           never touch data.value(), so it is safe there — and it must remain
+           visible in the error state so the user can see WHICH screen failed.
 
+           [loading] folds auth readiness — see scheduleLoading(). -->
       <app-list-state
-        [loading]="data.isLoading()"
+        [loading]="scheduleLoading()"
         [error]="data.status() === 'error'"
         label="the schedule"
         skeleton="table-rows"
         [rows]="6"
         (retry)="data.reload()">
         <ng-template>
+        <!-- Summary strip: over-allocation pressure across the whole roster. -->
+        <div class="command-card mb-6 flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between">
+          <div class="flex items-center gap-3">
+            <span
+              class="grid size-10 place-items-center rounded-md ring-1"
+              [class.bg-critical-tint]="overAllocatedCount() > 0"
+              [class.ring-critical]="overAllocatedCount() > 0"
+              [class.text-critical-text]="overAllocatedCount() > 0"
+              [class.bg-surface-muted]="overAllocatedCount() === 0"
+              [class.ring-line]="overAllocatedCount() === 0"
+              [class.text-ink-muted]="overAllocatedCount() === 0">
+              <mat-icon>{{ overAllocatedCount() > 0 ? 'warning' : 'verified' }}</mat-icon>
+            </span>
+            <div>
+              <div
+                class="font-display text-lg font-bold"
+                [class.text-critical-text]="overAllocatedCount() > 0"
+                [class.text-ink]="overAllocatedCount() === 0">
+                @if (overAllocatedCount() > 0) {
+                  {{ overAllocatedCount() }} {{ overAllocatedCount() === 1 ? 'resource' : 'resources' }} over-allocated
+                } @else {
+                  No over-allocation detected
+                }
+              </div>
+              <p class="text-sm text-ink-muted">
+                Across {{ rows().length }} {{ rows().length === 1 ? 'resource' : 'resources' }} and
+                {{ totalBookings() }} {{ totalBookings() === 1 ? 'booking' : 'bookings' }}.
+              </p>
+            </div>
+          </div>
+
+          <!-- Legend explaining bar styling. -->
+          <div class="flex flex-wrap items-center gap-4 text-xs text-ink-muted">
+            <span class="inline-flex items-center gap-2">
+              <span class="h-3 w-5 rounded-sm" [style.background]="legendColor"></span>
+              Booking (coloured by project)
+            </span>
+            <span class="inline-flex items-center gap-2">
+              <span class="h-3 w-5 rounded-sm bg-critical-tint ring-1 ring-critical"></span>
+              Over-allocation conflict
+            </span>
+          </div>
+        </div>
+
         @if (anchorMs() === null) {
           <!-- SSR / pre-hydration: the visible week range is browser-derived. -->
           <div class="command-card p-12 text-center text-sm text-ink-muted" aria-busy="true">
@@ -683,6 +701,23 @@ export class ScheduleComponent {
   });
 
   /**
+   * Whether the schedule has nothing truthful to render yet. `isLoading()` alone
+   * is NOT that question: `params()` above is false until the OIDC bootstrap
+   * settles and the stream answers that with `of(<empty>)` — a RESOLVED empty,
+   * not a pending one — so isLoading() was FALSE for the whole afterNextRender ->
+   * /api/storage-status -> OIDC discovery window (auth.service.ts 154, 191-249)
+   * *and* in the SSR HTML shipped to the browser. Bound bare, the wrapper showed
+   * the resolved-empty timeline — "No resources to schedule", and the summary
+   * strip's green all-clear across zero resources — for a read not yet made.
+   *
+   * Not-ready counts as loading, never as ready-and-empty — the same rule
+   * resources.component.ts's `listLoading()` applies, whose shape this mirrors.
+   */
+  protected readonly scheduleLoading = computed<boolean>(
+    () => !this.auth.authReady() || this.data.isLoading(),
+  );
+
+  /**
    * EDITABLE WORKING COPY of the loaded assignments. `linkedSignal` gives us a
    * writable signal that RE-SEEDS to a fresh copy whenever the loaded resource
    * changes (a reload), while letting us mutate it locally in between. The whole
@@ -691,7 +726,16 @@ export class ScheduleComponent {
    * reload cleanly discards any uncommitted local state.
    */
   private readonly working = linkedSignal({
-    source: (): Assignment[] => this.data.value().assignments,
+    // READ-FAILURE GUARD. `data.value()` THROWS while the resource is in its
+    // error state, and a linkedSignal's SOURCE is evaluated outside the template
+    // — no template reordering or ng-template deferral protects it, so this
+    // throw would abort the change-detection pass on its own and make the
+    // "Couldn't load the schedule" panel and its Retry unreachable code.
+    // Emptiness is never this screen's ANSWER: `data.status() === 'error'` drives
+    // the wrapper's [error] in the same pass, so the user gets the panel, not a
+    // bookingless timeline. (Hence not the banned error-to-empty accessor.)
+    source: (): Assignment[] =>
+      this.data.status() === 'error' ? [] : this.data.value().assignments,
     // Shallow-clone each assignment so per-field optimistic writes never mutate
     // the loaded resource's objects (which would defeat re-seeding/rollback).
     computation: (assignments: Assignment[]): Assignment[] => assignments.map(a => ({ ...a })),
@@ -701,7 +745,13 @@ export class ScheduleComponent {
    * The pure, date-based schedule model (lanes + conflicts), derived from the
    * WORKING copy of assignments (not the raw load) so local edits flow through.
    */
-  private readonly model = computed(() => {
+  private readonly model = computed<ScheduleModel>(() => {
+    // Same read-failure guard, and the same reasoning, as `working` above: this
+    // is reached from rows()/overAllocatedCount()/totalBookings(), and the
+    // summary strip that reads those now lives inside the wrapper's ng-template
+    // — but `projectColor` and the drag handlers reach it from outside, so the
+    // short-circuit belongs here rather than relying on template placement.
+    if (this.data.status() === 'error') return { lanes: [], conflicts: [] };
     const d = this.data.value();
     return buildSchedule(d.resources, this.working(), d.requests);
   });

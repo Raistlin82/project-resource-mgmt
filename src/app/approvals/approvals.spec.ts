@@ -1,7 +1,7 @@
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { of } from 'rxjs';
+import { NEVER, of, throwError } from 'rxjs';
 import { Approvals } from './approvals';
 import {
   ApiService,
@@ -81,6 +81,16 @@ interface SetupOptions {
   resources?: Resource[];
   orgNodes?: ResourceOrganization[];
   assignments?: Assignment[];
+  /** false reproduces the pre-OIDC-bootstrap window (and the SSR document). */
+  authReady?: boolean;
+  /** Leave the six-leg forkJoin in flight (no leg ever emits). */
+  pending?: boolean;
+  /** Fail the /approval-requests leg, as an expired bearer does. */
+  failing?: boolean;
+  /** Skip the flush, for the states where whenStable() never settles. */
+  noFlush?: boolean;
+  /** Leave the filter on 'mine' (the real default) instead of 'all'. */
+  keepFilter?: boolean;
 }
 
 /** Builds the component and FLUSHES it: the forkJoin resolves asynchronously and
@@ -94,18 +104,26 @@ async function setup({
   resources = RESOURCES,
   orgNodes = ORG_NODES,
   assignments = ASSIGNMENTS,
+  authReady = true,
+  pending = false,
+  failing = false,
+  noFlush = false,
+  keepFilter = false,
 }: SetupOptions = {}) {
+  // A leg that never emits keeps forkJoin — and therefore the resource — loading.
+  const leg = <T>(value: T) => (pending ? NEVER : of(value));
   const apiStub = {
-    getApprovalRequests: vi.fn(() => of(approvals)),
-    getProjects: vi.fn(() => of(PROJECTS)),
-    getResources: vi.fn(() => of(resources)),
-    getUsers: vi.fn(() => of(USERS)),
-    getAssignments: vi.fn(() => of(assignments)),
-    getResourceOrganizations: vi.fn(() => of(orgNodes)),
+    getApprovalRequests: vi.fn(() =>
+      failing ? throwError(() => new Error('401 Unauthorized')) : leg(approvals)),
+    getProjects: vi.fn(() => leg(PROJECTS)),
+    getResources: vi.fn(() => leg(resources)),
+    getUsers: vi.fn(() => leg(USERS)),
+    getAssignments: vi.fn(() => leg(assignments)),
+    getResourceOrganizations: vi.fn(() => leg(orgNodes)),
     decideApprovalRequest: vi.fn(() => of({})),
   } as unknown as ApiService;
   const authStub = {
-    authReady: signal(true), isAuthenticated: signal(true),
+    authReady: signal(authReady), isAuthenticated: signal(true),
     role: signal(role), userId: signal(userId),
   } as unknown as AuthService;
   const notifyStub = { show: vi.fn(), error: vi.fn(), success: vi.fn() } as unknown as NotificationService;
@@ -122,11 +140,29 @@ async function setup({
   });
   const fixture = TestBed.createComponent(Approvals);
   const component = fixture.componentInstance;
-  component.filter.set('all'); // read every row, not just the inbox-filtered ones
-  fixture.detectChanges();
-  await fixture.whenStable();
-  fixture.detectChanges();
+  if (!keepFilter) component.filter.set('all'); // read every row, not just the inbox-filtered ones
+  if (noFlush) {
+    // whenStable() never settles while a resource is in flight, so the pending
+    // and error cases drive change detection directly instead.
+    fixture.detectChanges();
+    fixture.detectChanges();
+  } else {
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+  }
   return { fixture, component, apiStub };
+}
+
+/** The list-state's loading region — its own contract (role=status +
+ *  aria-busy), not a shimmer class, so no other element can satisfy it. */
+function skeleton(host: HTMLElement): Element | null {
+  return host.querySelector('[role="status"][aria-busy="true"]');
+}
+
+/** The rendered text of the My-inbox badge (the count chip inside the segment). */
+function badgeText(host: HTMLElement): string {
+  return host.querySelector('[data-test="filter-mine"] .command-status')!.textContent!.trim();
 }
 
 describe('Approvals inbox — D allocation scope mirror', () => {
@@ -199,6 +235,100 @@ describe('Approvals inbox — D allocation scope mirror', () => {
   it('drops an out-of-scope allocation from the inbox count', async () => {
     const { component } = await setup({ approvals: [allocation('AR1', 'A_RR')], userId: 'stranger' });
     expect(component.mineCount()).toBe(0);
+  });
+});
+
+/**
+ * The pre-authReady window on the inbox. `res` resolves its pre-auth default
+ * (EMPTY_DATA) SYNCHRONOUSLY while authReady() is false, so `isLoading()` was
+ * false for the whole OIDC bootstrap — and for the SSR document. Bound bare, the
+ * page told a PM with three pending allocations "Your inbox is clear." over a
+ * badge reading 0.
+ *
+ * Every case below is paired with its opposite, and the pairing is the point:
+ * a fix that pins the skeleton (or the em dash) on forever passes the first half
+ * and fails the mirror, and a fix that deletes the empty state or the badge
+ * fails the mirror too.
+ */
+describe('Approvals inbox — read-state gate on the empty copy and the count badge', () => {
+  /** Three allocations on the same in-scope assignment => three approvable rows. */
+  const THREE = [
+    allocation('AR1', 'A_RR'),
+    allocation('AR2', 'A_RR'),
+    allocation('AR3', 'A_RR'),
+  ];
+
+  it('does not claim the inbox is clear before authReady, and does not print a count for a read not yet made', async () => {
+    // Flushed on purpose: the pre-auth stream RESOLVES, and it is that
+    // resolved-empty state — not a pending one — that this asserts about.
+    // Without the flush the skeleton would be on screen because nothing had
+    // settled yet, and the spec would pass with the gate removed.
+    const { fixture, component } = await setup({ approvals: THREE, userId: 'mid', authReady: false, keepFilter: true });
+    const host = fixture.nativeElement as HTMLElement;
+
+    // POSITIVE CONTROLS pinning the exact state under test: the read resolved to
+    // the pre-auth default AND the resource no longer reports loading. Without
+    // the second, the skeleton could be showing merely because nothing flushed.
+    expect(component.rows()).toEqual([]);
+    expect(component['res'].isLoading()).toBe(false);
+
+    expect(host.textContent).not.toContain('Your inbox is clear.');
+    expect(host.textContent).not.toContain('Nothing is waiting on your sign-off right now.');
+    expect(skeleton(host)).not.toBeNull();
+    // NOT toContain('0'): that also matches '10'. No digit at all is the claim.
+    expect(badgeText(host)).not.toMatch(/\d/);
+    expect(badgeText(host)).toContain('Inbox count not loaded yet');
+  });
+
+  it('does not claim it while the six-leg read is genuinely in flight either', async () => {
+    const { fixture, component } = await setup({ approvals: THREE, userId: 'mid', pending: true, noFlush: true, keepFilter: true });
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(component['res'].isLoading()).toBe(true);
+    expect(host.textContent).not.toContain('Your inbox is clear.');
+    expect(skeleton(host)).not.toBeNull();
+    expect(badgeText(host)).not.toMatch(/\d/);
+  });
+
+  // THE MIRROR for the copy AND for the badge's zero. A resolved read that is
+  // genuinely empty must say so and must print 0 — this is the half that a
+  // permanent skeleton, or a badge pinned to the em dash, cannot pass.
+  it('does say the inbox is clear once a resolved read is empty, and prints a real 0', async () => {
+    const { fixture } = await setup({ approvals: [], userId: 'mid', keepFilter: true });
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(skeleton(host)).toBeNull();
+    expect(host.textContent).toContain('Your inbox is clear.');
+    expect(host.textContent).toContain('Nothing is waiting on your sign-off right now.');
+    expect(badgeText(host)).toBe('0');
+  });
+
+  // And the non-empty mirror, so the badge is proven to carry a real count.
+  it('prints the true count once the read resolves with items awaiting this actor', async () => {
+    const { fixture } = await setup({ approvals: THREE, userId: 'mid', keepFilter: true });
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(skeleton(host)).toBeNull();
+    expect(host.textContent).not.toContain('Your inbox is clear.');
+    expect(badgeText(host)).toBe('3');
+  });
+
+  it('shows the error panel and Retry instead of aborting change detection when the read fails', async () => {
+    // mineCount() -> allRows() -> res.value() THROWS in the error state, and the
+    // badge that reads it renders ABOVE the wrapper — so an unguarded throw there
+    // aborted the pass and made this very panel unreachable code.
+    const { fixture, component } = await setup({ approvals: THREE, userId: 'mid', failing: true, noFlush: true, keepFilter: true });
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(() => fixture.detectChanges()).not.toThrow();
+    // The positive control: the test cannot pass by the read quietly succeeding.
+    expect(component['res'].status()).toBe('error');
+    expect(host.textContent).toContain("Couldn't load approvals");
+    const retry = [...host.querySelectorAll('button')].find(b => b.textContent!.includes('Retry'));
+    expect(retry).toBeDefined();
+    // A failed read is not an empty inbox: no clear-inbox copy, and no count.
+    expect(host.textContent).not.toContain('Your inbox is clear.');
+    expect(badgeText(host)).not.toMatch(/\d/);
   });
 });
 

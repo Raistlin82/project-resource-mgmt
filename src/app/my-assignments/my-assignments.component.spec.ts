@@ -64,6 +64,8 @@ function setup(overrides: {
   failing?: boolean;
   /** false reproduces the pre-OIDC-bootstrap window (and the SSR document). */
   authReady?: boolean;
+  /** Override the /self/profile row — `capacity` is the utilization divisor. */
+  profile?: Resource;
 } = {}) {
   const createMyTimeEntry = overrides.createMyTimeEntry ?? vi.fn(() => of(SUBMITTED_ENTRY));
   // A leg that never emits keeps forkJoin — and therefore the resource — loading.
@@ -74,7 +76,7 @@ function setup(overrides: {
     getMyRequests: vi.fn(() => leg(overrides.requests ?? [REQUEST])),
     getMyProfile: vi.fn(() => overrides.failing
       ? throwError(() => new Error('401 Unauthorized'))
-      : leg(PROFILE)),
+      : leg(overrides.profile ?? PROFILE)),
     getMyTimeEntries: vi.fn(() => leg<TimeEntry[]>([])),
     createMyTimeEntry,
   } as unknown as ApiService;
@@ -376,11 +378,13 @@ describe('MyAssignmentsComponent read-state boundary', () => {
     expect(values.length).toBe(3);
     expect(values[0]).toBe('5');
     expect(values[1]).toBe('320h');
-    // values[2] (Current Utilization) is DELIBERATELY not pinned: it divides
-    // lifetime assigned hours by a fixed four-weeks-of-weekly-capacity constant
-    // (my-assignments.component.ts currentUtilization()), which is a separate,
-    // still-open arithmetic defect. Asserting the number it produces today would
-    // certify it. The tile's presence is asserted through values.length.
+    // values[2] is the utilization tile, now period-scoped (see the dedicated
+    // describe at the bottom of this file for the arithmetic). This fixture books
+    // 5 x 64h = 320h into ONE week whose capacity is 40h, so 800% is the correct
+    // reading of a deliberately over-booked fixture. It was previously left
+    // unpinned because the figure divided lifetime hours by a fabricated
+    // four-weeks constant and any assertion would have certified that defect.
+    expect(values[2]).toBe('800%');
   });
 
   it('shows the error panel and Retry instead of aborting change detection when a leg fails', async () => {
@@ -529,8 +533,117 @@ describe('MyAssignmentsComponent time-entry validation announcement', () => {
 
     expect(hours().getAttribute('aria-invalid')).toBe('true');
     expect(hours().getAttribute('aria-describedby')).toBe('timeEntryMessage');
+
     expect(host.querySelector('#timeEntryMessage')).not.toBeNull();
     // The date is still valid and must not be blamed for the hours.
     expect(date().getAttribute('aria-invalid')).toBe('false');
+  });
+});
+
+/**
+ * The utilization tile's arithmetic.
+ *
+ * It used to be `lifetimeAssignedHours / (weeklyCapacity * 4)`: a numerator over
+ * every assignment the person has ever held, against one fabricated month that
+ * did not move when the user paged the period navigator. This pins the
+ * period-scoped replacement.
+ *
+ * CALENDAR-INDEPENDENT BY CONSTRUCTION, which matters because this suite runs
+ * under whatever date and zone CI happens to have. The fixtures carry NO
+ * startDate/endDate, so `estimatedHoursForDay` falls back to the displayed period
+ * and spreads the hours across exactly the business days the denominator counts.
+ * In week mode that count is always 5 (Mon-Fri), so both halves of the ratio
+ * cancel the calendar out and the expected percentages below are exact whatever
+ * day the suite runs on.
+ *
+ * WORKED EXAMPLE (the 50% case): capacity 40h/week => 40 / 5 = 8h per day.
+ * Week view => 5 business days => denominator 5 * 8 = 40h. One booking of 20h
+ * with no window spreads over those 5 days at 20 / 5 = 4h per day, so the
+ * numerator is 5 * 4 = 20h. 20 / 40 = 50%. The old formula gave
+ * 20 / (40 * 4) = 12.5% for the same inputs.
+ */
+describe('MyAssignmentsComponent utilization is scoped to the displayed period', () => {
+  /** One booking of `hours`, deliberately WITHOUT a window — see above. */
+  const booking = (hours: number): Assignment[] => [
+    { id: 'A1', requestId: 'REQ1', resourceId: 'R1', assignedHours: hours, status: 'Allocated' },
+  ];
+
+  it('reads 50% when half the week is booked (20h of a 40h week)', async () => {
+    const { fixture } = setup({ assignments: booking(20) });
+    await flush(fixture);
+    const component = fixture.componentInstance;
+
+    // The intermediate figures, so a wrong total and a wrong divisor cannot
+    // cancel each other out into a right-looking percentage.
+    expect(component.periodAssignedHours()).toBe(20);
+    expect(component.currentUtilization()).toBe(50);
+    expect(kpiValues(fixture.nativeElement as HTMLElement)[2]).toBe('50%');
+  });
+
+  it('reads 100% when the whole week is booked (40h of a 40h week)', async () => {
+    const { fixture } = setup({ assignments: booking(40) });
+    await flush(fixture);
+    const component = fixture.componentInstance;
+
+    expect(component.periodAssignedHours()).toBe(40);
+    expect(component.currentUtilization()).toBe(100);
+    expect(kpiValues(fixture.nativeElement as HTMLElement)[2]).toBe('100%');
+  });
+
+  // THE ABSENCE TWIN, and the one that kills the old formula outright: paging to
+  // a period the booking does not cover must move the number. The lifetime
+  // numerator over a fixed divisor was IDENTICAL for every period, so no amount
+  // of navigation changed it — a "0%" here is only reachable once the window is
+  // genuinely period-scoped. It also proves the figure is not a constant.
+  it('falls to 0% when the user pages to a week the booking does not cover', async () => {
+    const { fixture } = setup({
+      // A window that ends well before any period reachable by paging forward,
+      // so this assignment is genuinely absent from the period under test.
+      assignments: [{
+        id: 'A1', requestId: 'REQ1', resourceId: 'R1', assignedHours: 40,
+        status: 'Allocated', startDate: '2020-01-06', endDate: '2020-01-10',
+      }],
+    });
+    await flush(fixture);
+    const component = fixture.componentInstance;
+
+    // Positive control on the fixture itself: the booking exists and is counted
+    // as active, so a 0% here is about the PERIOD, not about missing data.
+    expect(component.activeAssignmentsCount()).toBe(1);
+    expect(component.totalAssignedHours()).toBe(40);
+
+    expect(component.periodAssignedHours()).toBe(0);
+    expect(component.currentUtilization()).toBe(0);
+  });
+
+  it('rescopes the denominator when the view switches from week to month', async () => {
+    const { fixture } = setup({ assignments: booking(40) });
+    await flush(fixture);
+    const component = fixture.componentInstance;
+    expect(component.currentUtilization()).toBe(100); // 40h / (5 x 8h)
+
+    component.setViewMode('month');
+    fixture.detectChanges();
+
+    // A month holds 20-23 business days, never 5, so the same 40h booking spread
+    // across the month must read WELL BELOW the weekly 100%. Asserted as a range
+    // rather than a number because the business-day count of "this month" is a
+    // property of the calendar the suite happens to run in — the claim being
+    // proven is that the divisor changed with the period, not its exact value.
+    const monthly = component.currentUtilization();
+    expect(monthly).toBeLessThan(100);
+    expect(monthly).toBeGreaterThan(0);
+    // 40h over 20-23 days of 8h capacity => 21.7%-25%.
+    expect(monthly).toBeGreaterThanOrEqual(100 * 40 / (23 * 8));
+    expect(monthly).toBeLessThanOrEqual(100 * 40 / (20 * 8));
+    // And the label says which period the percentage is about.
+    expect((fixture.nativeElement as HTMLElement).textContent).toContain('Utilization (month)');
+  });
+
+  it('reports 0% rather than dividing by zero when the profile carries no capacity', async () => {
+    const { fixture } = setup({ assignments: booking(40), profile: { ...PROFILE, capacity: 0 } });
+    await flush(fixture);
+
+    expect(fixture.componentInstance.currentUtilization()).toBe(0);
   });
 });

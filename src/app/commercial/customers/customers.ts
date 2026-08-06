@@ -34,8 +34,8 @@ import { SearchFilterBarComponent } from '../../shared/search-filter-bar.compone
         (clearAll)="customerQuery.set('')"
       />
 
-      <!-- Customers Table -->
-      <app-list-state [loading]="customersRes.isLoading()" [error]="customersRes.status() === 'error'" label="customers" (retry)="customersRes.reload()">
+      <!-- Customers Table. [loading] folds auth readiness — see listLoading(). -->
+      <app-list-state [loading]="listLoading()" [error]="customersRes.status() === 'error'" label="customers" (retry)="customersRes.reload()">
       <ng-template>
       <div class="command-card overflow-hidden">
         <div class="overflow-x-auto">
@@ -169,6 +169,25 @@ export class Customers {
 
   customers = this.customersRes.value;
   contracts = this.contractsRes.value;
+
+  /**
+   * Whether the customers table has nothing truthful to render yet.
+   * `isLoading()` alone is NOT that question: `params()` above is false until the
+   * OIDC bootstrap settles and the stream answers that with `of([])` — a RESOLVED
+   * empty, not a pending one — so isLoading() was FALSE for the entire
+   * afterNextRender -> /api/storage-status -> OIDC discovery window (auth.service.ts
+   * 154, 191-249) *and* in the SSR HTML shipped to the browser. Bound bare, this
+   * wrapper therefore rendered "No customers yet" / "Get started by adding your
+   * first customer." over a read that had not been made — a confident claim about
+   * a commercial book that may well be full, and one whose suggested remedy
+   * (create a customer) invites a duplicate of a customer that already exists.
+   *
+   * Not-ready counts as loading, never as ready-and-empty — the same rule
+   * resources.component.ts's `listLoading()` applies, whose shape this mirrors.
+   */
+  protected readonly listLoading = computed<boolean>(
+    () => !this.auth.authReady() || this.customersRes.isLoading(),
+  );
 
   // First-ever filter on this screen (design spec §8) -- a plain client-side
   // text match over the already-loaded list, same sophistication as
