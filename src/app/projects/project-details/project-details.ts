@@ -86,21 +86,40 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
                 <p class="text-sm text-[var(--cc-muted)] font-mono bg-[var(--cc-panel-muted)] inline-block px-2.5 py-1 rounded-md">{{ p.id }}</p>
               </div>
 
+              <!--
+                THESE THREE ARE FIELD LABELS, NOT HEADINGS.
+                They used to be h3 elements sitting directly under the project
+                name h1, which SKIPS h2 — and the tab panel below now legitimately
+                occupies h2, so the page outline read h1 → h3 → h2. A skipped
+                level is its own accessibility defect, and inflating a value's
+                label to a section rank to paper over it would be a second one.
+                The command-kpi-label class is a plain paragraph at 80 of the 88
+                places this codebase uses it (every KPI tile on this very page
+                included); these three were the outliers, so this is the
+                designed rendering rather than a new one. Precisely: the class
+                itself sets colour, family, size, weight and tracking
+                (styles.css:759), all of which outrank the h1-h4 element rule
+                (styles.css:333) that these three are leaving; the only
+                properties that rule contributed and the class does not are
+                line-height (tight, now the normal the other 80 labels already
+                use) and text-wrap: balance, which does nothing to a one-word
+                uppercase micro-label.
+              -->
               <div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-6 border-t border-[var(--cc-line)]">
                 <div class="md:col-span-2">
-                  <h3 class="command-kpi-label mb-2">Description</h3>
+                  <p class="command-kpi-label mb-2">Description</p>
                   <p class="text-[var(--cc-ink)] leading-relaxed">{{ p.description || 'No description provided.' }}</p>
                 </div>
                 <div class="space-y-4">
                   <div>
-                    <h3 class="command-kpi-label mb-1">Location</h3>
+                    <p class="command-kpi-label mb-1">Location</p>
                     <div class="flex items-center gap-2 text-[var(--cc-ink)] font-medium">
                       <mat-icon class="text-[var(--cc-primary)] text-[18px] w-[18px] h-[18px]">location_on</mat-icon>
                       {{ p.location }}
                     </div>
                   </div>
                   <div>
-                    <h3 class="command-kpi-label mb-1">Timeline</h3>
+                    <p class="command-kpi-label mb-1">Timeline</p>
                     <div class="flex items-center gap-2 text-[var(--cc-ink)] font-medium">
                       <mat-icon class="text-[var(--cc-green)] text-[18px] w-[18px] h-[18px]">date_range</mat-icon>
                       {{ p.startDate | date:'mediumDate' }} - {{ p.endDate | date:'mediumDate' }}
@@ -422,32 +441,56 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
             }
           </div>
         }
+        <!--
+          [headingLevel]="2" ON EVERY PANEL — the whole of the heading convention.
+
+          Each of these eight components is ALSO a standalone route
+          (app.routes.ts: project-partners, project-documents, project-plans,
+          financial-plans, project-cost-centers, project-tasks, project-issues,
+          change-requests), where it IS the page and its title must therefore be
+          the page's one h1. Here the same component is a tab panel UNDER the
+          project-name h1 above, so that title must be an h2: giving each panel a
+          plain h1 would have put TWO h1 elements on this route, trading the
+          missing-h1 defect for a duplicate-h1 one.
+
+          The level is therefore the PARENT's to declare, not something a child
+          can infer. It deliberately does NOT reuse projectId: that input is
+          project()?.id, which is undefined for the whole window before the
+          project resolves, so a child keying its heading off "do I have an id"
+          — the discriminator these panels already use for their project picker
+          — would render its standalone h1 inside this page mid-load.
+          headingLevel says what it means and never flickers.
+
+          app-project-rates takes no binding: it is tab-only (no route of its
+          own) and its title is already an h2, which is what embedding requires.
+          The moment it gains a route it needs this input too.
+        -->
         @if (activeTab() === 'partners') {
-          <app-project-partners [projectId]="project()?.id" />
+          <app-project-partners [projectId]="project()?.id" [headingLevel]="2" />
         }
         @if (activeTab() === 'documents') {
-          <app-project-documents [projectId]="project()?.id" />
+          <app-project-documents [projectId]="project()?.id" [headingLevel]="2" />
         }
         @if (activeTab() === 'plans') {
-          <app-project-plans [projectId]="project()?.id" />
+          <app-project-plans [projectId]="project()?.id" [headingLevel]="2" />
         }
         @if (activeTab() === 'financials') {
-          <app-financial-plans [projectId]="project()?.id" />
+          <app-financial-plans [projectId]="project()?.id" [headingLevel]="2" />
         }
         @if (activeTab() === 'cost-centers') {
-          <app-project-cost-centers [projectId]="project()?.id" />
+          <app-project-cost-centers [projectId]="project()?.id" [headingLevel]="2" />
         }
         @if (activeTab() === 'rates') {
           <app-project-rates [projectId]="project()?.id" />
         }
         @if (activeTab() === 'tasks') {
-          <app-project-tasks [projectId]="project()?.id" />
+          <app-project-tasks [projectId]="project()?.id" [headingLevel]="2" />
         }
         @if (activeTab() === 'issues') {
-          <app-project-issues [projectId]="project()?.id" />
+          <app-project-issues [projectId]="project()?.id" [headingLevel]="2" />
         }
         @if (activeTab() === 'changes') {
-          <app-change-requests [projectId]="project()?.id" />
+          <app-change-requests [projectId]="project()?.id" [headingLevel]="2" />
         }
       </div>
     </div>
