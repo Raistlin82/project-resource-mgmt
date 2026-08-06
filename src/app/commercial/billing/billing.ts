@@ -21,7 +21,7 @@ import {
 } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
-import { convertToBase, daysOverdue } from '../../services/finance.util';
+import { convertToBase, daysOverdue, effectiveDueDate } from '../../services/finance.util';
 import { sellRateFor, DEFAULT_HOURS_PER_DAY } from '../../services/sell-rate.util';
 import { CsvColumn, downloadCsv, toCsv } from '../../services/export.util';
 import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
@@ -229,8 +229,14 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
             <label for="filterContract" class="command-section-label block mb-1.5">Contract</label>
             <select id="filterContract" [formControl]="contractFilter" class="command-select">
               <option value="">All contracts</option>
-              @for (contract of contracts(); track contract.id) {
-                <option [value]="contract.id">{{ contract.name }}</option>
+              <!-- Options only in the resolved state. The contracts() accessor maps
+                   a failed read to [] so the template cannot throw, which also means
+                   a failed /contracts silently narrows this list to "All contracts" —
+                   a book with no contracts. The table below reports the failure. -->
+              @if (!financialDataLoading() && !financialDataError()) {
+                @for (contract of contracts(); track contract.id) {
+                  <option [value]="contract.id">{{ contract.name }}</option>
+                }
               }
             </select>
           </div>
@@ -238,6 +244,19 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
       </section>
 
       <!-- MASTER TABLE -->
+      <!-- Inside the SAME state machine as the KPI strip. This section used to sit
+           outside every gate, which is why a failed read was silent here: a failed
+           /billing-plan-items rendered "0 shown" and "No billing conditions match"
+           (a confident empty book, with the strip's error card above it read as "the
+           KPIs failed but the plan really is empty"), and a failed /orders printed
+           '—' in Invoice # for already-invoiced rows and removed the View-invoice
+           button from all of them. Widening the error gate alone would NOT have
+           fixed either: the banner would have appeared above a table still showing
+           those rows. The gate and the table must be one unit. -->
+      <app-list-state [loading]="financialDataLoading()" [error]="financialDataError()"
+                      skeleton="table-rows" [rows]="6" [columns]="8" label="billing conditions"
+                      (retry)="reloadFinancialData()">
+        <ng-template>
       <section class="command-card rounded-lg overflow-hidden">
         <div class="command-card-header">
           <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">All Billing Conditions</h2>
@@ -408,6 +427,8 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
           </table>
         </div>
       </section>
+        </ng-template>
+      </app-list-state>
     </div>
 
     <!-- CREATE / EDIT MODAL -->
@@ -837,6 +858,12 @@ export class Billing {
 
   // Never dereference rxResource.value() in an error state: the KPI state panel
   // must be able to render instead of ResourceValueError aborting the template.
+  // These are THROW GUARDS, not a data policy — the header's Export CSV binding
+  // reads rows() above both state panels, so an unguarded value() there would abort
+  // the pass that renders them. They are why a failed read used to be SILENT here,
+  // so nothing the user reads as data may be built on them: `financialDataError()`
+  // now gates the KPI strip AND the master table, and it is the only thing allowed
+  // to answer "what happened to the read".
   readonly items = computed(() => this.itemsRes.status() === 'error' ? [] : this.itemsRes.value());
   readonly contracts = computed(() => this.contractsRes.status() === 'error' ? [] : this.contractsRes.value());
   readonly customers = computed(() => this.customersRes.status() === 'error' ? [] : this.customersRes.value());
@@ -849,14 +876,22 @@ export class Billing {
   readonly negotiatedRates = computed(() => this.negotiatedRatesRes.status() === 'error' ? [] : this.negotiatedRatesRes.value());
 
   /**
-   * Financial KPIs are meaningful only once every input has resolved. Includes
-   * `hoursPerDayRes`: it is the EUR/day -> EUR/hour divisor for a negotiated
-   * rate, so a strip rendered without it prices at the default-8 assumption
-   * rather than the configured working day.
+   * The one state machine for this screen's whole envelope — the KPI strip AND the
+   * master table, which was the section outside every gate. Financial figures are
+   * meaningful only once every input has resolved. Includes `hoursPerDayRes`: it is
+   * the EUR/day -> EUR/hour divisor for a negotiated rate, so a strip rendered
+   * without it prices at the default-8 assumption rather than the configured
+   * working day.
+   *
+   * EVERY read the table renders from is listed here. A read that is not listed is
+   * a read whose failure the screen answers with a confident lie: an empty book, a
+   * row that looks un-invoiced, a Retry that never re-fires it.
    */
   readonly financialDataLoading = computed(() => !this.auth.authReady()
     || this.itemsRes.isLoading()
     || this.contractsRes.isLoading()
+    || this.customersRes.isLoading()
+    || this.ordersRes.isLoading()
     || this.projectsRes.isLoading()
     || this.milestonesRes.isLoading()
     || this.timeEntriesRes.isLoading()
@@ -867,6 +902,15 @@ export class Billing {
   readonly financialDataError = computed(() => [
     this.itemsRes,
     this.contractsRes,
+    // customersRes and ordersRes were in NO loading, error or reload list either,
+    // and they are the two the MASTER TABLE reads for identity: with /orders down,
+    // `ordersById` is empty, every Invoiced/Paid row printed '—' in Invoice # as
+    // though it had never been billed, and `@if (row.invoiceNumber)` deleted the
+    // View-invoice button, so no existing invoice could be opened or printed.
+    // With /customers down, the printable invoice rendered Bill-to as '—' — an
+    // invoice artifact with no counterparty. Neither reported anything at all.
+    this.customersRes,
+    this.ordersRes,
     this.projectsRes,
     // milestonesRes was in NO loading, error or reload list: on failure it
     // latched permanently and the billing table's Trigger column rendered
@@ -882,6 +926,8 @@ export class Billing {
   reloadFinancialData(): void {
     this.itemsRes.reload();
     this.contractsRes.reload();
+    this.customersRes.reload();
+    this.ordersRes.reload();
     this.projectsRes.reload();
     this.milestonesRes.reload();
     this.timeEntriesRes.reload();
@@ -1227,13 +1273,40 @@ export class Billing {
     return i.status === 'Invoiced' ? daysOverdue(i, this.today) : 0;
   }
 
+  /**
+   * The due date the Due column renders and the CSV exports.
+   *
+   * ONE ROW, ONE ANCHOR. This has to be the same date the overdue badge beside it,
+   * the Overdue KPI tile and /reporting's A/R aging are measured from, and that is
+   * `effectiveDueDate` — the explicit `dueDate`, else issuedDate + payment terms.
+   * It used to anchor on expectedDate + terms instead, which is a DIFFERENT date
+   * for anything invoiced in-app: `generateInvoice` writes only `issuedDate` and
+   * nothing in the app ever writes `dueDate`, so a condition planned for 30 Jun and
+   * actually invoiced on 15 Jul with 30-day terms rendered "due Jul 30" — a week in
+   * the past — next to a badge that (correctly) said it was not overdue until
+   * 14 Aug, and the CSV handed that stale anchor to whoever chases the customer.
+   *
+   * The expectedDate + terms arithmetic survives ONLY as the preview for a
+   * condition that has neither a due date nor an issue date: `effectiveDueDate`
+   * cannot derive one, and blanking the column would empty it for the whole
+   * Planned book — the un-issued rows are exactly the ones a finance user reads it
+   * for.
+   *
+   * DATE-ONLY IN, DATE-ONLY OUT. The preview used to parse the civil date as UTC
+   * midnight and then shift it with local `getDate`/`setDate`, which is an instant,
+   * not a date: in UTC-negative zones the cell showed the previous day next to
+   * explicitly-dated rows that showed the right one, and across a DST change the
+   * CSV exported '2026-04-18T23:00:00.000Z' into a column where every other row is
+   * a bare date. Whole UTC days, mirroring finance.util.ts's own `addDaysIso`.
+   */
   private dueOf(i: BillingPlanItem): string | null {
-    if (i.dueDate) return i.dueDate;
+    const effective = effectiveDueDate(i);
+    if (effective) return effective;
     if (!i.expectedDate) return null;
-    const base = new Date(i.expectedDate);
-    if (Number.isNaN(base.getTime())) return null;
-    base.setDate(base.getDate() + (i.paymentTermsDays ?? 0));
-    return base.toISOString();
+    const ms = Date.parse(i.expectedDate);
+    if (!Number.isFinite(ms)) return null;
+    const terms = Number.isFinite(i.paymentTermsDays) ? (i.paymentTermsDays as number) : 0;
+    return new Date(ms + terms * 86_400_000).toISOString().slice(0, 10);
   }
 
   private formatDate(iso: string): string {

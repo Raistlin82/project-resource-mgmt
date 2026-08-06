@@ -3,10 +3,11 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Observable, of, Subject, throwError } from 'rxjs';
 import { Billing } from './billing';
 import {
-  ApiService, BillingPlanItem, Contract, Customer, FxRate, NegotiatedRate, Project, Resource, TimeEntry,
+  ApiService, BillingPlanItem, Contract, Customer, FxRate, NegotiatedRate, Order, Project, Resource, TimeEntry,
 } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
+import { daysOverdue, effectiveDueDate } from '../../services/finance.util';
 
 /**
  * FINAL REVIEW, finding 3 — the T&M Accrued KPI must price at the NEGOTIATED
@@ -356,5 +357,287 @@ describe('Billing prices an Expense condition at the customer-facing amount', ()
     const text = host(fixture).textContent ?? '';
     expect(text).not.toContain('3,904');
     expect(text).not.toContain('3,200');
+  });
+});
+
+/** The rows() shape the two suites below read. `rows` is public on the component. */
+interface RowProbe {
+  readonly item: BillingPlanItem;
+  readonly due: string | null;
+  readonly overdueDays: number;
+  readonly invoiceNumber: string | null;
+}
+const rowsOf = (fixture: ComponentFixture<Billing>): RowProbe[] =>
+  (fixture.componentInstance as unknown as { rows: () => RowProbe[] }).rows();
+
+/**
+ * DT-03 + DT-04 — the Due column, the overdue badge, the Overdue KPI and
+ * /reporting's A/R aging must all be measured from ONE anchor.
+ *
+ * `dueOf` anchored on expectedDate + paymentTermsDays; `overdueDaysOf` delegates to
+ * finance.util's shared `effectiveDueDate`, which anchors on dueDate ?? issuedDate +
+ * terms. Both landed on the same row object and rendered side by side, so an
+ * in-app-invoiced condition read "due <a past date>" next to "not overdue", and the
+ * CSV exported the stale anchor to whoever chases the customer. That is the DEFAULT
+ * path, not an edge case: `generateInvoice` writes only `issuedDate`, and nothing in
+ * the app ever writes `dueDate`.
+ */
+describe('Billing — Due, the overdue badge and A/R aging share one anchor', () => {
+  const CT: Contract = {
+    id: 'CT1', customerId: 'C1', name: 'Framework', type: 'T&M', totalValue: 0,
+    currency: 'EUR', status: 'Active', startDate: '2026-01-01', endDate: '2026-12-31',
+  };
+
+  /**
+   * Planned 30 Jun, actually invoiced 15 Jul, net 30. The two anchors disagree by
+   * 15 days and land on opposite sides of "today" (2026-08-06 in the register).
+   */
+  const INVOICED_LATE: BillingPlanItem = {
+    id: 'BP-LATE', contractId: 'CT1', type: 'TimeAndMaterials', label: 'June T&M',
+    amount: 1_000, currency: 'EUR', status: 'Invoiced',
+    expectedDate: '2026-06-30', issuedDate: '2026-07-15', paymentTermsDays: 30,
+  };
+  /** Never issued: `effectiveDueDate` cannot derive a date, so the preview must serve. */
+  const PLANNED: BillingPlanItem = {
+    id: 'BP-PLAN', contractId: 'CT1', type: 'Milestone', label: 'SAL 2',
+    amount: 5_000, currency: 'EUR', status: 'Planned',
+    expectedDate: '2026-09-30', paymentTermsDays: 30,
+  };
+  /** Crosses the 29 March DST change in Europe/Rome; 20 Mar + 30d = 19 Apr. */
+  const DST: BillingPlanItem = {
+    id: 'BP-DST', contractId: 'CT1', type: 'Milestone', label: 'SAL 1',
+    amount: 2_000, currency: 'EUR', status: 'Planned',
+    expectedDate: '2026-03-20', paymentTermsDays: 30,
+  };
+  /** An explicit dueDate outranks both branches — the pre-existing contract. */
+  const EXPLICIT: BillingPlanItem = {
+    id: 'BP-EXPL', contractId: 'CT1', type: 'Advance', label: 'Advance',
+    amount: 900, currency: 'EUR', status: 'Invoiced',
+    expectedDate: '2026-01-31', issuedDate: '2026-04-01', paymentTermsDays: 60,
+    dueDate: '2026-05-05',
+  };
+
+  async function rows(items: BillingPlanItem[]): Promise<RowProbe[]> {
+    const fixture = await setupSparse({
+      getBillingPlanItems: () => of(items),
+      getContracts: () => of([CT]),
+    });
+    await tick(fixture);
+    return rowsOf(fixture);
+  }
+
+  const byId = (all: RowProbe[], id: string): RowProbe => all.find(r => r.item.id === id)!;
+
+  it('shows the overdue badge exactly when the date the row DISPLAYS has passed', async () => {
+    // The coherence property the two anchors broke, stated without literals and
+    // without a wall-clock dependency: whichever side of the due date "now" is on,
+    // an Invoiced row must not render a past Due date beside a 0-day badge, nor a
+    // future one beside an "Overdue Nd" chip. Under the old code the BP-LATE row
+    // displayed 2026-07-30 — already past — while overdueDays was 0, because the
+    // chip was measured from 2026-08-14. That is the single-row contradiction.
+    const today = new Date().toISOString().slice(0, 10);
+    const all = await rows([INVOICED_LATE, EXPLICIT]);
+
+    for (const id of ['BP-LATE', 'BP-EXPL']) {
+      const row = byId(all, id);
+      expect(row.item.status, 'the fixture must be Invoiced or overdueDaysOf never runs').toBe('Invoiced');
+      expect(row.overdueDays > 0, `row ${id}: due ${row.due} against today ${today}`)
+        .toBe((row.due ?? '9999-12-31') < today);
+    }
+  });
+
+  it('anchors an in-app-invoiced condition on issuedDate + terms, the same date the badge uses', async () => {
+    const all = await rows([INVOICED_LATE]);
+    const row = byId(all, 'BP-LATE');
+
+    // issuedDate 2026-07-15 + 30 = 2026-08-14.
+    expect(row.due).toBe('2026-08-14');
+    // ASSERTION OF ABSENCE: 2026-07-30 is expectedDate + terms — the second anchor
+    // that used to render here, a week in the past, beside a badge saying "not
+    // overdue". No substring form of it may survive.
+    expect(row.due).not.toContain('2026-07-30');
+    // And the anchor is literally the shared one, not a coincidence of arithmetic.
+    expect(row.due).toBe(effectiveDueDate(row.item));
+    // The badge is measured from that same string: 7 days past 2026-08-14.
+    expect(daysOverdue(row.item, '2026-08-21')).toBe(7);
+    // On the register's "today" the row is NOT overdue — the state in which the old
+    // Due cell contradicted its own badge.
+    expect(daysOverdue(row.item, '2026-08-06')).toBe(0);
+  });
+
+  it('still previews a due date for a condition that was never issued', async () => {
+    // THE LOAD-BEARING ABSENCE ASSERTION. `return effectiveDueDate(i) ?? null` also
+    // satisfies the test above, and blanks this column for the entire Planned book.
+    const all = await rows([PLANNED]);
+    const row = byId(all, 'BP-PLAN');
+
+    expect(row.due).not.toBeNull();
+    expect(row.due).toBe('2026-10-30');
+    // effectiveDueDate cannot serve this row — which is exactly why the preview
+    // branch has to stay. Asserted so the test states the reason it exists.
+    expect(effectiveDueDate(row.item)).toBeUndefined();
+  });
+
+  it('keeps every due date a bare civil date, in any timezone', async () => {
+    // The preview used to parse the civil date as UTC midnight and shift it with
+    // local getDate/setDate: '2026-04-18T23:00:00.000Z' under TZ=Europe/Rome (the
+    // CSV cell disagreeing with the screen across the DST change) and
+    // '2026-04-19T00:00:00.000Z' under TZ=UTC. The regex is what makes this
+    // un-fakeable under a UTC-only CI: no timestamp form can satisfy it.
+    const all = await rows([DST, PLANNED, INVOICED_LATE]);
+
+    expect(byId(all, 'BP-DST').due).toBe('2026-04-19');
+    for (const id of ['BP-DST', 'BP-PLAN', 'BP-LATE']) {
+      expect(byId(all, id).due).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
+  });
+
+  it('lets an explicit dueDate outrank both derivations', async () => {
+    // The must-still-be-ALLOWED case: a fix that always recomputes would break the
+    // one anchor the data states outright.
+    const all = await rows([EXPLICIT]);
+    const row = byId(all, 'BP-EXPL');
+
+    expect(row.due).toBe('2026-05-05');
+    // Neither derivation: issuedDate + 60 would be 2026-05-31, expectedDate + 60
+    // would be 2026-04-01.
+    expect(row.due).not.toBe('2026-05-31');
+    expect(row.due).not.toBe('2026-04-01');
+  });
+});
+
+/**
+ * F3 + the P2 sibling — every read the master table renders from is inside ONE
+ * state machine, and the table is inside it too.
+ *
+ * `ordersRes` and `customersRes` were absent from financialDataLoading,
+ * financialDataError and reloadFinancialData, and the master table was a section
+ * outside every gate. So a failed /orders printed '—' in the Invoice # column of
+ * already-invoiced rows and DELETED the View-invoice button from all of them —
+ * every existing invoice unreachable — while nothing on the page said a read had
+ * failed, and the Retry the strip offered never re-fired /orders. Widening the gate
+ * alone is not the fix: it raises a banner above a table still showing those rows.
+ */
+describe('Billing — the master table is inside the same state machine as the KPI strip', () => {
+  const CT: Contract = {
+    id: 'CT1', customerId: 'C1', name: 'Framework', type: 'T&M', totalValue: 0,
+    currency: 'EUR', status: 'Active', startDate: '2026-01-01', endDate: '2026-12-31',
+  };
+  const CUST: Customer = { id: 'C1', name: 'Acme Co' };
+  const ORDER: Order = {
+    id: 'ORD-1', contractId: 'CT1', type: 'Customer', amount: 1_000, currency: 'EUR',
+    status: 'Invoiced', orderDate: '2026-07-15', invoiceNumber: 'INV-0001', invoiceDate: '2026-07-15',
+  };
+  /** Invoiced, linked to ORD-1 — the row whose invoice must stay reachable. */
+  const ITEM: BillingPlanItem = {
+    id: 'BP1', contractId: 'CT1', type: 'Milestone', label: 'SAL 1',
+    amount: 1_000, currency: 'EUR', status: 'Invoiced',
+    issuedDate: '2026-07-15', paymentTermsDays: 30, orderId: 'ORD-1',
+  };
+
+  const resolving = {
+    getBillingPlanItems: () => of([ITEM]),
+    getContracts: () => of([CT]),
+    getCustomers: () => of([CUST]),
+    getOrders: () => of([ORDER]),
+  };
+
+  const table = (fixture: ComponentFixture<Billing>) => host(fixture).querySelector('.command-data-table');
+  const viewInvoiceButton = (fixture: ComponentFixture<Billing>) =>
+    host(fixture).querySelector('button[aria-label^="View invoice"]');
+  /** Every Retry control on the page, whichever state panel rendered it. */
+  const retryButtons = (fixture: ComponentFixture<Billing>) =>
+    [...host(fixture).querySelectorAll('button')].filter(b => b.textContent?.includes('Retry'));
+
+  /** Narrow probe on a private rxResource field: proves the intended read failed. */
+  const statusOf = (fixture: ComponentFixture<Billing>, field: string): string =>
+    (fixture.componentInstance as unknown as Record<string, { status: () => string }>)[field].status();
+
+  it('renders the table, the invoice number and the View-invoice button when every read resolves', async () => {
+    // THE CASE THAT MUST STILL BE ALLOWED. A gate that always refuses passes every
+    // assertion below it, so this anchors the whole suite.
+    const fixture = await setupSparse(resolving);
+    await tick(fixture);
+
+    expect(fixture.componentInstance.financialDataError()).toBe(false);
+    expect(fixture.componentInstance.financialDataLoading()).toBe(false);
+    expect(table(fixture)).not.toBeNull();
+    expect(host(fixture).textContent).toContain('INV-0001');
+    expect(viewInvoiceButton(fixture)).not.toBeNull();
+    expect(host(fixture).querySelector('[role="alert"]')).toBeNull();
+    // The Contract filter really does list its options in the resolved state.
+    expect([...host(fixture).querySelectorAll('#filterContract option')].map(o => o.textContent?.trim()))
+      .toStrictEqual(['All contracts', 'Framework']);
+  });
+
+  it('reports a failed /orders instead of rendering rows that look un-invoiced', async () => {
+    const fixture = await setupSparse({ ...resolving, getOrders: () => throwError(() => new Error('orders 500')) });
+    await tick(fixture);
+
+    // Positive control: it is /orders that failed, not some other read.
+    expect(statusOf(fixture, 'ordersRes')).toBe('error');
+    expect(fixture.componentInstance.financialDataError()).toBe(true);
+    expect(host(fixture).textContent).toContain("Couldn't load billing financial data");
+    // THE ABSENCE ASSERTION: the table is not rendered AT ALL. A banner raised above
+    // a table still printing '—' in Invoice # and still hiding every View-invoice
+    // button is the outcome this blocks.
+    expect(table(fixture)).toBeNull();
+    expect(viewInvoiceButton(fixture)).toBeNull();
+    expect(host(fixture).textContent).not.toContain('INV-0001');
+  });
+
+  it('reports a failed /customers, which used to be answered by nothing at all', async () => {
+    // /customers feeds the contract label AND the printable invoice's Bill-to, so a
+    // failure here used to emit an invoice artifact with no counterparty.
+    const fixture = await setupSparse({ ...resolving, getCustomers: () => throwError(() => new Error('customers 500')) });
+    await tick(fixture);
+
+    expect(statusOf(fixture, 'customersRes')).toBe('error');
+    expect(fixture.componentInstance.financialDataError()).toBe(true);
+    expect(host(fixture).querySelector('[role="alert"]')).not.toBeNull();
+    expect(table(fixture)).toBeNull();
+  });
+
+  it('never shows the confident-empty copy when the billing conditions themselves failed', async () => {
+    const fixture = await setupSparse({
+      ...resolving,
+      getBillingPlanItems: () => throwError(() => new Error('billing-plan-items 500')),
+    });
+    await tick(fixture);
+
+    expect(statusOf(fixture, 'itemsRes')).toBe('error');
+    // Scoped to the copy itself, not to "an error card exists somewhere": the KPI
+    // strip's card already worked before the fix and would satisfy that vacuously.
+    expect(host(fixture).textContent).not.toContain('No billing conditions match');
+    expect(host(fixture).textContent).not.toContain('shown');
+    expect(table(fixture)).toBeNull();
+    // A Retry the user can actually reach for the table's own failure.
+    expect(retryButtons(fixture).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('re-fires /orders and /customers on Retry', async () => {
+    // The latch: reloadFinancialData() never touched either resource, so the state
+    // survived every Retry for the life of the component. /fx-rates is the failing
+    // read here so the panel (and its Retry) renders while orders/customers resolve.
+    const getOrders = vi.fn(() => of([ORDER]));
+    const getCustomers = vi.fn(() => of([CUST]));
+    const fixture = await setupSparse({
+      ...resolving,
+      getOrders,
+      getCustomers,
+      getFxRates: () => throwError(() => new Error('fx 500')),
+    });
+    await tick(fixture);
+
+    expect(getOrders).toHaveBeenCalledTimes(1);
+    expect(getCustomers).toHaveBeenCalledTimes(1);
+
+    const retry = retryButtons(fixture)[0];
+    expect(retry, 'a Retry control must be rendered for a failed read').toBeTruthy();
+    retry.click();
+    await tick(fixture);
+
+    expect(getOrders).toHaveBeenCalledTimes(2);
+    expect(getCustomers).toHaveBeenCalledTimes(2);
   });
 });
