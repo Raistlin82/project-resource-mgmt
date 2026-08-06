@@ -2,7 +2,7 @@ import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { of, throwError, type Observable } from 'rxjs';
 import { ManageResourceOrganizationsComponent } from './manage-resource-organizations.component';
-import { ApiService, Resource, ResourceOrganization } from '../services/api.service';
+import { ApiService, CostCenter, Resource, ResourceOrganization } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 
@@ -30,10 +30,20 @@ const RESOURCES: Resource[] = [
   { id: '4', name: 'Terminated Tom', role: 'Consultant', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, terminationDate: '2020-01-01' },
 ];
 
-function setup(orgs: ResourceOrganization[] = ORGS, resources: Resource[] = RESOURCES) {
+/** Two cost centres, so an orphan id can be told apart from one still in the catalog. */
+const COST_CENTERS: CostCenter[] = [
+  { id: 'CC-100', name: 'Delivery Italy', manager: '1', allocated: 0, actual: 0 },
+  { id: 'CC-200', name: 'Delivery Germany', manager: '1', allocated: 0, actual: 0 },
+];
+
+function setup(
+  orgs: ResourceOrganization[] = ORGS,
+  resources: Resource[] = RESOURCES,
+  costCenters: CostCenter[] = COST_CENTERS,
+) {
   const getResourceOrganizations = vi.fn(() => of(orgs));
   const getResources = vi.fn(() => of(resources));
-  const getCostCenters = vi.fn(() => of([]));
+  const getCostCenters = vi.fn(() => of(costCenters));
   const getServiceOrganizations = vi.fn(() => of([]));
   const createResourceOrganization = vi.fn<(org: Partial<ResourceOrganization>) => Observable<ResourceOrganization>>(
     () => of({} as ResourceOrganization),
@@ -224,5 +234,129 @@ describe('ManageResourceOrganizationsComponent', () => {
     fixture.detectChanges();
 
     expect(fixture.componentInstance.showForm()).toBe(true);
+  });
+});
+
+/**
+ * UX register P2-19 — Cost Centers was a `<select multiple>`: holding a second cost
+ * centre needed a Ctrl/Cmd-click, which does not exist on touch, so on a phone or
+ * tablet the field held exactly one id and picking a second silently REPLACED the
+ * first. These ids feed cost allocation, so that replacement was a silent money-side
+ * data change with nothing on screen to show it.
+ */
+describe('ManageResourceOrganizationsComponent cost centres — no Ctrl/Cmd, no dropped ids', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  function picker(fixture: { nativeElement: HTMLElement }): HTMLSelectElement {
+    return fixture.nativeElement.querySelector<HTMLSelectElement>('[data-test="chips-picker"]')!;
+  }
+
+  function chipLabels(fixture: { nativeElement: HTMLElement }): string[] {
+    return Array.from(fixture.nativeElement.querySelectorAll<HTMLElement>('[data-test="chip-label"]'))
+      .map(c => c.textContent!.replace(/\s+/g, ' ').trim());
+  }
+
+  function addCostCenter(fixture: { nativeElement: HTMLElement; detectChanges: () => void }, id: string): void {
+    const select = picker(fixture);
+    select.value = id;
+    select.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    fixture.nativeElement.querySelector<HTMLButtonElement>('[data-test="chips-add"]')!.click();
+    fixture.detectChanges();
+  }
+
+  it('renders NO multiple-selection list box on the screen', async () => {
+    // THE NEGATIVE ASSERTION THAT CANNOT DRIFT: chips rendered alongside a surviving
+    // <select multiple> satisfy every positive-only check.
+    const { fixture } = setup();
+    await flush(fixture);
+    fixture.componentInstance.openForm(ORGS.find(o => o.id === '2')!);
+    fixture.detectChanges();
+
+    expect((fixture.nativeElement as HTMLElement).querySelector('select[multiple]')).toBeNull();
+  });
+
+  it('MUST STILL offer the catalog and hold TWO cost centres — the positive twin', async () => {
+    // Without this, deleting the field outright would pass the assertion above; and
+    // "the second pick replaces the first" is the recorded touch failure verbatim.
+    const { fixture, updateResourceOrganization } = setup();
+    await flush(fixture);
+    fixture.componentInstance.openForm(ORGS.find(o => o.id === '2')!);
+    fixture.detectChanges();
+
+    expect(Array.from(picker(fixture).options).map(o => o.value)).toStrictEqual(['', 'CC-100', 'CC-200']);
+
+    addCostCenter(fixture, 'CC-100');
+    addCostCenter(fixture, 'CC-200');
+    expect(chipLabels(fixture)).toStrictEqual(['CC-100 — Delivery Italy', 'CC-200 — Delivery Germany']);
+
+    fixture.componentInstance.save();
+    expect(updateResourceOrganization).toHaveBeenCalledWith('2', expect.objectContaining({
+      costCenters: ['CC-100', 'CC-200'],
+    }));
+  });
+
+  it('keeps an ORPHAN cost centre and saves it — removing the known one leaves EXACTLY the orphan', async () => {
+    // THE DATA RISK this control carries. A stored id the catalog no longer offers must
+    // stay on the node and stay removable: intersecting the model with the option list
+    // would silently drop it on the next save, and these ids drive cost allocation.
+    // Asserted with toStrictEqual, since [] and ['CC-100','CC-LEGACY'] are the two
+    // wrong answers this has to separate.
+    const orgs: ResourceOrganization[] = [
+      { id: '9', name: 'Legacy Node', description: '', costCenters: ['CC-100', 'CC-LEGACY'], level: 'capability' },
+    ];
+    const { fixture, updateResourceOrganization } = setup(orgs);
+    await flush(fixture);
+    fixture.componentInstance.openForm(orgs[0]);
+    fixture.detectChanges();
+
+    // The orphan renders as a chip like any other, flagged so the admin knows why it
+    // is unusual — and it is NOT offered back in the picker.
+    expect(chipLabels(fixture)).toStrictEqual(['CC-100 — Delivery Italy', 'CC-LEGACY (not in catalog)']);
+    expect(Array.from(picker(fixture).options).map(o => o.value)).toStrictEqual(['', 'CC-200']);
+
+    const host = fixture.nativeElement as HTMLElement;
+    host.querySelector<HTMLButtonElement>('button[aria-label="Remove CC-100 — Delivery Italy"]')!.click();
+    fixture.detectChanges();
+
+    fixture.componentInstance.save();
+    expect(updateResourceOrganization).toHaveBeenCalledWith('9', expect.objectContaining({
+      costCenters: ['CC-LEGACY'],
+    }));
+  });
+
+  it('survives the cost-centre catalog arriving after the form is open, without losing the stored ids', async () => {
+    // /cost-centers is a finance-gated read: an admin who cannot approve financials
+    // sees an EMPTY option list, and so does everyone for the moment before the read
+    // lands. Every stored id looks like an orphan then — and must still be saved back
+    // untouched, or opening the form without that read would erase the node's cost
+    // centres on the next save.
+    const orgs: ResourceOrganization[] = [
+      { id: '9', name: 'Node', description: '', costCenters: ['CC-100', 'CC-200'], level: 'capability' },
+    ];
+    const { fixture, updateResourceOrganization } = setup(orgs, RESOURCES, []);
+    await flush(fixture);
+    fixture.componentInstance.openForm(orgs[0]);
+    fixture.detectChanges();
+
+    expect(chipLabels(fixture)).toStrictEqual(['CC-100 (not in catalog)', 'CC-200 (not in catalog)']);
+
+    fixture.componentInstance.save();
+    expect(updateResourceOrganization).toHaveBeenCalledWith('9', expect.objectContaining({
+      costCenters: ['CC-100', 'CC-200'],
+    }));
+  });
+
+  it('keeps the field label pointing at a real control', async () => {
+    // The <label for="orgCostCenters"> is still on the screen, so the id has to land on
+    // the focusable element inside the chips control or the label names nothing.
+    const { fixture } = setup();
+    await flush(fixture);
+    fixture.componentInstance.openForm(ORGS.find(o => o.id === '2')!);
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    expect(host.querySelector('label[for="orgCostCenters"]')).not.toBeNull();
+    expect(picker(fixture).id).toBe('orgCostCenters');
   });
 });
