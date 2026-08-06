@@ -357,3 +357,128 @@ describe('WhatIf — the header badge/Reset must never claim parity it cannot kn
     expect(text).not.toContain('Unavailable');
   });
 });
+
+// -----------------------------------------------------------------------------
+// The Scenario Capacity chart wiring — the SECOND site of the same sweep.
+//
+// /forecast pins the identical contract; this block exists so the sweep is proven
+// at more than one call site rather than proven once and assumed twice. It matters
+// especially here: the levers on this screen exist to ADD supply, so a Supply left
+// in a stacked [series] would make every hire raise the demand column it is
+// supposed to be measured against — the scenario would look worse the more people
+// it hired.
+// -----------------------------------------------------------------------------
+
+/** The Scenario Capacity BAR chart (the demand trend chart also has a value axis). */
+function scenarioBarChart(fixture: ComponentFixture<WhatIf>): HTMLElement {
+  const chart = host(fixture).querySelector<HTMLElement>('command-bar-chart');
+  expect(chart, 'the scenario bar chart must render').toBeTruthy();
+  return chart!;
+}
+
+/** The numeric top of a chart's value axis, read back off its own last tick. */
+function chartAxisTop(chart: HTMLElement): number {
+  const labels = Array.from(chart.querySelectorAll('.ldg-axis-val')).map(t => (t.textContent ?? '').trim());
+  expect(labels.length, 'the value axis must render tick labels').toBeGreaterThan(1);
+  return Number((labels.at(-1) ?? '').replace(/[^\d.-]/g, ''));
+}
+
+function chartBars(chart: HTMLElement): SVGRectElement[] {
+  return Array.from(chart.querySelectorAll<SVGRectElement>('rect.ldg-bar'));
+}
+
+/** Plot height in viewBox units, measured off the gridlines themselves. */
+function chartPlotHeight(chart: HTMLElement): number {
+  const ys = Array.from(chart.querySelectorAll('.ldg-grid line')).map(l => Number(l.getAttribute('y1')));
+  expect(ys.length, 'the value axis must render gridlines').toBeGreaterThan(1);
+  return Math.max(...ys) - Math.min(...ys);
+}
+
+describe('WhatIf — Supply is the chart overlay, not a bar stacked onto demand', () => {
+  /** 540h of OPEN demand over 12 weeks vs one 100h/week resource: supply 100, pipeline 45. */
+  const SUPPLY = 100;
+  const STACK = 45;
+
+  it('tops the value axis at the supply, neither at the supply+demand sum nor at the demand alone', async () => {
+    const fixture = await setup(evenDemand(SUPPLY, 540));
+    await flush(fixture);
+    const top = chartAxisTop(scenarioBarChart(fixture));
+
+    // Not clipped (a domain of 45 alone would stop at 50)...
+    expect(top).toBeGreaterThanOrEqual(SUPPLY);
+    // ...and not summed: a stacked Supply makes the domain 145, so niceScale tops
+    // out at 150. This is the assertion of ABSENCE for the defect being fixed, and
+    // the half that a presence-only check on the polyline would have passed.
+    expect(top).toBeLessThan(SUPPLY + STACK);
+    expect(top).toBe(100);
+  });
+
+  it('draws two demand bars per week and no Supply bar at all', async () => {
+    const fixture = await setup(evenDemand(SUPPLY, 540));
+    await flush(fixture);
+    const chart = scenarioBarChart(fixture);
+
+    const rects = chartBars(chart);
+    // 12 weeks x {Committed, Pipeline}; a third series would make it 36.
+    expect(rects).toHaveLength(HORIZON_WEEKS * 2);
+    const titles = rects.map(r => r.querySelector('title')?.textContent ?? '');
+    expect(titles.some(t => t.includes('Supply'))).toBe(false);
+    // Paired presence, so "renders no bars" cannot satisfy the absence above.
+    expect(titles.filter(t => t.includes('Committed'))).toHaveLength(HORIZON_WEEKS);
+    expect(titles.filter(t => t.includes('Pipeline'))).toHaveLength(HORIZON_WEEKS);
+
+    // The stack still measures its own 45 against the 100 axis.
+    const totalHeight = rects.reduce((sum, r) => sum + Number(r.getAttribute('height')), 0);
+    expect(totalHeight / HORIZON_WEEKS / chartPlotHeight(chart)).toBeCloseTo(STACK / 100, 4);
+  });
+
+  it('renders Supply as a named overlay line inside the plot band', async () => {
+    const fixture = await setup(evenDemand(SUPPLY, 540));
+    await flush(fixture);
+    const chart = scenarioBarChart(fixture);
+
+    const line = chart.querySelector('polyline.ldg-overlay');
+    expect(line, 'Supply must render as the overlay polyline').not.toBeNull();
+    expect(line!.querySelector('title')?.textContent?.trim()).toBe('Supply');
+
+    const gridY = Array.from(chart.querySelectorAll('.ldg-grid line')).map(l => Number(l.getAttribute('y1')));
+    const ys = (line!.getAttribute('points') ?? '')
+      .trim()
+      .split(/\s+/)
+      .map(p => Number(p.split(',')[1]));
+    expect(ys.length).toBeGreaterThan(0);
+    expect(ys.every(Number.isFinite)).toBe(true);
+    expect(Math.min(...ys)).toBeGreaterThanOrEqual(Math.min(...gridY));
+    expect(Math.max(...ys)).toBeLessThanOrEqual(Math.max(...gridY));
+
+    // Not sighted-only: the overlay keeps its legend key and a11y column.
+    const legend = Array.from(chart.querySelectorAll('.ldg-legend li')).map(li => (li.textContent ?? '').trim());
+    expect(legend).toEqual(['Committed', 'Pipeline', 'Supply']);
+    const headers = Array.from(chart.querySelectorAll('.ldg-sr thead th')).map(th => (th.textContent ?? '').trim());
+    expect(headers).toEqual(['Category', 'Committed', 'Pipeline', 'Supply']);
+  });
+
+  it('a HIRE lifts the supply overlay and leaves the demand bands untouched', async () => {
+    // The lever this screen exists for. Hiring must move the SUPPLY line and
+    // nothing else: the demand stack it is compared against has to stay put, or
+    // the sandbox reports its own remedy as extra demand.
+    const fixture = await setup(evenDemand(SUPPLY, 540));
+    await flush(fixture);
+    const c = fixture.componentInstance;
+
+    const before = c.scenarioSupplyOverlay().values[0];
+    const demandBefore = c.scenarioDemandSeries().map(s => s.values[0]);
+
+    c.hireForm.setValue({ role: 'Developer', count: 1, capacity: 40, skill: '' });
+    c.hire();
+    fixture.detectChanges();
+
+    // Presence: supply grew.
+    expect(c.scenarioSupplyOverlay().values[0]).toBeGreaterThan(before);
+    // Absence: the demand bands did NOT — which is exactly what a stacked Supply
+    // would have broken, since the hire would have been added to the column.
+    expect(c.scenarioDemandSeries().map(s => s.values[0])).toEqual(demandBefore);
+    // And Supply is still no bar after the recompute.
+    expect(c.scenarioDemandSeries().map(s => s.name)).toEqual(['Committed', 'Pipeline']);
+  });
+});

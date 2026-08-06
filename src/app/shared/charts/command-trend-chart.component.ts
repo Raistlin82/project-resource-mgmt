@@ -20,12 +20,21 @@ export interface TrendSeries {
   readonly color?: string;
 }
 
+/** One plotted vertex. Only FINITE readings become one of these — see `paths`. */
+interface PathPoint {
+  x: number;
+  y: number;
+  value: number;
+  label: string;
+  category: string;
+}
+
 interface SeriesPath {
   name: string;
   color: string;
   line: string; // SVG path `d` for the stroke
   area: string; // SVG path `d` for the filled area (empty when mode='line')
-  points: { x: number; y: number; value: number; label: string; category: string }[];
+  points: PathPoint[];
 }
 
 interface AxisTick {
@@ -335,21 +344,49 @@ export class CommandTrendChartComponent {
     const cats = this.categories();
     const p = this.plot();
 
+    const trace = (run: PathPoint[]) => (this.smooth() ? smoothPath(run) : straightPath(run));
+    const baseY = p.y + p.h;
+
     return this.series().map((s, si) => {
-      const points = cats.map((category, i) => ({
-        x: this.xAt(i),
-        y: this.yAt(s.values[i] ?? 0),
-        value: s.values[i] ?? 0,
-        label: fmt(s.values[i] ?? 0),
-        category,
-      }));
-      const line = this.smooth() ? smoothPath(points) : straightPath(points);
-      const baseY = p.y + p.h;
+      /*
+       * Split the series into RUNS of consecutive finite readings.
+       *
+       * The old shape was `yAt(s.values[i] ?? 0)`, and `?? 0` catches null and
+       * undefined but NOT NaN. yAt(NaN) is NaN, so a single non-finite datum (a
+       * 0/0 ratio, a JSON null a caller's `map` coerced) emitted `M 56 NaN` into
+       * the path `d` — invalid geometry that makes the browser discard the WHOLE
+       * path. One bad week therefore erased an entire trend line, silently, while
+       * the axis still rendered correctly because `domain` already skips
+       * non-finite bounds. Same rule as the bar chart's rect guard; the unit here
+       * is a vertex, and the guard has to live in `paths` too because the domain
+       * guard says nothing about geometry.
+       *
+       * The run BREAKS at the gap rather than joining across it: a bridged
+       * segment would draw a straight line the data never claimed, which is the
+       * same fabrication as plotting the gap as 0.
+       */
+      const runs: PathPoint[][] = [];
+      let run: PathPoint[] = [];
+      cats.forEach((category, i) => {
+        const v = s.values[i];
+        // Number.isFinite does not coerce, so this one check covers undefined
+        // (a series shorter than the axis), null, NaN and ±Infinity alike.
+        if (!Number.isFinite(v)) {
+          if (run.length) runs.push(run);
+          run = [];
+          return;
+        }
+        run.push({ x: this.xAt(i), y: this.yAt(v), value: v, label: fmt(v), category });
+      });
+      if (run.length) runs.push(run);
+
+      // Sub-paths concatenate into one `d`: each run starts with its own `M`.
+      const line = runs.map(trace).join(' ');
       const area =
-        this.mode() === 'area' && points.length
-          ? `${line} L ${points[points.length - 1].x} ${baseY} L ${points[0].x} ${baseY} Z`
+        this.mode() === 'area'
+          ? runs.map(r => `${trace(r)} L ${r[r.length - 1].x} ${baseY} L ${r[0].x} ${baseY} Z`).join(' ')
           : '';
-      return { name: s.name, color: colors[si], line, area, points };
+      return { name: s.name, color: colors[si], line, area, points: runs.flat() };
     });
   });
 
@@ -360,7 +397,13 @@ export class CommandTrendChartComponent {
     const fmt = this.fmt();
     return this.categories().map((category, ci) => ({
       category,
-      cells: this.series().map((s) => fmt(s.values[ci] ?? 0)),
+      // The screen-reader table is the accessible equivalent of the plot, so it
+      // must report a missing reading as missing. `?? 0` used to state "0" for a
+      // gap the line does not draw — a fabricated figure, and the one form of it
+      // a sighted user could not cross-check.
+      cells: this.series().map((s) =>
+        Number.isFinite(s.values[ci]) ? fmt(s.values[ci]) : 'n/a',
+      ),
     }));
   });
 }

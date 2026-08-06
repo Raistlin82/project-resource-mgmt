@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
@@ -601,6 +601,151 @@ describe('Forecast — employment gates supply and skill coverage', () => {
 });
 
 // -----------------------------------------------------------------------------
+// The Supply-vs-Demand chart wiring.
+//
+// CommandBarChartComponent grew an [overlay] input precisely so a Supply series
+// could stop sharing the bar list with demand, and this call site was left on the
+// old shape. The two wrong states it can be in are BOTH visible in the value-axis
+// top, which is why the axis is the primary assertion here rather than the
+// presence of the polyline:
+//   * Supply left in [series] while [stacked] -> supply is ADDED to the demand it
+//     is the yardstick for; the axis climbs to cover 145 instead of 100.
+//   * Supply moved to [overlay] but the overlay excluded from the y-domain -> the
+//     line is clipped flat along the top gridline and the axis stops at 50.
+// -----------------------------------------------------------------------------
+
+/** The Supply-vs-Demand BAR chart (the trend chart in the same card also has an axis). */
+function timelineBarChart(fixture: ComponentFixture<Forecast>): HTMLElement {
+  const chart = host(fixture).querySelector<HTMLElement>('command-bar-chart');
+  expect(chart, 'the timeline bar chart must render').toBeTruthy();
+  return chart!;
+}
+
+/** Value-axis tick labels of one chart, DOM order = ascending value. */
+function chartAxisLabels(chart: HTMLElement): string[] {
+  return Array.from(chart.querySelectorAll('.ldg-axis-val')).map(t => (t.textContent ?? '').trim());
+}
+
+/** The numeric top of a chart's value axis, read back off its own last tick. */
+function chartAxisTop(chart: HTMLElement): number {
+  const labels = chartAxisLabels(chart);
+  expect(labels.length, 'the value axis must render tick labels').toBeGreaterThan(1);
+  return Number((labels.at(-1) ?? '').replace(/[^\d.-]/g, ''));
+}
+
+function chartBars(chart: HTMLElement): SVGRectElement[] {
+  return Array.from(chart.querySelectorAll<SVGRectElement>('rect.ldg-bar'));
+}
+
+/** Plot height in viewBox units, measured off the gridlines themselves. */
+function chartPlotHeight(chart: HTMLElement): number {
+  const ys = Array.from(chart.querySelectorAll('.ldg-grid line')).map(l => Number(l.getAttribute('y1')));
+  expect(ys.length, 'the value axis must render gridlines').toBeGreaterThan(1);
+  return Math.max(...ys) - Math.min(...ys);
+}
+
+describe('Forecast — Supply is the chart overlay, not a bar stacked onto demand', () => {
+  /**
+   * 360h of OPEN demand over the 8-week horizon against one 100h/week resource:
+   * every week is supply 100, committed 0, pipeline 45. Supply therefore sits
+   * ABOVE the demand stack, which is the configuration that can tell the three
+   * candidate wirings apart — with supply UNDER the stack every one of them
+   * produces the same axis.
+   */
+  const SUPPLY = 100;
+  const STACK = 45;
+
+  it('tops the value axis at the supply, neither at the supply+demand sum nor at the demand alone', async () => {
+    const fixture = await setup(evenDemandStub(SUPPLY, 360));
+    await flush(fixture);
+    const top = chartAxisTop(timelineBarChart(fixture));
+
+    // Not clipped: the supply line must fit inside the plot. niceScale(0,45,5)
+    // would stop at 50, so this fails if the overlay is dropped from the domain.
+    expect(top).toBeGreaterThanOrEqual(SUPPLY);
+    // Not summed: a Supply left in a stacked [series] makes the domain 145 and
+    // niceScale(0,145,5) tops out at 150. This is the assertion of ABSENCE for
+    // the defect actually being fixed, and it is the half a presence-only check
+    // on the polyline would have passed.
+    expect(top).toBeLessThan(SUPPLY + STACK);
+    // Exactly: niceScale(0,100,5).
+    expect(top).toBe(100);
+  });
+
+  it('keeps the supply line inside the plot band rather than pinned to the top gridline', async () => {
+    const fixture = await setup(evenDemandStub(SUPPLY, 360));
+    await flush(fixture);
+    const chart = timelineBarChart(fixture);
+
+    const line = chart.querySelector('polyline.ldg-overlay');
+    expect(line, 'Supply must render as the overlay polyline').not.toBeNull();
+    expect(line!.querySelector('title')?.textContent?.trim()).toBe('Supply');
+
+    const gridY = Array.from(chart.querySelectorAll('.ldg-grid line')).map(l => Number(l.getAttribute('y1')));
+    const ys = (line!.getAttribute('points') ?? '')
+      .trim()
+      .split(/\s+/)
+      .map(p => Number(p.split(',')[1]));
+    expect(ys.length).toBeGreaterThan(0);
+    expect(ys.every(Number.isFinite)).toBe(true);
+    // Inside the band, and STRICTLY below its top edge — supply 100 against an
+    // axis of 100 would sit exactly ON the top gridline, so this is a real
+    // geometric statement and not a tautology.
+    expect(Math.min(...ys)).toBeGreaterThanOrEqual(Math.min(...gridY));
+    expect(Math.max(...ys)).toBeLessThanOrEqual(Math.max(...gridY));
+  });
+
+  it('draws two demand bars per week and no Supply bar at all', async () => {
+    const fixture = await setup(evenDemandStub(SUPPLY, 360));
+    await flush(fixture);
+    const chart = timelineBarChart(fixture);
+
+    const rects = chartBars(chart);
+    // 8 weeks x {Committed, Pipeline}. A third series would make it 24.
+    expect(rects).toHaveLength(16);
+    const titles = rects.map(r => r.querySelector('title')?.textContent ?? '');
+    // The assertion of ABSENCE: no bar may be a Supply bar.
+    expect(titles.some(t => t.includes('Supply'))).toBe(false);
+    // The paired presence, so "renders no bars" cannot satisfy the line above.
+    expect(titles.filter(t => t.includes('Committed'))).toHaveLength(8);
+    expect(titles.filter(t => t.includes('Pipeline'))).toHaveLength(8);
+
+    // And the stack really measures the demand — 45 of the 100 axis — so moving
+    // supply out did not silently rescale the bars that remain. Summed per week
+    // because `stacked` is what makes Committed+Pipeline one column.
+    const totalHeight = rects.reduce((sum, r) => sum + Number(r.getAttribute('height')), 0);
+    expect(totalHeight / 8 / chartPlotHeight(chart)).toBeCloseTo(STACK / 100, 4);
+  });
+
+  it('still names Supply in the legend and in the screen-reader table', async () => {
+    const fixture = await setup(evenDemandStub(SUPPLY, 360));
+    await flush(fixture);
+    const chart = timelineBarChart(fixture);
+
+    // Moving a series to the overlay must not make it sighted-only or nameless:
+    // the capacity figure is the one every other number is judged against.
+    const legend = Array.from(chart.querySelectorAll('.ldg-legend li')).map(li => (li.textContent ?? '').trim());
+    expect(legend).toEqual(['Committed', 'Pipeline', 'Supply']);
+    const headers = Array.from(chart.querySelectorAll('.ldg-sr thead th')).map(th => (th.textContent ?? '').trim());
+    expect(headers).toEqual(['Category', 'Committed', 'Pipeline', 'Supply']);
+  });
+
+  it('exposes Supply and the demand bands as separate component inputs', async () => {
+    const fixture = await setup(evenDemandStub(SUPPLY, 360));
+    await flush(fixture);
+    const c = fixture.componentInstance;
+
+    // The bar list holds ONLY demand...
+    expect(c.demandSeries().map(s => s.name)).toEqual(['Committed', 'Pipeline']);
+    // ...and Supply is its own thing, carrying the real per-week capacity rather
+    // than an empty series that would satisfy the name check above.
+    expect(c.supplyOverlay().name).toBe('Supply');
+    expect(c.supplyOverlay().values).toHaveLength(8);
+    expect(c.supplyOverlay().values.every(v => v === SUPPLY)).toBe(true);
+  });
+});
+
+// -----------------------------------------------------------------------------
 // Source-text + token arithmetic. jsdom performs NO layout and resolves no
 // custom properties, so the honest form of a contrast claim is (a) a static
 // assertion over this component's own source and (b) the OKLCH→WCAG ratio
@@ -690,5 +835,229 @@ describe('Forecast — the pressed horizon label is legible in dark theme', () =
     )!;
     expect(pressed.classList.contains('text-ink-inverse')).toBe(true);
     expect(pressed.classList.contains('text-white')).toBe(false);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// The repo-wide half of the same rule, with a SHRINKING allow-list.
+//
+// The scoped scan above proves forecast.ts is clean. The remaining offenders live
+// in files this batch does not own, so they are enumerated rather than fixed — and
+// the enumeration is written so it can only ever get shorter:
+//   * a NEW offender anywhere fails, allow-listed file or not (per-file counts are
+//     capped at what is recorded here);
+//   * an allow-list entry that has been fixed elsewhere ALSO fails, as stale, so
+//     the list cannot outlive the defect it documents.
+// -----------------------------------------------------------------------------
+
+/**
+ * Every offender site, as `path:line`. Comments are stripped first: a comment
+ * cannot render, and the comments explaining this very rule name both class
+ * names, so an unstripped scan reports the documentation as the defect.
+ */
+function textWhiteOffenders(): string[] {
+  const root = resolve(process.cwd(), 'src/app');
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(p);
+      } else if (p.endsWith('.ts') && !p.endsWith('.spec.ts')) {
+        readFileSync(p, 'utf8')
+          .replace(/<!--[\s\S]*?-->/g, '')
+          .replace(/\/\*[\s\S]*?\*\//g, '')
+          .split('\n')
+          .forEach((line, i) => {
+            if (/text-white/.test(line) && /bg-accent|bg-critical/.test(line)) {
+              out.push(`${relative(process.cwd(), p)}:${i + 1}`);
+            }
+          });
+      }
+    }
+  };
+  walk(root);
+  return out.sort();
+}
+
+/**
+ * Files still carrying `text-white` on a bg-accent/bg-critical surface, with the
+ * count recorded at the time this scan landed. NOT owned by this batch — each is
+ * a destructive-confirm button, a segmented control or a nav/CTA in another
+ * agent's file. Fix a file: drop its entry (a stale entry fails below).
+ *
+ * app.ts:63 is the focus-visible skip-link, which the register explicitly exempts
+ * as unrelated; it is listed rather than exempted so the count is honest and the
+ * decision is visible instead of silently filtered out.
+ */
+const TEXT_WHITE_ALLOWLIST: Readonly<Record<string, number>> = {
+  'src/app/app.ts': 2,
+  'src/app/configuration/manage-cost-categories.component.ts': 1,
+  'src/app/configuration/manage-cost-centers.component.ts': 1,
+  'src/app/configuration/manage-industries.component.ts': 1,
+  'src/app/configuration/manage-locations.component.ts': 1,
+  'src/app/configuration/manage-partner-roles.component.ts': 1,
+  'src/app/configuration/manage-rate-cards.component.ts': 1,
+  'src/app/configuration/manage-vendors.component.ts': 1,
+  'src/app/not-found/not-found.component.ts': 1,
+  'src/app/projects/project-partners/project-partners.ts': 1,
+  'src/app/projects/project-rates/project-rates.ts': 1,
+  'src/app/projects/projects/projects.ts': 1,
+  'src/app/resources/resources.component.ts': 1,
+  'src/app/utilization/utilization.component.ts': 3,
+};
+
+describe('text-white on bg-accent / bg-critical is confined to a shrinking allow-list', () => {
+  const byFile = (): Map<string, number> => {
+    const counts = new Map<string, number>();
+    for (const site of textWhiteOffenders()) {
+      const file = site.slice(0, site.lastIndexOf(':'));
+      counts.set(file, (counts.get(file) ?? 0) + 1);
+    }
+    return counts;
+  };
+
+  it('has no offender outside the allow-list', () => {
+    const strays = [...byFile().keys()].filter(f => !(f in TEXT_WHITE_ALLOWLIST)).sort();
+    expect(strays).toEqual([]);
+  });
+
+  it('never grows: no allow-listed file carries more offenders than recorded', () => {
+    const counts = byFile();
+    for (const [file, cap] of Object.entries(TEXT_WHITE_ALLOWLIST)) {
+      expect(counts.get(file) ?? 0, `${file} gained a new text-white site`).toBeLessThanOrEqual(cap);
+    }
+  });
+
+  it('keeps no stale entry: every allow-listed file still has at least one offender', () => {
+    // This is what makes the list SHRINK rather than calcify — and it is also the
+    // non-vacuity proof for the two assertions above, because it fails if the
+    // scan stops reading these files at all (a broken walk, a changed path).
+    const counts = byFile();
+    for (const file of Object.keys(TEXT_WHITE_ALLOWLIST)) {
+      expect(counts.get(file) ?? 0, `${file} is fixed — delete its allow-list entry`).toBeGreaterThan(0);
+    }
+  });
+
+  it('measures the ratio the swap is for: ink-inverse beats white on both surfaces', () => {
+    // The token NAME is not the claim; the number is. Asserted here as well as in
+    // the scoped test above so the repo-wide list cannot be "satisfied" by a
+    // rename that moves no contrast.
+    const dark = cssBlock(GLOBAL_CSS, ':root[data-theme="dark"]');
+    const white: Oklch = { l: 1, c: 0, h: 0 };
+    const inkInverse = token(dark, '--color-ink-inverse');
+
+    for (const surface of ['--color-accent', '--color-critical'] as const) {
+      const bg = token(dark, surface);
+      // White is below AA on both — the defect the allow-list is tracking.
+      expect(contrast(white, bg), `white on dark ${surface}`).toBeLessThan(4.5);
+      // And the replacement token genuinely moves the number on both.
+      expect(
+        contrast(inkInverse, bg),
+        `ink-inverse must beat white on dark ${surface}`,
+      ).toBeGreaterThan(contrast(white, bg));
+    }
+  });
+
+  it('clears AA on bg-accent but NOT on dark bg-critical, which needs a token decision', () => {
+    /*
+     * Recorded deliberately, because the register's remedy is only half right and a
+     * later reader must not assume the allow-list above is purely clerical.
+     *
+     *   dark --color-accent   : white 3.40:1 -> ink-inverse 5.27:1  (AA reached)
+     *   dark --color-critical : white 4.01:1 -> ink-inverse 4.47:1  (AA NOT reached)
+     *
+     * So swapping the class fixes the accent sites outright, while every dark
+     * bg-critical site — all of them destructive-confirm buttons — stays under AA
+     * for small text no matter which of the two foregrounds it picks. Closing that
+     * needs the dark `--color-critical` fill itself to move, which is a background
+     * token ~30 unrelated call sites paint with; not a change to slip into a tail
+     * batch. This spec pins the arithmetic so the decision is made on numbers.
+     */
+    const dark = cssBlock(GLOBAL_CSS, ':root[data-theme="dark"]');
+    const inkInverse = token(dark, '--color-ink-inverse');
+
+    expect(contrast(inkInverse, token(dark, '--color-accent'))).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(inkInverse, token(dark, '--color-critical'))).toBeLessThan(4.5);
+    // It does clear the 3:1 large-text floor, so a >=18.66px bold label is fine
+    // there today; it is the 14px button labels that are not.
+    expect(contrast(inkInverse, token(dark, '--color-critical'))).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// The other half of the -text token family: red used as SMALL TEXT.
+// -----------------------------------------------------------------------------
+
+const WHAT_IF_SRC = readFileSync(resolve(process.cwd(), 'src/app/forecast/what-if.ts'), 'utf8');
+
+describe('Capacity Control renders negative figures at AA in dark theme', () => {
+  const DARK = cssBlock(GLOBAL_CSS, ':root[data-theme="dark"]');
+  const SURFACES = ['--color-surface', '--color-surface-muted'] as const;
+
+  it('resolves --cc-red-text to a shade that clears 4.5:1 where the raw fill tone does not', () => {
+    // The RATIO, not the token name: --cc-red reads 4.47:1 on the dark surface, so
+    // a spec asserting "the template says --cc-red-text" would have been green
+    // against the failing value. Both surfaces are checked because the data tables
+    // here zebra-stripe, and the muted row is the worse of the two.
+    const criticalFill = token(DARK, '--color-critical');
+    const criticalText = token(DARK, '--color-critical-text');
+    for (const s of SURFACES) {
+      const surface = token(DARK, s);
+      expect(contrast(criticalFill, surface), `raw --cc-red on dark ${s}`).toBeLessThan(4.5);
+      expect(contrast(criticalText, surface), `--cc-red-text on dark ${s}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it('uses no raw --cc-red in a colour position on either Capacity Control screen', () => {
+    // Absence over both owned templates: the Gap column, the "Over by" column and
+    // /what-if's demand delta are all 14px figures, so 4.5:1 applies to each.
+    // Scoped to `color`/`[style.color]` so it cannot fire on styles.css's
+    // border-top-color, which must KEEP the fill tone.
+    const inColourPosition = (src: string): string[] =>
+      src
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('\n')
+        .filter(line => /(\[style\.color\]|(?<!-)\bcolor:)/.test(line) && /var\(--cc-red\)/.test(line));
+
+    expect(inColourPosition(COMPONENT_SRC), 'forecast.ts').toEqual([]);
+    expect(inColourPosition(WHAT_IF_SRC), 'what-if.ts').toEqual([]);
+
+    // Non-vacuous: the identical scan finds the GREEN twin in a colour position on
+    // both files, which proves it is really reading these bindings — the same
+    // control the register asks for.
+    const greenTwin = (src: string): string[] =>
+      src.split('\n').filter(line => /(\[style\.color\]|(?<!-)\bcolor:)/.test(line) && /var\(--cc-green-text\)/.test(line));
+    expect(greenTwin(COMPONENT_SRC).length).toBeGreaterThan(0);
+    expect(greenTwin(WHAT_IF_SRC).length).toBeGreaterThan(0);
+  });
+
+  it('paints a negative gap with the -text shade and a positive one green — same cell, opposite states', async () => {
+    // Rendered, not source-scanned, and BOTH branches on the one element: a fix
+    // that dropped the red branch entirely would pass an absence-only check.
+    // 1600h of demand over 8 weeks = 200h/week against 100h/week of supply.
+    const over = await setup(evenDemandStub(100, 1600));
+    await flush(over);
+    const gapCells = Array.from(
+      host(over).querySelectorAll<HTMLElement>('tbody tr td:nth-child(5)'),
+    ).filter(td => td.classList.contains('num'));
+    expect(gapCells.length).toBeGreaterThan(0);
+    expect(gapCells[0].textContent?.trim()).toMatch(/^-/);
+    expect(gapCells[0].style.color).toBe('var(--cc-red-text)');
+
+    // Both states belong in ONE test (that is what makes the pair load-bearing),
+    // and the second needs a different API stub, so the module is reset rather
+    // than the assertions being split across two `it`s.
+    TestBed.resetTestingModule();
+
+    // The paired positive: spare capacity keeps the green -text shade.
+    const under = await setup(evenDemandStub(100, 360));
+    await flush(under);
+    const spare = Array.from(
+      host(under).querySelectorAll<HTMLElement>('tbody tr td:nth-child(5)'),
+    ).filter(td => td.classList.contains('num'));
+    expect(spare[0].textContent?.trim()).not.toMatch(/^-/);
+    expect(spare[0].style.color).toBe('var(--cc-green-text)');
   });
 });

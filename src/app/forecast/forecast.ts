@@ -158,12 +158,20 @@ interface PeriodRow extends CapacityPeriod {
             </div>
           </div>
 
-          <!-- Supply (Σ capacity) vs the committed + pipeline demand stack, per week. -->
+          <!-- Supply (Σ capacity) vs the committed + pipeline demand STACK, per week.
+               Supply goes through [overlay], not [series]: this chart is stacked, and
+               [stacked] stacks every entry of [series], so a Supply left in that list
+               would be added ON TOP of the demand it is supposed to be compared with —
+               a week booked to exactly its capacity would draw a column of 2x supply
+               and read as a shortfall. As an overlay it is a step reference LINE that
+               still widens the y-domain, so a supply above the stack raises the axis
+               instead of being clipped flat along the top gridline. -->
           <div class="px-5 pt-4">
             <command-bar-chart
               [categories]="weekLabels()"
-              [series]="capacitySeries()"
-              [stacked]="false"
+              [series]="demandSeries()"
+              [overlay]="supplyOverlay()"
+              [stacked]="true"
               [height]="300"
               formatKind="number"
               ariaLabel="Supply versus committed and pipeline demand by week"
@@ -220,7 +228,11 @@ interface PeriodRow extends CapacityPeriod {
                         @if (row.utilizationPct === null) { n/a } @else { {{ row.utilizationPct | number: '1.0-0' }}% }
                       </span>
                     </td>
-                    <td class="num font-semibold" [style.color]="row.gap < 0 ? 'var(--cc-red)' : 'var(--cc-green-text)'">
+                    <!-- --cc-red-text, not --cc-red: this is a 14px figure, so the
+                         4.5:1 AA floor applies and the raw fill tone reads 4.47:1 on
+                         the dark surface. Its green twin already uses the -text shade;
+                         the pair must be measured the same way. -->
+                    <td class="num font-semibold" [style.color]="row.gap < 0 ? 'var(--cc-red-text)' : 'var(--cc-green-text)'">
                       {{ row.gap | number: '1.0-0' }}
                     </td>
                   </tr>
@@ -304,7 +316,8 @@ interface PeriodRow extends CapacityPeriod {
                       <td class="num">
                         <span class="command-status red">{{ o.utilization | number: '1.0-0' }}%</span>
                       </td>
-                      <td class="num font-semibold" style="color: var(--cc-red)">{{ o.overByHours | number: '1.0-0' }}h</td>
+                      <!-- Small text again (see the Gap column): the -text shade. -->
+                      <td class="num font-semibold" style="color: var(--cc-red-text)">{{ o.overByHours | number: '1.0-0' }}h</td>
                     </tr>
                   } @empty {
                     <tr>
@@ -477,18 +490,31 @@ export class Forecast {
   );
 
   /**
-   * Capacity bar series — Supply (series-6/slate), Committed (accent), Pipeline (series-2/teal).
-   * Committed and Pipeline get genuinely distinct tones so the two demand bands (and
-   * their matching legend swatches) never collapse to the same colour.
+   * The DEMAND stack only — Committed (accent) over Pipeline (series-2/teal), so the
+   * two bands read as one total demand column per week and keep genuinely distinct
+   * tones (their legend swatches must never collapse to the same colour).
+   *
+   * Supply is deliberately NOT here; see {@link supplyOverlay}.
    */
-  readonly capacitySeries = computed<BarSeries[]>(() => {
+  readonly demandSeries = computed<BarSeries[]>(() => {
     const rows = this.periods();
     return [
-      { name: 'Supply', values: rows.map(r => r.supply), color: 'var(--color-series-6)' },
       { name: 'Committed', values: rows.map(r => r.committed), color: 'var(--color-accent)' },
       { name: 'Pipeline', values: rows.map(r => r.pipeline), color: 'var(--color-series-2)' },
     ];
   });
+
+  /**
+   * Supply (Σ capacity) as the chart's reference overlay rather than a third bar.
+   * A stacked chart adds every [series] entry together, so supply-as-a-series would
+   * be summed INTO the demand it exists to be measured against; as an overlay it is
+   * drawn as a step line that still contributes to the y-domain.
+   */
+  readonly supplyOverlay = computed<BarSeries>(() => ({
+    name: 'Supply',
+    values: this.periods().map(r => r.supply),
+    color: 'var(--color-series-6)',
+  }));
 
   /**
    * Utilisation trend (as a 0..1 fraction so the percent formatter renders 42%

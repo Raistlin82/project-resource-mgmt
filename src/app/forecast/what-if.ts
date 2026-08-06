@@ -306,12 +306,19 @@ interface TimelineRow {
             </div>
           </div>
 
-          <!-- Scenario supply vs committed + pipeline demand stack, per week. -->
+          <!-- Scenario supply vs the committed + pipeline demand STACK, per week. Same
+               wiring as /forecast: Supply is an [overlay], never a [series] entry, because
+               [stacked] stacks every series and a stacked Supply would be added on top of
+               the demand it is the yardstick for. The overlay still widens the y-domain, so
+               a scenario that hires capacity above the stack raises the axis instead of
+               drawing a flat clipped line along the top gridline — which is exactly the
+               lever this screen exists to evaluate. -->
           <div class="px-5 pt-4">
             <command-bar-chart
               [categories]="weekLabels()"
-              [series]="scenarioCapacitySeries()"
-              [stacked]="false"
+              [series]="scenarioDemandSeries()"
+              [overlay]="scenarioSupplyOverlay()"
+              [stacked]="true"
               [height]="300"
               formatKind="number"
               ariaLabel="Scenario supply versus committed and pipeline demand by week"
@@ -358,8 +365,12 @@ interface TimelineRow {
                         @if (row.utilizationPct === null) { n/a } @else { {{ row.utilizationPct | number: '1.0-0' }}% }
                       </span>
                     </td>
+                    <!-- --cc-red-text, not --cc-red: a 14px delta is small text, so the
+                         AA floor is 4.5:1 and the raw fill tone reads 4.47:1 on the dark
+                         surface. The green branch beside it already uses the -text
+                         shade; a signed pair has to be measured on the same footing. -->
                     <td class="num font-semibold"
-                        [style.color]="row.demandDelta > 0 ? 'var(--cc-red)' : (row.demandDelta < 0 ? 'var(--cc-green-text)' : 'var(--cc-muted)')">
+                        [style.color]="row.demandDelta > 0 ? 'var(--cc-red-text)' : (row.demandDelta < 0 ? 'var(--cc-green-text)' : 'var(--cc-muted)')">
                       {{ row.demandDelta > 0 ? '+' : '' }}{{ row.demandDelta | number: '1.0-0' }}
                     </td>
                   </tr>
@@ -683,18 +694,29 @@ export class WhatIf {
   );
 
   /**
-   * Scenario capacity bars — Supply (series-6/slate), Committed (accent), Pipeline (series-2/teal).
-   * Committed and Pipeline get genuinely distinct tones so the two demand bands (and
-   * their matching legend swatches) never collapse to the same colour.
+   * The scenario DEMAND stack only — Committed (accent) over Pipeline (series-2/teal),
+   * in genuinely distinct tones so the two bands and their legend swatches never
+   * collapse. Supply is deliberately absent; see {@link scenarioSupplyOverlay}.
    */
-  readonly scenarioCapacitySeries = computed<BarSeries[]>(() => {
+  readonly scenarioDemandSeries = computed<BarSeries[]>(() => {
     const rows = this.scenarioPeriods();
     return [
-      { name: 'Supply', values: rows.map(r => r.supply), color: 'var(--color-series-6)' },
       { name: 'Committed', values: rows.map(r => r.committed), color: 'var(--color-accent)' },
       { name: 'Pipeline', values: rows.map(r => r.pipeline), color: 'var(--color-series-2)' },
     ];
   });
+
+  /**
+   * Scenario supply (Σ capacity under the levers) as the chart's reference overlay
+   * rather than a third bar, for the reason spelled out at the call site: a stacked
+   * chart sums every [series] entry, so supply-as-a-series is added into the demand
+   * it is meant to be compared with.
+   */
+  readonly scenarioSupplyOverlay = computed<BarSeries>(() => ({
+    name: 'Supply',
+    values: this.scenarioPeriods().map(r => r.supply),
+    color: 'var(--color-series-6)',
+  }));
 
   /** Baseline vs scenario weekly demand, aligned on the scenario's period axis. */
   readonly demandTrendSeries = computed<TrendSeries[]>(() => {
