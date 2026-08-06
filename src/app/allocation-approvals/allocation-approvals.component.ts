@@ -108,6 +108,16 @@ function shiftMonth(month: string, delta: number): string {
  * `multiMode()` (multi-resource, Task 12 — the toolbar's "Approve selected"
  * button, gated on more than one entry in `selectedResourceIds()`) is set;
  * deciding a month reloads the feed either way.
+ *
+ * The `months` this page hands the modal are the FEED's loaded window, and in
+ * multi mode they are also the bound on the modal's month sweep (RPT §4.2's
+ * "Approva e Prosegui": it walks itself forward to each remaining decidable
+ * month and never leaves that window — see `ApprovalModalComponent`'s
+ * `nextReviewableMonth`). So the From/To selectors above are what widens or
+ * narrows how far one multi-resource pass can reach, and the modal stays open
+ * across the whole pass: the reload each decision triggers must therefore not
+ * disturb the window's VALUES, which is why `from`/`to` are only ever seeded
+ * once (see the seeding effect) and never re-derived from a response.
  */
 @Component({
   selector: 'app-allocation-approvals',

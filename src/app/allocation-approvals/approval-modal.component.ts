@@ -57,10 +57,35 @@ interface Line {
  * rows are passed. In multi mode the body groups those lines back by
  * resource into one collapsible `<details>` section per row (resource name
  * as the header), and the primary action becomes "Approve & Continue"
- * (`data-test="approve-continue"`): after a decision it advances
- * `selectedMonth` to the next entry in `months()` and stays open, or emits
- * `closed` once the current month is the last one — regardless of per-item
- * errors, since the call itself completed.
+ * (`data-test="approve-continue"`) — the RPT §4.2 month SWEEP: after a
+ * decision the panel STAYS OPEN and walks itself to the next month that has
+ * something left for this approver to decide, so the whole selection's
+ * pending months are cleared without ever touching the month selector.
+ *
+ * WHERE THE SWEEP STOPS, and why it is not `idx + 1` (see
+ * `nextReviewableMonth`). The advance skips any month whose lines this actor
+ * cannot act on, and DECLARES ITSELF FINISHED — visibly, in the panel — once
+ * no later month in the loaded window has anything decidable left, instead of
+ * closing on the caller. Both halves are load-bearing:
+ *   - a blind `idx + 1` lands on the first barren month in range (a month with
+ *     no bookings, only already-decided ones, or only lines this actor is not
+ *     the manager of). Every footer action is disabled there, so the sweep
+ *     DEAD-ENDS: the approver has to go back to the "Open months" select by
+ *     hand — exactly the manual step "Approve & Continue" exists to remove.
+ *     The advance now only ever lands on a month whose actions are live.
+ *   - closing at the end was silent and, worse, indistinguishable from a
+ *     FULLY FAILED batch: the call completes with every item errored, the
+ *     panel vanishes, the host drops the checkbox selection, and the only
+ *     trace of the refusal is a toast over a page that no longer offers the
+ *     retry. Staying open with an explicit notice keeps the failed month on
+ *     screen and still checked.
+ * The window itself is the other bound: the sweep never leaves `months()`,
+ * which is the feed's loaded window (`/allocation-approvals` defaults it to
+ * the span of Open planning periods). Availability WITHIN that window is
+ * decided by `decidable()` and not by the period's Open/Closed status —
+ * `POST /allocation-approvals/decide` carries no open-period gate (that gate
+ * is on planning EDITS: save-month and submit-month), so a pending approval
+ * in a closed month is still the approver's to clear and must not be skipped.
  *
  * Server semantics this modal must respect (see decideAllocationMonths):
  * items are decided INDEPENDENTLY — a batch call can return a mix of decided
@@ -92,8 +117,8 @@ interface Line {
  * an empty, untitled panel — the common case is deciding a resource's last
  * pending item under the page's default Pending filter, which drops that
  * resource out of the server-filtered feed entirely. Multi mode never uses
- * this close-on-empty check; its advance-or-close rule above is the only one
- * that governs there.
+ * this close-on-empty check; the sweep rule above is the only one that
+ * governs there, and it never emits `closed` on its own.
  *
  * Renders its OWN full panel (header, body, footer) — same shape as
  * AllocationCalendarComponent — so the host only wraps it in the standard
@@ -117,6 +142,32 @@ interface Line {
           <mat-icon>close</mat-icon>
         </button>
       </div>
+
+      <!-- END OF THE SWEEP (RPT §4.2). The advance is the primary action's whole
+           promise, so the one state it cannot express silently is "there is
+           nothing further to advance to": this says so in words, names the month
+           it stopped on, and leaves the panel open with that month's own lines
+           still on screen. role="status" (not "alert") — it is the successful end
+           of a flow the approver drove, not a problem. It reports only about
+           months AFTER the current one, which is why it stays true even when this
+           month's batch was refused: those lines are still listed, still checked
+           and still retryable below.
+           Multi-mode only by PROVENANCE rather than by a multi() guard here:
+           sweepComplete is written by advanceOrDeclareComplete alone, which
+           decide() calls only on the multi branch.
+           OUTSIDE the scrolling body on purpose — a shrink-0 band between the
+           header and the overflow-y-auto region. Inside it, the notice scrolls
+           with the lines, so an approver who had scrolled down a long
+           multi-resource month would be told the sweep finished somewhere above
+           the fold. -->
+      @if (sweepComplete()) {
+        <div class="px-6 sm:px-8 pt-4 shrink-0" data-test="sweep-complete-band">
+          <div class="command-card-muted p-4 flex items-start gap-3" role="status" data-test="sweep-complete">
+            <mat-icon class="text-[20px] w-[20px] h-[20px] text-positive-text shrink-0">task_alt</mat-icon>
+            <p class="text-sm font-medium text-[var(--cc-ink)]">{{ sweepCompleteMessage() }}</p>
+          </div>
+        </div>
+      }
 
       <div class="p-6 sm:p-8 overflow-y-auto flex-1 space-y-4">
         @if (months().length > 0) {
@@ -419,8 +470,9 @@ export class ApprovalModalComponent {
    * A plain `linkedSignal(() => this.months()[0] ?? '')` would reset on every
    * reload even when the month list's VALUES are unchanged, because a fresh
    * feed response gives `months()` a new array reference each time — that
-   * would silently undo multi mode's "advance to the next month" (see
-   * `advanceOrClose`) the instant the host's post-decision reload lands.
+   * would silently undo multi mode's month sweep (see
+   * `advanceOrDeclareComplete`) the instant the host's post-decision reload
+   * lands.
    */
   selectedMonth = linkedSignal<string[], string>({
     source: () => this.months(),
@@ -561,9 +613,20 @@ export class ApprovalModalComponent {
     return n > 0 && n < this.decidableCount();
   });
 
+  /**
+   * "& Continue" is dropped once there is nowhere to continue TO (the same
+   * `nextReviewableMonth()` the advance itself consults, so the label and the
+   * behaviour cannot disagree). P2-22 discipline applied to the sweep: a label
+   * promising a continuation the click will not perform is the pre-click twin
+   * of the dead-end advance this change removes — the approver should be able
+   * to see the last month coming, not only learn about it afterwards from the
+   * completion notice.
+   */
   protected approveLabel = computed(() => {
     const n = this.checked().size;
-    if (this.multi()) return this.partialScope() ? `Approve selected (${n}) & Continue` : 'Approve & Continue';
+    if (this.multi() && this.nextReviewableMonth() !== null) {
+      return this.partialScope() ? `Approve selected (${n}) & Continue` : 'Approve & Continue';
+    }
     return this.partialScope() ? `Approve selected (${n})` : 'Approve month';
   });
 
@@ -728,6 +791,11 @@ export class ApprovalModalComponent {
   }
 
   protected onMonthChange(event: Event): void {
+    // Picking a month BY HAND resumes the review, so the completion notice must
+    // go with it: it claims "nothing after the month the sweep stopped on", and
+    // that claim is about a month the approver has just navigated away from.
+    // Left standing it would sit above a live, decidable month.
+    this.sweepComplete.set(false);
     this.selectedMonth.set((event.target as HTMLSelectElement).value);
   }
 
@@ -742,9 +810,10 @@ export class ApprovalModalComponent {
    * between them, so the `[disabled]` binding has not been applied yet when the
    * second handler runs. Before this, in multi mode, response 1 advanced the
    * modal to the next month and response 2 then advanced it AGAIN from there —
-   * a month nobody had been shown was walked past and the modal closed as if the
-   * whole batch had been reviewed. Cleared in both the next and error callbacks
-   * (never as a one-shot latch) so the following month stays decidable.
+   * a month nobody had been shown was walked past and the panel signed off as if
+   * the whole batch had been reviewed (it closed outright, back when the sweep
+   * ended by closing). Cleared in both the next and error callbacks (never as a
+   * one-shot latch) so the following month stays decidable.
    */
   protected deciding = signal(false);
 
@@ -770,8 +839,9 @@ export class ApprovalModalComponent {
    * and left the user believing the rest had gone through.
    *
    * What happens next differs by mode:
-   *  - multi: always advance to the next month or close on the last one
-   *    (the call completed either way — see the class doc comment).
+   *  - multi: always run the sweep — advance to the next month that still has
+   *    something decidable, or declare itself finished and stay open (the call
+   *    completed either way — see the class doc comment).
    *  - single: close when nothing is left to decide — simulated locally from
    *    the CURRENT `rows()` plus this response's successfully-decided ids,
    *    rather than waiting on the host's async reload to feed back new rows.
@@ -795,8 +865,8 @@ export class ApprovalModalComponent {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (res) => {
-          // Released BEFORE the advance/close below, so the next month arrives
-          // with a live footer rather than one the guard has stranded.
+          // Released BEFORE the sweep below, so the next month arrives with a
+          // live footer rather than one the guard has stranded.
           this.deciding.set(false);
           const failures = res.results.filter(r => r.status === 'Error');
           if (failures.length > 0) {
@@ -810,7 +880,7 @@ export class ApprovalModalComponent {
           this.decided.emit();
 
           if (this.multi()) {
-            this.advanceOrClose();
+            this.advanceOrDeclareComplete();
             return;
           }
           const decidedIds = new Set(res.results.filter(r => r.status !== 'Error').map(r => r.assignmentMonthId));
@@ -833,20 +903,76 @@ export class ApprovalModalComponent {
       row.items.every(item => decidedIds.has(item.assignmentMonthId) || !this.decidable({ row, item })));
   }
 
-  /** Multi-mode advance rule: move to the next month in `months()`, or emit
-   *  `closed` once the current month is the last one. `checked()` re-derives
-   *  for the new month automatically — it is a `computed` over `decidableIds()`,
-   *  which walks `lines()`, which recomputes off `selectedMonth`. The approver's
-   *  `excluded` ids survive the move, but they are keyed by assignmentMonthId
-   *  (month included), so none of them can match a line of the NEXT month. */
-  private advanceOrClose(): void {
+  /**
+   * True once the sweep has run out of months to advance to — see the class doc
+   * comment. Set ONLY by `advanceOrDeclareComplete` (so it can never claim the
+   * end of a sweep that never ran) and cleared by `onMonthChange`.
+   */
+  protected sweepComplete = signal(false);
+
+  /** The notice's wording. It states what the sweep found — "no later month",
+   *  naming the month it stopped on — and deliberately NOT "everything is
+   *  approved": lines the approver un-checked here, and lines the server
+   *  refused, are still pending and still on screen. */
+  protected sweepCompleteMessage = computed(() =>
+    `Reviewed up to ${this.monthLabelLong(this.selectedMonth())} — no later month in this range has anything left for you to decide. `
+    + 'Close the panel when you are done.');
+
+  /**
+   * Does any loaded row have a line in `month` this actor could actually decide?
+   * The SAME `decidable()` predicate the checkboxes and `checked()` are gated
+   * on, which is what makes the sweep's landing month a month whose footer
+   * actions are live — not merely a month that exists.
+   */
+  private hasDecidableLines(month: string): boolean {
+    return this.rows().some(row =>
+      row.items.some(item => item.month === month && this.decidable({ row, item })));
+  }
+
+  /**
+   * The next month of the loaded window with something left for this actor to
+   * decide, or null when the sweep has nothing further to visit.
+   *
+   * SEARCHES FORWARD, SKIPPING BARREN MONTHS — never `months[idx + 1]`. A month
+   * with no bookings, only already-decided ones, or only lines this actor is not
+   * the accountable manager of, offers a disabled footer: landing there ends the
+   * sweep in a dead end the approver can only escape through the month selector.
+   *
+   * STRICTLY AFTER the current month, which is also what makes it safe to
+   * consult from `decide()`'s response callback: the host's post-decision reload
+   * is still in flight there, so `rows()` still shows the months just decided as
+   * 'Requested' — but a decision only ever touches lines of the CURRENT month
+   * (`checked()` comes from `lines()`, which filters on `selectedMonth`), so
+   * every month this walk looks at is one the response cannot have changed.
+   */
+  protected nextReviewableMonth = computed<string | null>(() => {
     const months = this.months();
     const idx = months.indexOf(this.selectedMonth());
-    if (idx === -1 || idx >= months.length - 1) {
-      this.closed.emit();
-      return;
+    if (idx === -1) return null;
+    for (let i = idx + 1; i < months.length; i++) {
+      if (this.hasDecidableLines(months[i])) return months[i];
     }
-    this.selectedMonth.set(months[idx + 1]);
+    return null;
+  });
+
+  /**
+   * Multi-mode sweep rule: move to the next month that still has something to
+   * decide, or declare the sweep finished and STAY OPEN. It never emits
+   * `closed` — see the class doc comment for why the previous auto-close was
+   * indistinguishable from a wholly refused batch.
+   *
+   * `checked()` re-derives for the new month automatically — it is a `computed`
+   * over `decidableIds()`, which walks `lines()`, which recomputes off
+   * `selectedMonth`. The approver's `excluded` ids survive the move, but they
+   * are keyed by assignmentMonthId (month included), so none of them can match
+   * a line of the month being advanced to.
+   */
+  private advanceOrDeclareComplete(): void {
+    const next = this.nextReviewableMonth();
+    // ONE assignment for both branches: a "finished" flag left latched from an
+    // earlier stop would sit above the month the sweep has just moved onto.
+    this.sweepComplete.set(next === null);
+    if (next !== null) this.selectedMonth.set(next);
   }
 
   private static readonly MONTH_FMT = new Intl.DateTimeFormat('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
