@@ -196,3 +196,53 @@ describe('ProjectIssues — status select after a refused PUT', () => {
     expect(api.updateProjectIssue).not.toHaveBeenCalled();
   });
 });
+
+describe('ProjectIssues — the Report Issue dialog survives a refused POST', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('keeps the dialog open with the title, impact and action plan intact when the POST is refused', async () => {
+    // THE DEFECT: closeForm() ran unconditionally right after firing the POST, so
+    // issueForm.reset() wiped every field — including the multi-line action plan —
+    // while the request was still in flight. On a refusal the reporter saw a toast
+    // over an empty screen and had to retype a long free-text field from memory.
+    const { fixture } = await render({
+      createProjectIssue: () => throwError(() => new HttpErrorResponse({
+        status: 400, error: { error: 'title already reported on this project' },
+      })),
+    });
+    const component = fixture.componentInstance;
+
+    component.showForm.set(true);
+    component.issueForm.patchValue({
+      title: 'Queue backlog', type: 'Risk', severity: 'High',
+      impact: 'Schedule slip of two weeks', actionPlan: 'Add consumers and re-baseline the sprint',
+    });
+    component.saveIssue();
+    await tick(fixture);
+
+    expect(component.showForm()).toBe(true);
+    expect(component.issueForm.controls.title.value).toBe('Queue backlog');
+    expect(component.issueForm.controls.impact.value).toBe('Schedule slip of two weeks');
+    expect(component.issueForm.controls.actionPlan.value).toBe('Add consumers and re-baseline the sprint');
+    // Stated INLINE, because error toasts in this app auto-dismiss and a dialog left
+    // open with a vanished toast is an unexplained refusal.
+    expect(host(fixture).querySelector('[data-test="issue-save-error"]')?.textContent)
+      .toContain('title already reported on this project');
+  });
+
+  it('MUST STILL close and reset when the POST is accepted', async () => {
+    // The assertion of ABSENCE: "never close the dialog" passes the case above and
+    // fails here, so the two together pin the actual behaviour.
+    const { fixture } = await render();
+    const component = fixture.componentInstance;
+
+    component.showForm.set(true);
+    component.issueForm.patchValue({ title: 'Queue backlog', actionPlan: 'Add consumers' });
+    component.saveIssue();
+    await tick(fixture);
+
+    expect(component.showForm()).toBe(false);
+    expect(component.issueForm.controls.title.value).toBeNull();
+    expect(host(fixture).querySelector('[data-test="issue-save-error"]')).toBeNull();
+  });
+});

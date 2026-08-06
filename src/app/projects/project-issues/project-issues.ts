@@ -128,6 +128,13 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
 
             <div class="p-6 sm:p-8 overflow-y-auto flex-1">
               <form [formGroup]="issueForm" (ngSubmit)="saveIssue()" class="space-y-6">
+                <!-- Rendered INLINE rather than left to the interceptor's toast, because
+                     error toasts in this app auto-dismiss: a dialog that stays open with a
+                     vanished toast is an unexplained refusal. Same shape as
+                     project-cost-centers.ts's saveError. -->
+                @if (saveError(); as err) {
+                  <p role="alert" data-test="issue-save-error" class="text-xs text-critical-text">{{ err }}</p>
+                }
                 <div>
                   <label for="issueTitle" class="block text-sm font-semibold text-ink-secondary mb-1.5">Title *</label>
                   <input id="issueTitle" type="text" formControlName="title" class="command-input" placeholder="e.g. API Rate Limiting">
@@ -301,8 +308,12 @@ export class ProjectIssues {
       });
   }
 
+  /** Server refusal text for the open dialog, or null. See the template comment. */
+  saveError = signal<string | null>(null);
+
   closeForm() {
     this.showForm.set(false);
+    this.saveError.set(null);
     this.issueForm.reset({ type: 'Bug', severity: 'Medium', reportedBy: '', owner: '', escalated: false });
   }
 
@@ -311,6 +322,7 @@ export class ProjectIssues {
     const pId = this.projectId() || this.selectedProjectId();
     if (!pId) return;
 
+    this.saveError.set(null);
     const v = this.issueForm.getRawValue();
     this.api.createProjectIssue({
       projectId: pId,
@@ -326,9 +338,23 @@ export class ProjectIssues {
       escalated: Boolean(v.escalated),
     })
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => this.issuesRes.reload());
-
-    this.closeForm();
+      // CLOSE ONLY ONCE THE SERVER HAS ACCEPTED IT — same rule as
+      // project-cost-centers.ts's saveCostCenter(). `closeForm()` used to run
+      // unconditionally right after firing the POST, so `issueForm.reset()` wiped the
+      // title, impact and the whole action plan while the request was still in
+      // flight; on a refusal the reporter got a toast over an empty screen and had to
+      // retype a long free-text field from memory.
+      .subscribe({
+        next: () => {
+          this.issuesRes.reload();
+          this.closeForm();
+        },
+        error: (e: unknown) => {
+          this.saveError.set(
+            (e as { error?: { error?: string } })?.error?.error ?? 'Could not report the issue.',
+          );
+        },
+      });
   }
 
   isOverdue(issue: Issue): boolean {

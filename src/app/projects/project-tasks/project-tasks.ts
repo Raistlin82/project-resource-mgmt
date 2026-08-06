@@ -150,6 +150,13 @@ type CommercialCoverage =
           
           <div class="p-6 sm:p-8 overflow-y-auto flex-1">
             <form [formGroup]="taskForm" (ngSubmit)="saveTask()" class="space-y-6">
+              <!-- Rendered INLINE rather than left to the interceptor's toast, because
+                   error toasts in this app auto-dismiss: a dialog that stays open with a
+                   vanished toast is an unexplained refusal. Same shape as
+                   project-cost-centers.ts's saveError. -->
+              @if (saveError(); as err) {
+                <p role="alert" data-test="task-save-error" class="text-xs text-critical-text">{{ err }}</p>
+              }
               <div>
                 <label for="taskName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Task Name *</label>
                 <input id="taskName" type="text" formControlName="name" class="command-input" placeholder="e.g. Design Database Schema">
@@ -341,8 +348,12 @@ export class ProjectTasks {
     });
   }
 
+  /** Server refusal text for the open dialog, or null. See the template comment. */
+  saveError = signal<string | null>(null);
+
   closeForm() {
     this.showForm.set(false);
+    this.saveError.set(null);
     this.taskForm.reset({ priority: 'Medium', status: 'To Do', assignee: 'Unassigned', assigneeType: 'Internal', partnerId: '' });
   }
 
@@ -368,8 +379,24 @@ export class ProjectTasks {
       priority: v.priority ?? 'Medium',
     };
 
-    this.api.createProjectTask(newTask).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.tasksRes.reload());
-    this.closeForm();
+    // CLOSE ONLY ONCE THE SERVER HAS ACCEPTED IT — same rule as
+    // project-cost-centers.ts's saveCostCenter(). `closeForm()` used to run
+    // unconditionally right after firing the POST, so `taskForm.reset()` wiped the
+    // name, assignee, partner and due date while the request was still in flight. A
+    // resource-manager, who can READ this table but not write it, hit exactly that:
+    // 403, a toast, and an empty form.
+    this.saveError.set(null);
+    this.api.createProjectTask(newTask).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {
+        this.tasksRes.reload();
+        this.closeForm();
+      },
+      error: (e: unknown) => {
+        this.saveError.set(
+          (e as { error?: { error?: string } })?.error?.error ?? 'Could not save the task.',
+        );
+      },
+    });
   }
 
   assignmentLabel(task: Task): string {

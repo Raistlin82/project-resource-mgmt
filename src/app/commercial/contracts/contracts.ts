@@ -88,11 +88,21 @@ import { SearchFilterBarComponent } from '../../shared/search-filter-bar.compone
       </div>
     </div>
 
-    <!-- New Contract Modal -->
+    <!--
+      SCROLL-SAFE OVERLAY (same shape as manage-rate-cards.component.ts:104-124 and
+      the billing create/edit overlay). Nine fields plus a header and a pinned footer
+      makes this the tallest form in the commercial chain. A POSITION:FIXED box cannot
+      be scrolled by the page, so "flex items-center" split the overflow above and
+      below the centre: on a short viewport the Customer select went above y=0 and
+      "Create Contract" below the fold, with no scroller anywhere — a contract could
+      be filled in and never created. The overlay now owns a scroller, anchors to the
+      top on short viewports and re-centres from the "sm" breakpoint up; the panel stays bounded by
+      max-h-[90vh] and its body scrolls, which keeps the footer reachable.
+    -->
     @if (showForm()) {
-      <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+      <div data-test="contract-form-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
            appModal ariaLabelledby="contractModalTitle" (dismiss)="closeForm()">
-        <div class="command-card w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+        <div data-test="contract-form-panel" class="command-card w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
           <div class="command-card-header">
             <h2 id="contractModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">New Contract</h2>
             <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-ink-muted hover:text-ink-secondary hover:bg-surface-muted transition-colors">
@@ -100,7 +110,7 @@ import { SearchFilterBarComponent } from '../../shared/search-filter-bar.compone
             </button>
           </div>
 
-          <div class="p-6 sm:p-8 overflow-y-auto flex-1">
+          <div class="p-6 sm:p-8 overflow-y-auto flex-1 min-h-0">
             <form [formGroup]="contractForm" (ngSubmit)="save()" class="space-y-6">
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div class="sm:col-span-2">
