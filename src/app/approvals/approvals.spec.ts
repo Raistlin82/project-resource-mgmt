@@ -201,3 +201,35 @@ describe('Approvals inbox — D allocation scope mirror', () => {
     expect(component.mineCount()).toBe(0);
   });
 });
+
+/**
+ * UX register P2-09 — the My inbox / All pending segmented control announced
+ * its selection to nobody: the pressed segment was marked by background,
+ * shadow and ink classes only, so a screen-reader user heard two identical
+ * buttons and could not tell which view they were looking at.
+ *
+ * Asserted as the PAIR, in both directions. `getAttribute('aria-pressed')` is
+ * truthy even when it returns the string 'false', so a single presence check
+ * would pass on a control that hard-codes one value on both buttons; requiring
+ * ['true','false'] and then ['false','true'] cannot.
+ */
+describe('Approvals inbox — the segmented filter exposes its selection (P2-09)', () => {
+  it('marks the selected segment aria-pressed=true and the other false, both ways round', async () => {
+    const { fixture, component } = await setup({ approvals: [allocation('AR1', 'A_RR')], userId: 'mid' });
+    const host = fixture.nativeElement as HTMLElement;
+    const pressed = () =>
+      Array.from(host.querySelectorAll('[data-test^="filter-"]')).map(b => b.getAttribute('aria-pressed'));
+
+    // `setup` leaves the filter on 'all' so the scope cases can read every row.
+    component.filter.set('mine');
+    fixture.detectChanges();
+    expect(pressed()).toEqual(['true', 'false']);
+
+    // Driven through the rendered control, not the signal: the state has to
+    // follow the button the user actually pressed.
+    host.querySelector<HTMLButtonElement>('[data-test="filter-all"]')!.click();
+    fixture.detectChanges();
+    expect(component.filter()).toBe('all');
+    expect(pressed()).toEqual(['false', 'true']);
+  });
+});

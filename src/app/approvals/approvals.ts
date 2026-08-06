@@ -96,8 +96,18 @@ const OUT_OF_SCOPE_TITLE = 'You do not manage this resource, so you cannot decid
             Review and decide items awaiting your sign-off across time, expenses, milestones, changes, and invoices.
           </p>
         </div>
+        <!-- UX register P2-09: the pressed segment used to be marked by
+             background/shadow/ink classes ONLY, so the control announced its
+             selection to nobody — a screen-reader user met two identically
+             named buttons with no way to tell which view was showing.
+             aria-pressed goes on BOTH segments, never only on the pressed one:
+             the attribute's ABSENCE is not the same statement as "false", and a
+             control that carries it on one button only reads as a single
+             stateful toggle rather than a two-option choice. Bound off the same
+             filter() the classes read, so the two can never disagree. -->
         <div class="command-card-muted p-1 flex items-center self-start sm:self-auto">
-          <button type="button" (click)="filter.set('mine')"
+          <button type="button" (click)="filter.set('mine')" data-test="filter-mine"
+                  [attr.aria-pressed]="filter() === 'mine'"
                   [class.bg-surface]="filter() === 'mine'"
                   [class.shadow-sm]="filter() === 'mine'"
                   [class.text-ink]="filter() === 'mine'"
@@ -106,7 +116,8 @@ const OUT_OF_SCOPE_TITLE = 'You do not manage this resource, so you cannot decid
             My inbox
             <span class="command-status">{{ mineCount() }}</span>
           </button>
-          <button type="button" (click)="filter.set('all')"
+          <button type="button" (click)="filter.set('all')" data-test="filter-all"
+                  [attr.aria-pressed]="filter() === 'all'"
                   [class.bg-surface]="filter() === 'all'"
                   [class.shadow-sm]="filter() === 'all'"
                   [class.text-ink]="filter() === 'all'"

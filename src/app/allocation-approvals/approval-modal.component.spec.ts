@@ -2,7 +2,16 @@ import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { Observable, of, Subject } from 'rxjs';
 import { ApprovalModalComponent } from './approval-modal.component';
-import { AllocationApprovalRow, ApiService, Resource, ResourceOrganization, SubstitutionResult, UserRole } from '../services/api.service';
+import {
+  AllocationApprovalRow,
+  AllocationDecisionItem,
+  AllocationDecisionResult,
+  ApiService,
+  Resource,
+  ResourceOrganization,
+  SubstitutionResult,
+  UserRole,
+} from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 
@@ -53,11 +62,83 @@ const RESOURCES: Resource[] = [
   { id: 'r11', name: 'Terminated Tom', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 0, kind: 'internal', organization: 'Digital', terminationDate: '2020-01-01' },
 ];
 
+/**
+ * Fixtures for the two catalogue-race cases below. The principal ('mgr',
+ * 'resource-manager') is authorized THROUGH the catalogue reads, never by the
+ * feed row's own `managerId` — none of these rows carries one — so
+ * `canDecideFor` really does dereference `resources()` and `orgNodes()` and the
+ * modal really does recompute when either lands. That is the whole point: with
+ * an admin principal `canDecideFor` short-circuits on the role and neither read
+ * is ever touched, so the same test would pass vacuously.
+ */
+const RACE_CATALOGUE: Resource[] = (
+  [
+    // The signed-in manager themself: the org CHART walk resolves managers
+    // through this list, so an id absent from it authorizes nobody.
+    { id: 'mgr', name: 'Manager Mo' },
+    // 'p1' reports to 'mgr' directly -> its lines are decidable in BOTH windows,
+    // before and after either read lands.
+    { id: 'p1', name: 'Ada', managerId: 'mgr' },
+    // 'p2' hangs off a node somebody ELSE manages: decidable only while the tree
+    // (or the resource list that names its organization) is still missing —
+    // `roleFallback` — and refused the moment it arrives. That FLIP is the
+    // DOM-visible proof the emission was flushed.
+    { id: 'p2', name: 'Bob', organization: 'Cap' },
+  ] as Partial<Resource>[]
+).map(r => ({
+  role: 'Developer', skills: [], projectRoles: [], externalExperience: [],
+  utilization: 0, capacity: 40, kind: 'internal' as const, ...r,
+})) as Resource[];
+
+const RACE_TREE: ResourceOrganization[] = [
+  { id: 'n1', name: 'Cap', description: '', costCenters: [], level: 'capability', managerId: 'other' },
+];
+
+/** Two decidable lines on a resource 'mgr' manages. `A1` is the one the approver
+ *  un-checks; `A2` is the untouched line that must STAY checked. */
+const ROW_RACE_A: AllocationApprovalRow = {
+  resourceId: 'p1', resourceName: 'Ada', kind: 'internal', contractHoursPerDay: 8,
+  targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 120 },
+  items: [
+    { assignmentMonthId: 'A1:2026-09', assignmentId: 'A1', month: '2026-09', status: 'Requested', requestId: '1', projectName: 'Apollo', hours: 80, approvalId: 'AR1' },
+    { assignmentMonthId: 'A2:2026-09', assignmentId: 'A2', month: '2026-09', status: 'Requested', requestId: '2', projectName: 'Gemini', hours: 40, approvalId: 'AR2' },
+  ],
+};
+
+/** The line whose decidability FLIPS when the pending read lands. No
+ *  `organization` on the ROW itself — the resource list is what carries it, so
+ *  the flip is driven by the read under test and not by the feed. */
+const ROW_RACE_B: AllocationApprovalRow = {
+  resourceId: 'p2', resourceName: 'Bob', kind: 'internal', contractHoursPerDay: 8,
+  targetHours: { '2026-09': 176 }, totalHours: { '2026-09': 80 },
+  items: [
+    { assignmentMonthId: 'B1:2026-09', assignmentId: 'B1', month: '2026-09', status: 'Requested', requestId: '3', projectName: 'Zeus', hours: 80, approvalId: 'AR3' },
+  ],
+};
+
+/** One resource booked in TWO consecutive months — the shape the double-click
+ *  case needs, since it must show that the SECOND month is still decidable. */
+const ROW_TWO_MONTHS: AllocationApprovalRow = {
+  resourceId: 'r1', resourceName: 'Ada', managerId: 'm1', kind: 'internal', contractHoursPerDay: 8,
+  targetHours: { '2026-09': 176, '2026-10': 176 }, totalHours: { '2026-09': 80, '2026-10': 80 },
+  items: [
+    { assignmentMonthId: 'M1:2026-09', assignmentId: 'M1', month: '2026-09', status: 'Requested', requestId: '1', projectName: 'Apollo', hours: 80, approvalId: 'AR1' },
+    { assignmentMonthId: 'M1:2026-10', assignmentId: 'M1', month: '2026-10', status: 'Requested', requestId: '1', projectName: 'Apollo', hours: 80, approvalId: 'AR2' },
+  ],
+};
+
 interface SetupOptions {
   rows?: AllocationApprovalRow[];
   months?: string[];
   multi?: boolean;
   decideResults?: { assignmentMonthId: string; status: string; error?: string }[];
+  /**
+   * Override the OBSERVABLE `decideAllocationMonths()` returns. Defaults to a
+   * synchronous `of({ results })`, which answers INSIDE the click handler and
+   * so cannot show anything about an in-flight decision. Pass a Subject to hold
+   * the batch open across a second click.
+   */
+  decideSource?: Observable<{ results: AllocationDecisionResult[] }>;
   /** Effective role of the signed-in principal (mirrors AuthService.role()). */
   role?: UserRole;
   /** The principal's RESOURCE id (mirrors AuthService.userId()). */
@@ -78,6 +159,12 @@ interface SetupOptions {
    * that depends on the tree arriving AFTER the resource list.
    */
   orgsSource?: Observable<ResourceOrganization[]>;
+  /**
+   * Same seam as `orgsSource`, for the OTHER catalogue leg. `/resources` and
+   * `/resource-organizations` are two independent requests; either one can be
+   * the last to land, so both windows need pinning.
+   */
+  resourcesSource?: Observable<Resource[]>;
   /** Result `substituteDummyMonth()` resolves with. */
   substituteResult?: SubstitutionResult;
 }
@@ -94,13 +181,21 @@ function setup({
   resources = RESOURCES,
   orgs = [],
   orgsSource,
+  resourcesSource,
+  decideSource,
   substituteResult = {
     targetResourceId: 'r9', targetResourceName: 'Nora Fenn',
     outcomes: [{ month: '2026-09', transferredHours: 8, remainingHours: 0, targetAssignmentMonthId: 'X1:2026-09', status: 'Requested' }],
   },
 }: SetupOptions = {}) {
-  const decideAllocationMonths = vi.fn(() => of({ results: decideResults }));
-  const getResources = vi.fn(() => of(resources));
+  /** Every batch payload the component sent, in order — what the double-click
+   *  case asserts on (the call COUNT and the ids, never the DOM). */
+  const decideCalls: AllocationDecisionItem[][] = [];
+  const decideAllocationMonths = vi.fn((items: AllocationDecisionItem[]) => {
+    decideCalls.push(items);
+    return decideSource ?? of({ results: decideResults });
+  });
+  const getResources = vi.fn(() => resourcesSource ?? of(resources));
   const getResourceOrganizations = vi.fn(() => orgsSource ?? of(orgs));
   const substituteDummyMonth = vi.fn(() => of(substituteResult));
   const apiStub = { decideAllocationMonths, getResources, getResourceOrganizations, substituteDummyMonth } as unknown as ApiService;
@@ -123,7 +218,7 @@ function setup({
   fixture.componentRef.setInput('months', months);
   fixture.componentRef.setInput('multi', multi);
   fixture.detectChanges();
-  return { fixture, decideAllocationMonths, getResources, substituteDummyMonth, notifyStub };
+  return { fixture, decideAllocationMonths, decideCalls, getResources, substituteDummyMonth, notifyStub };
 }
 
 describe('ApprovalModalComponent', () => {
@@ -766,5 +861,206 @@ describe('ApprovalModalComponent — Substitute (C2)', () => {
 
     // Still offered — now a real, tree-backed exact match, not a skipped check.
     expect(host.textContent).toContain('Cap Cara');
+  });
+});
+
+/**
+ * REGISTER (P2/logic, approval-modal.component.ts:438) — the approver's
+ * un-check must SURVIVE the modal's own catalogue reads landing.
+ *
+ * The modal fires `/resources` and `/resource-organizations` itself and the
+ * check-set default is derived from `decidable()`, which reads both. While
+ * either is in flight the approver can un-check a line; when the read lands the
+ * default was rebuilt and the un-checked line came BACK, so `decide()` posted a
+ * month the approver had deliberately excluded. There is no undo on this screen.
+ *
+ * Each case pins FOUR things, and the pairing is what makes it non-vacuous:
+ *   - the un-checked line stays OUT (the defect; red before the fix);
+ *   - an untouched, still-decidable line stays IN (so "clear the set" cannot pass);
+ *   - a line the arriving read reveals as NOT decidable leaves the set (so
+ *     "freeze the set forever" cannot pass either);
+ *   - that same line's checkbox flips to disabled — the DOM-visible proof the
+ *     emission was actually flushed, without which every assertion above would
+ *     hold trivially on a test that never emitted.
+ */
+describe('ApprovalModalComponent — the approver\'s un-check survives the catalogue reads (register :438)', () => {
+  /** `/resources` resolves synchronously; only the pending leg is left open, so
+   *  `whenStable()` cannot be used (it never settles — see the Substitute
+   *  round-1 test). A couple of microtasks let the synchronous `of(...)` land. */
+  async function settleResolvedLeg(fixture: { detectChanges: () => void }): Promise<void> {
+    fixture.detectChanges();
+    await Promise.resolve();
+    await Promise.resolve();
+    fixture.detectChanges();
+  }
+
+  it('keeps a line un-checked when the ORG TREE lands afterwards', async () => {
+    const orgsSubject = new Subject<ResourceOrganization[]>();
+    const { fixture } = setup({
+      rows: [ROW_RACE_A, ROW_RACE_B], months: ['2026-09'], multi: true,
+      role: 'resource-manager', userId: 'mgr',
+      resources: RACE_CATALOGUE, orgsSource: orgsSubject,
+    });
+    await settleResolvedLeg(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+    const component = fixture.componentInstance;
+
+    // Pre-condition: all three lines are pre-checked, and Bob's line is still
+    // offered — the tree that will refuse it has not arrived.
+    expect([...component.checked()].sort()).toEqual(['A1:2026-09', 'A2:2026-09', 'B1:2026-09']);
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Select Zeus"]')!.disabled).toBe(false);
+
+    // The approver un-checks Apollo, through the rendered checkbox.
+    host.querySelector<HTMLInputElement>('[aria-label="Select Apollo"]')!.click();
+    fixture.detectChanges();
+    expect(component.checked().has('A1:2026-09')).toBe(false);
+
+    orgsSubject.next(RACE_TREE);
+    orgsSubject.complete();
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // The tree really did land: Bob's line is now refused.
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Select Zeus"]')!.disabled).toBe(true);
+    // The edit survived...
+    expect(component.checked().has('A1:2026-09')).toBe(false);
+    // ...the untouched line is still checked (the set was not simply cleared)...
+    expect(component.checked().has('A2:2026-09')).toBe(true);
+    // ...and the newly-refused line left it (the set was not simply frozen).
+    expect(component.checked().has('B1:2026-09')).toBe(false);
+  });
+
+  it('keeps a line un-checked when the RESOURCE LIST lands afterwards', async () => {
+    const resourcesSubject = new Subject<Resource[]>();
+    const { fixture } = setup({
+      rows: [ROW_RACE_A, ROW_RACE_B], months: ['2026-09'], multi: true,
+      role: 'resource-manager', userId: 'mgr',
+      orgs: RACE_TREE, resourcesSource: resourcesSubject,
+    });
+    await settleResolvedLeg(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+    const component = fixture.componentInstance;
+
+    // Bob's line is offered because nothing yet says which organization he is
+    // in — the feed row deliberately does not carry one.
+    expect([...component.checked()].sort()).toEqual(['A1:2026-09', 'A2:2026-09', 'B1:2026-09']);
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Select Zeus"]')!.disabled).toBe(false);
+
+    host.querySelector<HTMLInputElement>('[aria-label="Select Apollo"]')!.click();
+    fixture.detectChanges();
+    expect(component.checked().has('A1:2026-09')).toBe(false);
+
+    resourcesSubject.next(RACE_CATALOGUE);
+    resourcesSubject.complete();
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Select Zeus"]')!.disabled).toBe(true);
+    expect(component.checked().has('A1:2026-09')).toBe(false);
+    expect(component.checked().has('A2:2026-09')).toBe(true);
+    expect(component.checked().has('B1:2026-09')).toBe(false);
+  });
+});
+
+/**
+ * REGISTER (P2/logic, approval-modal.component.ts:632, register P2-17) — a
+ * double-click on "Approve & Continue" must decide ONE month.
+ *
+ * Nothing disabled the button between the two click events, so both handlers
+ * ran: two identical batch calls went out, and the second response advanced the
+ * modal a SECOND time — 2026-10 was never presented for a decision and the
+ * modal closed as if every month had been walked.
+ *
+ * Asserted on the api spy (call count + payload), never on the DOM: the button's
+ * [disabled] binding is the affordance, but change detection does not run
+ * between two clicks in the same task, so only the guard inside `decide()` can
+ * be what actually holds.
+ */
+describe('ApprovalModalComponent — one decision per click (register P2-17)', () => {
+  it('sends ONE batch for a double-click, then lets the NEXT month be decided', () => {
+    const decide$ = new Subject<{ results: AllocationDecisionResult[] }>();
+    const { fixture, decideAllocationMonths, decideCalls } = setup({
+      rows: [ROW_TWO_MONTHS], months: ['2026-09', '2026-10'], multi: true, decideSource: decide$,
+    });
+    const host = fixture.nativeElement as HTMLElement;
+
+    const button = host.querySelector<HTMLButtonElement>('[data-test="approve-continue"]')!;
+    button.click();
+    button.click();
+
+    expect(decideAllocationMonths).toHaveBeenCalledTimes(1);
+    expect(decideCalls[0]).toEqual([{ assignmentMonthId: 'M1:2026-09', decision: 'Approved', note: undefined }]);
+
+    // The batch answers. Exactly ONE advance, so September's decision leaves
+    // October — not November — on screen.
+    decide$.next({ results: [{ assignmentMonthId: 'M1:2026-09', status: 'Approved' }] });
+    fixture.detectChanges();
+    expect(fixture.componentInstance.selectedMonth()).toBe('2026-10');
+
+    // ABSENCE TWIN: the guard is per-call, not a one-shot latch — October must
+    // still be decidable, and it must be OCTOBER's month row that goes out.
+    host.querySelector<HTMLButtonElement>('[data-test="approve-continue"]')!.click();
+    expect(decideAllocationMonths).toHaveBeenCalledTimes(2);
+    expect(decideCalls[1]).toEqual([{ assignmentMonthId: 'M1:2026-10', decision: 'Approved', note: undefined }]);
+  });
+
+  /**
+   * Only TWO decision buttons are ever in the DOM at once — the footer renders
+   * `approve-continue` in multi mode and `approve-month` in single mode, never
+   * both — so the two cases below cover the three [disabled] expressions
+   * between them rather than one case claiming all three.
+   */
+  it('disables the multi-mode decision actions while a decision is in flight, and restores them after', () => {
+    const decide$ = new Subject<{ results: AllocationDecisionResult[] }>();
+    const { fixture } = setup({
+      rows: [ROW_TWO_MONTHS], months: ['2026-09', '2026-10'], multi: true, decideSource: decide$,
+    });
+    const host = fixture.nativeElement as HTMLElement;
+    const actions = () => ({
+      approve: host.querySelector<HTMLButtonElement>('[data-test="approve-continue"]')!.disabled,
+      reject: host.querySelector<HTMLButtonElement>('[data-test="reject-month"]')!.disabled,
+      // Dismissing must survive the guard: a batch decision cannot be
+      // cancelled, so a Close that went dead mid-flight would trap the
+      // approver in the panel until the response landed.
+      closeStaysLive: !host.querySelector<HTMLButtonElement>('[aria-label="Close"]')!.disabled,
+    });
+
+    expect(actions()).toStrictEqual({ approve: false, reject: false, closeStaysLive: true });
+
+    host.querySelector<HTMLButtonElement>('[data-test="approve-continue"]')!.click();
+    fixture.detectChanges();
+    expect(actions()).toStrictEqual({ approve: true, reject: true, closeStaysLive: true });
+
+    // ...and they come back once the batch answers, so the in-flight guard can
+    // never strand the approver on a dead footer.
+    decide$.next({ results: [{ assignmentMonthId: 'M1:2026-09', status: 'Approved' }] });
+    fixture.detectChanges();
+    expect(actions()).toStrictEqual({ approve: false, reject: false, closeStaysLive: true });
+  });
+
+  it('guards the SINGLE-mode approve-month button too, and re-enables it when the batch ERRORS', () => {
+    const decide$ = new Subject<{ results: AllocationDecisionResult[] }>();
+    const { fixture, decideAllocationMonths } = setup({ decideSource: decide$ });
+    const host = fixture.nativeElement as HTMLElement;
+    const approve = () => host.querySelector<HTMLButtonElement>('[data-test="approve-month"]')!;
+
+    expect(approve().disabled).toBe(false);
+    approve().click();
+    approve().click();
+    fixture.detectChanges();
+    expect(decideAllocationMonths).toHaveBeenCalledTimes(1);
+    expect(approve().disabled).toBe(true);
+
+    // ABSENCE TWIN for the ERROR leg, which the success cases cannot reach: a
+    // 5xx/network failure is toasted by the global interceptor and the modal
+    // stays open, so the guard MUST be released or the only remaining action is
+    // to close and lose the note drafts. Red without the error callback.
+    decide$.error(new Error('offline'));
+    fixture.detectChanges();
+    expect(approve().disabled).toBe(false);
+    approve().click();
+    expect(decideAllocationMonths).toHaveBeenCalledTimes(2);
   });
 });
