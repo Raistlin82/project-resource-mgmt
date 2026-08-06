@@ -47,6 +47,7 @@ import {
   TrendSeries,
 } from '../shared/charts';
 import { ListStateComponent } from '../shared/list-state.component';
+import { todayLocalIso } from '../services/local-date.util';
 import { countsTowardDeliveryCapacity, kindOf } from '../services/resource-kind.util';
 import { DEFAULT_HOURS_PER_DAY } from '../services/sell-rate.util';
 
@@ -341,6 +342,11 @@ interface ProjectCommandRow {
             <span class="font-mono text-2xl font-semibold text-[var(--cc-ink)]">{{ internalBenchCount() }} <span class="text-sm font-normal text-ink-muted">int.</span> / {{ subcoBenchCount() }} <span class="text-sm font-normal text-ink-muted">subco</span></span>
             <a routerLink="/bench" class="text-sm font-bold text-[var(--cc-primary)]">Bench</a>
           </div>
+          <!-- Names the month the two counts describe: a bare "0 / 0" cannot say
+               whether nobody is benched or the fetched window has no present tense. -->
+          @if (benchTileNote()) {
+            <div class="mt-1 text-xs text-[var(--cc-muted)]" data-test="bench-tile-month">{{ benchTileNote() }}</div>
+          }
         </div>
       </section>
 
@@ -619,6 +625,9 @@ export class DashboardComponent {
 
   /** Reporting/base currency for portfolio money KPIs (see EUR caption). */
   protected readonly baseCurrency = BASE_CURRENCY;
+
+  /** Month label for the "In Bench" tile's subtitle — UTC-pinned, like bench.component.ts's. */
+  private static readonly BENCH_MONTH_FMT = new Intl.DateTimeFormat('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
 
   private static readonly EMPTY_DATA: DashboardData = {
     resources: [],
@@ -977,8 +986,35 @@ export class DashboardComponent {
   // internal gets reallocated, an idle subcontractor does not get renewed and
   // their cost simply stops — the two actions have no common denominator, so
   // there is never an `internalBenchCount() + subcoBenchCount()` anywhere here.
-  /** `months[0]` is the rollup's current/anchor month — same convention as bench.component.ts / utilization.component.ts. */
-  private readonly currentBenchMonth = computed(() => this.data().benchRollup.months[0] ?? '');
+  /**
+   * The month the tile's two counts describe: TODAY's month, and only if the fetched
+   * bench window contains it — the same rule (and the same clock helper)
+   * bench.component.ts and utilization.component.ts now use.
+   *
+   * It used to be `months[0]`, which the server anchors on the OLDEST Open planning
+   * period — four months in the past with the shipped seed — so this KPI was a
+   * four-month-old snapshot presented as the present. `todayLocalIso()`, not
+   * `new Date().toISOString()`: the UTC form names the wrong month around midnight on
+   * the 1st (east of UTC) or the last of the month (west of it).
+   */
+  private readonly currentBenchMonth = computed(() => {
+    const now = todayLocalIso().slice(0, 7);
+    return this.data().benchRollup.months.includes(now) ? now : '';
+  });
+
+  /**
+   * The month the tile is speaking about, or the explicit admission that the fetched
+   * window has no present tense. A blank subtitle under two zeros would read as
+   * "nobody is on the bench" — the opposite of "we are not looking at now".
+   */
+  readonly benchTileNote = computed<string>(() => {
+    const months = this.data().benchRollup.months;
+    if (months.length === 0) return '';
+    const shown = this.currentBenchMonth();
+    return shown
+      ? DashboardComponent.BENCH_MONTH_FMT.format(new Date(shown + '-01T00:00:00Z'))
+      : 'Current month not in window';
+  });
   readonly internalBenchCount = computed(() =>
     this.data().benchRollup.internalRows.filter(r => r.monthly[this.currentBenchMonth()]?.state === 'BENCH').length,
   );

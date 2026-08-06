@@ -6,6 +6,7 @@ import { AuthService } from '../services/auth.service';
 import { authGatedResource } from '../services/auth-gated-resource.util';
 import { fteOf, standardMonthlyHours } from '../services/capacity.util';
 import { EMPTY_BENCH_ROLLUP, type AvailabilityDate, type BenchRollup, type BenchRow } from '../services/bench.util';
+import { todayLocalIso } from '../services/local-date.util';
 import { ListStateComponent } from '../shared/list-state.component';
 
 interface BenchPageData {
@@ -47,6 +48,9 @@ interface BenchPageData {
 
       <app-list-state [loading]="loading()" [error]="hasError()" skeleton="table-rows" [rows]="5" label="bench data" (retry)="reload()">
         <ng-template>
+          @if (windowNote()) {
+            <p class="text-sm text-[var(--cc-muted)]" data-test="bench-window-note">{{ windowNote() }}</p>
+          }
           <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
             <section class="command-card overflow-hidden" data-test="internal-section">
               <div class="command-card-header">
@@ -177,7 +181,50 @@ export class BenchComponent {
   reload(): void { this.dataRes.reload(); }
 
   private readonly rollup = computed(() => this.dataRes.value().rollup);
-  private readonly currentMonth = computed(() => this.rollup().months[0] ?? '');
+
+  /**
+   * The month whose cells the Status / Freeing up / Available columns describe:
+   * TODAY's month, and only if the fetched window actually contains it.
+   *
+   * It used to be `months[0]`, but the server anchors the bench window on the OLDEST
+   * Open planning period — four months in the past with the shipped seed — so every
+   * present-tense figure on this page described a four-month-old snapshot with nothing
+   * saying so: somebody booked solid for the next two months read "BENCH (D)" in red,
+   * "Available: today", and counted toward the "% of active on bench" a delivery
+   * executive reallocates against.
+   *
+   * The month comes from `todayLocalIso()` — the repo's one clock helper — NOT from
+   * `new Date().toISOString()`, which names the previous month for anyone east of UTC
+   * during the first hours of the 1st and the next month for anyone west of it on the
+   * last evening. When the window genuinely excludes the present, `''` selects the
+   * existing empty state (no state, no aging suffix, zero counts, guarded
+   * percentages) and {@link windowNote} says so instead of leaving a blank column
+   * that reads as missing data.
+   */
+  private readonly currentMonth = computed(() => {
+    const now = todayLocalIso().slice(0, 7);
+    return this.rollup().months.includes(now) ? now : '';
+  });
+
+  /**
+   * Names the month the present-tense columns describe — or, when the fetched window
+   * has no present tense at all, says that explicitly and names the window's bounds.
+   * A window that legitimately excludes today must announce it; that is the whole
+   * difference between "nobody is on the bench" and "we are not looking at now".
+   */
+  readonly windowNote = computed<string>(() => {
+    const months = this.rollup().months;
+    if (months.length === 0) return '';
+    const shown = this.currentMonth();
+    if (shown) return `Status shown for ${this.monthLabel(shown)}.`;
+    return `This window (${this.monthLabel(months[0])} – ${this.monthLabel(months[months.length - 1])}) `
+      + `does not include the current month (${this.monthLabel(todayLocalIso().slice(0, 7))}), so no current status is shown.`;
+  });
+
+  private monthLabel(month: string): string {
+    return BenchComponent.MONTH_FMT.format(new Date(month + '-01T00:00:00Z'));
+  }
+
   readonly internalRows = computed<BenchRow[]>(() => this.rollup().internalRows);
   readonly subcoRows = computed<BenchRow[]>(() => this.rollup().subcoRows);
   readonly hiringDemand = computed(() => this.rollup().hiringDemand);

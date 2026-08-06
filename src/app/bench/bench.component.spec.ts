@@ -5,20 +5,59 @@ import { BenchComponent } from './bench.component';
 import { ApiService } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import type { BenchRollup } from '../services/bench.util';
+import { todayLocalIso } from '../services/local-date.util';
+
+/**
+ * Set (or clear) the process time zone. `process.env['TZ']` is honoured by V8 for
+ * every subsequent Date operation, so this genuinely relocates the runner's local
+ * calendar — the only way to make a local-vs-UTC disagreement deterministic instead
+ * of a property of whatever machine happens to run the suite.
+ */
+function setTz(tz: string | undefined): void {
+  if (tz === undefined) delete process.env['TZ'];
+  else process.env['TZ'] = tz;
+}
+
+/** 'YYYY-MM' `delta` months from `month`, normalising the year. */
+function shiftMonth(month: string, delta: number): string {
+  const [y, m] = month.split('-').map(Number);
+  const zeroBased = y * 12 + (m - 1) + delta;
+  return `${Math.floor(zeroBased / 12)}-${String((zeroBased % 12) + 1).padStart(2, '0')}`;
+}
+
+/**
+ * The month whose cells the page's present-tense columns describe.
+ *
+ * Every fixture below keys its cells on THIS, not on `months[0]`. The window the
+ * server sends starts on the oldest OPEN planning period — four months in the past
+ * with the shipped seed — and this file used to call that first entry "the CURRENT
+ * month", which is precisely the defect: the page read a four-month-old column as
+ * the present, so somebody booked solid for the next two months showed "BENCH (D)"
+ * and "Available: today".
+ */
+const NOW_MONTH = todayLocalIso().slice(0, 7);
+
+/**
+ * Reproduces the SHAPE of the shipped window: six months of which four are already
+ * past, so `months[0]` is never the current month and a regression to it cannot
+ * accidentally agree with the fixture.
+ */
+const WINDOW = [-4, -3, -2, -1, 0, 1].map(d => shiftMonth(NOW_MONTH, d));
+const WINDOW_END = WINDOW[WINDOW.length - 1];
 
 const ROLLUP: BenchRollup = {
-  months: ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09'],
+  months: WINDOW,
   internalRows: [
     {
       resourceId: '7', resourceName: 'Priya Kapoor', kind: 'internal',
-      monthly: { '2026-04': { state: 'ALLOCATED', upcomingUnallocated: false } },
-      availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: '2026-09' },
+      monthly: { [NOW_MONTH]: { state: 'ALLOCATED', upcomingUnallocated: false } },
+      availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: WINDOW_END },
     },
   ],
   subcoRows: [
     {
       resourceId: '6', resourceName: 'Subco — Mediolanum Senior Developer', kind: 'subco',
-      monthly: { '2026-04': { state: 'PARTIAL', upcomingUnallocated: true } },
+      monthly: { [NOW_MONTH]: { state: 'PARTIAL', upcomingUnallocated: true } },
       availabilityDate: { kind: 'date', date: '2026-05-01' },
     },
   ],
@@ -33,34 +72,34 @@ const ROLLUP: BenchRollup = {
  * Subcontractors: 1 of 3 -> 33% (rounded).
  */
 const COUNTS_ROLLUP: BenchRollup = {
-  months: ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09'],
+  months: WINDOW,
   internalRows: [
-    { resourceId: 'i1', resourceName: 'Internal Bench One', kind: 'internal', monthly: { '2026-04': { state: 'BENCH', upcomingUnallocated: false } }, availabilityDate: { kind: 'date', date: '2026-08-05' } },
-    { resourceId: 'i2', resourceName: 'Internal Bench Two', kind: 'internal', monthly: { '2026-04': { state: 'BENCH', upcomingUnallocated: false } }, availabilityDate: { kind: 'date', date: '2026-08-05' } },
-    { resourceId: 'i3', resourceName: 'Internal Partial', kind: 'internal', monthly: { '2026-04': { state: 'PARTIAL', upcomingUnallocated: false } }, availabilityDate: { kind: 'date', date: '2026-05-01' } },
-    { resourceId: 'i4', resourceName: 'Internal Allocated', kind: 'internal', monthly: { '2026-04': { state: 'ALLOCATED', upcomingUnallocated: false } }, availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: '2026-09' } },
+    { resourceId: 'i1', resourceName: 'Internal Bench One', kind: 'internal', monthly: { [NOW_MONTH]: { state: 'BENCH', upcomingUnallocated: false } }, availabilityDate: { kind: 'date', date: '2026-08-05' } },
+    { resourceId: 'i2', resourceName: 'Internal Bench Two', kind: 'internal', monthly: { [NOW_MONTH]: { state: 'BENCH', upcomingUnallocated: false } }, availabilityDate: { kind: 'date', date: '2026-08-05' } },
+    { resourceId: 'i3', resourceName: 'Internal Partial', kind: 'internal', monthly: { [NOW_MONTH]: { state: 'PARTIAL', upcomingUnallocated: false } }, availabilityDate: { kind: 'date', date: '2026-05-01' } },
+    { resourceId: 'i4', resourceName: 'Internal Allocated', kind: 'internal', monthly: { [NOW_MONTH]: { state: 'ALLOCATED', upcomingUnallocated: false } }, availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: WINDOW_END } },
   ],
   subcoRows: [
-    { resourceId: 's1', resourceName: 'Subco Bench One', kind: 'subco', monthly: { '2026-04': { state: 'BENCH', upcomingUnallocated: false } }, availabilityDate: { kind: 'date', date: '2026-08-05' } },
-    { resourceId: 's2', resourceName: 'Subco Allocated One', kind: 'subco', monthly: { '2026-04': { state: 'ALLOCATED', upcomingUnallocated: false } }, availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: '2026-09' } },
-    { resourceId: 's3', resourceName: 'Subco Allocated Two', kind: 'subco', monthly: { '2026-04': { state: 'ALLOCATED', upcomingUnallocated: false } }, availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: '2026-09' } },
+    { resourceId: 's1', resourceName: 'Subco Bench One', kind: 'subco', monthly: { [NOW_MONTH]: { state: 'BENCH', upcomingUnallocated: false } }, availabilityDate: { kind: 'date', date: '2026-08-05' } },
+    { resourceId: 's2', resourceName: 'Subco Allocated One', kind: 'subco', monthly: { [NOW_MONTH]: { state: 'ALLOCATED', upcomingUnallocated: false } }, availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: WINDOW_END } },
+    { resourceId: 's3', resourceName: 'Subco Allocated Two', kind: 'subco', monthly: { [NOW_MONTH]: { state: 'ALLOCATED', upcomingUnallocated: false } }, availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: WINDOW_END } },
   ],
   hiringDemand: [],
 };
 
 /**
- * Neither row has a cell for the CURRENT month ('2026-04', `months[0]`) — both
- * are active only from '2026-05' — so the `> 0 ? ... : 0` zero-denominator
- * guard on both `internalBenchPct`/`subcoBenchPct` is the only thing standing
- * between this fixture and a `NaN%`/`Infinity%` render.
+ * Neither row has a cell for the current month — both are active only from NEXT
+ * month — so the `> 0 ? ... : 0` zero-denominator guard on both
+ * `internalBenchPct`/`subcoBenchPct` is the only thing standing between this
+ * fixture and a `NaN%`/`Infinity%` render.
  */
 const ZERO_DENOM_ROLLUP: BenchRollup = {
-  months: ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09'],
+  months: WINDOW,
   internalRows: [
-    { resourceId: 'i9', resourceName: 'Not Yet Active Internal', kind: 'internal', monthly: { '2026-05': { state: 'BENCH', upcomingUnallocated: false } }, availabilityDate: { kind: 'date', date: '2026-05-01' } },
+    { resourceId: 'i9', resourceName: 'Not Yet Active Internal', kind: 'internal', monthly: { [shiftMonth(NOW_MONTH, 1)]: { state: 'BENCH', upcomingUnallocated: false } }, availabilityDate: { kind: 'date', date: '2026-05-01' } },
   ],
   subcoRows: [
-    { resourceId: 's9', resourceName: 'Not Yet Active Subco', kind: 'subco', monthly: { '2026-05': { state: 'BENCH', upcomingUnallocated: false } }, availabilityDate: { kind: 'date', date: '2026-05-01' } },
+    { resourceId: 's9', resourceName: 'Not Yet Active Subco', kind: 'subco', monthly: { [shiftMonth(NOW_MONTH, 1)]: { state: 'BENCH', upcomingUnallocated: false } }, availabilityDate: { kind: 'date', date: '2026-05-01' } },
   ],
   hiringDemand: [],
 };
@@ -177,22 +216,22 @@ describe('BenchComponent', () => {
   // presented as mutually exclusive, nor may one silently suppress the other.
   it('shows "Beyond <month>" together with "Freeing up next month" for the same resource, and only for the flagged one', async () => {
     const rollup: BenchRollup = {
-      months: ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09'],
+      months: WINDOW,
       internalRows: [
         {
           // Flagged: about to free up next month, yet never bench within the
           // 6-month window shown -> availabilityDate is beyond-horizon.
           resourceId: '7', resourceName: 'Freeing Soon Person', kind: 'internal',
-          monthly: { '2026-04': { state: 'ALLOCATED', upcomingUnallocated: true } },
-          availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: '2026-09' },
+          monthly: { [NOW_MONTH]: { state: 'ALLOCATED', upcomingUnallocated: true } },
+          availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: WINDOW_END },
         },
         {
           // Control row: same beyond-horizon availability, but NOT flagged —
           // isolates that the flag is per-row, not a side effect of the
           // availability kind.
           resourceId: '77', resourceName: 'Steady Person', kind: 'internal',
-          monthly: { '2026-04': { state: 'ALLOCATED', upcomingUnallocated: false } },
-          availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: '2026-09' },
+          monthly: { [NOW_MONTH]: { state: 'ALLOCATED', upcomingUnallocated: false } },
+          availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: WINDOW_END },
         },
       ],
       subcoRows: [],
@@ -306,11 +345,11 @@ describe('BenchComponent', () => {
   // bench.util.spec.ts was covered, not this component's use of it.
   it('renders the aging-bucket suffix on a BENCH status (e.g. "BENCH (B)")', async () => {
     const rollup: BenchRollup = {
-      months: ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09'],
+      months: WINDOW,
       internalRows: [
         {
           resourceId: 'agingA', resourceName: 'Aging Bench Person', kind: 'internal',
-          monthly: { '2026-04': { state: 'BENCH', agingBucket: 'B', upcomingUnallocated: false } },
+          monthly: { [NOW_MONTH]: { state: 'BENCH', agingBucket: 'B', upcomingUnallocated: false } },
           availabilityDate: { kind: 'date', date: '2026-08-05' },
         },
       ],
@@ -341,5 +380,109 @@ describe('BenchComponent', () => {
     expect(row).toBeTruthy();
     const availableCell = row!.querySelectorAll('td')[3];
     expect(availableCell.textContent?.trim()).toBe('May 1, 2026');
+  });
+});
+
+/**
+ * The anchor month, under a clock pinned to an instant where UTC and the local civil
+ * date DISAGREE — and in a window that does not start at the current month.
+ *
+ * Three wrong implementations all pass a TZ-blind test of this, and this repo has
+ * recorded that exact failure nine times:
+ *   * `months[0]` — what shipped. The server anchors the bench window on the OLDEST
+ *     Open planning period, four months back with the seed, so the page presented a
+ *     four-month-old column as the present tense.
+ *   * `new Date().toISOString().slice(0, 7)` — the obvious "current month", which
+ *     names the WRONG month for anyone east of UTC in the first hours of the 1st.
+ *     Here the local date is 1 October and UTC still says 30 September.
+ *   * a guard that always answers `''` — which passes every "must be absent" case,
+ *     so the ALLOWED case below is mandatory.
+ *
+ * TZ is forced rather than sniffed: on a UTC runner no instant can make local and
+ * UTC disagree, and a test that quietly skips its own point is a green gate.
+ */
+describe('BenchComponent — the anchor month is TODAY, in the LOCAL calendar', () => {
+  const ORIGINAL_TZ = process.env['TZ'];
+  /** UTC+14, no DST ever: 2026-09-30T23:00Z is 2026-10-01T13:00 local. */
+  const LOCAL_MONTH = '2026-10';
+  const UTC_MONTH = '2026-09';
+
+  beforeAll(() => {
+    setTz('Pacific/Kiritimati');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(Date.UTC(2026, 8, 30, 23, 0)));
+  });
+  afterAll(() => {
+    vi.useRealTimers();
+    setTz(ORIGINAL_TZ);
+    TestBed.resetTestingModule();
+  });
+
+  it('has a fixture whose local and UTC months genuinely differ (the precondition, not an assumption)', () => {
+    expect(todayLocalIso().slice(0, 7)).toBe(LOCAL_MONTH);
+    expect(new Date().toISOString().slice(0, 7)).toBe(UTC_MONTH);
+    expect(LOCAL_MONTH).not.toBe(UTC_MONTH);
+  });
+
+  /** Window ends at the local current month; `months[0]` and the UTC month are both earlier. */
+  const IN_WINDOW: BenchRollup = {
+    months: ['2026-07', '2026-08', UTC_MONTH, LOCAL_MONTH],
+    internalRows: [{
+      resourceId: 'i1', resourceName: 'Anchor Person', kind: 'internal',
+      monthly: {
+        '2026-07': { state: 'ALLOCATED', upcomingUnallocated: false },
+        [UTC_MONTH]: { state: 'ALLOCATED', upcomingUnallocated: false },
+        [LOCAL_MONTH]: { state: 'BENCH', agingBucket: 'B', upcomingUnallocated: false },
+      },
+      availabilityDate: { kind: 'date', date: '2026-10-01' },
+    }],
+    subcoRows: [],
+    hiringDemand: [],
+  };
+
+  it('reads the LOCAL current month, not months[0] and not the UTC month (the case that must still be ALLOWED)', async () => {
+    const fixture = await setupWith(IN_WINDOW);
+    const host = fixture.nativeElement as HTMLElement;
+    const section = host.querySelector('[data-test="internal-section"]')!;
+    // RED three ways: months[0] and the UTC month both say ALLOCATED, and an
+    // always-empty anchor says nothing at all.
+    expect(fixture.componentInstance.internalBenchCount()).toBe(1);
+    expect(section.textContent ?? '').toContain('BENCH (B)');
+    expect(host.querySelector('[data-test="bench-window-note"]')?.textContent ?? '').toContain('Oct 26');
+  });
+
+  /** Window stops BEFORE the local current month, but still contains the UTC one. */
+  const PAST_WINDOW: BenchRollup = {
+    months: ['2026-06', '2026-07', '2026-08', UTC_MONTH],
+    internalRows: [{
+      resourceId: 'i1', resourceName: 'Stale Judgement Person', kind: 'internal',
+      monthly: {
+        '2026-06': { state: 'BENCH', agingBucket: 'D', upcomingUnallocated: false },
+        [UTC_MONTH]: { state: 'BENCH', agingBucket: 'C', upcomingUnallocated: false },
+      },
+      availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: UTC_MONTH },
+    }],
+    subcoRows: [],
+    hiringDemand: [],
+  };
+
+  it('reports NOTHING for a window that does not reach the current month, and says why', async () => {
+    const fixture = await setupWith(PAST_WINDOW);
+    const host = fixture.nativeElement as HTMLElement;
+    const section = host.querySelector('[data-test="internal-section"]')!;
+    const sectionText = section.textContent ?? '';
+
+    expect(fixture.componentInstance.internalBenchCount()).toBe(0);
+    // THE ABSENCE TWIN: a past month's judgement must not appear in a present-tense
+    // column. Today both of these fail — `months[0]` renders 'BENCH (D)' and the UTC
+    // month renders 'BENCH (C)'.
+    expect(sectionText).not.toContain('BENCH');
+    expect(sectionText).not.toContain('(D)');
+    expect(sectionText).not.toContain('(C)');
+    // ...and a blank column is not allowed to pass for "nobody is on the bench":
+    // only the `includes()` form can tell the two apart and label it.
+    const note = host.querySelector('[data-test="bench-window-note"]')?.textContent ?? '';
+    expect(note).toContain('does not include the current month');
+    expect(note).toContain('Oct 26');
   });
 });
