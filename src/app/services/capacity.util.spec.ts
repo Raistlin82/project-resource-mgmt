@@ -1,4 +1,5 @@
 import {
+  employedWorkingDays,
   standardMonthlyHours, fteOf, semaphoreBand, monthsInRange, isActiveInMonth, rollupMonthly,
   hoursByResourceMonth,
 } from './capacity.util';
@@ -222,5 +223,127 @@ describe('rollupMonthly', () => {
     });
     expect(rollup.rows.map(r => r.resourceId)).toEqual(['R1']);
     expect(rollup.demandRows).toEqual([]);
+  });
+});
+
+/**
+ * Employment is enforced by the server ONE DAY AT A TIME
+ * (`bookingOutsideEmploymentError`), so measuring it by the month made /capacity
+ * disagree with the API at both ends. None of the pre-existing cases in this file
+ * placed a hire or termination date INSIDE a month, which is why the defect shipped:
+ * the whole suite stayed green when the arithmetic was replaced.
+ */
+describe('employedWorkingDays / mid-month employment in rollupMonthly', () => {
+  const MONTH = '2026-05';
+  const ALL_DAYS = workingDaysInMonth(MONTH, NO_HOL);
+  const base = {
+    assignments: [{ id: 'a1', resourceId: 'joiner' }],
+    assignmentMonths: [{ assignmentId: 'a1', month: MONTH, status: 'Allocated' }],
+    months: [MONTH],
+    hoursPerDay: 8,
+    holidays: NO_HOL,
+  };
+
+  it('counts only the working days actually employed', () => {
+    // 2026-05-18 is a Monday; a hire that day excludes every earlier working day.
+    const employed = employedWorkingDays({ hireDate: '2026-05-18' }, MONTH, NO_HOL);
+    expect(employed.length).toBeGreaterThan(0);
+    expect(employed.length).toBeLessThan(ALL_DAYS.length);
+    expect(employed[0]).toBe('2026-05-18');
+    expect(employed.every(d => d >= '2026-05-18')).toBe(true);
+  });
+
+  it('is the FULL working-day list when employment spans the whole month', () => {
+    // ABSENCE TWIN #1: a filter that always narrowed would pass the case above and
+    // silently halve the capacity of every ordinary full-month employee.
+    expect(employedWorkingDays({}, MONTH, NO_HOL)).toEqual(ALL_DAYS);
+    expect(employedWorkingDays({ hireDate: '2020-01-01' }, MONTH, NO_HOL)).toEqual(ALL_DAYS);
+    expect(employedWorkingDays({ hireDate: '2020-01-01', terminationDate: '2030-01-01' }, MONTH, NO_HOL)).toEqual(ALL_DAYS);
+  });
+
+  it('is empty when the person was employed on no working day of the month', () => {
+    expect(employedWorkingDays({ hireDate: '2026-07-01' }, MONTH, NO_HOL)).toEqual([]);
+    expect(employedWorkingDays({ terminationDate: '2026-03-31' }, MONTH, NO_HOL)).toEqual([]);
+  });
+
+  it('includes the hire and termination days themselves (closed interval)', () => {
+    // Off-by-one at either bound is the whole defect class; pin both boundaries.
+    expect(employedWorkingDays({ hireDate: '2026-05-18' }, MONTH, NO_HOL)).toContain('2026-05-18');
+    expect(employedWorkingDays({ terminationDate: '2026-05-15' }, MONTH, NO_HOL)).toContain('2026-05-15');
+  });
+
+  it('KEEPS a mid-month joiner’s row and her already-booked hours', () => {
+    // THE JOINER DEFECT: isActiveInMonth compared hireDate with the month START, so
+    // rollupMonthly did `continue` and the row vanished — together with hours the
+    // server had already accepted. RED before the fix: rows is empty.
+    const out = rollupMonthly({
+      ...base,
+      resources: [{ id: 'joiner', name: 'Mid-month Joiner', contractHoursPerDay: 8, hireDate: '2026-05-18' }],
+      assignmentDays: [{ assignmentId: 'a1', date: '2026-05-20', hours: 8 }],
+    });
+    const row = out.rows.find(r => r.resourceId === 'joiner');
+    expect(row, 'a mid-month joiner must still have a row').toBeTruthy();
+    expect(row!.monthly[MONTH].confirmedHours).toBe(8);
+    expect(out.totals[MONTH].resourceCount).toBe(1);
+    expect(out.totals[MONTH].demandFteConfirmed).toBeGreaterThan(0);
+  });
+
+  it('pro-rates a joiner’s capacity to the days employed, not a whole month', () => {
+    const employed = employedWorkingDays({ hireDate: '2026-05-18' }, MONTH, NO_HOL);
+    const out = rollupMonthly({
+      ...base,
+      resources: [{ id: 'joiner', name: 'Mid-month Joiner', contractHoursPerDay: 8, hireDate: '2026-05-18' }],
+      assignmentDays: [],
+    });
+    // The ratio, not a magic number: employed working days over the month's own.
+    expect(out.totals[MONTH].capacityFte).toBeCloseTo(employed.length / ALL_DAYS.length, 10);
+    expect(out.totals[MONTH].capacityFte).toBeLessThan(1);
+  });
+
+  it('pro-rates a mid-month LEAVER instead of crediting a full FTE of supply', () => {
+    // THE LEAVER DEFECT: the whole month was kept AND credited in full, so the screen
+    // advertised capacity the API refuses to book. RED before the fix: exactly 1.
+    const employed = employedWorkingDays({ terminationDate: '2026-05-15' }, MONTH, NO_HOL);
+    const out = rollupMonthly({
+      ...base,
+      assignments: [{ id: 'a1', resourceId: 'leaver' }],
+      resources: [{ id: 'leaver', name: 'Mid-month Leaver', contractHoursPerDay: 8, terminationDate: '2026-05-15' }],
+      assignmentDays: [],
+    });
+    expect(out.totals[MONTH].capacityFte).toBeCloseTo(employed.length / ALL_DAYS.length, 10);
+    expect(out.totals[MONTH].capacityFte).not.toBeCloseTo(1, 6);
+  });
+
+  it('still credits a FULL FTE to a full-month employee', () => {
+    // ABSENCE TWIN #2, and the one that matters most: a pro-rating that applied to
+    // everyone would pass both cases above while halving the whole org's supply.
+    const out = rollupMonthly({
+      ...base,
+      assignments: [{ id: 'a1', resourceId: 'steady' }],
+      resources: [{ id: 'steady', name: 'Steady', contractHoursPerDay: 8, hireDate: '2020-01-01' }],
+      assignmentDays: [],
+    });
+    expect(out.totals[MONTH].capacityFte).toBeCloseTo(1, 10);
+  });
+
+  it('drops the cell only when NO working day is employed', () => {
+    const out = rollupMonthly({
+      ...base,
+      assignments: [{ id: 'a1', resourceId: 'future' }],
+      resources: [{ id: 'future', name: 'Future Hire', contractHoursPerDay: 8, hireDate: '2026-07-01' }],
+      assignmentDays: [],
+    });
+    expect(out.rows.find(r => r.resourceId === 'future')).toBeUndefined();
+    expect(out.totals[MONTH].resourceCount).toBe(0);
+    expect(out.totals[MONTH].capacityFte).toBe(0);
+  });
+
+  it('honours holidays, which the pre-existing cases never exercised', () => {
+    // The `holidays` argument had no coverage anywhere in this file: every case
+    // passed NO_HOL, so a fix that ignored it entirely would have stayed green.
+    const withHoliday = new Set(['2026-05-20']);
+    const employed = employedWorkingDays({ hireDate: '2026-05-18' }, MONTH, withHoliday);
+    expect(employed).not.toContain('2026-05-20');
+    expect(employed.length).toBe(employedWorkingDays({ hireDate: '2026-05-18' }, MONTH, NO_HOL).length - 1);
   });
 });

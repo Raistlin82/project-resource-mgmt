@@ -1,4 +1,4 @@
-import { monthOf, monthlyTargetHours } from './calendar.util';
+import { monthOf, monthlyTargetHours, workingDaysInMonth } from './calendar.util';
 import { countsTowardInternalCapacity, kindOf } from './resource-kind.util';
 
 export type SemaphoreBand = 'idle' | 'under' | 'healthy' | 'over';
@@ -60,11 +60,50 @@ export function monthsInRange(from: string, to: string): string[] {
   }
   return out;
 }
+/**
+ * COARSE, month-granularity employment test: hired on or before the month's START
+ * and not terminated before it.
+ *
+ * It is WRONG AT BOTH ENDS, which is why `rollupMonthly` now uses
+ * {@link employedWorkingDays} instead. Kept because `bench.util.ts` still calls it;
+ * substituting it there is that file's own change (it would move /bench headcounts,
+ * which the bench specs pin).
+ */
 export function isActiveInMonth(r: { hireDate?: string; terminationDate?: string }, month: string): boolean {
   const monthStart = `${month}-01`;
   if (r.hireDate && r.hireDate > monthStart) return false;
   if (r.terminationDate && r.terminationDate < monthStart) return false;
   return true;
+}
+
+/**
+ * The month's working days on which this person was actually employed: the month's
+ * working-day list intersected with the closed interval [hireDate, terminationDate].
+ * Empty exactly when they were employed on none of them.
+ *
+ * DAY granularity is not a refinement here — it is the only granularity that can
+ * agree with the rest of the system. The server accepts or refuses a booked day
+ * against employment ONE DAY AT A TIME (`bookingOutsideEmploymentError` in
+ * src/server/operational-integrity.util.ts). Measuring capacity by the month made
+ * this screen disagree with the API at both ends:
+ *
+ *  - JOINER: `isActiveInMonth` compares `hireDate` with the month's START, so
+ *    someone hired on the 17th was "not active" for the whole month and
+ *    `rollupMonthly` skipped the cell entirely — taking her ALREADY-BOOKED hours
+ *    with it. The grid showed no row, the planned-FTE totals under-reported, and
+ *    the CSV wrote nothing for a person with real demand the server had accepted.
+ *  - LEAVER: the whole month was kept AND credited a FULL month of capacity, so
+ *    someone who left on the 15th still contributed one whole FTE of supply. The
+ *    screen then advertised free capacity that the API refuses to book.
+ */
+export function employedWorkingDays(
+  r: { hireDate?: string; terminationDate?: string },
+  month: string,
+  holidays: ReadonlySet<string>,
+): string[] {
+  return workingDaysInMonth(month, holidays).filter(
+    d => (r.hireDate === undefined || d >= r.hireDate) && (r.terminationDate === undefined || d <= r.terminationDate),
+  );
 }
 
 /**
@@ -118,7 +157,11 @@ export function rollupMonthly(input: RollupInput): CapacityRollup {
     const isInternal = countsTowardInternalCapacity(kindOf(r));
     const monthly: Record<string, CapacityCell> = {}; let hasAny = false;
     for (const m of months) {
-      if (!isActiveInMonth(r, m)) continue;
+      // Employment is measured in DAYS, not months (see employedWorkingDays): the
+      // cell is dropped only when the person was employed on NO working day of the
+      // month, so a mid-month joiner keeps her row and her already-booked hours.
+      const employedDays = employedWorkingDays(r, m, holidays);
+      if (employedDays.length === 0) continue;
       const target = targetByMonth.get(m)!;
       const src = byResMonth.get(r.id)?.get(m) ?? { confirmed: 0, planned: 0 };
       const fteConfirmed = fteOf(src.confirmed, target);
@@ -129,7 +172,12 @@ export function rollupMonthly(input: RollupInput): CapacityRollup {
           fteConfirmed, ftePlanned, band: semaphoreBand(ftePlanned * 100) };
         t.demandFteConfirmed += fteConfirmed;
         t.demandFtePlanned += ftePlanned;
-        t.capacityFte += fteOf(monthlyTargetHours(r.contractHoursPerDay ?? hoursPerDay, m, holidays), target);
+        // Capacity is PRO-RATED to the days actually employed. It used to be
+        // `monthlyTargetHours(...)` — the whole month — so a leaver who went on the
+        // 15th supplied a full FTE the API would refuse to book against.
+        // `monthlyTargetHours` is `workingDays × contractHoursPerDay`, so the
+        // pro-rated form is the same product over the employed subset.
+        t.capacityFte += fteOf(employedDays.length * (r.contractHoursPerDay ?? hoursPerDay), target);
         t.resourceCount += 1;
       } else {
         // Inert placeholder band: demand rows share the CapacityCell type but
