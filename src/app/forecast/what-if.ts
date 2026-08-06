@@ -17,7 +17,9 @@ import {
   ForecastData,
   CapacityPeriod,
   SkillGapEntry,
+  UtilizationBand,
   capacityForecast,
+  forecastUtilizationBand,
   skillGap,
   isCompleteForecastWindow,
   utilizationChangeTone,
@@ -36,14 +38,25 @@ import { ListStateComponent } from '../shared/list-state.component';
 /** Rolling horizon (weeks) for the sandbox forecast. Fixed: this is a comparison, not a tuning, surface. */
 const HORIZON_WEEKS = 12;
 
-/** A single headline metric compared base-vs-scenario, with a signed delta. */
+/**
+ * A single headline metric compared base-vs-scenario, with a signed delta.
+ *
+ * `base`/`scenario`/`delta` are nullable because Avg Utilization can be
+ * UNANSWERABLE: with no supply in any period of the horizon there is no
+ * utilisation to average, and a 0% there would be a confident claim of idleness
+ * where the honest answer is "no capacity to measure". A null side renders "n/a"
+ * and carries NO tone (see `deltaIsGood`/`deltaIsBad`) — colouring a comparison
+ * against an unknown baseline is the same defect as the header badge that used
+ * to affirm parity it could not know.
+ */
 interface KpiDelta {
   label: string;
   /** Short explanation of what the number means. */
   note: string;
-  base: number;
-  scenario: number;
-  delta: number;
+  base: number | null;
+  scenario: number | null;
+  /** scenario − base, or null when either side is unknown. */
+  delta: number | null;
   /** How to render the value (percent vs plain count) and how to colour the delta. */
   format: 'pct' | 'count';
   /** Direction that should read as "good" (green). 'down' ⇒ lower is better. */
@@ -56,15 +69,16 @@ interface TimelineRow {
   label: string;
   supply: number;
   demand: number;
-  utilizationPct: number;
+  /** null when the scenario period has no supply — rendered "n/a", never 0%. */
+  utilizationPct: number | null;
   /** Scenario demand − base demand for the same period (hours). */
   demandDelta: number;
   /** Committed-demand hours for the period (scenario). */
   committed: number;
   /** Pipeline-demand hours for the period (scenario). */
   pipeline: number;
-  /** Utilisation band driving the cell colour. */
-  band: 'under' | 'tight' | 'over';
+  /** Utilisation band driving the cell colour (`forecastUtilizationBand`). */
+  band: UtilizationBand;
 }
 
 /**
@@ -332,12 +346,16 @@ interface TimelineRow {
                     <td class="font-mono whitespace-nowrap">{{ row.label }}</td>
                     <td class="num">{{ row.supply | number: '1.0-0' }}</td>
                     <td class="num">{{ row.demand | number: '1.0-0' }}</td>
+                    <!-- Same 'forecastUtilizationBand' as /forecast: the two Capacity
+                         Control screens must not encode two different opinions about
+                         what a healthy week looks like. 'spare' (below healthy) is
+                         amber, and a period with no supply renders "n/a" untinted. -->
                     <td class="num">
                       <span class="command-status"
-                            [class.green]="row.band === 'under'"
-                            [class.amber]="row.band === 'tight'"
+                            [class.green]="row.band === 'healthy'"
+                            [class.amber]="row.band === 'spare'"
                             [class.red]="row.band === 'over'">
-                        {{ row.utilizationPct | number: '1.0-0' }}%
+                        @if (row.utilizationPct === null) { n/a } @else { {{ row.utilizationPct | number: '1.0-0' }}% }
                       </span>
                     </td>
                     <td class="num font-semibold"
@@ -554,8 +572,11 @@ export class WhatIf {
     capacityForecast(this.scenario(), this.horizonStartIso(), HORIZON_WEEKS, 'weekly'),
   );
 
-  private readonly baseSkills = computed<SkillGapEntry[]>(() => skillGap(this.baseData()));
-  private readonly scenarioSkills = computed<SkillGapEntry[]>(() => skillGap(this.scenario()));
+  // `currentMonth()` is threaded into both sides so coverage counts only people
+  // employed now — and, critically, the SAME month on both, or a base-vs-scenario
+  // delta would partly reflect a different employment cut-off.
+  private readonly baseSkills = computed<SkillGapEntry[]>(() => skillGap(this.baseData(), this.currentMonth()));
+  private readonly scenarioSkills = computed<SkillGapEntry[]>(() => skillGap(this.scenario(), this.currentMonth()));
 
   /** The current calendar month — `notFullyAllocatedAt`'s single-month snapshot,
    * NOT `/bench`'s own 6-month display window (this sandbox only ever needs
@@ -603,7 +624,9 @@ export class WhatIf {
         note: `Mean across ${HORIZON_WEEKS} weeks`,
         base: baseAvg,
         scenario: scenAvg,
-        delta: scenAvg - baseAvg,
+        // Unknown either side ⇒ unknown delta. Treating a missing average as 0
+        // would manufacture a huge signed swing out of an absent measurement.
+        delta: baseAvg === null || scenAvg === null ? null : scenAvg - baseAvg,
         format: 'pct',
         better: 'up',
       },
@@ -650,7 +673,7 @@ export class WhatIf {
       demandDelta: r.demand - (baseByPeriod.get(r.period)?.demand ?? 0),
       committed: r.committed,
       pipeline: r.pipeline,
-      band: this.bandFor(r.utilizationPct),
+      band: forecastUtilizationBand(r.utilizationPct),
     }));
   });
 
@@ -842,24 +865,31 @@ export class WhatIf {
 
   // --- Template formatting helpers --------------------------------------------
 
-  formatMetric(k: KpiDelta, value: number): string {
+  /** 'n/a' for an unmeasurable metric — never a 0 standing in for "unknown". */
+  formatMetric(k: KpiDelta, value: number | null): string {
+    if (value === null) return 'n/a';
     const rounded = Math.round(value);
     return k.format === 'pct' ? `${rounded}%` : `${rounded}`;
   }
 
   deltaText(k: KpiDelta): string {
+    if (k.delta === null) return 'n/a';
     const rounded = Math.round(k.delta);
     const sign = rounded > 0 ? '+' : '';
     return k.format === 'pct' ? `${sign}${rounded}%` : `${sign}${rounded}`;
   }
 
   deltaIsGood(k: KpiDelta): boolean {
+    // No tone at all when either side is unknown: a green/red card is a claim
+    // about a comparison that was never possible to make.
+    if (k.base === null || k.scenario === null || k.delta === null) return false;
     if (k.label === 'Avg Utilization') return utilizationChangeTone(k.base, k.scenario) === 'good';
     if (k.delta === 0) return false;
     return k.better === 'up' ? k.delta > 0 : k.delta < 0;
   }
 
   deltaIsBad(k: KpiDelta): boolean {
+    if (k.base === null || k.scenario === null || k.delta === null) return false;
     if (k.label === 'Avg Utilization') return utilizationChangeTone(k.base, k.scenario) === 'bad';
     if (k.delta === 0) return false;
     return k.better === 'up' ? k.delta < 0 : k.delta > 0;
@@ -899,20 +929,20 @@ export class WhatIf {
     return new Date(ms + deltaMs).toISOString().slice(0, 10);
   }
 
-  private avgUtil(periods: CapacityPeriod[]): number {
-    if (!periods.length) return 0;
-    return periods.reduce((acc, p) => acc + p.utilizationPct, 0) / periods.length;
+  /**
+   * Mean utilisation over the periods that HAVE one; `null` when none do.
+   * Periods with no supply are EXCLUDED rather than counted as 0% — averaging in
+   * a fabricated 0 for a week with no capacity drags the whole horizon down and
+   * makes a hire lever look like it caused a collapse it did not cause.
+   */
+  private avgUtil(periods: CapacityPeriod[]): number | null {
+    const measured = periods.filter(p => p.utilizationPct !== null);
+    if (!measured.length) return null;
+    return measured.reduce((acc, p) => acc + (p.utilizationPct as number), 0) / measured.length;
   }
 
   private peakDemand(periods: CapacityPeriod[]): number {
     return periods.reduce((max, p) => Math.max(max, p.demand), 0);
-  }
-
-  /** Utilisation → colour band: <85% spare, 85–100% tight, >100% over capacity. */
-  private bandFor(utilizationPct: number): TimelineRow['band'] {
-    if (utilizationPct > 100) return 'over';
-    if (utilizationPct >= 85) return 'tight';
-    return 'under';
   }
 
   /** True when any request shared by both lists has a changed start/end date. */

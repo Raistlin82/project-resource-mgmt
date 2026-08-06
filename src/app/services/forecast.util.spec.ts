@@ -1,18 +1,79 @@
 import {
   capacityForecast,
+  forecastUtilizationBand,
   overAllocated,
   skillGap,
   isCompleteForecastWindow,
   utilizationChangeTone,
   ForecastData,
 } from './forecast.util';
-import { Resource, ResourceRequest, Assignment } from './api.service';
+import { Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth } from './api.service';
+import { MonthStatus, monthRowId } from './allocation-month.util';
 import { ResourceKind } from './resource-kind.util';
 
-/** `ForecastData`'s tail fields that `capacityForecast`/`overAllocated`/`skillGap`
- * never read (they're `notFullyAllocatedAt`'s concern, exercised in `bench.util.spec.ts`)
- * — spread into every fixture below just to satisfy the shared interface. */
-const EMPTY_TAIL = { assignmentDays: [], assignmentMonths: [], holidays: [], hoursPerDay: 8 };
+/**
+ * The month `skillGap` measures coverage "as of" throughout this suite. Coverage
+ * is employment-dependent, so every call has to name a month — there is no
+ * "whenever" for whether somebody works here.
+ */
+const AS_OF = '2026-08';
+
+/** One month of an assignment: its lifecycle status and the hours booked in it. */
+interface MonthPlan {
+  month: string;
+  status: MonthStatus;
+  hours: number;
+}
+
+/**
+ * Build the (assignmentDays, assignmentMonths) pair for an assignment.
+ *
+ * These rows are NOT decoration: committed demand is aggregated from them
+ * (`monthlyAggregateHours`), so a fixture without them books nothing. The
+ * previous version of this file spread a hard-coded `EMPTY_TAIL` into every
+ * fixture with a comment claiming `capacityForecast`/`overAllocated` "never
+ * read" these fields — which is what let the suite report full coverage of
+ * committed demand while the only shape that occurs in production (an assignment
+ * with one approved month and one still-pending month) was untested.
+ */
+function monthRows(assignmentId: string, plans: readonly MonthPlan[]): {
+  days: AssignmentDay[];
+  months: AssignmentMonth[];
+} {
+  return {
+    days: plans.map(p => ({
+      id: `${assignmentId}:${p.month}:day`,
+      assignmentId,
+      date: `${p.month}-03`,
+      hours: p.hours,
+    })),
+    months: plans.map(p => ({
+      id: monthRowId(assignmentId, p.month),
+      assignmentId,
+      month: p.month,
+      status: p.status,
+    })),
+  };
+}
+
+/** `ForecastData`'s allocation-row tail, assembled from zero or more `monthRows` groups. */
+function tail(...groups: { days: AssignmentDay[]; months: AssignmentMonth[] }[]) {
+  return {
+    assignmentDays: groups.flatMap(g => g.days),
+    assignmentMonths: groups.flatMap(g => g.months),
+    holidays: [],
+    hoursPerDay: 8,
+  };
+}
+
+/**
+ * No day/month rows at all. Committed demand is then 0 BY RULE, not by accident:
+ * `monthlyAggregateHours` documents that a day whose month row is absent
+ * contributes to neither total (B1 self-healing), and with no day rows there is
+ * nothing to aggregate. Used by the fixtures that are about pipeline, supply or
+ * skills — never as a stand-in for "committed demand exists".
+ */
+const NO_ALLOCATION_ROWS = tail();
 
 function res(
   id: string,
@@ -20,6 +81,7 @@ function res(
   utilization: number,
   skills: { name: string; level: number }[] = [],
   kind?: ResourceKind,
+  extra: Partial<Resource> = {},
 ): Resource {
   return {
     id,
@@ -31,6 +93,7 @@ function res(
     utilization,
     capacity,
     ...(kind ? { kind } : {}),
+    ...extra,
   };
 }
 
@@ -63,7 +126,7 @@ function assign(
 
 describe('forecast.util — capacityForecast', () => {
   it('builds N weekly periods with 7-day-spaced ISO labels', () => {
-    const data: ForecastData = { resources: [res('1', 40, 50)], requests: [], assignments: [], ...EMPTY_TAIL };
+    const data: ForecastData = { resources: [res('1', 40, 50)], requests: [], assignments: [], ...NO_ALLOCATION_ROWS };
     const rows = capacityForecast(data, '2026-06-08', 4);
     expect(rows.length).toBe(4);
     expect(rows.map(r => r.period)).toEqual([
@@ -79,19 +142,19 @@ describe('forecast.util — capacityForecast', () => {
       resources: [res('1', 40, 0), res('2', 32, 0)],
       requests: [],
       assignments: [],
-      ...EMPTY_TAIL,
+      ...NO_ALLOCATION_ROWS,
     };
     const rows = capacityForecast(data, '2026-06-08', 2);
     expect(rows.every(r => r.supply === 72)).toBe(true);
   });
 
   it('spreads committed assignment hours across the linked request window', () => {
-    // Request spans exactly two periods (14 days); 80 booked hours split evenly = 40 each.
+    // Request spans exactly two periods (14 days); 80 confirmed hours split evenly = 40 each.
     const data: ForecastData = {
       resources: [res('1', 40, 0)],
       requests: [req('r1', 0, 'Open', { startDate: '2026-06-08', endDate: '2026-06-22' })],
       assignments: [assign('a1', 'r1', '1', 80)],
-      ...EMPTY_TAIL,
+      ...tail(monthRows('a1', [{ month: '2026-06', status: 'Allocated', hours: 80 }])),
     };
     const rows = capacityForecast(data, '2026-06-08', 3);
     expect(rows[0].committed).toBeCloseTo(40, 6);
@@ -104,7 +167,7 @@ describe('forecast.util — capacityForecast', () => {
       resources: [res('1', 40, 0)],
       requests: [req('r1', 0, 'Open')], // no start/end dates
       assignments: [assign('a1', 'r1', '1', 25)],
-      ...EMPTY_TAIL,
+      ...tail(monthRows('a1', [{ month: '2026-06', status: 'Allocated', hours: 25 }])),
     };
     const rows = capacityForecast(data, '2026-06-08', 3);
     expect(rows[0].committed).toBe(25);
@@ -120,7 +183,7 @@ describe('forecast.util — capacityForecast', () => {
         req('r1', 100, 'Open', { staffedEffort: 30, startDate: '2026-06-08', endDate: '2026-06-08' }),
       ],
       assignments: [],
-      ...EMPTY_TAIL,
+      ...NO_ALLOCATION_ROWS,
     };
     const rows = capacityForecast(data, '2026-06-08', 2);
     expect(rows[0].pipeline).toBe(70);
@@ -135,7 +198,7 @@ describe('forecast.util — capacityForecast', () => {
         req('closed', 40, 'Fulfilled'), // closed status
       ],
       assignments: [],
-      ...EMPTY_TAIL,
+      ...NO_ALLOCATION_ROWS,
     };
     const rows = capacityForecast(data, '2026-06-08', 2);
     expect(rows[0].pipeline).toBe(0);
@@ -151,7 +214,7 @@ describe('forecast.util — capacityForecast', () => {
         req('p1', 10, 'Open', { startDate: '2026-06-08', endDate: '2026-06-08' }),
       ],
       assignments: [assign('a1', 'r1', '1', 30)],
-      ...EMPTY_TAIL,
+      ...tail(monthRows('a1', [{ month: '2026-06', status: 'Allocated', hours: 30 }])),
     };
     const rows = capacityForecast(data, '2026-06-08', 1);
     expect(rows[0].committed).toBe(30);
@@ -161,29 +224,32 @@ describe('forecast.util — capacityForecast', () => {
     expect(rows[0].gap).toBe(0);
   });
 
-  it('guards against zero capacity (no division by zero)', () => {
+  it('reports NO utilization (null, never 0%) for a period with zero capacity', () => {
     const data: ForecastData = {
       resources: [res('1', 0, 0)], // zero capacity -> zero supply
       requests: [req('p1', 50, 'Open', { startDate: '2026-06-08', endDate: '2026-06-08' })],
       assignments: [],
-      ...EMPTY_TAIL,
+      ...NO_ALLOCATION_ROWS,
     };
     const rows = capacityForecast(data, '2026-06-08', 1);
     expect(rows[0].supply).toBe(0);
     expect(rows[0].demand).toBe(50);
-    expect(rows[0].utilizationPct).toBe(0); // guarded, not Infinity/NaN
+    // null = "no answer". Not Infinity/NaN, and NOT the 0 this used to assert:
+    // 0% sits in the below-healthy band, so every consumer painted a period with
+    // no capacity at all as spare capacity and folded it into the average.
+    expect(rows[0].utilizationPct).toBeNull();
     expect(rows[0].gap).toBe(-50);
   });
 
   it('returns an empty horizon for non-positive periods or an unparseable start', () => {
-    const data: ForecastData = { resources: [res('1', 40, 0)], requests: [], assignments: [], ...EMPTY_TAIL };
+    const data: ForecastData = { resources: [res('1', 40, 0)], requests: [], assignments: [], ...NO_ALLOCATION_ROWS };
     expect(capacityForecast(data, '2026-06-08', 0)).toEqual([]);
     expect(capacityForecast(data, '2026-06-08', -3)).toEqual([]);
     expect(capacityForecast(data, 'not-a-date', 4)).toEqual([]);
   });
 
   it('scales weekly supply to a monthly period unit', () => {
-    const data: ForecastData = { resources: [res('1', 40, 0)], requests: [], assignments: [], ...EMPTY_TAIL };
+    const data: ForecastData = { resources: [res('1', 40, 0)], requests: [], assignments: [], ...NO_ALLOCATION_ROWS };
     const rows = capacityForecast(data, '2026-06-08', 1, 'monthly');
     expect(rows[0].supply).toBeCloseTo(40 * (52 / 12), 6);
   });
@@ -200,27 +266,208 @@ describe('forecast.util — capacityForecast', () => {
       ],
       requests: [],
       assignments: [],
-      ...EMPTY_TAIL,
+      ...NO_ALLOCATION_ROWS,
     };
     const rows = capacityForecast(data, '2026-06-08', 1);
     // internal (10) + subco (40) = 50; the dummy's 20 must NOT be counted.
     expect(rows[0].supply).toBe(50);
   });
+});
 
-  it('counts only approved allocations as committed demand', () => {
-    const data: ForecastData = {
-      resources: [res('1', 40, 0)],
-      requests: [req('r1', 0, 'Open')],
-      assignments: [
-        assign('allocated', 'r1', '1', 20, 'Allocated'),
-        assign('draft', 'r1', '1', 30, 'Draft'),
-        assign('requested', 'r1', '1', 40, 'Requested'),
-        assign('rejected', 'r1', '1', 50, 'Rejected'),
+/**
+ * Committed demand is the CONFIRMED month hours, not `Assignment.status` +
+ * `assignedHours`.
+ *
+ * The case this replaced ("counts only approved allocations as committed
+ * demand") asserted that the assignment-level status IS the policy — it pinned
+ * `committed === 20` for an assignment with no month rows at all. That is the
+ * defect: `Assignment.status` is a DERIVED rollup in which one pending month
+ * dominates every approved one, so the pinned model erases board-approved hours
+ * in the mixed case and over-counts unapproved ones in the inverse case. The
+ * arithmetic below restates the same intent ("only approved work is committed")
+ * at the granularity the approval actually happens at.
+ */
+describe('forecast.util — committed demand comes from the CONFIRMED month rows', () => {
+  /** Request + assignment shaped like the live case: Aug approved, Sep pending. */
+  function mixedMonthData(plans: readonly MonthPlan[], staffedEffort: number): ForecastData {
+    return {
+      resources: [res('1', 320, 0)],
+      requests: [
+        req('r1', 320, 'Open', { staffedEffort, startDate: '2026-08-03', endDate: '2026-09-28' }),
       ],
-      ...EMPTY_TAIL,
+      // Derived rollup of ['Allocated','Requested'] is 'Requested' — which is
+      // exactly why the old all-or-nothing filter dropped the whole booking.
+      assignments: [assign('a1', 'r1', '1', 320, 'Requested')],
+      ...tail(monthRows('a1', plans)),
     };
+  }
 
-    expect(capacityForecast(data, '2026-06-08', 1)[0].committed).toBe(20);
+  it('keeps the APPROVED month of an assignment whose other month is still pending', () => {
+    const data = mixedMonthData(
+      [
+        { month: '2026-08', status: 'Allocated', hours: 160 },
+        { month: '2026-09', status: 'Requested', hours: 160 },
+      ],
+      160,
+    );
+    const rows = capacityForecast(data, '2026-08-03', 8);
+    const committed = rows.reduce((acc, r) => acc + r.committed, 0);
+    const demand = rows.reduce((acc, r) => acc + r.demand, 0);
+
+    // 160 approved hours are committed demand; the unstaffed 160 stays pipeline.
+    expect(committed).toBeCloseTo(160, 6);
+    expect(demand).toBeCloseTo(320, 6);
+    // Absence: the erasure this closes. The whole engagement contributed 0.00
+    // committed hours to every week of the forecast, the Committed bar and the CSV.
+    expect(committed).not.toBeCloseTo(0, 6);
+  });
+
+  it('counts NOTHING when every month is still awaiting a decision', () => {
+    // The absence twin of the case above: a fix that merely deleted the status
+    // filter and counted every assignment would report 320 here.
+    const data = mixedMonthData(
+      [
+        { month: '2026-08', status: 'Requested', hours: 160 },
+        { month: '2026-09', status: 'Requested', hours: 160 },
+      ],
+      0,
+    );
+    const rows = capacityForecast(data, '2026-08-03', 8);
+    expect(rows.reduce((acc, r) => acc + r.committed, 0)).toBe(0);
+    // ...while the unstaffed effort is still visible as pipeline, so "0 committed"
+    // is a statement about approval, not a dropped booking.
+    expect(rows.reduce((acc, r) => acc + r.pipeline, 0)).toBeCloseTo(320, 6);
+  });
+
+  it('counts NOTHING for an assignment with no month row at all', () => {
+    // monthlyAggregateHours' documented rule: a day whose month row is absent
+    // contributes to neither total. Here there are no rows of either kind.
+    const data = mixedMonthData([], 0);
+    const rows = capacityForecast(data, '2026-08-03', 8);
+    expect(rows.reduce((acc, r) => acc + r.committed, 0)).toBe(0);
+  });
+
+  it('does not count a Draft/Rejected month even when the rollup reads Allocated', () => {
+    // The inverse direction, previously untested: ['Allocated','Draft'] rolls up
+    // to 'Allocated', so the old filter took the assignment's whole 200h.
+    const data: ForecastData = {
+      resources: [res('1', 320, 0)],
+      requests: [req('r1', 0, 'Open', { startDate: '2026-08-03', endDate: '2026-09-28' })],
+      assignments: [assign('a1', 'r1', '1', 200, 'Allocated')],
+      ...tail(
+        monthRows('a1', [
+          { month: '2026-08', status: 'Allocated', hours: 100 },
+          { month: '2026-09', status: 'Draft', hours: 100 },
+        ]),
+      ),
+    };
+    const rows = capacityForecast(data, '2026-08-03', 8);
+    const committed = rows.reduce((acc, r) => acc + r.committed, 0);
+    expect(committed).toBeCloseTo(100, 6);
+    expect(committed).not.toBeCloseTo(200, 6);
+  });
+
+  it('ignores a Rejected month entirely', () => {
+    const data: ForecastData = {
+      resources: [res('1', 320, 0)],
+      requests: [req('r1', 0, 'Open', { startDate: '2026-08-03', endDate: '2026-09-28' })],
+      assignments: [assign('a1', 'r1', '1', 50, 'Rejected')],
+      ...tail(monthRows('a1', [{ month: '2026-08', status: 'Rejected', hours: 50 }])),
+    };
+    const rows = capacityForecast(data, '2026-08-03', 8);
+    expect(rows.reduce((acc, r) => acc + r.committed, 0)).toBe(0);
+  });
+});
+
+/**
+ * Supply and skill coverage may only count people who actually work here in the
+ * period being measured. Every case here is paired with the one that must still
+ * be ALLOWED — a gate that always refuses would otherwise pass the lot.
+ */
+describe('forecast.util — supply and coverage follow employment', () => {
+  it('drops a resource who left before the horizon, keeps one whose leaving date is still ahead', () => {
+    const data: ForecastData = {
+      resources: [
+        res('leaver', 40, 0, [], 'internal', { terminationDate: '2026-03-15' }),
+        res('staying', 40, 0, [], 'internal', { terminationDate: '2026-12-31' }),
+      ],
+      requests: [],
+      assignments: [],
+      ...NO_ALLOCATION_ROWS,
+    };
+    const rows = capacityForecast(data, '2026-08-03', 1);
+    // Only the person still employed in August contributes.
+    expect(rows[0].supply).toBe(40);
+    // Absence: the inflated total the /forecast KPI used to advertise, which the
+    // Bench table on the same page already excluded.
+    expect(rows[0].supply).not.toBe(80);
+  });
+
+  it('makes supply period-dependent: a future hire contributes 0 before joining and full capacity after', () => {
+    const data: ForecastData = {
+      resources: [res('joiner', 40, 0, [], 'internal', { hireDate: '2026-10-01' })],
+      requests: [],
+      assignments: [],
+      ...NO_ALLOCATION_ROWS,
+    };
+    // 10 weekly periods from 2026-08-03: rows[0] is August, rows[9] is 2026-10-05.
+    const rows = capacityForecast(data, '2026-08-03', 10);
+    expect(rows[0].period).toBe('2026-08-03');
+    expect(rows[9].period).toBe('2026-10-05');
+    expect(rows[0].supply).toBe(0);
+    // The presence half: supply must actually VARY by period, so "drop anyone
+    // with a hireDate" and "supply is a constant" both fail here.
+    expect(rows[9].supply).toBe(40);
+  });
+
+  it('reports no utilization (not 0%) for a period whose only resource has not joined yet', () => {
+    // The P1-17/P1-18 coupling: once supply can legitimately be 0 for a period,
+    // that period has no utilisation to report even though demand is real.
+    const data: ForecastData = {
+      resources: [res('joiner', 40, 0, [], 'internal', { hireDate: '2026-10-01' })],
+      requests: [req('p1', 20, 'Open', { startDate: '2026-08-03', endDate: '2026-08-03' })],
+      assignments: [],
+      ...NO_ALLOCATION_ROWS,
+    };
+    const rows = capacityForecast(data, '2026-08-03', 10);
+    expect(rows[0].demand).toBe(20);
+    expect(rows[0].utilizationPct).toBeNull();
+    // ...and the period where she IS employed reports a real number.
+    expect(rows[9].utilizationPct).toBe(0);
+  });
+
+  it('does not count a departed holder of a skill as coverage', () => {
+    const data: ForecastData = {
+      resources: [
+        res('gone', 40, 0, [{ name: 'Java', level: 4 }], 'internal', { terminationDate: '2026-03-15' }),
+        res('here', 40, 0, [{ name: 'Angular', level: 3 }], 'internal'),
+      ],
+      requests: [req('r1', 80, 'Open', { skills: ['Java', 'Angular'] })],
+      assignments: [],
+      ...NO_ALLOCATION_ROWS,
+    };
+    const gaps = skillGap(data, AS_OF);
+
+    const java = gaps.find(g => g.skill === 'Java');
+    expect(java?.supplyCount).toBe(0);
+    // The shortage the inflated count suppressed: the only Java holder has left.
+    expect(java?.shortage).toBe(true);
+    // The presence twin — an employed holder must still count, so the fix cannot
+    // be "stop counting skills".
+    const angular = gaps.find(g => g.skill === 'Angular');
+    expect(angular?.supplyCount).toBe(1);
+    expect(angular?.shortage).toBe(false);
+  });
+
+  it('counts a hire as coverage from the month she starts, not before', () => {
+    const data: ForecastData = {
+      resources: [res('joiner', 40, 0, [{ name: 'Go', level: 3 }], 'internal', { hireDate: '2026-10-01' })],
+      requests: [req('r1', 40, 'Open', { skills: ['Go'] })],
+      assignments: [],
+      ...NO_ALLOCATION_ROWS,
+    };
+    expect(skillGap(data, '2026-08')[0].supplyCount).toBe(0);
+    expect(skillGap(data, '2026-10')[0].supplyCount).toBe(1);
   });
 });
 
@@ -240,21 +487,72 @@ describe('forecast.util — scenario validation and KPI tone', () => {
   });
 });
 
+describe('forecast.util — forecastUtilizationBand', () => {
+  it('does not call a below-healthy figure the same thing as a healthy one', () => {
+    // The contradiction this closes: 45% was painted with the healthy green tone
+    // on /forecast while /what-if scored the same move as bad.
+    expect(forecastUtilizationBand(45)).not.toBe(forecastUtilizationBand(90));
+    expect(forecastUtilizationBand(45)).toBe('spare');
+    expect(forecastUtilizationBand(90)).toBe('healthy');
+  });
+
+  it('keeps the whole healthy band together and puts over-capacity outside it', () => {
+    // 90 and 95 are both healthy: a ladder that split them (the old >=85/<=100
+    // hand-rolled pair called 95 healthy and 100.1 over) would fail here.
+    expect(forecastUtilizationBand(90)).toBe(forecastUtilizationBand(95));
+    expect(forecastUtilizationBand(105)).toBe('healthy');
+    expect(forecastUtilizationBand(120)).toBe('over');
+    // Three distinct bands must survive: any collapse into two fails one of these.
+    expect(new Set([forecastUtilizationBand(45), forecastUtilizationBand(90), forecastUtilizationBand(120)]).size).toBe(3);
+  });
+
+  it('answers "unknown" — never a tone — when there is no utilization to paint', () => {
+    expect(forecastUtilizationBand(null)).toBe('unknown');
+    expect(forecastUtilizationBand(Number.NaN)).toBe('unknown');
+    // Absence: 'unknown' must not be any of the three real bands, or a
+    // no-capacity period inherits a colour that asserts something.
+    expect(['spare', 'healthy', 'over']).not.toContain(forecastUtilizationBand(null));
+  });
+});
+
 describe('forecast.util — overAllocated', () => {
   it('lists resources at/above the default 110% threshold, most over first', () => {
     const data: ForecastData = {
       resources: [
-        res('1', 40, 130), // over, booked 60 -> 20 over hours
+        res('1', 40, 130), // over, 60 confirmed hours -> 20 over hours
         res('2', 40, 115), // over
         res('3', 40, 105), // under 110 -> excluded
       ],
       requests: [],
       assignments: [assign('a1', 'r1', '1', 60)],
-      ...EMPTY_TAIL,
+      ...tail(monthRows('a1', [{ month: '2026-08', status: 'Allocated', hours: 60 }])),
     };
     const over = overAllocated(data);
     expect(over.map(o => o.resourceId)).toEqual(['1', '2']);
     expect(over.find(o => o.resourceId === '1')?.overByHours).toBe(20);
+  });
+
+  it('measures "Over by" from the confirmed months only, and does not zero it because another month is pending', () => {
+    // Same all-or-nothing bug as committed demand: the assignment rolls up to
+    // 'Requested', which used to erase its 100 APPROVED hours and report 0h over.
+    const data: ForecastData = {
+      resources: [res('1', 40, 150)],
+      requests: [],
+      assignments: [assign('a1', 'r1', '1', 180, 'Requested')],
+      ...tail(
+        monthRows('a1', [
+          { month: '2026-08', status: 'Allocated', hours: 100 },
+          { month: '2026-09', status: 'Requested', hours: 80 },
+        ]),
+      ),
+    };
+    const over = overAllocated(data);
+    // 100 confirmed − 40 capacity = 60 over.
+    expect(over[0].overByHours).toBe(60);
+    // Absence, both directions: not the erased 0, and not the 140 the whole
+    // assignment's 180h would give.
+    expect(over[0].overByHours).not.toBe(0);
+    expect(over[0].overByHours).not.toBe(140);
   });
 
   it('supports a 100% threshold band', () => {
@@ -262,7 +560,7 @@ describe('forecast.util — overAllocated', () => {
       resources: [res('1', 40, 101), res('2', 40, 100), res('3', 40, 99)],
       requests: [],
       assignments: [],
-      ...EMPTY_TAIL,
+      ...NO_ALLOCATION_ROWS,
     };
     expect(overAllocated(data, 100).map(o => o.resourceId)).toEqual(['1', '2']);
   });
@@ -275,7 +573,7 @@ describe('forecast.util — overAllocated', () => {
       ],
       requests: [],
       assignments: [],
-      ...EMPTY_TAIL,
+      ...NO_ALLOCATION_ROWS,
     };
     const over = overAllocated(data);
     expect(over.map(o => o.resourceId)).toEqual(['2']);
@@ -294,9 +592,9 @@ describe('forecast.util — skillGap', () => {
         req('r2', 40, 'Open', { skills: ['Kubernetes'] }),
       ],
       assignments: [],
-      ...EMPTY_TAIL,
+      ...NO_ALLOCATION_ROWS,
     };
-    const gaps = skillGap(data);
+    const gaps = skillGap(data, AS_OF);
 
     const k8s = gaps.find(g => g.skill === 'Kubernetes');
     expect(k8s).toBeDefined();
@@ -320,9 +618,9 @@ describe('forecast.util — skillGap', () => {
       resources: [res('1', 40, 50, [{ name: 'angular', level: 3 }])],
       requests: [req('r1', 10, 'Open', { skills: ['Angular'] })],
       assignments: [],
-      ...EMPTY_TAIL,
+      ...NO_ALLOCATION_ROWS,
     };
-    const gaps = skillGap(data);
+    const gaps = skillGap(data, AS_OF);
     expect(gaps.length).toBe(1);
     expect(gaps[0].supplyCount).toBe(1);
     expect(gaps[0].shortage).toBe(false);
@@ -333,9 +631,9 @@ describe('forecast.util — skillGap', () => {
       resources: [],
       requests: [req('r1', 100, 'Open', { staffedEffort: 70, skills: ['Go'] })],
       assignments: [],
-      ...EMPTY_TAIL,
+      ...NO_ALLOCATION_ROWS,
     };
-    const gaps = skillGap(data);
+    const gaps = skillGap(data, AS_OF);
     expect(gaps[0].demandHours).toBe(30); // 100 - 70
     expect(gaps[0].shortage).toBe(true);
   });
@@ -348,14 +646,14 @@ describe('forecast.util — skillGap', () => {
         req('r2', 40, 'Open', { staffedEffort: 40, skills: ['Rust'] }),
       ],
       assignments: [],
-      ...EMPTY_TAIL,
+      ...NO_ALLOCATION_ROWS,
     };
-    expect(skillGap(data)).toEqual([]);
+    expect(skillGap(data, AS_OF)).toEqual([]);
   });
 
   it('returns an empty list when there is no open demand', () => {
-    const data: ForecastData = { resources: [res('1', 40, 50)], requests: [], assignments: [], ...EMPTY_TAIL };
-    expect(skillGap(data)).toEqual([]);
+    const data: ForecastData = { resources: [res('1', 40, 50)], requests: [], assignments: [], ...NO_ALLOCATION_ROWS };
+    expect(skillGap(data, AS_OF)).toEqual([]);
   });
 
   it('does not treat dummy skills as deliverable coverage', () => {
@@ -366,14 +664,14 @@ describe('forecast.util — skillGap', () => {
       ],
       requests: [req('r1', 40, 'Open', { skills: ['Kubernetes', 'Angular'] })],
       assignments: [],
-      ...EMPTY_TAIL,
+      ...NO_ALLOCATION_ROWS,
     };
 
-    expect(skillGap(data).find(gap => gap.skill === 'Kubernetes')).toMatchObject({
+    expect(skillGap(data, AS_OF).find(gap => gap.skill === 'Kubernetes')).toMatchObject({
       supplyCount: 0,
       shortage: true,
     });
-    expect(skillGap(data).find(gap => gap.skill === 'Angular')).toMatchObject({
+    expect(skillGap(data, AS_OF).find(gap => gap.skill === 'Angular')).toMatchObject({
       supplyCount: 1,
       shortage: false,
     });
