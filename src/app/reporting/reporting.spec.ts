@@ -2,7 +2,9 @@ import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { of, throwError } from 'rxjs';
 import { Reporting } from './reporting';
-import { ApiService, BillingPlanItem, Contract, NegotiatedRate, Project, Resource, TimeEntry } from '../services/api.service';
+import { ABSENCE_REASON_CODES, ApiService, BillingPlanItem, Contract, NegotiatedRate, Project, Resource, TimeEntry, type BenchCell, type BenchRollup } from '../services/api.service';
+import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
+import { todayLocalIso } from '../services/local-date.util';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { XlsxSheet } from '../services/export.util';
@@ -57,6 +59,11 @@ async function setup(resources: Resource[] = RESOURCES, overrides: Partial<ApiSe
     getAssignmentDays: empty,
     getAssignmentMonths: empty,
     getCostBaselines: empty,
+    // H (Q4) — appended AFTER getCostBaselines, matching the component
+    // forkJoin's own end-of-block convention. Its real shape is a BenchRollup
+    // OBJECT, not a bare array: `empty` here would put `[]` where `.months` is
+    // read and every absence mark would evaluate against undefined.
+    getBenchMonthly: () => of(EMPTY_BENCH_ROLLUP),
     // The EUR/day -> EUR/hour divisor for a negotiated rate. 8 is the seeded and
     // default working day, so the figures below read as "one 8h day per day rate".
     getHoursPerDay: () => of({ value: 8 }),
@@ -622,3 +629,453 @@ describe('Reporting — RPT xlsx exports', () => {
     expect(notify.show).not.toHaveBeenCalled();
   });
 });
+
+// -----------------------------------------------------------------------------
+// BLOCK H — non-billable engagements (Q2) and absence marking (Q4).
+//
+// jsdom DOES NOT LAY OUT. Nothing below can prove a bar is legible, that a tile
+// is not clipped, or that a tone is distinguishable to the eye; every assertion
+// here is structural (a label, a category string, a per-datum colour token, a
+// computed figure). The visual half belongs to the browser pass in spec §8.4.
+// -----------------------------------------------------------------------------
+
+/**
+ * The four project shapes the block turns on, and the ONE fixture the money
+ * tests below share. All four are required and none is decorative:
+ *
+ *   PB  billable: true                     — the control that must not move
+ *   PN  billable: false, type 'Delivery'   — internal, NOT a basket (the legitimate
+ *                                            converse of the Basket invariant)
+ *   PK  billable: false, type 'Basket'     — the manual's dedicated engagement
+ *   PL  NO billable FIELD AT ALL           — must read as BILLABLE (?? true)
+ *
+ * Without PL a mutation that inverted the default would keep every other
+ * assertion green; without PN, "excluded" and "is a Basket" could not be told
+ * apart. Money is hand-verifiable: every rate is 100/200 EUR per hour, so every
+ * figure below is a product of two numbers written on this page.
+ *
+ *   PB  revenue 100000  cost 300h x 100 = 30000   margin  70000   billable
+ *   PN  revenue      0  cost 100h x 100 = 10000   margin -10000   NON-billable
+ *   PK  revenue      0  cost  40h x 100 =  4000   margin  -4000   NON-billable
+ *   PL  revenue  20000  cost  50h x 100 =  5000   margin  15000   billable (default)
+ *
+ *   fully loaded = 120000 - (30000 + 5000) - (10000 + 4000) = 71000  (59.17%)
+ *   the OLD /reporting sum (revenue-bearing projects only) = 70000 + 15000 = 85000
+ *
+ * So one fixture measures both halves of Q2: the tile on THIS page moves by
+ * 14000, and the dashboard's — an unfiltered sum all along — does not.
+ */
+const H_RESOURCES: Resource[] = [
+  { id: 'R1', name: 'Rita One', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 80, capacity: 40, kind: 'internal', costRate: 100, billRate: 200 },
+  { id: 'R2', name: 'Ravi Two', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 60, capacity: 40, kind: 'internal', costRate: 100, billRate: 200 },
+];
+
+const H_PROJECTS: Project[] = [
+  { id: 'PB', name: 'Billable Delivery', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution', billable: true, type: 'Delivery' },
+  { id: 'PN', name: 'Internal Platform', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution', billable: false, type: 'Delivery' },
+  { id: 'PK', name: 'BASKET Engineering', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution', billable: false, type: 'Basket' },
+  { id: 'PL', name: 'Legacy Row', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution' },
+];
+
+/** The SAME four projects with the flags stripped — every one reads billable. */
+const H_PROJECTS_UNFLAGGED: Project[] = H_PROJECTS.map(p => {
+  const copy: Project = { ...p };
+  delete copy.billable;
+  delete copy.type;
+  return copy;
+});
+
+const H_TIME: TimeEntry[] = [
+  { id: 'T1', assignmentId: 'a', requestId: 'r', resourceId: 'R1', projectId: 'PB', date: '2026-05-04', hours: 300, status: 'Approved' },
+  { id: 'T2', assignmentId: 'a', requestId: 'r', resourceId: 'R2', projectId: 'PN', date: '2026-05-04', hours: 100, status: 'Approved' },
+  { id: 'T3', assignmentId: 'a', requestId: 'r', resourceId: 'R2', projectId: 'PK', date: '2026-05-04', hours: 40, status: 'Approved' },
+  { id: 'T4', assignmentId: 'a', requestId: 'r', resourceId: 'R1', projectId: 'PL', date: '2026-05-04', hours: 50, status: 'Approved' },
+];
+
+/**
+ * Billing items exist ONLY on the billable engagements, which is not a
+ * convenience: the server refuses one on a non-billable project (spec §6.3), so
+ * a fixture that put one there would pin a state the system forbids. They give
+ * recognizedRevenue something to return, so the realization differential moves a
+ * MONEY figure and not only an hours count.
+ */
+const H_BILLING: BillingPlanItem[] = [
+  { id: 'BP-PB', contractId: 'CT', projectId: 'PB', type: 'Milestone', label: 'M1', amount: 18000, currency: 'EUR', status: 'Ready' },
+  { id: 'BP-PL', contractId: 'CT', projectId: 'PL', type: 'Milestone', label: 'M1', amount: 6000, currency: 'EUR', status: 'Ready' },
+];
+
+const H_ORDERS = [
+  { id: 'O1', contractId: 'CT', type: 'Customer' as const, amount: 120000, currency: 'EUR', status: 'Invoiced' as const, orderDate: '2026-01-01' },
+];
+const H_ORDER_LINES = [
+  { id: 'L-PB', orderId: 'O1', projectId: 'PB', description: 'x', amount: 100000 },
+  { id: 'L-PL', orderId: 'O1', projectId: 'PL', description: 'x', amount: 20000 },
+];
+
+function hOverrides(projects: Project[], extra: Record<string, unknown> = {}): Partial<ApiService> {
+  return {
+    getProjects: () => of(projects),
+    getTimeEntries: () => of(H_TIME),
+    getBillingPlanItems: () => of(H_BILLING),
+    getOrders: () => of(H_ORDERS),
+    getOrderLines: () => of(H_ORDER_LINES),
+    ...extra,
+  } as unknown as Partial<ApiService>;
+}
+
+/** The Portfolio Financials tile whose label must carry "fully loaded". */
+function marginTile(fixture: { nativeElement: unknown }): HTMLElement {
+  const tile = host(fixture).querySelector<HTMLElement>('[data-test="fully-loaded-margin-tile"]');
+  expect(tile, 'the fully-loaded margin tile must exist').not.toBeNull();
+  return tile!;
+}
+
+describe('Reporting — the portfolio margin tile is FULLY LOADED and says so (Q2; structure only, jsdom does not lay out)', () => {
+  it('carries the cost of non-billable work, which the pre-H sum on THIS page dropped', async () => {
+    const fixture = await setup(H_RESOURCES, hOverrides(H_PROJECTS));
+    await flush(fixture);
+    const c = fixture.componentInstance;
+
+    // The numbers, hand-derived at the top of this block.
+    expect(c.totalRevenue()).toBe(120000);
+    expect(c.totalMargin()).toBe(71000);
+    expect(c.portfolioMarginPct()).toBeCloseTo(59.1667, 3);
+
+    // THE MOVE, stated as a number rather than "it changed": /reporting summed
+    // projectMargins(), which filters revenue > 0 and therefore dropped every
+    // non-billable engagement — the exact opposite of fully loaded. The tile is
+    // 14000 EUR below that sum, and the per-project list it came from is
+    // deliberately UNCHANGED (spec §11), so both figures stay derivable here.
+    const revenueBearingSum = c.projectMargins().reduce((s, p) => s + p.margin, 0);
+    expect(revenueBearingSum).toBe(85000);
+    expect(c.totalMargin()).toBe(revenueBearingSum - 14000);
+  });
+
+  it('names "fully loaded" in the LABEL, and says the figure is not a project delivery margin', async () => {
+    const fixture = await setup(H_RESOURCES, hOverrides(H_PROJECTS));
+    await flush(fixture);
+
+    // The LABEL, not the caption: the caption is what somebody comparing two
+    // euro figures on two screens does not read.
+    const label = marginTile(fixture).querySelector('.command-kpi-label')?.textContent ?? '';
+    expect(label.toLowerCase()).toContain('fully loaded');
+
+    const note = marginTile(fixture).querySelector('[data-test="fully-loaded-note"]')?.textContent ?? '';
+    expect(note).toContain('€14,000');
+    expect(note).toContain('2 engagements');
+    expect(note.toLowerCase()).toContain('not comparable');
+  });
+
+  it('says the OPPOSITE when nothing non-billable is in the base — the note is not wallpaper', async () => {
+    // THE ABSENCE TWIN. Without this, a hard-coded "not comparable with a project
+    // margin" string would satisfy the test above forever, including on a
+    // portfolio where the caveat is false.
+    const fixture = await setup(H_RESOURCES, hOverrides(H_PROJECTS_UNFLAGGED));
+    await flush(fixture);
+
+    const note = marginTile(fixture).querySelector('[data-test="fully-loaded-note"]')?.textContent ?? '';
+    expect(note.toLowerCase()).toContain('no non-billable engagement');
+    expect(note.toLowerCase()).not.toContain('not comparable');
+    // …and the label still says fully loaded, because the QUESTION the tile
+    // answers does not depend on today's data.
+    expect((marginTile(fixture).querySelector('.command-kpi-label')?.textContent ?? '').toLowerCase())
+      .toContain('fully loaded');
+  });
+
+  it('DIFFERENTIAL — the same fixture with and without the flags: the total is identical, the split is not', async () => {
+    // The §8.2 trap in this screen's own terms. FinanceData.projects omitted (or
+    // carrying no flags) reads as all-billable, which reproduces the pre-H
+    // behaviour exactly — so a value-only test stays green while the flags are
+    // never read. Two renders of the SAME money: one answer that must NOT move,
+    // and one that must.
+    const flagged = await setup(H_RESOURCES, hOverrides(H_PROJECTS));
+    await flush(flagged);
+    const withFlags = flagged.componentInstance['portfolioMargin']();
+
+    TestBed.resetTestingModule();
+
+    const unflagged = await setup(H_RESOURCES, hOverrides(H_PROJECTS_UNFLAGGED));
+    await flush(unflagged);
+    const without = unflagged.componentInstance['portfolioMargin']();
+
+    // Q2's own answer, CONFIRMED rather than assumed: the headline does not move.
+    // The cost was always inside the total; what H adds is knowing which part of
+    // it has no customer behind it — which is exactly why the label had to change
+    // even though the figure did not.
+    expect(without.fullyLoadedMargin).toBe(withFlags.fullyLoadedMargin);
+    expect(without.revenue).toBe(withFlags.revenue);
+
+    // …and the split, which is the whole of the change.
+    expect(withFlags.nonBillableCost).toBe(14000);
+    expect(without.nonBillableCost).toBe(0);
+    expect(withFlags.deliveryCost).toBe(35000);
+    expect(without.deliveryCost).toBe(49000);
+    expect(withFlags.nonBillableProjectIds).toStrictEqual(['PK', 'PN']);
+    expect(without.nonBillableProjectIds).toStrictEqual([]);
+  });
+
+  it('treats a project row with NO billable field as billable, never as an unflagged basket', async () => {
+    const fixture = await setup(H_RESOURCES, hOverrides(H_PROJECTS));
+    await flush(fixture);
+    const ids = fixture.componentInstance['portfolioMargin']().nonBillableProjectIds;
+    // PL carries neither flag. The safe default keeps margin alerts ON for it;
+    // inverting that default is a silent, portfolio-wide suppression, so it is
+    // pinned in both directions on one fixture.
+    expect(ids).not.toContain('PL');
+    expect(ids).toStrictEqual(['PK', 'PN']);
+  });
+});
+
+describe('Reporting — realization excludes non-billable engagements (F-7; structure only, jsdom does not lay out)', () => {
+  it('DIFFERENTIAL — the same fixture with and without the flags disagrees on realization, hours, headcount and the excluded list', async () => {
+    const flagged = await setup(H_RESOURCES, hOverrides(H_PROJECTS));
+    await flush(flagged);
+    const withFlags = flagged.componentInstance.realization();
+
+    TestBed.resetTestingModule();
+
+    const unflagged = await setup(H_RESOURCES, hOverrides(H_PROJECTS_UNFLAGGED));
+    await flush(unflagged);
+    const without = unflagged.componentInstance.realization();
+
+    // Billable only: 350 approved hours x 200 = 70000 of rate-card value behind
+    // 24000 of recognised revenue => 34.29%.
+    expect(withFlags.hours).toBe(350);
+    expect(withFlags.standardBillValue).toBe(70000);
+    expect(withFlags.realizationPct).toBeCloseTo(34.2857, 3);
+    expect(withFlags.headcount).toBe(1);
+    expect(withFlags.excludedProjectIds).toStrictEqual(['PK', 'PN']);
+
+    // Pre-H: the 140 hours on PN and PK carried 28000 of rate-card value against
+    // no customer at all, dragging the ratio down by ~10 points.
+    expect(without.hours).toBe(490);
+    expect(without.standardBillValue).toBe(98000);
+    expect(without.realizationPct).toBeCloseTo(24.4898, 3);
+    expect(without.headcount).toBe(2);
+    expect(without.excludedProjectIds).toStrictEqual([]);
+
+    // The revenue numerator is the SAME in both — a non-billable engagement has
+    // none to remove — which is what makes the ratio's move attributable to the
+    // denominator rather than to a revenue figure quietly changing too.
+    expect(withFlags.revenue).toBe(without.revenue);
+    expect(withFlags.revenue).toBe(24000);
+  });
+
+  it('says how many engagements the strip leaves out, and says the opposite when it leaves out none', async () => {
+    const flagged = await setup(H_RESOURCES, hOverrides(H_PROJECTS));
+    await flush(flagged);
+    const scoped = host(flagged).querySelector('[data-test="realization-scope"]')?.textContent ?? '';
+    expect(scoped).toContain('billable engagements only');
+    expect(scoped).toContain('2 non-billable excluded');
+
+    TestBed.resetTestingModule();
+
+    // THE ABSENCE TWIN: the subtitle must be able to say there is nothing to
+    // exclude, or "billable engagements only" is a permanent decoration.
+    const unflagged = await setup(H_RESOURCES, hOverrides(H_PROJECTS_UNFLAGGED));
+    await flush(unflagged);
+    const clean = host(unflagged).querySelector('[data-test="realization-scope"]')?.textContent ?? '';
+    expect(clean).toContain('all engagements are billable');
+    expect(clean).not.toContain('non-billable excluded');
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Q4 — someone away for the whole month is MARKED on the utilization chart, not
+// dropped from it. Three internals whose profile utilizations differ, so the
+// mean has a value worth moving:
+//
+//   Rita  80%   away all month  -> marked, and OUT of the average denominator
+//   Ravi  60%   present         -> unmarked (the paired absence assertion)
+//   Rosa  40%   present         -> unmarked
+//
+//   mean with Rita counted  = (80 + 60 + 40) / 3 = 60%
+//   mean with Rita excluded = (60 + 40) / 2      = 50%
+//
+// Rita is deliberately the HIGHEST reading, not a zero: the scalar `utilization`
+// is a whole-of-time profile value H leaves alone (spec §11), so an away person
+// can carry a large number, and an implementation that "marks the zero bars"
+// would mark the wrong people while every 0%-fixture stayed green.
+// -----------------------------------------------------------------------------
+
+const AWAY_RESOURCES: Resource[] = [
+  { id: 'R1', name: 'Rita One', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 80, capacity: 40, kind: 'internal' },
+  { id: 'R2', name: 'Ravi Two', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 60, capacity: 40, kind: 'internal' },
+  { id: 'R3', name: 'Rosa Three', role: 'Designer', skills: [], projectRoles: [], externalExperience: [], utilization: 40, capacity: 40, kind: 'internal' },
+];
+
+const THIS_MONTH = todayLocalIso().slice(0, 7);
+
+function cell(state: BenchCell['state']): BenchCell {
+  return { state, upcomingUnallocated: false };
+}
+
+/**
+ * A rollup whose window CONTAINS the current month, with R1's state as the only
+ * variable. Calling it twice — once 'ABSENT', once 'BENCH' — is the differential:
+ * one input byte apart, and the screen must disagree.
+ */
+function awayRollup(r1: BenchCell['state']): BenchRollup {
+  return {
+    months: [THIS_MONTH],
+    internalRows: [
+      { resourceId: 'R1', resourceName: 'Rita One', kind: 'internal', monthly: { [THIS_MONTH]: cell(r1) }, availabilityDate: { kind: 'date', date: THIS_MONTH + '-01' } },
+      { resourceId: 'R2', resourceName: 'Ravi Two', kind: 'internal', monthly: { [THIS_MONTH]: cell('ALLOCATED') }, availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: THIS_MONTH } },
+      { resourceId: 'R3', resourceName: 'Rosa Three', kind: 'internal', monthly: { [THIS_MONTH]: cell('PARTIAL') }, availabilityDate: { kind: 'date', date: THIS_MONTH + '-01' } },
+    ],
+    subcoRows: [],
+    hiringDemand: [],
+  };
+}
+
+function awaySetup(rollup: BenchRollup) {
+  return setup(AWAY_RESOURCES, { getBenchMonthly: () => of(rollup) } as unknown as Partial<ApiService>);
+}
+
+describe('Reporting — Q4 marks an away person instead of dropping them (structure only, jsdom does not lay out)', () => {
+  it('DIFFERENTIAL — the same three people, one bench cell apart, disagree on the axis, the tone and the mean', async () => {
+    const marked = await awaySetup(awayRollup('ABSENT'));
+    await flush(marked);
+    // Snapshotted BEFORE the TestBed reset: these are signals, and re-reading one
+    // after its injector is destroyed answers from the empty default — which
+    // would have made the second half of this test compare two blanks.
+    const markedCats = marked.componentInstance.utilizationChartCategories();
+    const markedSeries = marked.componentInstance.utilizationChartSeries()[0];
+    const markedColors = markedSeries.colors;
+    const markedValues = markedSeries.values;
+    const markedMean = utilizationKpi(marked);
+
+    TestBed.resetTestingModule();
+
+    const plain = await awaySetup(awayRollup('BENCH'));
+    await flush(plain);
+    const noAbsence = plain.componentInstance;
+
+    // PRESENCE: Rita is named as away on the axis, toned `info`, and gone from
+    // the denominator.
+    expect(markedCats).toStrictEqual(['Rita (away)', 'Ravi', 'Rosa']);
+    expect(markedColors).toStrictEqual(['var(--color-info)', undefined, undefined]);
+    expect(markedMean).toBe('50%');
+
+    // ABSENCE, on the same fixture: with the one cell flipped to BENCH, nobody is
+    // marked and the mean is back over all three. Everybody still on the chart in
+    // both — Q4 chose marking over exclusion, so the bar count must not move.
+    expect(noAbsence.utilizationChartCategories()).toStrictEqual(['Rita', 'Ravi', 'Rosa']);
+    expect(noAbsence.utilizationChartSeries()[0].colors).toStrictEqual([undefined, undefined, undefined]);
+    expect(utilizationKpi(plain)).toBe('60%');
+    expect(noAbsence.utilizationChartCategories().length).toBe(markedCats.length);
+
+    // The values are UNTOUCHED in both. H does not rewrite the scalar (spec §11);
+    // marking it is the whole of the change, and 80 surviving here is what proves
+    // the mark is not "the bar that reads zero".
+    expect(markedValues).toStrictEqual([80, 60, 40]);
+    expect(noAbsence.utilizationChartSeries()[0].values).toStrictEqual([80, 60, 40]);
+  });
+
+  it('renders the away annotation with the canonical glyph, tone and wording — and names no cause', async () => {
+    const fixture = await awaySetup(awayRollup('ABSENT'));
+    await flush(fixture);
+    const legend = host(fixture).querySelector('[data-test="utilization-away-legend"]');
+    expect(legend, 'the away annotation must exist when somebody is away').not.toBeNull();
+
+    const chip = legend!.querySelector('li');
+    // The canonical treatment, verbatim from availability-strip.component.ts, so
+    // the four surfaces of this block read alike. Tokens, not a `dark:` variant:
+    // this design system re-points the same tokens under [data-theme="dark"].
+    expect(chip!.className).toContain('bg-info-tint');
+    expect(chip!.className).toContain('text-info-text');
+    expect(chip!.className).toContain('ring-info');
+    expect(chip!.textContent).toContain('L');
+    expect(chip!.getAttribute('aria-label')).toContain('Away (on leave) — not staffable');
+    expect(legend!.textContent).toContain('Rita (away)');
+
+    // PRIVACY, asserted over the WHOLE rendered page rather than one node: an
+    // absence reason is special-category data and this screen's audience is not
+    // its audience. Scanning the whole body is how a leak from a NEW reader gets
+    // caught, not just from the one this test was written for.
+    const page = host(fixture).textContent ?? '';
+    for (const reason of ABSENCE_REASON_CODES) expect(page).not.toContain(reason);
+    // Vacuity control: the scan must be running against a page that DID render
+    // the marking, or "no reason on screen" is satisfied by an empty page.
+    expect(page).toContain('Rita (away)');
+  });
+
+  it('draws no annotation, and drops nobody from the mean, when nobody is away', async () => {
+    // The annotation's own absence twin — a legend hard-coded into the template
+    // would satisfy the test above and be wrong every other day of the year.
+    const fixture = await awaySetup(awayRollup('BENCH'));
+    await flush(fixture);
+    expect(host(fixture).querySelector('[data-test="utilization-away-legend"]')).toBeNull();
+    expect(host(fixture).querySelector('[data-test="kpi-note"]')).toBeNull();
+  });
+
+  it('says how many the average dropped, in the tile and in the exported CSV', async () => {
+    const fixture = await awaySetup(awayRollup('ABSENT'));
+    await flush(fixture);
+
+    // U6: a mean whose denominator silently changed is a number nobody can
+    // reproduce, so the tile carries what it left out.
+    const note = host(fixture).querySelector('[data-test="kpi-note"]')?.textContent ?? '';
+    expect(note).toContain('Excludes 1 away on leave all month');
+
+    // …and the file, which is where the figure goes once it leaves the screen.
+    // The CSV is built through its own method rather than the Blob path so the
+    // BYTES can be asserted: an export is the classic escape route for a field
+    // that should never leave, and the only test worth having reads them.
+    const csv = fixture.componentInstance['buildSummaryCsv']() as string;
+    expect(csv.split('\n')[0]).toBe('KPI,Value,Trend,Note');
+    expect(csv).toContain('Excludes 1 away on leave all month');
+    expect(csv).toContain('50%');
+    for (const reason of ABSENCE_REASON_CODES) expect(csv).not.toContain(reason);
+  });
+
+  it('refuses to imply "nobody is away" when the fetched window has no present tense', async () => {
+    // The bare-"0 / 0" defect, in this screen's dialect: with the window stopping
+    // short of today there is nothing to mark, and an unmarked chart must not be
+    // readable as an all-clear. Same remedy as the bench tile's month subtitle.
+    const past = shiftIso(THIS_MONTH, -3);
+    const rollup: BenchRollup = {
+      months: [past],
+      internalRows: [
+        { resourceId: 'R1', resourceName: 'Rita One', kind: 'internal', monthly: { [past]: cell('ABSENT') }, availabilityDate: { kind: 'date', date: past + '-01' } },
+      ],
+      subcoRows: [],
+      hiringDemand: [],
+    };
+    const fixture = await awaySetup(rollup);
+    await flush(fixture);
+
+    const scope = host(fixture).querySelector('[data-test="utilization-absence-scope"]')?.textContent ?? '';
+    expect(scope).toContain('does not reach the current month');
+    // …and the stale ABSENT cell three months back changed nothing on screen:
+    // the window is respected in this direction too.
+    expect(fixture.componentInstance.utilizationChartCategories()).toStrictEqual(['Rita', 'Ravi', 'Rosa']);
+    expect(utilizationKpi(fixture)).toBe('60%');
+  });
+
+  it('states plainly that nobody is away when the window does cover today and nobody is', async () => {
+    const fixture = await awaySetup(awayRollup('BENCH'));
+    await flush(fixture);
+    const scope = host(fixture).querySelector('[data-test="utilization-absence-scope"]')?.textContent ?? '';
+    expect(scope).toContain('Nobody internal is away');
+    expect(scope).not.toContain('does not reach the current month');
+  });
+
+  it('declares the treatment in the chart caption (U5), and the caption names no cause', async () => {
+    const fixture = await awaySetup(awayRollup('ABSENT'));
+    await flush(fixture);
+    // The caption reaches the DOM through the chart's screen-reader figcaption,
+    // so this reads the rendered text rather than the input binding.
+    const caption = host(fixture).querySelector('figcaption caption')?.textContent ?? '';
+    expect(caption).toContain('(away)');
+    expect(caption).toContain('leaves the average');
+    expect(caption.toLowerCase()).toContain('the reason for the leave is never shown');
+  });
+});
+
+/** 'YYYY-MM' shifted by `delta` months, normalising the year. */
+function shiftIso(month: string, delta: number): string {
+  const [y, m] = month.split('-').map(Number);
+  const zeroBased = y * 12 + (m - 1) + delta;
+  return `${Math.floor(zeroBased / 12)}-${String((zeroBased % 12) + 1).padStart(2, '0')}`;
+}
