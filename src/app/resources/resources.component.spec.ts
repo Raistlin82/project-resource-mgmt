@@ -3,7 +3,7 @@ import { TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { of, Subject, throwError, type Observable } from 'rxjs';
 import { ResourcesComponent } from './resources.component';
-import { ApiService, Resource, ResourceOrganization, RateCard, Assignment, Vendor } from '../services/api.service';
+import { ApiService, Resource, ResourceOrganization, RateCard, Assignment, Vendor, Project, ResourceRequest } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { localIsoDate, todayLocalIso } from '../services/local-date.util';
@@ -52,6 +52,17 @@ function setup(
   // The pre-authReady window is a real state of this screen (SSR + the whole
   // OIDC bootstrap), not a test artefact, so it needs to be settable here.
   authReady = true,
+  // Block H (U18): the `assignment -> request -> project` join that decides which
+  // booked hours are chargeable. An OPTIONS OBJECT rather than two more
+  // positional slots — `authReady` already holds the 5th, so two trailing arrays
+  // would make every billability call site read `setup(r, [], [], a$, true, [], [])`
+  // and put the interesting arguments furthest from the eye. Defaulting BOTH to
+  // `[]` reproduces the pre-H call site exactly, which is what makes the
+  // differential tests below able to disagree with each other.
+  join: {
+    requests?: ResourceRequest[] | Observable<ResourceRequest[]>;
+    projects?: Project[] | Observable<Project[]>;
+  } = {},
 ) {
   const getResources = vi.fn(() => (Array.isArray(resources) ? of(resources) : resources));
   const getProjectRoles = vi.fn(() => of([]));
@@ -61,11 +72,15 @@ function setup(
   const getRateCards = vi.fn(() => (Array.isArray(rateCards) ? of(rateCards) : rateCards));
   const getVendors = vi.fn(() => of(VENDORS));
   const getAssignments = vi.fn(() => assignments$);
+  const requests = join.requests ?? [];
+  const projects = join.projects ?? [];
+  const getRequests = vi.fn(() => (Array.isArray(requests) ? of(requests) : requests));
+  const getProjects = vi.fn(() => (Array.isArray(projects) ? of(projects) : projects));
   const createResource = vi.fn(() => of({} as Resource));
   const updateResource = vi.fn(() => of({} as Resource));
   const apiStub = {
     getResources, getProjectRoles, getResourceOrganizations, getCountries, getCities,
-    getRateCards, getVendors, getAssignments, createResource, updateResource,
+    getRateCards, getVendors, getAssignments, getRequests, getProjects, createResource, updateResource,
   } as unknown as ApiService;
   const notifyStub = { show: vi.fn() } as unknown as NotificationService;
   const authStub = { authReady: signal(authReady), isAuthenticated: signal(true) } as unknown as AuthService;
@@ -82,7 +97,7 @@ function setup(
   });
 
   const fixture = TestBed.createComponent(ResourcesComponent);
-  return { fixture, getResources, getResourceOrganizations, getVendors, createResource, updateResource, notifyStub };
+  return { fixture, getResources, getResourceOrganizations, getVendors, getRequests, getProjects, createResource, updateResource, notifyStub };
 }
 
 /** N days from today in LOCAL calendar terms — the same clock the component's
@@ -549,7 +564,17 @@ describe('ResourcesComponent', () => {
       fixture.componentInstance.showForm.set(true);
       fixture.detectChanges();
 
-      expect(fixture.componentInstance.billability()).toEqual({ hours: 100, cost: 7500, billable: 14000 });
+      // `toStrictEqual`, upgraded from `toEqual` when block H made this call site
+      // load-bearing (U18). The upgrade is deliberate and the stricter behaviour
+      // is the POINT: `resourceBillability`'s return shape is what the screen
+      // renders, so a third figure appearing there must fail here and be read by
+      // a human, not slide in. (H considered adding a chargeable/non-chargeable
+      // hours split and rejected it — see the template comment: the split would
+      // duplicate finance.util.ts's own join.) Alice's fixture has no `requests`
+      // and no `projects`, so 100h -> 14000 is the `billable ?? true` answer, and
+      // that is correct for her: she is the control that proves H changed nothing
+      // for a caller with nothing non-billable to exclude.
+      expect(fixture.componentInstance.billability()).toStrictEqual({ hours: 100, cost: 7500, billable: 14000 });
       const host = fixture.nativeElement as HTMLElement;
       const billabilityEl = host.querySelector('[data-test="resource-billability"]');
       // digitsInfo '1.0-2' (this codebase's established convention for money,
@@ -586,6 +611,186 @@ describe('ResourcesComponent', () => {
       expect(fixture.componentInstance.billability()).toBeNull();
       const host = fixture.nativeElement as HTMLElement;
       expect(host.querySelector('[data-test="resource-billability"]')).toBeNull();
+    });
+  });
+
+  /**
+   * Block H, U18 / F-8 — jsdom does NOT lay out, so nothing here proves the figure
+   * is visible or reachable; these are STRUCTURAL assertions on the computed value
+   * and on the rendered text node.
+   *
+   * The defect this block closes was not in `resourceBillability`: T5 corrected the
+   * function and pinned it. The defect was that this screen's ONLY call site built
+   * its `FinanceData` with `requests: []` and no `projects` at all, so every id
+   * resolved `billable ?? true`, the corrected branch was never entered, and the
+   * figure stayed at its pre-H value with the whole suite green. That is this
+   * project's recurring failure mode — a right function reached by an empty input —
+   * so the assertions below are DIFFERENTIAL by construction: the same Sofia
+   * fixture, once with the join and once without, has to disagree. A test that
+   * only asserted the correct wired number would pass just as happily against a
+   * component that ignored both new reads.
+   */
+  describe('billability excludes non-billable engagements (block H, U18/F-8 — structural, not visual: jsdom does no layout)', () => {
+    /**
+     * Sofia Ferrari, seed resource '14', at her seeded rates (600 EUR/day cost,
+     * 1120 EUR/day bill) and her seeded split: 176 h on project '3' (the BASKET
+     * engagement, `billable: false`) and 872 h on project '1' (billable). She
+     * exists in the seed for exactly this: one person carrying BOTH kinds of
+     * hours, so the two plausible wrong answers are both excluded — uncorrected
+     * (all 1,048 h priced) and over-corrected (none priced). Her rates are
+     * load-bearing: she shipped without them once and all three candidate
+     * answers collapsed to 0, which made the fixture built to prevent a blind
+     * gate into one (seed.ts, H/T2).
+     */
+    const SOFIA: Resource[] = [
+      { id: '14', name: 'Sofia Ferrari', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 100, capacity: 40, kind: 'internal', costRate: 600, billRate: 1120 },
+    ];
+    const SOFIA_ASSIGNMENTS: Assignment[] = [
+      { id: '15', requestId: '15', resourceId: '14', assignedHours: 176, status: 'Allocated' },
+      { id: '16', requestId: '16', resourceId: '14', assignedHours: 872, status: 'Allocated' },
+    ];
+    const SOFIA_REQUESTS: ResourceRequest[] = [
+      { id: '15', name: 'BASKET Engineering - AMS presidio', requiredRole: 'Developer', requiredEffort: 176, status: 'Fulfilled', skills: [], projectId: '3' },
+      { id: '16', name: 'Project Alpha - Sofia full allocation', requiredRole: 'Developer', requiredEffort: 872, status: 'Fulfilled', skills: [], projectId: '1' },
+    ];
+    const SOFIA_PROJECTS: Project[] = [
+      { id: '1', name: 'Project Alpha', location: 'Milan', startDate: '2026-01-01', endDate: '2026-12-31', status: 'Active', billable: true, type: 'Delivery' },
+      { id: '3', name: 'BASKET - Engineering Practice', location: 'Milan', startDate: '2026-01-01', endDate: '2026-12-31', status: 'Active', billable: false, type: 'Basket' },
+    ];
+
+    /** 1,048 h × 600 — UNCHANGED by H: she really did work them and really did cost that. */
+    const TOTAL_COST = 628_800;
+    /** 872 billable h × 1120 — what H reports. */
+    const CHARGEABLE_WIRED = 976_640;
+    /** 1,048 h × 1120 — the pre-H figure, i.e. what the unwired call site printed. */
+    const CHARGEABLE_PRE_H = 1_173_760;
+
+    // `resetTestingModule()` first: the differential tests below mount the SAME
+    // component TWICE inside one `it`, which is the whole point — two fixtures, two
+    // inputs, one comparison — and TestBed refuses a second `configureTestingModule`
+    // after instantiation. Splitting each comparison across two `it`s would move
+    // the assertion that the two DISAGREE out of the tests entirely, into the
+    // reader's head, which is exactly where this project keeps losing it.
+    async function billabilityFor(join: Parameters<typeof setup>[5]) {
+      TestBed.resetTestingModule();
+      const { fixture } = setup(SOFIA, [], [], of(SOFIA_ASSIGNMENTS), true, join);
+      await flush(fixture);
+      fixture.componentInstance.editingId.set('14');
+      fixture.componentInstance.showForm.set(true);
+      fixture.detectChanges();
+      return { fixture, value: fixture.componentInstance.billability() };
+    }
+
+    it('prices only the hours booked on a billable project once requests and projects are wired', async () => {
+      const { fixture, value } = await billabilityFor({ requests: SOFIA_REQUESTS, projects: SOFIA_PROJECTS });
+
+      expect(value).toStrictEqual({ hours: 1048, cost: TOTAL_COST, billable: CHARGEABLE_WIRED });
+      // The assertion that makes the one above mean something: the wired figure is
+      // NOT the number the old call site produced. Without this, an implementation
+      // that quietly kept passing `[]` would satisfy every line except this one.
+      expect(value?.billable).not.toBe(CHARGEABLE_PRE_H);
+
+      const el = (fixture.nativeElement as HTMLElement).querySelector('[data-test="resource-billability"]');
+      expect(el?.textContent).toContain('976,640');
+      expect(el?.textContent).not.toContain('1,173,760');
+    });
+
+    it('DIFFERENTIAL: the same fixture with the join omitted returns to the pre-H figure', async () => {
+      // The absence twin. This is the state the screen was in before U18 — the
+      // pre-H arithmetic to the digit — and asserting it explicitly is what proves
+      // the fixture can move the number at all. A fixture that produced
+      // CHARGEABLE_WIRED either way would certify nothing.
+      const { value: noJoin } = await billabilityFor({});
+      expect(noJoin).toStrictEqual({ hours: 1048, cost: TOTAL_COST, billable: CHARGEABLE_PRE_H });
+
+      const { value: wired } = await billabilityFor({ requests: SOFIA_REQUESTS, projects: SOFIA_PROJECTS });
+      expect(wired?.billable).not.toBe(noJoin?.billable);
+      // Direction, not just difference: excluding non-billable work can only ever
+      // LOWER the chargeable figure, and `cost`/`hours` must not move at all.
+      expect(wired!.billable).toBeLessThan(noJoin!.billable);
+      expect(wired!.cost).toBe(noJoin!.cost);
+      expect(wired!.hours).toBe(noJoin!.hours);
+    });
+
+    it('DIFFERENTIAL: requests alone, or projects alone, is not enough — both halves of the join are read', async () => {
+      // Two separate ways to leave the wiring half-done, both of which fall back
+      // to `billable ?? true`: `projects` alone cannot resolve an assignment to a
+      // project id, and `requests` alone has no `billable` flag to read. Each is a
+      // plausible partial fix, and neither may pass.
+      const { value: requestsOnly } = await billabilityFor({ requests: SOFIA_REQUESTS });
+      const { value: projectsOnly } = await billabilityFor({ projects: SOFIA_PROJECTS });
+
+      expect(requestsOnly?.billable).toBe(CHARGEABLE_PRE_H);
+      expect(projectsOnly?.billable).toBe(CHARGEABLE_PRE_H);
+    });
+
+    it('leaves her BILLABLE engagement priced exactly as before — the exclusion is of hours, not of the person', async () => {
+      // §8.1's paired assertion for F-8: alongside "the non-billable hours are
+      // dropped" must sit "the billable ones are untouched". Same fixture minus
+      // the BASKET booking: the chargeable figure is IDENTICAL to the wired one
+      // above, which is only true if exactly the 176 non-billable hours were the
+      // difference.
+      const { fixture } = setup(
+        SOFIA, [], [], of([SOFIA_ASSIGNMENTS[1]]), true,
+        { requests: SOFIA_REQUESTS, projects: SOFIA_PROJECTS },
+      );
+      await flush(fixture);
+      fixture.componentInstance.editingId.set('14');
+      fixture.componentInstance.showForm.set(true);
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.billability()).toStrictEqual({ hours: 872, cost: 523_200, billable: CHARGEABLE_WIRED });
+    });
+
+    it('a failed /projects read shows the error panel, never the pre-H number', async () => {
+      // The gate has to cover the new reads too. `[]` from a failed `/projects` is
+      // not "we don't know": it is the precise input that makes everything read as
+      // billable, so a read that fails while the gate ignores it would render the
+      // OVERSTATED figure with nothing on screen saying anything went wrong. That
+      // is worse than the original bug, because the original at least had no
+      // error to hide.
+      const { fixture } = setup(
+        SOFIA, [], [], of(SOFIA_ASSIGNMENTS), true,
+        { requests: SOFIA_REQUESTS, projects: throwError(() => new Error('403 Forbidden')) },
+      );
+      await flush(fixture);
+      fixture.componentInstance.editingId.set('14');
+      fixture.componentInstance.showForm.set(true);
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.rateFiguresState()).toBe('error');
+      expect(fixture.componentInstance.billability()).toBeNull();
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.querySelector('[data-test="resource-billability"]')).toBeNull();
+      expect(host.textContent).not.toContain('1,173,760');
+      expect(host.textContent).not.toContain('976,640');
+    });
+
+    it('a failed /requests read shows the error panel too', async () => {
+      const { fixture } = setup(
+        SOFIA, [], [], of(SOFIA_ASSIGNMENTS), true,
+        { requests: throwError(() => new Error('403 Forbidden')), projects: SOFIA_PROJECTS },
+      );
+      await flush(fixture);
+      fixture.componentInstance.editingId.set('14');
+      fixture.componentInstance.showForm.set(true);
+      fixture.detectChanges();
+
+      expect(fixture.componentInstance.rateFiguresState()).toBe('error');
+      expect(fixture.componentInstance.billability()).toBeNull();
+    });
+
+    it('does not fire either new read before authReady', async () => {
+      // Same authReady rule as every other read on this screen: a principal-gated
+      // /api call made before the OIDC bootstrap settles goes out without a bearer,
+      // 401s, and latches the view empty.
+      const { fixture, getRequests, getProjects } = setup(SOFIA, [], [], of(SOFIA_ASSIGNMENTS), false, { requests: SOFIA_REQUESTS, projects: SOFIA_PROJECTS });
+      await flush(fixture);
+
+      expect(getRequests).not.toHaveBeenCalled();
+      expect(getProjects).not.toHaveBeenCalled();
+      // And the pre-auth window is 'loading', never a confident figure.
+      expect(fixture.componentInstance.rateFiguresState()).toBe('loading');
     });
   });
 

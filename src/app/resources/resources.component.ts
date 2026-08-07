@@ -13,7 +13,7 @@ import { of } from 'rxjs';
 import { DecimalPipe } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
-import { ApiService, Resource, ProjectRole, Country, City, ResourceOrganization, RateCard, Assignment, Vendor } from '../services/api.service';
+import { ApiService, Resource, ProjectRole, Country, City, ResourceOrganization, RateCard, Assignment, Vendor, Project, ResourceRequest } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ModalDialogDirective } from '../directives/modal-dialog.directive';
@@ -368,8 +368,22 @@ const REMOTE_LOCATION = 'Remote';
                   <!-- BILLABILITY: only for an existing resource — a new one has no
                        id to filter assignments by (design spec §8). -->
                   @if (editingId() && billability(); as b) {
+                    <!-- Block H (U18): the three figures no longer share one
+                         denominator, so the wording has to say so. Cost and hours
+                         are totals over EVERY booking — the person really did work
+                         those hours and really did cost that money — while the
+                         chargeable term prices only the hours booked on a billable
+                         engagement. Left as the old "billable X EUR (Y h)" the
+                         pair reads as "Y hours are worth X", which is precisely
+                         the overstatement F-8 removes. No breakdown row is added:
+                         splitting the hours would mean re-deriving the
+                         assignment -> request -> project join in a component,
+                         beside the one in finance.util.ts that owns it, and two
+                         copies of that join is how the figures on one screen
+                         start disagreeing. -->
                     <p data-test="resource-billability" class="-mt-2 text-xs text-[var(--cc-muted)]">
-                      Billability to date: cost {{ b.cost | number:'1.0-2' }} · billable {{ b.billable | number:'1.0-2' }} EUR ({{ b.hours | number:'1.0-2' }} h)
+                      Billability to date: cost {{ b.cost | number:'1.0-2' }} · chargeable {{ b.billable | number:'1.0-2' }} EUR of {{ b.hours | number:'1.0-2' }} h booked.
+                      Hours on non-billable engagements still count as cost and as hours, never as chargeable value.
                     </p>
                   }
                 </ng-template>
@@ -577,10 +591,39 @@ export class ResourcesComponent {
     defaultValue: [] as Assignment[],
   });
 
+  // BILLABILITY, block H (U18 / F-8): the join `assignment -> request -> project`
+  // is what tells `resourceBillability` which booked hours are chargeable. Both
+  // legs are READS THIS SCREEN DID NOT MAKE until now, and their absence was not
+  // a cosmetic gap: `FinanceData.projects` missing means every project id resolves
+  // `billable ?? true` (finance.util.ts's declared trap), so T5's correction
+  // arrived here and did nothing — the figure stayed at its pre-H value with the
+  // whole test suite green. Wiring these two is the only thing that moves it.
+  //
+  // Same rxResource idiom as `assignmentsRes` above, and for the same stated
+  // reason: this file does not use `authGatedResource` anywhere, and matching its
+  // own convention matters more than a shorter form mid-file.
+  protected readonly requestsRes = rxResource<ResourceRequest[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getRequests() : of<ResourceRequest[]>([])),
+    defaultValue: [] as ResourceRequest[],
+  });
+  protected readonly projectsRes = rxResource<Project[], boolean>({
+    params: () => this.auth.authReady(),
+    stream: ({ params: ready }) => (ready ? this.api.getProjects() : of<Project[]>([])),
+    defaultValue: [] as Project[],
+  });
+
   /** Every read a billability figure on this form derives from — one shared
-   *  list, so the gate below cannot drift from what actually feeds the number. */
+   *  list, so the gate below cannot drift from what actually feeds the number.
+   *
+   *  `requestsRes`/`projectsRes` belong HERE, not merely in the `FinanceData`
+   *  literal below: leaving them out of the gate would let a failed
+   *  `/projects` read fall back to `[]`, and `[]` is not "we don't know" — it is
+   *  the exact input that makes every engagement read as billable. The figure
+   *  would render confidently at its pre-H value with no error anywhere on
+   *  screen, which is the same class of defect as the missing wiring itself. */
   private billabilityInputs() {
-    return [this.resourcesRes, this.orgsRes, this.rateCardsRes, this.assignmentsRes];
+    return [this.resourcesRes, this.orgsRes, this.rateCardsRes, this.assignmentsRes, this.requestsRes, this.projectsRes];
   }
 
   /** `status()==='error' ? [] : value()` is banned on this project: it turns
@@ -602,13 +645,23 @@ export class ResourcesComponent {
 
   /** Cost/billable/hours for the resource being edited (design spec §8) — null
    *  while creating (no id to filter assignments by) or whenever the inputs
-   *  above are not all ready, never a zero standing in for either case. */
+   *  above are not all ready, never a zero standing in for either case.
+   *
+   *  `requests` and `projects` are BOTH load-bearing (block H, U18/F-8) and
+   *  neither may go back to a placeholder `[]`: `requests` carries the
+   *  `assignment -> projectId` hop and `projects` carries the `billable` flag,
+   *  so dropping either one restores `billable ?? true` for every hour and
+   *  silently returns this figure to its pre-H value. On the shipped seed that
+   *  is the difference between 1,173,760 EUR claimed as chargeable and the
+   *  976,640 EUR that actually is (Sofia Ferrari, 176 of her 1,048 booked hours
+   *  sit on the non-billable BASKET engagement). */
   billability = computed<{ cost: number; billable: number; hours: number } | null>(() => {
     const id = this.editingId();
     if (!id || this.rateFiguresState() !== 'ready') return null;
     const data: FinanceData = {
-      requests: [], orders: [], orderLines: [], financials: [],
+      requests: this.requestsRes.value(), orders: [], orderLines: [], financials: [],
       resources: this.resources(), assignments: this.assignmentsRes.value(),
+      projects: this.projectsRes.value(),
     };
     return resourceBillability(id, data);
   });
