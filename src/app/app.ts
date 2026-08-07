@@ -29,7 +29,12 @@ import {
 import { AuthService } from './services/auth.service';
 import { NotificationService } from './services/notification.service';
 import { ThemeService } from './services/theme.service';
-import { ALLOCATION_APPROVAL_ROLES, CAPACITY_ROLES } from './guards/role.guard';
+import {
+  ABSENCE_REASON_READ_ROLES,
+  ALLOCATION_APPROVAL_ROLES,
+  CAPACITY_ROLES,
+  PROJECT_CLASSIFICATION_ROLES,
+} from './guards/role.guard';
 import { countsTowardDeliveryCapacity, kindOf } from './services/resource-kind.util';
 
 type NavBadge = 'requests' | 'risks' | 'changes' | 'overbooked';
@@ -487,6 +492,7 @@ export class App {
         { label: 'Staffing', icon: 'group_add', route: '/staffing' },
         { label: 'Schedule', icon: 'calendar_view_week', route: '/schedule' },
         { label: 'Approvals', icon: 'fact_check', route: '/approvals' },
+        { label: 'Absences', icon: 'person_off', route: '/absences' },
       ],
     },
     {
@@ -501,6 +507,7 @@ export class App {
         { label: 'Project Partners', icon: 'handshake', route: '/project-partners' },
         { label: 'Financial Plans', icon: 'payments', route: '/financial-plans' },
         { label: 'Project Cost Centers', icon: 'account_balance', route: '/project-cost-centers' },
+        { label: 'Engagement Classification', icon: 'label', route: '/project-classification' },
       ],
     },
     {
@@ -568,6 +575,12 @@ export class App {
     // allocationApprovalsGuard (imported ALLOCATION_APPROVAL_ROLES) — a
     // dedicated local so it can never desync from the route gate.
     const canViewAllocationApprovals = this.auth.hasAnyRole([...ALLOCATION_APPROVAL_ROLES]);
+    // H — the two block-H screens gate their nav entries on the SAME exported
+    // role sets their route guards use, so a nav link can never outlive the gate
+    // behind it. Absences deliberately includes `employee`: the server serves
+    // them their OWN rows, so the link leads somewhere real for them.
+    const canViewAbsences = this.auth.hasAnyRole([...ABSENCE_REASON_READ_ROLES]);
+    const canClassifyEngagements = this.auth.hasAnyRole([...PROJECT_CLASSIFICATION_ROLES]);
     // Resources (people lifecycle) mirrors its roleGuard — visible only to the
     // roles that own resource master data (resource-manager/delivery-executive/admin).
     return this.allNavGroups
@@ -577,6 +590,7 @@ export class App {
             if (item.route === '/requests' || item.route === '/staffing' || item.route === '/schedule') return canManageStaffing;
             if (item.route === '/resources') return canManageResources;
             if (item.route === '/approvals') return canApproveWorkflow;
+            if (item.route === '/absences') return canViewAbsences;
             return true;
           });
           return { label: group.label, items };
@@ -584,6 +598,7 @@ export class App {
         if (group.label === 'Project Control') {
           const items = group.items.filter(item => {
             if (item.route === '/financial-plans' || item.route === '/project-cost-centers') return canFinance;
+            if (item.route === '/project-classification') return canClassifyEngagements;
             if (item.route === '/projects') return true;
             return canManageProjects;
           });
