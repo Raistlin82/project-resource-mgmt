@@ -134,6 +134,13 @@
       "when": 1785922907516,
       "tag": "0018_lowly_lady_bullseye",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1786077718485,
+      "tag": "0019_purple_shinko_yamashiro",
+      "breakpoints": true
     }
   ]
 }
