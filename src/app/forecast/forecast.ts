@@ -413,7 +413,7 @@ export class Forecast {
   readonly horizon = signal<Horizon>(8);
 
   private static readonly EMPTY_DATA: ForecastData = {
-    resources: [], requests: [], assignments: [], assignmentDays: [], assignmentMonths: [], holidays: [], hoursPerDay: DEFAULT_HOURS_PER_DAY,
+    resources: [], requests: [], assignments: [], assignmentDays: [], assignmentMonths: [], holidays: [], hoursPerDay: DEFAULT_HOURS_PER_DAY, absences: [],
   };
 
   // resources is principal-gated server-side: key the forkJoin on auth readiness
@@ -435,6 +435,10 @@ export class Forecast {
             assignmentMonths: this.api.getAssignmentMonths(),
             holidays: this.api.getHolidays(),
             hoursPerDay: this.api.getHoursPerDay().pipe(map(r => r.value)),
+            // The REDACTED feed, never GET /absences: this screen rebuilds the bench
+            // rollup in the browser, so it needs the intervals — but a reason is
+            // special-category data and its audience is narrower than this one.
+            absences: this.api.getAbsenceCalendar(),
           })
         : of<ForecastData>(Forecast.EMPTY_DATA),
     defaultValue: Forecast.EMPTY_DATA,
@@ -572,6 +576,10 @@ export class Forecast {
       resources: d.resources, assignments: d.assignments, assignmentDays: d.assignmentDays,
       assignmentMonths: d.assignmentMonths, hoursPerDay: d.hoursPerDay,
       holidays: new Set(d.holidays.map(h => h.id)),
+      // Without this the corrected branch in `notFullyAllocatedAt` is never
+      // entered: with no absences nobody is ever ABSENT, so the fix reads as
+      // applied while listing people on leave among the reallocatable.
+      absences: d.absences ?? [],
     };
     return notFullyAllocatedAt(input, this.currentMonth(), todayLocalIso());
   });

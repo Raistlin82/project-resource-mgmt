@@ -32,6 +32,10 @@ function apiStub(overrides: Partial<ApiService> = {}): ApiService {
     getAssignmentMonths: () => of([{ id: `a1:${CURRENT_MONTH}`, assignmentId: 'a1', month: CURRENT_MONTH, status: 'Allocated' }]),
     getHolidays: () => of([]),
     getHoursPerDay: () => of({ value: 8 }),
+    // The REDACTED feed (Block H). These two screens rebuild the bench rollup
+    // client-side, so they fetch the intervals; the default is empty, which is
+    // exactly the pre-H behaviour every case here was written against.
+    getAbsenceCalendar: () => of([]),
     getProjects: () => of([]),
     ...overrides,
   } as unknown as ApiService;
@@ -480,5 +484,84 @@ describe('WhatIf — Supply is the chart overlay, not a bar stacked onto demand'
     expect(c.scenarioDemandSeries().map(s => s.values[0])).toEqual(demandBefore);
     // And Supply is still no bar after the recompute.
     expect(c.scenarioDemandSeries().map(s => s.name)).toEqual(['Committed', 'Pipeline']);
+  });
+});
+
+/**
+ * BLOCK H — the absence feed reaches BOTH legs, or it reaches neither.
+ *
+ * `toRollupInput()` is one shared helper precisely so the baseline and the
+ * scenario cannot diverge; these cases are what make that structural claim
+ * observable. Wiring one leg and asserting only that one is how this defect
+ * survives, so both numbers are read from the SAME KPI on the SAME fixture.
+ *
+ * The stub's default is `[]`, which reproduces the pre-H answer exactly — which
+ * is also why every other case in this file stayed green when the wiring landed,
+ * and why only a DIFFERENTIAL can show it is live.
+ */
+describe('WhatIf — the redacted absence feed reaches both legs (Block H)', () => {
+  /** Two mounts in one case need an explicit reset: TestBed refuses to be
+   *  reconfigured once instantiated, and a differential is two mounts by nature. */
+  const remount = async (overrides: Partial<ApiService>) => {
+    TestBed.resetTestingModule();
+    const fixture = await setup(overrides);
+    await flush(fixture); // the rxResource is unresolved until this runs, and an
+                          // unflushed mount reads 0 for everything — which a
+                          // differential would report as "no difference".
+    return onBenchKpi(fixture);
+  };
+
+  /** A second resource with no bookings at all: on bench by construction. */
+  const IDLE: Resource = {
+    id: 'idle', name: 'Nobody Booked Me', role: 'Developer', skills: [], projectRoles: [],
+    externalExperience: [], utilization: 0, capacity: 40, kind: 'internal',
+  };
+  const withIdle = () => of([...RESOURCES, IDLE]);
+  /**
+   * Covers the whole current month, so `idle` reads ABSENT rather than BENCH.
+   *
+   * The end date is computed, not typed: a hard-coded `-28` leaves the 29th to
+   * 31st uncovered, which makes the month PARTLY absent — the state stays BENCH,
+   * the person stays in the count, and the differential silently measures
+   * nothing. That is what the first version of this fixture did.
+   */
+  const monthEnd = new Date(Date.UTC(Number(CURRENT_MONTH.slice(0, 4)), Number(CURRENT_MONTH.slice(5, 7)), 0))
+    .toISOString().slice(0, 10);
+  const wholeMonth = [{ id: 'ab1', resourceId: 'idle', startDate: `${CURRENT_MONTH}-01`, endDate: monthEnd }];
+
+  it('DIFFERENTIAL: an absence covering the month removes that person from BOTH bench counts', async () => {
+    const without = await remount({ getResources: withIdle });
+    const withAbs = await remount({ getResources: withIdle, getAbsenceCalendar: () => of(wholeMonth) });
+
+    // FIXTURE GUARD: without the absence she IS on bench, or the case below is
+    // satisfied for lack of anybody to remove. Narrows the nullable KPI too.
+    expect(without.base, 'the idle resource must be on bench to begin with').toBeGreaterThan(0);
+    expect(without.scenario).not.toBeNull();
+    const baseBefore = without.base as number;
+    const scenBefore = without.scenario as number;
+
+    expect(withAbs.base, 'baseline leg').toBe(baseBefore - 1);
+    expect(withAbs.scenario, 'scenario leg').toBe(scenBefore - 1);
+  });
+
+  it('ABSENCE TWIN: an absence on SOMEBODY ELSE moves neither leg', async () => {
+    // Without this, a feed that simply drops one row from every count passes the
+    // case above. The interval is identical; only the resourceId differs.
+    const other = [{ id: 'ab2', resourceId: 'not-a-resource', startDate: `${CURRENT_MONTH}-01`, endDate: monthEnd }];
+    const without = await remount({ getResources: withIdle });
+    const withAbs = await remount({ getResources: withIdle, getAbsenceCalendar: () => of(other) });
+    expect({ base: withAbs.base, scenario: withAbs.scenario })
+      .toStrictEqual({ base: without.base, scenario: without.scenario });
+  });
+
+  it('reads the REDACTED feed, never the reason-carrying one', async () => {
+    // A privacy assertion, not a wiring one: /absences serves special-category
+    // data to a narrower audience than this screen has.
+    const getAbsenceCalendar = vi.fn(() => of([]));
+    const getAbsences = vi.fn(() => of([]));
+    TestBed.resetTestingModule();
+    await flush(await setup({ getResources: withIdle, getAbsenceCalendar, getAbsences }));
+    expect(getAbsenceCalendar).toHaveBeenCalled();
+    expect(getAbsences, 'this screen must never ask for absence reasons').not.toHaveBeenCalled();
   });
 });

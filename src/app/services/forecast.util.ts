@@ -1,4 +1,4 @@
-import { Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, Holiday } from './api.service';
+import { Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, Holiday, RedactedAbsence } from './api.service';
 import { countsTowardDeliveryCapacity, kindOf } from './resource-kind.util';
 import { DayHours, MonthStatus, monthRowId, monthlyAggregateHours } from './allocation-month.util';
 import { employedWorkingDays, monthsInRange, semaphoreBand } from './capacity.util';
@@ -48,6 +48,21 @@ export interface ForecastData {
   assignmentMonths: AssignmentMonth[];
   holidays: Holiday[];
   hoursPerDay: number;
+  /**
+   * REDACTED absence intervals (Block H) — `{id, resourceId, startDate, endDate}`,
+   * never a reason. `/forecast` and `/what-if` are the only two screens that
+   * rebuild the bench rollup IN THE BROWSER; everywhere else the server threads
+   * absences into `/bench/monthly` and `/capacity/monthly` and the client just
+   * renders the answer. So these two need the intervals themselves, and this is
+   * where they arrive.
+   *
+   * OPTIONAL with an empty default, deliberately: omitting it reproduces the
+   * pre-H numbers exactly, which is the invariant every fixture in this block
+   * relies on. It also means a caller that forgets it gets the OLD answer rather
+   * than a crash — so the differential test, not the type, is what proves the
+   * wiring is live.
+   */
+  absences?: RedactedAbsence[];
 }
 
 export type ForecastGranularity = 'weekly' | 'monthly';

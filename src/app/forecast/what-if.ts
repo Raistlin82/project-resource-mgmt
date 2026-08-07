@@ -455,7 +455,7 @@ export class WhatIf {
   // --- BASE: loaded once, treated as immutable -------------------------------
 
   private static readonly EMPTY_DATA: ForecastData = {
-    resources: [], requests: [], assignments: [], assignmentDays: [], assignmentMonths: [], holidays: [], hoursPerDay: DEFAULT_HOURS_PER_DAY,
+    resources: [], requests: [], assignments: [], assignmentDays: [], assignmentMonths: [], holidays: [], hoursPerDay: DEFAULT_HOURS_PER_DAY, absences: [],
   };
 
   // resources is principal-gated server-side: key the forkJoin on auth readiness
@@ -476,6 +476,10 @@ export class WhatIf {
             assignmentMonths: this.api.getAssignmentMonths(),
             holidays: this.api.getHolidays(),
             hoursPerDay: this.api.getHoursPerDay().pipe(map(r => r.value)),
+            // The REDACTED feed, never GET /absences: this screen rebuilds the bench
+            // rollup in the browser, so it needs the intervals — but a reason is
+            // special-category data and its audience is narrower than this one.
+            absences: this.api.getAbsenceCalendar(),
           })
         : of<ForecastData>(WhatIf.EMPTY_DATA),
     defaultValue: WhatIf.EMPTY_DATA,
@@ -594,11 +598,18 @@ export class WhatIf {
    * "right now" for its base-vs-scenario comparison). */
   private readonly currentMonth = computed<string>(() => todayLocalIso().slice(0, 7));
 
+  /**
+   * ONE helper feeding BOTH the baseline and the scenario leg. That is the whole
+   * reason `absences` is threaded here and not at the two call sites: wiring one
+   * leg and not the other would compare two worlds under different rules, which
+   * is worse than wiring neither.
+   */
   private toRollupInput(d: ForecastData) {
     return {
       resources: d.resources, assignments: d.assignments, assignmentDays: d.assignmentDays,
       assignmentMonths: d.assignmentMonths, hoursPerDay: d.hoursPerDay,
       holidays: new Set(d.holidays.map(h => h.id)),
+      absences: d.absences ?? [],
     };
   }
   // Recomputed straight from `this.scenario()` (mutated in-memory by every
@@ -929,6 +940,13 @@ export class WhatIf {
       assignmentMonths: data.assignmentMonths.map(m => ({ ...m })),
       holidays: data.holidays.map(h => ({ ...h })),
       hoursPerDay: data.hoursPerDay,
+      // Absences are a FACT about the world, not a lever: no scenario mutates
+      // them, so they are copied straight through. Dropping them here is the
+      // subtle way to wire only one leg — `toRollupInput` is shared, so the
+      // baseline reads them and the scenario silently does not, and the two
+      // sides of the comparison end up under different rules. That is worse
+      // than wiring neither, and it is what this list did before H.
+      absences: (data.absences ?? []).map(a => ({ ...a })),
     };
   }
 

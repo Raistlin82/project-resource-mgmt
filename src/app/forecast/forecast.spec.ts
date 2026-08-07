@@ -56,6 +56,10 @@ function apiStub(overrides: Partial<ApiService> = {}): ApiService {
     getAssignmentMonths: () => of(ASSIGNMENT_MONTHS),
     getHolidays: () => of([]),
     getHoursPerDay: () => of({ value: 8 }),
+    // The REDACTED feed (Block H). These two screens rebuild the bench rollup
+    // client-side, so they fetch the intervals; the default is empty, which is
+    // exactly the pre-H behaviour every case here was written against.
+    getAbsenceCalendar: () => of([]),
     ...overrides,
   } as unknown as ApiService;
 }

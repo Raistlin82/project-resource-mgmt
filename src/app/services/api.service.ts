@@ -1252,6 +1252,61 @@ export class ApiService {
     return this.http.get<BenchRollup>(`${this.baseUrl}/bench/monthly`, { params });
   }
 
+  // --- Absences and project classification (Block H) ---
+
+  /**
+   * The REDACTED absence feed: `{id, resourceId, startDate, endDate}` and nothing
+   * else. This is what every derivation surface consumes — `/forecast` and
+   * `/what-if` rebuild the bench rollup in the browser, so they need the intervals
+   * even though `/bench/monthly` and `/capacity/monthly` are threaded server-side.
+   *
+   * Use THIS, never {@link getAbsences}, anywhere a screen only needs to know that
+   * somebody is away. An absence reason is special-category data (GDPR art. 9) and
+   * its audience is narrower than this one; the server serves the two paths under
+   * different READ_RULEs, and the whole arithmetic of the block is built so a
+   * reason never reaches a derivation (design spec §3.4, §7.3).
+   */
+  getAbsenceCalendar(from?: string, to?: string): Observable<RedactedAbsence[]> {
+    let params = new HttpParams();
+    if (from) params = params.set('from', from);
+    if (to) params = params.set('to', to);
+    return this.http.get<RedactedAbsence[]>(`${this.baseUrl}/absences/calendar`, { params });
+  }
+
+  /**
+   * FULL absence rows, reason and note included. Restricted audience
+   * (`resource-manager`, `delivery-executive`, `admin`; an `employee` is filtered
+   * to their own rows server-side). Only for a screen whose job IS the reason —
+   * the registration UI. Every other caller wants {@link getAbsenceCalendar}.
+   */
+  getAbsences(): Observable<ResourceAbsence[]> {
+    return this.http.get<ResourceAbsence[]>(`${this.baseUrl}/absences`);
+  }
+
+  /** `recordedBy`/`recordedAt` are pinned server-side from the verified actor and
+   *  are never read from this body, so `Partial` cannot smuggle them. */
+  createAbsence(a: Partial<ResourceAbsence>): Observable<ResourceAbsence> {
+    return this.http.post<ResourceAbsence>(`${this.baseUrl}/absences`, a);
+  }
+  updateAbsence(id: string, a: Partial<ResourceAbsence>): Observable<ResourceAbsence> {
+    return this.http.put<ResourceAbsence>(`${this.baseUrl}/absences/${id}`, a);
+  }
+  deleteAbsence(id: string): Observable<void> {
+    return this.http.delete<void>(`${this.baseUrl}/absences/${id}`);
+  }
+
+  /**
+   * Billability and type move ONLY through here, never through
+   * {@link updateProject}: the server refuses those two keys on the ordinary
+   * project paths with a 403 rather than dropping them silently, because a wizard
+   * that "works" and quietly ships a billable project is worse than one that
+   * errors. Restricted to `delivery-executive`, `finance`, `admin` — a `pm` is
+   * measured on a project's margin and must not be able to declare it has none.
+   */
+  classifyProject(id: string, body: { billable: boolean; type: ProjectType }): Observable<Project> {
+    return this.http.put<Project>(`${this.baseUrl}/projects/${id}/classification`, body);
+  }
+
   /**
    * ONE resource's month-by-month disallocation history (days not allocated + the
    * percentage), ending at the current month.
