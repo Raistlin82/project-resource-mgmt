@@ -579,6 +579,172 @@ describe('CapacityComponent', () => {
     });
   });
 
+  /**
+   * Block H — the deliberate two-denominator divergence, DECLARED on screen.
+   *
+   * jsdom does NOT lay out, so nothing here proves the note is visible or that a
+   * reader reaches it: these are structural assertions on presence, wording and
+   * placement.
+   *
+   * `rollupMonthly` pro-rates the CELL target to staffable days while the TOTALS
+   * keep the whole standard month — the two must diverge, because recording an
+   * absence changes an individual's saturation without creating any work for the
+   * organisation. This screen prints both, one under the other, so the divergence
+   * has to be stated. What makes these tests non-blind is that the two fixtures
+   * below carry the SAME booked hours and differ only in Alice's May target: if
+   * the component ignored the difference, the "no note" twin would still pass and
+   * the "note" one would not.
+   */
+  describe('cells-vs-totals divergence disclosure (block H — structural, not visual: jsdom does no layout)', () => {
+    /**
+     * Alice absent 11 of May's 22 working days, booked solid on the 11 she is
+     * there (88 h); Bob at a full 176 h. June has no absence at all, so ONE
+     * envelope carries both a divergent column and an untouched one.
+     *
+     *   May  cells: 88/88 = 1.0 and 176/176 = 1.0        -> Σ 2.0
+     *   May  total: 88/176 + 176/176 = 0.5 + 1.0         -> 1.5   (diverges by 0.5)
+     *   June cells: 1.0 + 1.0 = 2.0  =  June total 2.0           (does not diverge)
+     */
+    const ABSENCE_ENVELOPE: CapacityMonthly = {
+      months: ['2026-05', '2026-06'],
+      rows: [
+        {
+          resourceId: 'r1',
+          resourceName: 'Alice',
+          monthly: {
+            '2026-05': { confirmedHours: 88, plannedHours: 88, targetHours: 88, fteConfirmed: 1, ftePlanned: 1, band: 'healthy' },
+            '2026-06': { confirmedHours: 176, plannedHours: 176, targetHours: 176, fteConfirmed: 1, ftePlanned: 1, band: 'healthy' },
+          },
+        },
+        {
+          resourceId: 'r2',
+          resourceName: 'Bob',
+          monthly: {
+            '2026-05': { confirmedHours: 176, plannedHours: 176, targetHours: 176, fteConfirmed: 1, ftePlanned: 1, band: 'healthy' },
+            '2026-06': { confirmedHours: 176, plannedHours: 176, targetHours: 176, fteConfirmed: 1, ftePlanned: 1, band: 'healthy' },
+          },
+        },
+      ],
+      demandRows: [],
+      totals: {
+        '2026-05': { demandFteConfirmed: 1.5, demandFtePlanned: 1.5, capacityFte: 1.5, resourceCount: 2, demandFteUncovered: 0 },
+        '2026-06': { demandFteConfirmed: 2, demandFtePlanned: 2, capacityFte: 2, resourceCount: 2, demandFteUncovered: 0 },
+      },
+    };
+
+    /**
+     * The twin: the SAME 88 booked hours for Alice in May, with no absence, so her
+     * target is the whole standard month and her cell reads 50% instead of 100%.
+     * Every column now reconciles. This is the "without absences" half of the
+     * differential — and Alice's cell reading differently in the two is what
+     * proves the pair is genuinely different data rather than two spellings of
+     * the same thing.
+     */
+    const NO_ABSENCE_ENVELOPE: CapacityMonthly = {
+      ...ABSENCE_ENVELOPE,
+      rows: [
+        {
+          resourceId: 'r1',
+          resourceName: 'Alice',
+          monthly: {
+            '2026-05': { confirmedHours: 88, plannedHours: 88, targetHours: 176, fteConfirmed: 0.5, ftePlanned: 0.5, band: 'under' },
+            '2026-06': { confirmedHours: 176, plannedHours: 176, targetHours: 176, fteConfirmed: 1, ftePlanned: 1, band: 'healthy' },
+          },
+        },
+        ABSENCE_ENVELOPE.rows[1],
+      ],
+      totals: {
+        '2026-05': { demandFteConfirmed: 1.5, demandFtePlanned: 1.5, capacityFte: 2, resourceCount: 2, demandFteUncovered: 0 },
+        '2026-06': { demandFteConfirmed: 2, demandFtePlanned: 2, capacityFte: 2, resourceCount: 2, demandFteUncovered: 0 },
+      },
+    };
+
+    function noteOf(host: HTMLElement): HTMLElement | null {
+      return host.querySelector('[data-test="prorated-note"]');
+    }
+    function markerIn(host: HTMLElement, month: string): Element | null {
+      return host.querySelector(`[data-test="totals-${month}"] [data-test="totals-prorated"]`);
+    }
+
+    it('declares the divergence, and marks only the column where it is real', async () => {
+      const { fixture } = setup(true, ABSENCE_ENVELOPE);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      const note = noteOf(host);
+      expect(note).not.toBeNull();
+      expect(note?.textContent).toContain('May 2026');
+      // The paired absence assertion, inside the same envelope: June reconciles,
+      // so the note must not claim it. A note that named every month would pass a
+      // bare "contains May" check while saying something false about June.
+      expect(note?.textContent).not.toContain('June 2026');
+      expect(note?.textContent).toContain('that month');
+
+      expect(markerIn(host, '2026-05')).not.toBeNull();
+      expect(markerIn(host, '2026-06')).toBeNull();
+
+      // The pro-rated cell is genuinely what is on screen: Alice reads 100% on the
+      // days she was staffable, not 50% of a month she was half absent for. That
+      // is the §1.2 correction, and without it the note would be explaining a
+      // divergence the grid does not actually show.
+      expect((host.querySelector('[data-cell="r1-2026-05"]') as HTMLElement).textContent).toContain('100%');
+    });
+
+    it('DIFFERENTIAL: the same booked hours without the absence render no note and no marker', async () => {
+      const { fixture } = setup(true, NO_ABSENCE_ENVELOPE);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      expect(noteOf(host)).toBeNull();
+      expect(host.querySelectorAll('[data-test="totals-prorated"]').length).toBe(0);
+      // Same 88 hours, whole-month denominator: 50%. If this read 100% the two
+      // fixtures would be the same data and the pair would prove nothing.
+      expect((host.querySelector('[data-cell="r1-2026-05"]') as HTMLElement).textContent).toContain('50%');
+      // And the totals row is untouched by any of this — the point of keeping the
+      // organisation's denominator fixed.
+      expect((host.querySelector('[data-test="totals-2026-05"]') as HTMLElement).textContent).toContain('1.5');
+    });
+
+    it('DIFFERENTIAL: the two envelopes disagree on which months diverge', async () => {
+      // The comparison itself, asserted rather than left to the reader across two
+      // tests. Both mount the same component; only the envelope differs.
+      const withAbsence = setup(true, ABSENCE_ENVELOPE);
+      await flush(withAbsence.fixture);
+      const divergentMonths = withAbsence.fixture.componentInstance['proRatedMonths']();
+
+      TestBed.resetTestingModule();
+      const without = setup(true, NO_ABSENCE_ENVELOPE);
+      await flush(without.fixture);
+      const reconcilingMonths = without.fixture.componentInstance['proRatedMonths']();
+
+      expect(divergentMonths).toStrictEqual(['2026-05']);
+      expect(reconcilingMonths).toStrictEqual([]);
+      expect(divergentMonths).not.toStrictEqual(reconcilingMonths);
+    });
+
+    it('says nothing on the shipped default envelope, where every column reconciles', async () => {
+      // The regression control: a screen with no absences anywhere must read
+      // exactly as it did before this block. A note that appeared unconditionally
+      // would be boilerplate a planner learns to skip, and it would be false.
+      const { fixture } = setup(true);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      expect(noteOf(host)).toBeNull();
+      expect(host.querySelectorAll('[data-test="totals-prorated"]').length).toBe(0);
+    });
+
+    it('says nothing on a failed read', async () => {
+      // Same gate as the legend and the KPI strip: an explanation of a grid that
+      // is not on the page describes nothing, and the error panel is what should
+      // hold the reader's attention.
+      const { fixture } = setupFailingRead();
+      await flush(fixture);
+
+      expect(noteOf(fixture.nativeElement as HTMLElement)).toBeNull();
+    });
+  });
+
   it('disables the exports only when both blocks are empty', async () => {
     const { fixture } = setup(true, { months: [], rows: [], demandRows: [], totals: {} });
     await flush(fixture);
