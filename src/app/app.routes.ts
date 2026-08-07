@@ -1,5 +1,13 @@
 import { Routes } from '@angular/router';
-import { allocationApprovalsGuard, capacityGuard, commercialGuard, financeGuard, roleGuard } from './guards/role.guard';
+import {
+  absenceRegisterGuard,
+  allocationApprovalsGuard,
+  capacityGuard,
+  commercialGuard,
+  financeGuard,
+  projectClassificationGuard,
+  roleGuard,
+} from './guards/role.guard';
 
 export const routes: Routes = [
   // Resource Management
@@ -14,6 +22,11 @@ export const routes: Routes = [
   { path: 'forecast', title: 'Forecast', canMatch: [roleGuard(a => a.canReadStaffing())], loadComponent: () => import('./forecast/forecast').then(m => m.Forecast) },
   { path: 'what-if', title: 'What-if Analysis', canMatch: [roleGuard(a => a.canReadStaffing())], loadComponent: () => import('./forecast/what-if').then(m => m.WhatIf) },
   { path: 'approvals', title: 'Approvals', canMatch: [roleGuard(a => a.hasAnyRole(['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin']))], loadComponent: () => import('./approvals/approvals').then(m => m.Approvals) },
+  // H — the absence register: the ONE screen that may show a reason (GDPR art. 9).
+  // Gated on the same set the server's '/absences' READ_RULE admits, `employee`
+  // included, because the server narrows an employee to their own rows rather
+  // than refusing them. Writing is a NARROWER set and is gated inside the screen.
+  { path: 'absences', title: 'Absences', canMatch: [absenceRegisterGuard], loadComponent: () => import('./absences/absence-register.component').then(m => m.AbsenceRegisterComponent) },
 
   // Project Management
   { path: 'projects', title: 'Projects', loadComponent: () => import('./projects/projects/projects').then(m => m.ProjectsComponent) },
@@ -27,6 +40,11 @@ export const routes: Routes = [
   { path: 'project-tasks', title: 'Tasks', canMatch: [roleGuard(a => a.canManageProjects())], loadComponent: () => import('./projects/project-tasks/project-tasks').then(m => m.ProjectTasks) },
   { path: 'project-issues', title: 'Issues', canMatch: [roleGuard(a => a.canManageProjects())], loadComponent: () => import('./projects/project-issues/project-issues').then(m => m.ProjectIssues) },
   { path: 'change-requests', title: 'Change Control', canMatch: [roleGuard(a => a.canManageProjects())], loadComponent: () => import('./projects/change-requests/change-requests').then(m => m.ChangeRequests) },
+  // H — billable/type move ONLY through PUT /projects/:id/classification, whose
+  // audience is deliberately NOT the coarse /projects one: `pm` is excluded
+  // because whoever is measured on an engagement's margin must not be able to
+  // declare that the engagement has no margin.
+  { path: 'project-classification', title: 'Engagement Classification', canMatch: [projectClassificationGuard], loadComponent: () => import('./projects/project-classification/project-classification').then(m => m.ProjectClassificationComponent) },
 
   // Commercial (gated on commercial capability; billing additionally on finance)
   { path: 'customers', title: 'Customers', canMatch: [commercialGuard], loadComponent: () => import('./commercial/customers/customers').then(m => m.Customers) },
