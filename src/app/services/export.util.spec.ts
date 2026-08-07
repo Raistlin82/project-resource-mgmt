@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { inflateRawSync } from 'node:zlib';
 import {
   escapeCsv,
@@ -12,6 +12,23 @@ import {
   XlsxColumn,
   XlsxSheet,
 } from './export.util';
+
+
+/**
+ * exceljs arrives through a dynamic `import()` inside `buildXlsx`, and the FIRST
+ * call in a worker pays the entire module load — 5.5 to 9.4 seconds on this
+ * machine, against Vitest's 5000 ms default. Whichever `buildXlsx` test happened
+ * to run first therefore flaked, and the one that usually drew the short straw
+ * was the formula-injection assertion: the single worst test in this file to
+ * teach anyone to ignore, because it is the safety property of the export.
+ *
+ * Paying the load once here, outside any test's budget, is the honest fix. Raising
+ * each test's timeout instead would have hidden WHY they were slow and left every
+ * future `buildXlsx` test to rediscover it.
+ */
+beforeAll(async () => {
+  await buildXlsx([]);
+}, 60_000);
 
 describe('export.util — escapeCsv', () => {
   it('passes through a plain value unchanged', () => {

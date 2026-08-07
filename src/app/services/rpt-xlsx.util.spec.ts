@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import type { Assignment, AssignmentDay, AssignmentMonth, Project, Resource, ResourceRequest } from './api.service';
 import { monthRowId } from './allocation-month.util';
 import { buildXlsx, XlsxCellValue, XlsxSheet } from './export.util';
@@ -141,6 +141,23 @@ function rowsWhere(sheet: XlsxSheet, header: string, value: string): readonly (r
 }
 
 // --- the cube ---------------------------------------------------------------
+
+
+/**
+ * exceljs arrives through a dynamic `import()` inside `buildXlsx`, and the FIRST
+ * call in a worker pays the entire module load — 5.5 to 9.4 seconds on this
+ * machine, against Vitest's 5000 ms default. Whichever `buildXlsx` test happened
+ * to run first therefore flaked, and the one that usually drew the short straw
+ * was the formula-injection assertion: the single worst test in this file to
+ * teach anyone to ignore, because it is the safety property of the export.
+ *
+ * Paying the load once here, outside any test's budget, is the honest fix. Raising
+ * each test's timeout instead would have hidden WHY they were slow and left every
+ * future `buildXlsx` test to rediscover it.
+ */
+beforeAll(async () => {
+  await buildXlsx([]);
+}, 60_000);
 
 describe('rpt-xlsx.util — allocationCube', () => {
   it('counts only days whose owning month is Allocated or Requested', () => {
