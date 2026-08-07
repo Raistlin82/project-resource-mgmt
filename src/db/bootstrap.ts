@@ -138,11 +138,11 @@ async function seedDemoDatabase(database: DrizzleDb): Promise<void> {
   // here is invisible in dev and stops the server booting on Postgres — which
   // is exactly what happened in C1 (see the negotiatedRates note below).
   //
-  // T1 WIRES THE ORDER, T2 SUPPLIES THE ROWS (design spec §9): `seed.ts` has no
-  // `resourceAbsences` export yet and `seedIfEmpty` no-ops on an empty array,
-  // so this call is a positioned placeholder. T2 MUST swap `[]` for
-  // `seed.resourceAbsences` here AND in `repositories.ts`.
-  await seedIfEmpty(database, schema.resourceAbsences, []); // -> resources
+  // T2 SUPPLIED THE ROWS. `seedIfEmpty` no-ops on an empty array, so a literal
+  // `[]` here would leave a fresh Postgres boot with no absences at all while
+  // every gate stayed green; `src/db/seed.spec.ts` asserts this call reads the
+  // seed export.
+  await seedIfEmpty(database, schema.resourceAbsences, seed.resourceAbsences); // -> resources
   await seedIfEmpty(database, schema.languages, seed.languages);
   await seedIfEmpty(database, schema.fxRates, seed.fxRates);
   await seedIfEmpty(database, schema.settings, seed.settings); // global settings (hoursPerDay)
