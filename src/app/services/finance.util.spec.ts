@@ -1,6 +1,10 @@
 import {
   computeProjectFinancials,
   resourceBillability,
+  isProjectBillable,
+  hasAnyAlert,
+  portfolioRealization,
+  portfolioMarginFullyLoaded,
   billedToDate,
   recognizedRevenue,
   unbilledWip,
@@ -2064,5 +2068,463 @@ describe('finance.util recognizedRevenueTrend', () => {
     expect(t.previous).toBe(1400);
     expect(t.current).toBe(2800);
     expect(t.direction).toBe('up');
+  });
+});
+
+// =============================================================================
+// Block H — non-billable engagements ("BASKET")
+// Design spec: docs/superpowers/specs/2026-08-06-h-basket-non-billable-design.md
+// (§5 F-1..F-9, §8 the test strategy, §10 Q2 = fully-loaded portfolio margin)
+//
+// THE TRAP THIS SUITE EXISTS TO DEFEAT (spec §8.2): a FinanceData with no
+// `projects` reads every id as `billable ?? true`, which reproduces the pre-H
+// numbers EXACTLY. So every other suite in this file stays green while
+// exercising none of the code below. Value assertions alone would therefore
+// certify nothing; the two DIFFERENTIAL suites at the bottom are what prove the
+// flag is read at all.
+//
+// The fixture deliberately carries every shape the flag can be in:
+//   PB  billable: true,  type: 'Delivery'  — an ordinary customer engagement
+//   PL  NO billable, NO type               — a pre-H row; MUST read as billable
+//   PI  billable: false, type: 'Delivery'  — internal, NOT a basket (legitimate)
+//   PK  billable: false, type: 'Basket'    — the manual's basket engagement
+//   PX  billable: true,  type: 'Basket'    — contradictory, reachable only as bad
+//                                            data; proves the arithmetic reads
+//                                            `billable` and NEVER `type`
+//
+// PI carries CUSTOMER REVENUE on purpose. Without it the exclusions would be
+// inert — `revenue > 0` already blocks every margin alert on a zero-revenue
+// engagement — and a test over an inert branch is the blind green gate this
+// project has now paid for nine times. PI is the reachable shape that makes
+// them bite: a project that carried order lines and was later flipped, which
+// the §6.3 write gates (they cover billing plan items) do not prevent.
+// =============================================================================
+
+/** Project with explicit block-H classification. `billable`/`type` are OMITTED
+ *  when undefined — an omitted field is not the same row as `billable: true`,
+ *  and PL depends entirely on the difference. */
+function projH(
+  id: string,
+  name: string,
+  o: { billable?: boolean; type?: Project['type']; contractId?: string } = {},
+): Project {
+  const p: Project = { id, name, location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'Active' };
+  if (o.billable !== undefined) p.billable = o.billable;
+  if (o.type !== undefined) p.type = o.type;
+  if (o.contractId !== undefined) p.contractId = o.contractId;
+  return p;
+}
+
+const H_PROJECTS: Project[] = [
+  projH('PB', 'Phoenix', { billable: true, type: 'Delivery', contractId: 'CT1' }),
+  projH('PL', 'Legacy', { contractId: 'CT2' }),                 // no billable, no type
+  projH('PI', 'Internal Tooling', { billable: false, type: 'Delivery' }),
+  projH('PK', 'BASKET - Engineering Practice', { billable: false, type: 'Basket' }),
+  projH('PX', 'Mislabelled', { billable: true, type: 'Basket' }),
+];
+
+/** The SAME rows with every engagement billable. Used by the differential that
+ *  isolates the flag itself: `projects` is present in both arms, so the only
+ *  variable left is the value of `billable`. */
+const H_PROJECTS_ALL_BILLABLE: Project[] = H_PROJECTS.map(p => ({ ...p, billable: true }));
+
+const H_BASE: Omit<FinanceData, 'projects'> = {
+  resources: [res('1', 75, 140), res('2', 90, 180)],
+  requests: [req('rPB', 'PB'), req('rPL', 'PL'), req('rPI', 'PI'), req('rPK', 'PK'), req('rPX', 'PX')],
+  assignments: [
+    assign('aPB', 'rPB', '1', 100),
+    assign('aPL', 'rPL', '1', 40),
+    assign('aPI', 'rPI', '1', 30),
+    assign('aPK', 'rPK', '1', 20),
+    assign('aPX', 'rPX', '1', 10),
+    assign('aPK2', 'rPK', '2', 50),   // resource 2 works ONLY on the basket
+  ],
+  orders: [order('oc', 'Customer', 'Invoiced'), order('op', 'Purchase', 'Confirmed')],
+  orderLines: [
+    line('l1', 'oc', 'PB', 100_000),
+    line('l2', 'oc', 'PL', 20_000),
+    line('l3', 'oc', 'PI', 10_000),   // the flipped engagement's leftover revenue
+    line('l4', 'op', 'PB', 5_000),
+  ],
+  financials: [fin('fPB', 'PB', 200_000, 0), fin('fPK', 'PK', 10_000, 0)],
+  timeEntries: [
+    time('tPB', 'aPB', 'rPB', '1', 'PB', 200, 'Approved'),
+    time('tPL', 'aPL', 'rPL', '1', 'PL', 20, 'Approved'),
+    time('tPI', 'aPI', 'rPI', '2', 'PI', 100, 'Approved'),
+    time('tPK', 'aPK', 'rPK', '2', 'PK', 100, 'Approved'),
+  ],
+  billingItems: [
+    bill('bPB', 'PB', 'Milestone', 60_000, 'Invoiced'),
+    bill('bPL', 'PL', 'Milestone', 10_000, 'Invoiced'),
+    // NO billing item on PI/PK: the §6.3 write gates make one impossible. The
+    // absence is a deliberate NON-fixture, annotated here so it can never be
+    // mistaken for coverage (spec §8.3, S7).
+  ],
+  assignmentDays: [day('dPK', 'aPK', '2026-03-10', 8)],
+  assignmentMonths: [month('aPK', '2026-03', 'Allocated')],
+  costBaselines: [baseline('cbPK', 'PK', '2026-03', 500, '2026-02-01')],
+  contracts: [contract('CT1', 'CUS1'), contract('CT2', 'CUS2')],
+  customers: [customer('CUS1', 'Acme'), customer('CUS2', 'Globex')],
+};
+
+/** The block-H fixture. */
+const H: FinanceData = { ...H_BASE, projects: H_PROJECTS };
+/** Same rows, same money, every engagement billable. */
+const H_BILLABLE: FinanceData = { ...H_BASE, projects: H_PROJECTS_ALL_BILLABLE };
+/** Same money, NO project master data at all — the pre-H caller. */
+const H_NO_PROJECTS: FinanceData = { ...H_BASE };
+
+describe('finance.util H — billability is read from `billable`, never from `type`', () => {
+  it('resolves the flag for all five classification shapes', () => {
+    expect(isProjectBillable('PB', H)).toBe(true);
+    expect(isProjectBillable('PL', H)).toBe(true);   // field ABSENT -> billable (?? true)
+    expect(isProjectBillable('PI', H)).toBe(false);
+    expect(isProjectBillable('PK', H)).toBe(false);
+    // `type: 'Basket'` with `billable: true` is contradictory data. The
+    // arithmetic believes `billable`. If this ever flips, someone taught the
+    // engine to read the label, and two fields now fight over one number.
+    expect(isProjectBillable('PX', H)).toBe(true);
+  });
+
+  it('an unknown project id, and a caller with no project data at all, are billable', () => {
+    expect(isProjectBillable('does-not-exist', H)).toBe(true);
+    expect(isProjectBillable('PK', H_NO_PROJECTS)).toBe(true); // PK is non-billable ONLY in H
+  });
+
+  it('computeProjectFinancials reports the flag and leaves the arithmetic alone', () => {
+    // The margin of a non-billable engagement is still revenue - actualCost.
+    // The cost is real; what changes is who consumes the number (spec §11).
+    const pk = computeProjectFinancials('PK', H);
+    expect(pk.billable).toBe(false);
+    expect(pk.actualCost).toBe(9_000);
+    expect(pk.margin).toBe(-9_000);
+    // ...and it is byte-identical to the same project read as billable.
+    const pkBillable = computeProjectFinancials('PK', H_BILLABLE);
+    expect(pkBillable.margin).toBe(pk.margin);
+    expect(pkBillable.actualCost).toBe(pk.actualCost);
+    expect(pkBillable.billable).toBe(true);
+
+    expect(computeProjectFinancials('PL', H).billable).toBe(true);
+    expect(computeProjectFinancials('PX', H).billable).toBe(true);
+  });
+});
+
+describe('finance.util H — F-3: no margin alert on a non-billable engagement', () => {
+  it('suppresses the margin flag on PI, which WOULD fire if it were billable', () => {
+    // PI: revenue 10000, actualCost 9000 -> marginPct 10% <= target 15%.
+    expect(computeProjectFinancials('PI', H).marginPct).toBeCloseTo(10, 9);
+    expect(projectAlerts('PI', H_BILLABLE).marginBelowTarget).toBe(true);   // the defect
+    expect(projectAlerts('PI', H).marginBelowTarget).toBe(false);           // the fix
+    expect(projectAlerts('PI', H).items).toStrictEqual([]);
+  });
+
+  it('keeps BURN alerts on a non-billable engagement — a basket has a budget', () => {
+    // PK: budget 10000, actualCost 9000 -> burn 90% >= warn 90%. Non-billable
+    // suppresses MARGIN, not overspend: the exclusion is scoped, not a mute.
+    const pk = projectAlerts('PK', H);
+    expect(pk.marginBelowTarget).toBe(false);
+    expect(pk.burnOver).toBe(true);
+    expect(hasAnyAlert(pk)).toBe(true);
+  });
+
+  it('portfolioAlerts drops the non-billable margin row and keeps the burn row', () => {
+    expect(portfolioAlerts(H).map(r => r.projectId)).toStrictEqual(['PK']);
+    expect(portfolioAlerts(H_BILLABLE).map(r => r.projectId)).toStrictEqual(['PI', 'PK']);
+    // and the surviving row is still labelled from d.projects
+    expect(portfolioAlerts(H)[0].name).toBe('BASKET - Engineering Practice');
+  });
+
+  it('marginCompressionAlerts skips non-billable projects, in BOTH scopes', () => {
+    expect(marginCompressionAlerts(H, {}, ['project'])).toStrictEqual([]);
+    expect(marginCompressionAlerts(H_BILLABLE, {}, ['project']).map(a => a.id)).toStrictEqual(['PI']);
+
+    // Customer scope needs no code of its own — it reads customerProfitability,
+    // which already drops them (F-5), so it follows by construction. Asserted
+    // rather than assumed: "follows by construction" is how a surface gets
+    // forgotten.
+    expect(marginCompressionAlerts(H, {}, ['customer'])).toStrictEqual([]);
+    expect(marginCompressionAlerts(H_BILLABLE, {}, ['customer']).map(a => a.id)).toStrictEqual(['unknown']);
+  });
+
+  it('the BILLABLE projects keep every alert verdict they had — unchanged to the cent', () => {
+    for (const id of ['PB', 'PL', 'PX']) {
+      expect(projectAlerts(id, H)).toStrictEqual(projectAlerts(id, H_BILLABLE));
+      expect(computeProjectFinancials(id, H).margin).toBe(computeProjectFinancials(id, H_BILLABLE).margin);
+    }
+  });
+});
+
+describe('finance.util H — F-5/F-6: customer rollups drop the non-billable work', () => {
+  it('customerProfitability excludes PI and PK; the Unknown row is PX alone', () => {
+    const rows = customerProfitability(H);
+    expect(rows.map(r => r.customerId)).toStrictEqual(['CUS1', 'CUS2', 'unknown']);
+    expect(rows.find(r => r.customerId === 'CUS1')).toStrictEqual({
+      customerId: 'CUS1', customerName: 'Acme',
+      revenue: 100_000, cost: 20_000, margin: 80_000, marginPct: 80, projectIds: ['PB'],
+    });
+    // PL has NO `billable` field and still lands on a real customer.
+    expect(rows.find(r => r.customerId === 'CUS2')?.projectIds).toStrictEqual(['PL']);
+    // Only PX (billable: true despite type 'Basket') is left under Unknown.
+    const unknown = rows.find(r => r.customerId === 'unknown')!;
+    expect(unknown.projectIds).toStrictEqual(['PX']);
+    expect(unknown.cost).toBe(750);
+    // The paired ABSENCE assertion: the two excluded ids appear under NO customer.
+    expect(rows.flatMap(r => r.projectIds)).not.toContain('PI');
+    expect(rows.flatMap(r => r.projectIds)).not.toContain('PK');
+  });
+
+  it('...and the same fixture read as all-billable puts them back (18 750 of cost)', () => {
+    const unknown = customerProfitability(H_BILLABLE).find(r => r.customerId === 'unknown')!;
+    expect(unknown.projectIds).toStrictEqual(['PI', 'PK', 'PX']);
+    expect(unknown.cost).toBe(18_750);   // 9000 + 9000 + 750
+    expect(unknown.revenue).toBe(10_000);
+    expect(unknown.margin).toBe(-8_750); // the permanently-in-the-red fake customer
+  });
+
+  it('customerConcentration moves because the denominator moves (F-6)', () => {
+    const h = customerConcentration(H);
+    expect(h.totalRevenue).toBe(120_000);        // 100k + 20k; PI's 10k is gone
+    expect(h.customerCount).toBe(2);
+    expect(h.topCustomerSharePct).toBeCloseTo((100_000 / 120_000) * 100, 9);
+
+    const all = customerConcentration(H_BILLABLE);
+    expect(all.totalRevenue).toBe(130_000);      // PI's 10k back under Unknown
+    expect(all.customerCount).toBe(3);
+    expect(all.topCustomerSharePct).toBeCloseTo((100_000 / 130_000) * 100, 9);
+    // the whole point: this is NOT the same concentration reading
+    expect(all.hhi).not.toBeCloseTo(h.hhi, 6);
+  });
+});
+
+describe('finance.util H — F-7: realization is not dragged by a structural 0%', () => {
+  it('per-project realization is unchanged and merely reports the flag', () => {
+    const pk = realizationMetrics('PK', H);
+    expect(pk.billable).toBe(false);
+    expect(pk.hours).toBe(100);
+    expect(pk.standardBillValue).toBe(18_000);   // 100h x 180
+    expect(pk.revenue).toBe(0);
+    expect(pk.realizationPct).toBe(0);           // the figure that drags the mean
+    expect(realizationMetrics('PK', H_BILLABLE).realizationPct).toBe(0); // identical arithmetic
+    expect(realizationMetrics('PL', H).billable).toBe(true);
+  });
+
+  it('portfolioRealization excludes them, and the mean moves by over 122 points', () => {
+    const h = portfolioRealization(H);
+    expect(h.excludedProjectIds).toStrictEqual(['PI', 'PK']);
+    expect(h.hours).toBe(220);                   // 200 (PB) + 20 (PL)
+    expect(h.standardBillValue).toBe(30_800);    // 28000 + 2800
+    expect(h.revenue).toBe(70_000);              // 60000 + 10000 recognised
+    expect(h.realizationPct).toBeCloseTo((70_000 / 30_800) * 100, 9);  // 227.27%
+    expect(h.headcount).toBe(1);                 // only resource 1 on billable work
+    expect(h.revenuePerHead).toBe(70_000);
+
+    const all = portfolioRealization(H_BILLABLE);
+    expect(all.excludedProjectIds).toStrictEqual([]);
+    expect(all.hours).toBe(420);
+    expect(all.standardBillValue).toBe(66_800);
+    expect(all.revenue).toBe(70_000);            // the excluded work earns NOTHING
+    expect(all.realizationPct).toBeCloseTo((70_000 / 66_800) * 100, 9);  // 104.79%
+    expect(all.headcount).toBe(2);
+
+    // The defect, as one number: 36 000 of rate-card denominator with a zero
+    // numerator was pulling portfolio realization down by ~122.5 points.
+    expect(h.realizationPct - all.realizationPct).toBeGreaterThan(122);
+  });
+
+  it('de-duplicates headcount across projects and never divides by zero', () => {
+    const empty = portfolioRealization({ resources: [], requests: [], assignments: [], orders: [], orderLines: [], financials: [] });
+    expect(empty).toStrictEqual({
+      revenue: 0, hours: 0, standardBillValue: 0, realizationPct: 0,
+      headcount: 0, fte: 0, revenuePerHead: 0, revenuePerFte: 0, excludedProjectIds: [],
+    });
+    // resource 1 books approved time on BOTH PB and PL; it must count once.
+    expect(portfolioRealization(H).headcount).toBe(1);
+    const withFte = portfolioRealization(H, { hoursPerFte: 220 });
+    expect(withFte.fte).toBeCloseTo(200 / 220 + 20 / 220, 9);
+    expect(Number.isFinite(withFte.revenuePerFte)).toBe(true);
+  });
+});
+
+describe('finance.util H — F-8: hours on non-billable work are not billable value', () => {
+  it('narrows `billable` while leaving `hours` and `cost` as the true totals', () => {
+    // Resource 1: 100 (PB) + 40 (PL) + 30 (PI) + 20 (PK) + 10 (PX) = 200h.
+    // Billable hours = 100 + 40 + 10 = 150 (PI and PK are out).
+    expect(resourceBillability('1', H)).toStrictEqual({
+      hours: 200, cost: 15_000, billable: 21_000,   // 150h x 140
+    });
+    // Same person, same bookings, read as all-billable: the pre-H figure.
+    expect(resourceBillability('1', H_BILLABLE)).toStrictEqual({
+      hours: 200, cost: 15_000, billable: 28_000,   // 200h x 140
+    });
+    // 7 000 EUR of claimed value was work we can never invoice.
+  });
+
+  it('a person working only on a basket has real cost and ZERO billable value', () => {
+    expect(resourceBillability('2', H)).toStrictEqual({ hours: 50, cost: 4_500, billable: 0 });
+    expect(resourceBillability('2', H_BILLABLE)).toStrictEqual({ hours: 50, cost: 4_500, billable: 9_000 });
+  });
+
+  it('an unresolvable booking stays BILLABLE — the caller that passes no requests', () => {
+    // resources.component.ts builds its FinanceData with `requests: []` and no
+    // `projects`. It must keep its pre-H number, not collapse to zero. (T7 has
+    // to wire requests + projects in, or F-8 never fires on that screen.)
+    const noJoin: FinanceData = { ...H, requests: [] };
+    expect(resourceBillability('1', noJoin).billable).toBe(28_000);
+    expect(resourceBillability('1', H_NO_PROJECTS).billable).toBe(28_000);
+  });
+});
+
+describe('finance.util H — F-4: cost planning KEEPS working on a basket engagement', () => {
+  it('plannedCostSchedule still prices a non-billable engagement', () => {
+    // The tempting over-correction is "exclude the non-billable from all of
+    // finance". This is the annual plan on a historical basis the manual asks
+    // for (spec §2.5) — it MUST report.
+    expect(plannedCostSchedule(H, ['2026-03'], { projectId: 'PK' })).toStrictEqual([
+      { period: '2026-03', plannedCost: 600, cumulative: 600 },   // 8h x 75
+    ]);
+  });
+
+  it('costBaselineComparison still compares a non-billable engagement', () => {
+    expect(costBaselineComparison(H, 'PK')).toStrictEqual([
+      { period: '2026-03', baseline: 500, planned: 600, delta: 100, deltaPct: 20, outOfBaselineHorizon: false },
+    ]);
+  });
+
+  it('the cost is EXCLUDED from customer profitability and REPORTED in the plan — both', () => {
+    // Exclusion from the alert/customer rollups is not deletion of the cost.
+    expect(customerProfitability(H).flatMap(r => r.projectIds)).not.toContain('PK');
+    expect(plannedCostSchedule(H, ['2026-03'], { projectId: 'PK' })[0].plannedCost).toBeGreaterThan(0);
+    expect(computeProjectFinancials('PK', H).actualCost).toBe(9_000);
+  });
+});
+
+describe('finance.util H — Q2: the portfolio margin is FULLY LOADED, and named so', () => {
+  it('carries the internal cost and names the value for what it is', () => {
+    expect(portfolioMarginFullyLoaded(H)).toStrictEqual({
+      baseCurrency: 'EUR',
+      revenue: 130_000,             // 100k PB + 20k PL + 10k PI
+      deliveryCost: 22_250,         // PB 20000 + PL 1500 + PX 750
+      nonBillableCost: 18_000,      // PI 9000 + PK 9000
+      fullyLoadedMargin: 89_750,    // 130000 - 22250 - 18000
+      fullyLoadedMarginPct: (89_750 / 130_000) * 100,
+      nonBillableProjectIds: ['PI', 'PK'],
+    });
+  });
+
+  it('states the gap against the delivery margin somebody WILL compare it to', () => {
+    const m = portfolioMarginFullyLoaded(H);
+    // The documented reconciliation: delivery margin = fully loaded + internal.
+    const deliveryMargin = m.fullyLoadedMargin + m.nonBillableCost;
+    expect(deliveryMargin).toBe(107_750);
+    const deliveryPct = (deliveryMargin / m.revenue) * 100;
+    expect(deliveryPct - m.fullyLoadedMarginPct).toBeCloseTo(13.846153846153847, 9);
+    // 18 000 EUR / 13.85 points: the size of Q2's answer on this fixture.
+    expect(deliveryMargin - m.fullyLoadedMargin).toBe(18_000);
+  });
+
+  it('the HEADLINE is invariant to the flag; only the split it explains moves', () => {
+    // This is the property the NAME has to carry. "Fully loaded" means TOTAL
+    // cost, so flipping the flags cannot change it — which is exactly why a
+    // field called `margin` would have been a lie here: the number nobody sees
+    // changing would have been the one whose MEANING changed.
+    const h = portfolioMarginFullyLoaded(H);
+    const all = portfolioMarginFullyLoaded(H_BILLABLE);
+    expect(all.fullyLoadedMargin).toBe(h.fullyLoadedMargin);
+    expect(all.revenue).toBe(h.revenue);
+    // ...and the split, which is what the flag is for, DOES move:
+    expect(all.nonBillableCost).toBe(0);
+    expect(all.deliveryCost).toBe(40_250);
+    expect(all.nonBillableProjectIds).toStrictEqual([]);
+    expect(h.deliveryCost + h.nonBillableCost).toBe(all.deliveryCost);
+  });
+
+  it('never returns NaN with no revenue, and never sums two currencies', () => {
+    const noRevenue = portfolioMarginFullyLoaded({ ...H, orderLines: [] });
+    expect(noRevenue.revenue).toBe(0);
+    expect(noRevenue.fullyLoadedMarginPct).toBe(0);
+    expect(Number.isFinite(noRevenue.fullyLoadedMargin)).toBe(true);
+
+    // USD order lines normalised through convertToBase before they land here.
+    const usd: FinanceData = {
+      ...H,
+      orders: [orderC('oc', 'Customer', 'Invoiced', 'USD'), order('op', 'Purchase', 'Confirmed')],
+      fxRates: fx(),
+    };
+    expect(portfolioMarginFullyLoaded(usd).revenue).toBeCloseTo(130_000 * 0.9, 6);
+    expect(portfolioMarginFullyLoaded(usd).baseCurrency).toBe('EUR');
+  });
+
+  it('counts an engagement whose cost has no request row (it would otherwise vanish)', () => {
+    // A basket staffed straight off time entries: no request, so allProjectIds
+    // never sees it. A "fully loaded" total that drops it is not fully loaded.
+    const orphan: FinanceData = {
+      resources: [res('9', 100, 200)],
+      requests: [], assignments: [], orders: [], orderLines: [], financials: [],
+      timeEntries: [time('t9', 'a9', 'r9', '9', 'PZ', 10, 'Approved')],
+      projects: [projH('PZ', 'Ghost basket', { billable: false, type: 'Basket' })],
+    };
+    expect(portfolioMarginFullyLoaded(orphan).nonBillableCost).toBe(1_000);
+    expect(portfolioMarginFullyLoaded(orphan).fullyLoadedMargin).toBe(-1_000);
+  });
+});
+
+// --- The two differential suites (spec §8.2) ---------------------------------
+//
+// Neither of these asserts a "correct value". They assert that two runs over
+// the SAME fixture DISAGREE. That is the only assertion an unread input cannot
+// satisfy, and an unread input is the failure this whole block is shaped
+// around: omit `projects` and every number above silently reverts to pre-H.
+
+describe('finance.util H — differential 1: `projects` omitted reproduces pre-H exactly', () => {
+  it('every block-H consumer reads DIFFERENTLY with and without project data', () => {
+    expect(customerProfitability(H_NO_PROJECTS)).not.toStrictEqual(customerProfitability(H));
+    expect(customerConcentration(H_NO_PROJECTS)).not.toStrictEqual(customerConcentration(H));
+    expect(portfolioRealization(H_NO_PROJECTS)).not.toStrictEqual(portfolioRealization(H));
+    expect(resourceBillability('1', H_NO_PROJECTS)).not.toStrictEqual(resourceBillability('1', H));
+    expect(portfolioMarginFullyLoaded(H_NO_PROJECTS)).not.toStrictEqual(portfolioMarginFullyLoaded(H));
+    expect(portfolioAlerts(H_NO_PROJECTS).map(r => r.projectId))
+      .not.toStrictEqual(portfolioAlerts(H).map(r => r.projectId));
+    expect(marginCompressionAlerts(H_NO_PROJECTS, {}, ['project']))
+      .not.toStrictEqual(marginCompressionAlerts(H, {}, ['project']));
+  });
+
+  it('and the pre-H arm reproduces the pre-H answers, not merely a different one', () => {
+    // Without `projects` everything is billable, so nothing is excluded.
+    expect(portfolioRealization(H_NO_PROJECTS).excludedProjectIds).toStrictEqual([]);
+    expect(portfolioMarginFullyLoaded(H_NO_PROJECTS).nonBillableCost).toBe(0);
+    expect(resourceBillability('1', H_NO_PROJECTS).billable).toBe(28_000);
+    expect(projectAlerts('PI', H_NO_PROJECTS).marginBelowTarget).toBe(true);
+  });
+});
+
+describe('finance.util H — differential 2: only the `billable` flag differs', () => {
+  it('isolates the flag: same rows, same money, `projects` present in BOTH arms', () => {
+    // Differential 1 changes two things at once (billability AND contract
+    // resolution, since projectToContract is built from d.projects). This arm
+    // changes exactly one field on exactly two rows, so a difference here can
+    // only mean `billable` itself was read.
+    expect(H.projects!.map(p => p.id)).toStrictEqual(H_BILLABLE.projects!.map(p => p.id));
+    expect(H.projects!.map(p => p.contractId)).toStrictEqual(H_BILLABLE.projects!.map(p => p.contractId));
+
+    expect(customerProfitability(H)).not.toStrictEqual(customerProfitability(H_BILLABLE));
+    expect(customerConcentration(H)).not.toStrictEqual(customerConcentration(H_BILLABLE));
+    expect(portfolioRealization(H)).not.toStrictEqual(portfolioRealization(H_BILLABLE));
+    expect(resourceBillability('1', H)).not.toStrictEqual(resourceBillability('1', H_BILLABLE));
+    expect(portfolioMarginFullyLoaded(H)).not.toStrictEqual(portfolioMarginFullyLoaded(H_BILLABLE));
+    expect(projectAlerts('PI', H)).not.toStrictEqual(projectAlerts('PI', H_BILLABLE));
+    expect(marginCompressionAlerts(H, {}, ['project', 'customer']))
+      .not.toStrictEqual(marginCompressionAlerts(H_BILLABLE, {}, ['project', 'customer']));
+  });
+
+  it('the paired ABSENCE assertion: a fixture with NOTHING non-billable cannot differ', () => {
+    // If this ever fails, some branch keys on the PRESENCE of `projects` rather
+    // than on the VALUE of `billable` — the exact confusion differential 1
+    // cannot detect on its own.
+    const a: FinanceData = { ...H_BASE, projects: H_PROJECTS_ALL_BILLABLE };
+    const b: FinanceData = { ...H_BASE, projects: H_PROJECTS_ALL_BILLABLE.map(p => ({ ...p })) };
+    expect(customerProfitability(a)).toStrictEqual(customerProfitability(b));
+    expect(portfolioRealization(a)).toStrictEqual(portfolioRealization(b));
+    expect(portfolioMarginFullyLoaded(a)).toStrictEqual(portfolioMarginFullyLoaded(b));
+    expect(resourceBillability('1', a)).toStrictEqual(resourceBillability('1', b));
   });
 });
