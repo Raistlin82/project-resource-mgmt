@@ -127,32 +127,45 @@ const NO_HOLIDAYS: ReadonlySet<string> = new Set<string>();
  * DERIVED, not asserted: it averages `workingDaysInMonth` — the very function
  * `employedWorkingDays` filters, so the constant counts a month exactly the way
  * the rest of the system does — over four consecutive years, which covers one
- * leap year and every weekday alignment a year can start on. The mean is ~21.7
- * for any such window (1045/48 here, 1043/48 for 2028-2031), so the floor is 21
- * whichever window is chosen; the spec's test pins that with a DIFFERENT window
- * than this one, so a typo in the years above shows up red.
+ * leap year and every weekday alignment a year can start on — which is what makes
+ * the MAXIMUM stable at 23 for any such window (checked over 2020-2040: min 20,
+ * max 23). The spec pins it against a DIFFERENT window than this one, so a typo
+ * in the years above shows up red.
  *
  * HOLIDAY-FREE on purpose. Holidays are per-tenant data that an administrator
  * can edit; folding them in would move a bucket boundary, and the same idle
  * history would silently reclassify from C to D because somebody added a public
  * holiday. The threshold is a policy constant, not a per-tenant measurement.
  *
- * FLOOR, not round: "about a working month" is the intent, the B bucket's own
- * test is `<= WORKING_DAYS_PER_MONTH` (inclusive), and that inclusive boundary
- * already absorbs the fractional 0.7.
+ * THE MAXIMUM, not the mean — and this is the correction that matters.
+ *
+ * The mean over such a window is ~21.7, so flooring gave 21. But the requirement
+ * the RPT labels state is "B = idle less than ONE MONTH", and a single full month
+ * is 20, 21, 22 or 23 working days depending on which month it is. Against a
+ * ceiling of 21, one full month of idleness landed in B for May and August 2026
+ * (21 days) and in C for April, June, July and September (22-23). The bucket then
+ * depended on WHICH MONTH somebody happened to be idle in — precisely the
+ * arbitrariness that moving to days was meant to remove, relocated rather than
+ * removed. It was visible on the seed: Marco's April read C where the month-based
+ * code read B.
+ *
+ * Taking the longest possible month makes one full month ALWAYS B and two full
+ * months ALWAYS C (2 × 23 = 46 is the most two months can be), so the labels mean
+ * what the manual says regardless of the calendar. The cost is that an idle span
+ * of 22-23 days assembled across a month boundary also reads B; that is the
+ * honest side of the trade, and "idle about a month" is a fair description of it.
  *
  * Cost: 48 × ~30 iterations once at module load, all pure string arithmetic.
  */
-export const WORKING_DAYS_PER_MONTH: number = (() => {
-  let days = 0;
-  let months = 0;
+export const LONGEST_WORKING_MONTH_DAYS: number = (() => {
+  let longest = 0;
   for (let y = DERIVATION_FIRST_YEAR; y < DERIVATION_FIRST_YEAR + DERIVATION_YEARS; y++) {
     for (let m = 1; m <= 12; m++) {
-      days += workingDaysInMonth(`${y}-${String(m).padStart(2, '0')}`, NO_HOLIDAYS).length;
-      months++;
+      const n = workingDaysInMonth(`${y}-${String(m).padStart(2, '0')}`, NO_HOLIDAYS).length;
+      if (n > longest) longest = n;
     }
   }
-  return Math.floor(days / months);
+  return longest;
 })();
 
 /**
@@ -175,8 +188,8 @@ export const WORKING_DAYS_PER_MONTH: number = (() => {
  * (they are its labels); this file owns the numbers, so the classifier never has
  * to re-derive them.
  */
-export const IDLE_WORKING_DAYS_B_MAX = WORKING_DAYS_PER_MONTH;
-export const IDLE_WORKING_DAYS_C_MAX = WORKING_DAYS_PER_MONTH * 2;
+export const IDLE_WORKING_DAYS_B_MAX = LONGEST_WORKING_MONTH_DAYS;
+export const IDLE_WORKING_DAYS_C_MAX = LONGEST_WORKING_MONTH_DAYS * 2;
 
 /**
  * One month's worth of facts for {@link idleWorkingDaysAt}. Three primitives

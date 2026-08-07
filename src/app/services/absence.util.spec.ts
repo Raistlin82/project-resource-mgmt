@@ -1,6 +1,6 @@
 import {
   AbsenceInterval, IdleMonth, IDLE_WORKING_DAYS_B_MAX, IDLE_WORKING_DAYS_C_MAX,
-  WORKING_DAYS_PER_MONTH, absenceDaysFor, availableWorkingDays, idleWorkingDaysAt, monthAvailability,
+  LONGEST_WORKING_MONTH_DAYS, absenceDaysFor, availableWorkingDays, idleWorkingDaysAt, monthAvailability,
 } from './absence.util';
 import { workingDaysInMonth } from './calendar.util';
 import { employedWorkingDays } from './capacity.util';
@@ -146,41 +146,72 @@ describe('monthAvailability', () => {
   });
 });
 
-describe('WORKING_DAYS_PER_MONTH / the idle-aging thresholds', () => {
-  it('is 21, and is genuinely derived from the calendar', () => {
-    expect(WORKING_DAYS_PER_MONTH).toBe(21);
-    // Derived here over 2028-2031 — a DIFFERENT four-year window from the module's
+describe('LONGEST_WORKING_MONTH_DAYS / the idle-aging thresholds', () => {
+  it('is 23, and is genuinely derived from the calendar', () => {
+    expect(LONGEST_WORKING_MONTH_DAYS).toBe(23);
+    // Measured here over 2028-2031 — a DIFFERENT four-year window from the module's
     // 2024-2027, so this is a second measurement rather than a copy of the formula.
-    // Any such window averages ~21.7 (1043/48 here, 1045/48 there), which is the
-    // property that makes the floor insensitive to which years were picked.
-    let days = 0;
-    let months = 0;
+    // The MAXIMUM is stable at 23 for any such window (a 31-day month starting on a
+    // Monday), which is the property that makes the constant window-insensitive.
+    let longest = 0;
     for (let y = 2028; y <= 2031; y++) {
       for (let m = 1; m <= 12; m++) {
-        days += workingDaysInMonth(`${y}-${String(m).padStart(2, '0')}`, NO_HOL).length;
-        months++;
+        longest = Math.max(longest, workingDaysInMonth(`${y}-${String(m).padStart(2, '0')}`, NO_HOL).length);
       }
     }
-    const mean = days / months;
-    expect(mean).toBeGreaterThanOrEqual(21);
-    expect(mean).toBeLessThan(22);
-    expect(Math.floor(mean)).toBe(WORKING_DAYS_PER_MONTH);
+    expect(longest).toBe(LONGEST_WORKING_MONTH_DAYS);
   });
 
-  it('sits inside the range a real month can actually take', () => {
-    // ABSENCE TWIN: "is a number" is satisfied by 0 and by 30. 2026-02 is the short
-    // end (20 working days, four exact weeks) and 2026-05 the long one (21).
-    expect(WORKING_DAYS_PER_MONTH).toBeGreaterThanOrEqual(workingDaysInMonth('2026-02', NO_HOL).length);
-    expect(WORKING_DAYS_PER_MONTH).toBeLessThanOrEqual(MAY_DAYS.length);
+  it('is the LONGEST month, not the average one', () => {
+    // ABSENCE TWIN of the case above, and the assertion this file did not have.
+    // The constant used to be the mean floored (21). Nothing here was wrong about
+    // 21 as a number — what was wrong is that 21 cannot be a ceiling for "one
+    // month", because a real month runs 20 to 23 working days.
+    const mean = (() => {
+      let days = 0, months = 0;
+      for (let y = 2028; y <= 2031; y++) {
+        for (let m = 1; m <= 12; m++) {
+          days += workingDaysInMonth(`${y}-${String(m).padStart(2, '0')}`, NO_HOL).length;
+          months++;
+        }
+      }
+      return days / months;
+    })();
+    expect(Math.floor(mean)).toBe(21);
+    expect(LONGEST_WORKING_MONTH_DAYS).toBeGreaterThan(Math.floor(mean));
+  });
+
+  /**
+   * THE REQUIREMENT, stated as a test instead of as prose — and the one that was
+   * missing. The RPT labels mean "B = idle less than one month, C = one to two,
+   * D = over two". Against a ceiling of 21 that was FALSE for most of the year:
+   * one full month of idleness read B in May and August 2026 (21 working days) and
+   * C in April, June, July and September (22-23). The bucket depended on which
+   * month somebody happened to be idle in.
+   *
+   * Every month of the derivation window, both ends of both boundaries. A mean-
+   * based ceiling fails this on the first 22-day month it reaches.
+   */
+  it('one full month of idleness is B, and two full months are C, for EVERY month', () => {
+    const offenders: string[] = [];
+    for (let y = 2024; y <= 2027; y++) {
+      for (let m = 1; m <= 12; m++) {
+        const month = `${y}-${String(m).padStart(2, '0')}`;
+        const oneMonth = workingDaysInMonth(month, NO_HOL).length;
+        if (oneMonth > IDLE_WORKING_DAYS_B_MAX) offenders.push(`${month} (${oneMonth}d) escapes B`);
+        if (oneMonth * 2 > IDLE_WORKING_DAYS_C_MAX) offenders.push(`${month} x2 (${oneMonth * 2}d) escapes C`);
+      }
+    }
+    expect(offenders, 'a full month of idleness must never escape its bucket').toStrictEqual([]);
   });
 
   it('anchors B and C to one and two working months', () => {
-    expect(IDLE_WORKING_DAYS_B_MAX).toBe(WORKING_DAYS_PER_MONTH);
-    expect(IDLE_WORKING_DAYS_C_MAX).toBe(WORKING_DAYS_PER_MONTH * 2);
+    expect(IDLE_WORKING_DAYS_B_MAX).toBe(LONGEST_WORKING_MONTH_DAYS);
+    expect(IDLE_WORKING_DAYS_C_MAX).toBe(LONGEST_WORKING_MONTH_DAYS * 2);
     // Literals as well as the relation: a `* 2` typo'd to `* 1` satisfies the two
     // assertions above only if the relation is the only thing checked.
-    expect(IDLE_WORKING_DAYS_B_MAX).toBe(21);
-    expect(IDLE_WORKING_DAYS_C_MAX).toBe(42);
+    expect(IDLE_WORKING_DAYS_B_MAX).toBe(23);
+    expect(IDLE_WORKING_DAYS_C_MAX).toBe(46);
   });
 });
 

@@ -115,8 +115,8 @@ describe('bucketForIdleWorkingDays (B/C/D from consecutive idle WORKING DAYS, sp
   it('the thresholds this suite asserts against are the derived ones, not 21/42 retyped', () => {
     // A guard on the FIXTURE: if the derivation in absence.util ever moves, the
     // boundary cases below move with it instead of silently asserting the wrong side.
-    expect(IDLE_WORKING_DAYS_B_MAX).toBe(21);
-    expect(IDLE_WORKING_DAYS_C_MAX).toBe(42);
+    expect(IDLE_WORKING_DAYS_B_MAX).toBe(23);
+    expect(IDLE_WORKING_DAYS_C_MAX).toBe(46);
   });
 
   it('1 day -> B (one day idle is the shallowest real bucket, never C)', () => {
@@ -125,13 +125,13 @@ describe('bucketForIdleWorkingDays (B/C/D from consecutive idle WORKING DAYS, sp
   });
   // The three boundary PAIRS. Each asserts the day ON the boundary and the day
   // AFTER it, so an off-by-one in either comparison is red — a `<` instead of
-  // `<=` moves 21 to C and 42 to D, which is a whole bucket of people
+  // `<=` moves 23 to C and 46 to D, which is a whole bucket of people
   // reclassified.
-  it('B is INCLUSIVE at 21, and 22 is already C', () => {
+  it('B is INCLUSIVE at 23, and 24 is already C', () => {
     expect(bucketForIdleWorkingDays(IDLE_WORKING_DAYS_B_MAX)).toBe('B');
     expect(bucketForIdleWorkingDays(IDLE_WORKING_DAYS_B_MAX + 1)).toBe('C');
   });
-  it('C is INCLUSIVE at 42, and 43 is already D', () => {
+  it('C is INCLUSIVE at 46, and 47 is already D', () => {
     expect(bucketForIdleWorkingDays(IDLE_WORKING_DAYS_C_MAX)).toBe('C');
     expect(bucketForIdleWorkingDays(IDLE_WORKING_DAYS_C_MAX + 1)).toBe('D');
   });
@@ -141,19 +141,35 @@ describe('bucketForIdleWorkingDays (B/C/D from consecutive idle WORKING DAYS, sp
     expect(bucketForIdleWorkingDays(0)).toBe('B'));
 
   /**
-   * THE UNIT CHANGE, stated as a test rather than left in a comment: a single
-   * 22-working-day month of idleness used to read B (one BENCH month) and now
-   * reads C. The two functions are composed here because the composition is what
-   * `benchRollup` does, and it is where a mismatched unit — days handed to a
-   * month classifier, or the reverse — would show up.
+   * THE REQUIREMENT the unit change has to keep, stated as a test.
+   *
+   * This case previously asserted the OPPOSITE — that one 22-working-day month
+   * reads C "where the month count said B" — and presented that as the unit
+   * change working. It was the defect: against a ceiling of 21, one full month of
+   * idleness read B in a 21-day month and C in a 22- or 23-day one, so the bucket
+   * depended on WHICH month somebody was idle in. The manual says B is "idle less
+   * than one month" and does not qualify it by calendar. Fixed by taking the
+   * LONGEST possible month (23) as the ceiling instead of the floored mean.
+   *
+   * The composition is tested here because it is what `benchRollup` does, and it
+   * is where a mismatched unit — days handed to a month classifier, or the
+   * reverse — would show up.
    */
-  it('composes with idleWorkingDaysAt: ONE idle 22-day month is C, where the month count said B', () => {
-    const months: IdleMonth[] = [{ employed: true, staffed: false, availableDays: 22 }];
-    expect(idleWorkingDaysAt(months, 0)).toBe(22);
-    expect(bucketForIdleWorkingDays(idleWorkingDaysAt(months, 0))).toBe('C');
-    // ABSENCE TWIN: 'B' is what a month-counting classifier returns for the same
-    // month (1 month idle -> B), so this pins the unit and not just the number.
-    expect(bucketForIdleWorkingDays(idleWorkingDaysAt(months, 0))).not.toBe('B');
+  it('composes with idleWorkingDaysAt: ONE full idle month is B, whichever month it is', () => {
+    // Every length a real month can take, including the long ones that used to
+    // escape into C.
+    for (const availableDays of [20, 21, 22, 23]) {
+      const months: IdleMonth[] = [{ employed: true, staffed: false, availableDays }];
+      expect(idleWorkingDaysAt(months, 0)).toBe(availableDays);
+      expect(bucketForIdleWorkingDays(idleWorkingDaysAt(months, 0)), `${availableDays}d`).toBe('B');
+    }
+    // ABSENCE TWIN: the bucket is not simply always B — two full months is C.
+    const two: IdleMonth[] = [
+      { employed: true, staffed: false, availableDays: 22 },
+      { employed: true, staffed: false, availableDays: 23 },
+    ];
+    expect(idleWorkingDaysAt(two, 1)).toBe(45);
+    expect(bucketForIdleWorkingDays(idleWorkingDaysAt(two, 1))).toBe('C');
   });
   it('composes the other way too: a SHORT idle stretch inside one month stays B (so the unit change is not "everything is C")', () => {
     // A joiner employed for 9 working days, idle on all of them.
@@ -399,12 +415,14 @@ describe('benchRollup — seed integration (design spec §11 fixture table, WITH
     // §5.1/§5.2) — without this, a hard-coded `true` at the call site would
     // leave every assertion in this test green.
     expect(row.monthly['2026-05'].upcomingUnallocated).toBe(false);
-    // THE MOVED BUCKETS (H, product decision Q1): the ladder is counted in idle
-    // WORKING DAYS now, not in whole BENCH months, so May (21 days, its own first
-    // idle month) is still B and June (21+22=43) has already crossed the C ceiling
-    // of 42 into D, where the month count read C.
+    // The ladder is counted in idle WORKING DAYS now (product decision Q1), not in
+    // whole BENCH months — but the LABELS still have to mean what the manual says,
+    // so one full month is B and two are C whichever months they are. May (21 days,
+    // its own first idle month) is B; June (21+22=43) is C, inside the two-month
+    // ceiling of 46. Against the earlier floored-mean ceiling of 42 the same 43 days
+    // read D, i.e. the calendar decided the label.
     expect(row.monthly['2026-05']).toMatchObject({ state: 'BENCH', agingBucket: 'B' });
-    expect(row.monthly['2026-06']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
+    expect(row.monthly['2026-06']).toMatchObject({ state: 'BENCH', agingBucket: 'C' });
     expect(row.monthly['2026-07']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
     // S4 — THE SUBCO CASE. August is covered end to end by absence AB1, so the
     // fourth state applies to subcontractors too: without this, /dashboard's
@@ -493,9 +511,12 @@ describe('benchRollup — seed integration (design spec §11 fixture table, WITH
     // THE MOVED BUCKETS: April is 22 idle working days — one calendar month, but
     // already past the 21-day B ceiling, so C. The look-back truncation still
     // holds and is the reason it is not D: February and March are before his hire.
-    expect(row.monthly['2026-04']).toMatchObject({ state: 'BENCH', agingBucket: 'C' });
-    expect(row.monthly['2026-04'].agingBucket).not.toBe('D');
-    expect(row.monthly['2026-05']).toMatchObject({ state: 'BENCH', agingBucket: 'D' }); // 21 + 22 = 43
+    // One full month of idleness is B whichever month it is — April 2026 has 22
+    // working days, and against the earlier ceiling of 21 it read C purely because
+    // of the calendar.
+    expect(row.monthly['2026-04']).toMatchObject({ state: 'BENCH', agingBucket: 'B' });
+    expect(row.monthly['2026-04'].agingBucket).not.toBe('C');
+    expect(row.monthly['2026-05']).toMatchObject({ state: 'BENCH', agingBucket: 'C' }); // 22 + 21 = 43
     expect(row.monthly['2026-06'].state).toBe('ABSENT');
     expect(row.monthly['2026-07'].state).toBe('ABSENT');
     expect(row.monthly['2026-08'].state).toBe('ABSENT');
@@ -923,7 +944,7 @@ describe('unallocatedHistoryFor', () => {
     // THE MOVED BUCKET (H, Q1): April's 22 idle WORKING DAYS are one day past the
     // B ceiling of 21, so C where the month count said B.
     expect(unallocatedHistoryFor(input, 'h1', '2026-05-10')).toStrictEqual([
-      { month: '2026-04', state: 'BENCH', agingBucket: 'C', unallocatedPct: 100, unallocatedDays: 22 },
+      { month: '2026-04', state: 'BENCH', agingBucket: 'B', unallocatedPct: 100, unallocatedDays: 22 },
       { month: '2026-05', state: 'PARTIAL', unallocatedPct: 75, unallocatedDays: 15.75 },
     ]);
   });
@@ -1355,9 +1376,11 @@ describe('benchRollup — fully-absent months (the guard `benchStateFor` cannot 
     // Q1 THROUGH A STALE-BOOKED MONTH: June is April's 22 idle days plus its own 22
     // = 44, past the 42-day C ceiling. If the booking broke the run, June would
     // count only its own 22 days and read C — a different label, not a rounding.
-    expect(row.monthly['2026-04']).toMatchObject({ state: 'BENCH', agingBucket: 'C' }); // 22
-    expect(row.monthly['2026-06']).toMatchObject({ state: 'BENCH', agingBucket: 'D' }); // 22 + 0 + 22
-    expect(row.monthly['2026-06'].agingBucket).not.toBe('C');
+    expect(row.monthly['2026-04']).toMatchObject({ state: 'BENCH', agingBucket: 'B' }); // 22, one full month
+    expect(row.monthly['2026-06']).toMatchObject({ state: 'BENCH', agingBucket: 'C' }); // 22 + 0 + 22 = 44
+    // ABSENCE TWIN: 'B' is what June would read if the absent month had RESTARTED
+    // the run (its own 22 days alone), so this is what pins "walks straight through".
+    expect(row.monthly['2026-06'].agingBucket).not.toBe('B');
   });
 
   /**
@@ -1366,20 +1389,36 @@ describe('benchRollup — fully-absent months (the guard `benchStateFor` cannot 
    * one past the B ceiling of 21 — so the absence pulls the label DOWN from C to B.
    * Nothing else in this file crosses a boundary on the strength of a single day.
    */
-  it('a ONE-DAY absence moves the aging bucket C -> B, because an absent day contributes zero idle days', () => {
+  /**
+   * A single absent working day is enough to move the LABEL, which is what makes
+   * "an absent day contributes zero idle days" observable rather than internal.
+   *
+   * The fixture has to straddle a boundary to show that, and this one is built to.
+   * Hired 2026-04-28 gives April exactly three working days (28-30); with May's 21
+   * the run reaches 24, one past B's ceiling of 23. Remove one May working day and
+   * it is 23 — B. The earlier version of this case used a whole April against a
+   * ceiling of 21, which stopped straddling anything the moment that ceiling was
+   * corrected to the longest real month: its premise disappeared, not just its
+   * numbers, so it is rebuilt rather than renumbered.
+   */
+  it('ONE absent working day moves the aging bucket C -> B, because an absent day contributes zero idle days', () => {
     const input: BenchRollupInput = {
-      resources: [{ id: 'one', name: 'One Day Off', role: 'Developer', kind: 'internal', contractHoursPerDay: 8, hireDate: '2026-04-01' }],
+      resources: [{ id: 'one', name: 'One Day Off', role: 'Developer', kind: 'internal', contractHoursPerDay: 8, hireDate: '2026-04-28' }],
       assignments: [], assignmentMonths: [], assignmentDays: [],
-      months: ['2026-04'], displayMonths: ['2026-04'], hoursPerDay: 8, holidays: NO_HOL,
+      months: ['2026-04', '2026-05'], displayMonths: ['2026-04', '2026-05'], hoursPerDay: 8, holidays: NO_HOL,
     };
-    const cellOf = (absences: readonly AbsenceInterval[]) =>
-      benchRollup({ ...input, absences }, '2026-04-17').internalRows[0].monthly['2026-04'];
-    // 2026-04-07 is a Tuesday, so it really is a working day to remove.
-    const oneDay: readonly AbsenceInterval[] = [{ resourceId: 'one', startDate: '2026-04-07', endDate: '2026-04-07' }];
-    expect(cellOf([])).toMatchObject({ state: 'BENCH', agingBucket: 'C', unallocatedDays: 22 });
-    expect(cellOf(oneDay)).toMatchObject({ state: 'BENCH', agingBucket: 'B', unallocatedDays: 21 });
+    const mayCell = (absences: readonly AbsenceInterval[]) =>
+      benchRollup({ ...input, absences }, '2026-05-15').internalRows[0].monthly['2026-05'];
+    // FIXTURE GUARD: without exactly three April working days the run is not 24 and
+    // this test straddles nothing — the failure mode the rebuild exists to avoid.
+    expect(benchRollup(input, '2026-05-15').internalRows[0].monthly['2026-04'].unallocatedDays).toBe(3);
+
+    // 2026-05-05 is a Tuesday, so it really is a working day to remove.
+    const oneDay: readonly AbsenceInterval[] = [{ resourceId: 'one', startDate: '2026-05-05', endDate: '2026-05-05' }];
+    expect(mayCell([])).toMatchObject({ state: 'BENCH', agingBucket: 'C', unallocatedDays: 21 });      // 3 + 21 = 24
+    expect(mayCell(oneDay)).toMatchObject({ state: 'BENCH', agingBucket: 'B', unallocatedDays: 20 });  // 3 + 20 = 23
     // Still BENCH, and still 100% — only the DAYS moved, which is the point.
-    expect(cellOf(oneDay).unallocatedPct).toBe(100);
+    expect(mayCell(oneDay).unallocatedPct).toBe(100);
   });
 
   it('a WEEKEND-only absence moves nothing: those days were never available to begin with', () => {
