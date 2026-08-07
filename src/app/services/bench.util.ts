@@ -189,21 +189,39 @@ export type AvailabilityDate =
  * two fields have different data scopes on purpose).
  *
  * H REQUIRES ABSENT MONTHS TO BE SKIPPED (spec §5.1 B6: "the most user-visible
- * falsehood — a table declaring somebody on maternity leave available today"),
- * and BOTH branches below already do, because both test `=== 'BENCH'` rather
- * than `!== 'ALLOCATED'`. No line changes here; the tests are what make that a
- * guarantee instead of a coincidence. THE INVERSION IS THE HAZARD: rewriting
- * either predicate to `!== 'ALLOCATED'` — the shape {@link notFullyAllocatedAt}
- * uses one screen over — silently starts answering "available today" for
- * everyone on leave. A month on leave still yields an answer, never an empty
- * field: the first genuinely bench month after it, or `beyond-horizon`.
+ * falsehood — a table declaring somebody on maternity leave available today").
+ *
+ * Testing `=== 'BENCH'` in both branches is necessary and WAS NOT SUFFICIENT, and
+ * the gap shipped: the first branch asked about `cells[0]`, which is the first
+ * month of the DISPLAY WINDOW — anchored on the oldest Open planning period, four
+ * months before today with the shipped seed — not about today. Marco Belli is
+ * BENCH in April and on parental leave for the whole of August, so with today in
+ * August the page answered "Available: 7 August 2026" for a man on leave. The
+ * exact falsehood B6 names, produced by a predicate that reads correct.
+ *
+ * Every pre-existing case here passed `today` inside `cells[0]`'s own month — the
+ * one shape where asking about `cells[0]` and asking about today are the same
+ * question. That is why the tests were green.
+ *
+ * The window is also searched FORWARD FROM TODAY, not from its start: a BENCH
+ * month that has already passed is not an availability date, and returning it
+ * would answer with a date in the past.
+ *
+ * THE INVERSION REMAINS A HAZARD: rewriting either predicate to
+ * `!== 'ALLOCATED'` — the shape {@link notFullyAllocatedAt} uses one screen over
+ * — starts answering "available today" for everyone on leave. A month on leave
+ * still yields an answer, never an empty field: the first genuinely bench month
+ * after it, or `beyond-horizon`.
  */
 export function availabilityDateFor(
   cells: readonly { month: string; state: BenchState }[],
   today: string,
 ): AvailabilityDate {
-  if (cells[0]?.state === 'BENCH') return { kind: 'date', date: today };
-  const firstBench = cells.find(c => c.state === 'BENCH');
+  const currentMonth = today.slice(0, 7);
+  // Forward from today, never from the start of the window.
+  const ahead = cells.filter(c => c.month >= currentMonth);
+  if (ahead[0]?.month === currentMonth && ahead[0].state === 'BENCH') return { kind: 'date', date: today };
+  const firstBench = ahead.find(c => c.state === 'BENCH');
   if (firstBench) return { kind: 'date', date: `${firstBench.month}-01` };
   return { kind: 'beyond-horizon', horizonEndMonth: cells[cells.length - 1]?.month ?? '' };
 }

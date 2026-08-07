@@ -235,6 +235,62 @@ describe('freeingUpNextMonth (mutually exclusive with a BENCH state this month, 
 
 describe('availabilityDateFor (design spec §7 — three branches, in order)', () => {
   const state = (s: BenchState) => s;
+
+  /**
+   * THE SHAPE EVERY OTHER CASE IN THIS BLOCK MISSED, and the reason B6 shipped
+   * broken while reading correct.
+   *
+   * The display window is anchored on the oldest Open planning period, so
+   * `cells[0]` is routinely months BEFORE today. Every pre-existing case here
+   * passes a `today` inside `cells[0]`'s own month — the single shape where
+   * "is cells[0] bench?" and "is TODAY bench?" are the same question. These
+   * cases separate them.
+   */
+  describe('today is NOT the first month of the window', () => {
+    /** Marco Belli's shipped seed row: bench in spring, on leave Jun-Aug. */
+    const marco = [
+      { month: '2026-04', state: state('BENCH') },
+      { month: '2026-05', state: state('BENCH') },
+      { month: '2026-06', state: state('ABSENT') },
+      { month: '2026-07', state: state('ABSENT') },
+      { month: '2026-08', state: state('ABSENT') },
+      { month: '2026-09', state: state('BENCH') },
+    ];
+
+    it('a person ON LEAVE TODAY is not "available today" because an EARLIER month was bench', () => {
+      // Before the fix this answered { date: '2026-08-07' } — B6 verbatim, on a
+      // man whose August is entirely parental leave.
+      expect(availabilityDateFor(marco, '2026-08-07'))
+        .toStrictEqual({ kind: 'date', date: '2026-09-01' });
+    });
+
+    it('ABSENCE TWIN: the same row, with today in a month that IS bench, still answers today', () => {
+      // Without this, returning "the first bench month after today" ALWAYS would
+      // pass the case above while breaking the ordinary answer.
+      expect(availabilityDateFor(marco, '2026-05-12'))
+        .toStrictEqual({ kind: 'date', date: '2026-05-12' });
+    });
+
+    it('never answers with a date in the PAST, even when the only bench month has gone', () => {
+      const past = [
+        { month: '2026-04', state: state('BENCH') },
+        { month: '2026-05', state: state('ALLOCATED') },
+        { month: '2026-06', state: state('ALLOCATED') },
+      ];
+      expect(availabilityDateFor(past, '2026-06-10'))
+        .toStrictEqual({ kind: 'beyond-horizon', horizonEndMonth: '2026-06' });
+    });
+
+    it('a window entirely on leave from today onward is beyond-horizon, never an empty field', () => {
+      const allLeave = [
+        { month: '2026-04', state: state('BENCH') },
+        { month: '2026-05', state: state('ABSENT') },
+        { month: '2026-06', state: state('ABSENT') },
+      ];
+      expect(availabilityDateFor(allLeave, '2026-05-04'))
+        .toStrictEqual({ kind: 'beyond-horizon', horizonEndMonth: '2026-06' });
+    });
+  });
   it('bench THIS month -> today, not the 1st of the month', () => {
     const cells = [{ month: '2026-04', state: state('BENCH') }, { month: '2026-05', state: state('ALLOCATED') }];
     expect(availabilityDateFor(cells, '2026-04-17')).toEqual({ kind: 'date', date: '2026-04-17' });
