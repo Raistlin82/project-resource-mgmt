@@ -1,6 +1,6 @@
 import {
   employedWorkingDays,
-  standardMonthlyHours, fteOf, semaphoreBand, monthsInRange, isActiveInMonth, rollupMonthly,
+  standardMonthlyHours, fteOf, semaphoreBand, monthsInRange, rollupMonthly,
   hoursByResourceMonth,
 } from './capacity.util';
 import { workingDaysInMonth } from './calendar.util';
@@ -83,16 +83,6 @@ describe('hoursByResourceMonth (extracted so bench.util can reuse the exact same
   });
 });
 
-describe('isActiveInMonth (hireDate ≤ monthStart AND (no term OR term ≥ monthStart))', () => {
-  it('hired before, not terminated → active', () =>
-    expect(isActiveInMonth({ hireDate: '2020-01-01' }, '2026-05')).toBe(true));
-  it('hired after month start → inactive', () =>
-    expect(isActiveInMonth({ hireDate: '2026-06-15' }, '2026-05')).toBe(false));
-  it('terminated before month start → inactive', () =>
-    expect(isActiveInMonth({ terminationDate: '2026-04-30' }, '2026-05')).toBe(false));
-  it('terminated on/after month start → active', () =>
-    expect(isActiveInMonth({ terminationDate: '2026-05-01' }, '2026-05')).toBe(true));
-});
 
 describe('rollupMonthly', () => {
   const months = ['2026-05'];
@@ -328,7 +318,7 @@ describe('employedWorkingDays / mid-month employment in rollupMonthly', () => {
   });
 
   it('KEEPS a mid-month joiner’s row and her already-booked hours', () => {
-    // THE JOINER DEFECT: isActiveInMonth compared hireDate with the month START, so
+    // THE JOINER DEFECT: the month-granular gate compared hireDate with the month START, so
     // rollupMonthly did `continue` and the row vanished — together with hours the
     // server had already accepted. RED before the fix: rows is empty.
     const out = rollupMonthly({

@@ -1,7 +1,8 @@
 # Lutech RPT vs Delivery Control — comparativa side by side
 
 _Fonte lato RPT: **Manuale Utente Resource Planning Tool (RPT), v04 del 07/07/2026**, 49 pagine, letto integralmente._
-_Fonte lato nostro: **il codice su `main`**, verificato riga per riga il 2026-08-06 e riverificato dopo la prima wave di chiusura il 2026-08-07 — **2407 test unitari** su 114 file, 790 check smoke API (792 e un solo skip su Postgres). 46 tabelle, 20 migrazioni, 50 rotte. Non la roadmap, non la memoria di sessione (che su due punti si è rivelata già superata)._
+_Fonte lato nostro: **il codice su `main`**, verificato riga per riga il 2026-08-06 e riverificato dopo la prima wave di chiusura il 2026-08-07 — **2453 test unitari** su 115 file, 790 check smoke API (792 e un solo skip su Postgres). 46 tabelle, 20 migrazioni, 50 rotte. Non la roadmap, non la memoria di sessione (che su due punti si è rivelata già superata)._
+_Questi sono gli **unici conteggi** del documento: il resto del testo vi rimanda invece di ripeterli, perché una cifra scritta in due posti è una cifra che prima o poi ne contraddice un'altra._
 
 ---
 
@@ -149,7 +150,7 @@ RPT legge le commesse: tutta la catena che le genera e le monetizza è fuori dal
 | 67 | schedule drag-and-drop con rilevamento conflitti di sovra-allocazione **a livello di data** (sweep-line) | — |
 | 68 | **16 schermate di master data in self-service** (skill, cataloghi, proficiency, ruoli progetto, centri di costo, org di servizio e di risorsa, sedi, industry, categorie di costo, ruoli partner, fornitori, rate card, disponibilità, integrazioni, lingua) | in RPT dummy e fornitori si aggiungono **scrivendo a `rpt.wfm@lutech.it`** |
 | 69 | rate card + **tariffe di vendita negoziate** per progetto/ruolo | — |
-| 70 | doppia persistenza (in-memory / Postgres+Drizzle) con parità garantita dagli stessi handler, 20 migrazioni forward, 2453 test unitari, 790 check smoke API (792 e un solo skip su Postgres) | SOLO DC — non è una feature utente: è la ragione per cui dev e prod si comportano identicamente |
+| 70 | doppia persistenza (in-memory / Postgres+Drizzle) con parità garantita dagli stessi handler e migrazioni forward-only | SOLO DC — non è una feature utente: è la ragione per cui dev e prod si comportano identicamente |
 
 ---
 
@@ -221,7 +222,7 @@ Contare le feature per decidere non ha senso: **non sono lo stesso prodotto.** R
 
 RPT vince sull'**ergonomia del pianificatore**: 13 faccette con la disponibilità dentro la card di ricerca, codici digitabili, XLSX multi-foglio, IT/EN, Storico visibile per riga, email, auto-avanzamento nell'approvazione. Sono tutte scelte di chi ha visto un pianificatore lavorare.
 
-Noi vinciamo sul **rigore**: ogni scrittura passa da RBAC + SoD + audit; la parità dev/prod è garantita dagli stessi handler su due adapter e verificata da 2453 test e 790 check; i semafori rispettano WCAG 1.4.1; la sostituzione non può corrompere ore prenotate; la baseline è congelata e attribuita.
+Noi vinciamo sul **rigore**: ogni scrittura passa da RBAC + SoD + audit; la parità dev/prod è garantita dagli stessi handler su due adapter e verificata dall'intera suite unitaria e dallo smoke API; i semafori rispettano WCAG 1.4.1; la sostituzione non può corrompere ore prenotate; la baseline è congelata e attribuita.
 
 ---
 

@@ -416,7 +416,7 @@ export function capacityForecast(
     //
     // Both ends were wrong under the previous month-granular presence test, and a
     // week is the sharpest place to see it:
-    //  - JOINER: `isActiveInMonth` compared `hireDate` with the month's START, so
+    //  - JOINER: the month-granular gate compared `hireDate` with the month's START, so
     //    someone hired on the 17th contributed NOTHING for any week of her hire
     //    month — including the weeks she works, whose hours /allocation-calendar
     //    happily books. Merely admitting the month instead would have flipped that

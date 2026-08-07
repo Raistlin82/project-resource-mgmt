@@ -179,15 +179,18 @@ export const LONGEST_WORKING_MONTH_DAYS: number = (() => {
  * answers were wrong. Counting days dissolves the question (see
  * {@link idleWorkingDaysAt}).
  *
- * Boundaries are INCLUSIVE at the top, so the three buckets tile the line with
- * no gap and no overlap: B is `[1, 23]`, C is `[24, 46]`, D is `[47, ∞)` — read
- * off the constants below, never retyped, because this comment already went stale
- * once. It said `[1, 21]` / `[22, 42]` and offered "a single 22-working-day month
- * now reads C" as the example, both of which were true only of the FLOORED-MEAN
- * ceiling that this file no longer uses: 22 reads B. The prose survived the fix
- * to the numbers and the tests, and a reader following it would have drawn the
- * wrong boundary — which is why the xlsx report interpolates these constants into
- * its category labels instead of typing month phrases.
+ * Boundaries are INCLUSIVE at the top, so the three buckets tile the line with no
+ * gap and no overlap: B is `[1, B_MAX]`, C is `[B_MAX+1, C_MAX]`, D is
+ * `[C_MAX+1, ∞)`.
+ *
+ * SYMBOLIC, no literals — and the first version of this correction still typed
+ * them, which is how the mistake nearly repeated. The comment originally read
+ * `[1, 21]` / `[22, 42]` / `[43, ∞)` with "a single 22-working-day month now reads
+ * C" as its example: both true only of the FLOORED-MEAN ceiling this file stopped
+ * using, and 22 in fact reads B. The prose survived the fix to the numbers AND to
+ * the tests. Quoting a derived constant in prose defeats the point of deriving it;
+ * `UNCHARGEABLE_CATEGORY_LABELS` (`rpt-xlsx.util.ts`) interpolates them into
+ * user-facing text for exactly this reason.
  *
  * The spec's own "C 21-42" is ambiguous about the endpoint; inclusive-at-top is
  * the reading, and a full working month belongs to B whichever month it is.

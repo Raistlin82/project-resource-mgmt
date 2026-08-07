@@ -383,7 +383,29 @@ const allocationLifecycle = new AllocationLifecycleExecutor<Repositories>(
  * so the database read is bounded rather than a full SELECT *; the in-memory
  * adapter sorts newest-first and slices the same page.
  * For PUT/DELETE mutations we additionally capture which keys changed plus
- * before/after snapshots of just those keys.
+ * before/after snapshots of the WHOLE entity row — `cloneEntity` is a full-object
+ * clone and `diffChangedKeys` only computes the NAMES of the keys that moved.
+ * Nothing trims the snapshots.
+ *
+ * This comment used to claim "snapshots of just those keys", and the wrong
+ * description had already propagated into `docs/rpt-comparison.md`. Whole rows are
+ * DELIBERATE: the trail exists to reconstruct an entity's state at a point in
+ * time — the reason the money-defining master data (FX, rate cards, hours/day) was
+ * added to `auditRepoBySegment` in the first place was that "a disputed
+ * revaluation could not be reconstructed from it". A snapshot trimmed to the
+ * changed keys cannot reconstruct anything, and it would also make "the key was
+ * not on the entity" indistinguishable from "the key did not change".
+ *
+ * THE CONSEQUENCE, named rather than left implicit: on an `/absences` mutation the
+ * untouched `reasonCode` and `note` — special-category personal data (GDPR art. 9)
+ * — travel in the stored payload regardless of which field was edited, and
+ * `GET /audit-logs` hands the whole entry to `admin` and `delivery-executive`. That
+ * audience is not an accident: product decision Q5 (spec §10, 2026-08-07)
+ * deliberately widened the reason audience to `delivery-executive` AND explicitly
+ * rejected building per-field redaction in this middleware. Minimisation therefore
+ * happens at RENDER time — `audit-trail.ts` scopes its diff to `changedKeys`, so an
+ * untouched reason never reaches a screen — while the payload stays whole. If that
+ * trade is ever revisited, it is Q5 that changes, not this comment.
  */
 interface AuditEntry {
   id: string;

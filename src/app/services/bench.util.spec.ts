@@ -630,7 +630,7 @@ describe('benchRollup — resource active for only part of the display window (h
   it('is active from the HIRE MONTH onward, not from the month after it: the months before are genuinely ABSENT keys, not zeroed cells', () => {
     expect(row).toBeDefined();
     // hireDate 2026-06-15. THE MOVED NUMBER: '2026-06' used to be ABSENT here,
-    // because the old gate (`isActiveInMonth`) compared hireDate with the month's
+    // because the old month-granular gate compared hireDate with the month's
     // START — so /bench dropped the hire month outright while /capacity, already on
     // the day-granular gate, kept it. June 2026 has 12 working days on or after the
     // 15th, so she IS employed in June and the cell belongs to her.
@@ -657,7 +657,7 @@ describe('benchRollup — resource active for only part of the display window (h
 /**
  * /bench and /capacity are two renderings of the SAME employment fact, and they
  * used to answer it with two different predicates: `benchRollup` asked the coarse
- * `isActiveInMonth` (hireDate vs the month's START) while `rollupMonthly` asked
+ * a month-granular gate (hireDate vs the month's START) while `rollupMonthly` asked
  * `employedWorkingDays` (the month's working days actually employed). A hire
  * landing on the 15th therefore HAD a /capacity cell carrying her booked hours and
  * NO /bench row at all — the same person, present on one screen and absent on the

@@ -130,16 +130,25 @@ export type UnallocatedAgingBucket = (typeof UNALLOCATED_AGING_BUCKETS)[number];
  * here because B/C/D are this file's vocabulary.
  *
  * The boundaries are INCLUSIVE at the top and tile the line with no gap and no
- * overlap: B is `[1, 21]`, C is `[22, 42]`, D is `[43, ∞)`. They are NOT
- * hardcoded — `IDLE_WORKING_DAYS_B_MAX`/`_C_MAX` are derived from how
- * `workingDaysInMonth` actually counts a typical month, so "about one working
- * month" stays true if the derivation window moves.
+ * overlap: B is `[1, IDLE_WORKING_DAYS_B_MAX]`, C is `[B_MAX+1,
+ * IDLE_WORKING_DAYS_C_MAX]`, D is `[C_MAX+1, ∞)`.
  *
- * THE MOVED NUMBERS, stated because they are visible to users on day one: a
- * single 22-working-day month of idleness now reads C, where the month count read
- * B. That is the unit change doing its job, not an off-by-one — "one calendar
- * month idle" and "21 idle working days" are different facts and the thresholds
- * are anchored to the second.
+ * SYMBOLIC ON PURPOSE, no literals. This comment previously spelled out `[1, 21]`
+ * / `[22, 42]` / `[43, ∞)` and went stale the moment the derivation changed from
+ * the floored MEAN of a month to the LONGEST month — the live values are 23 and
+ * 46, so every number here was wrong while reading authoritative. The same drift
+ * hit the twin comment in `absence.util.ts`. Quoting a derived constant in prose
+ * defeats the point of deriving it; `UNCHARGEABLE_CATEGORY_LABELS`
+ * (`rpt-xlsx.util.ts`) interpolates them into user-facing text for exactly this
+ * reason and is the model to follow.
+ *
+ * THE REQUIREMENT the boundaries have to keep: ONE FULL MONTH of idleness is B
+ * whichever month it is, and two full months are C. A real month runs 20 to 23
+ * working days, so a ceiling below 23 made the bucket depend on WHICH month
+ * somebody happened to be idle in — which is the arbitrariness moving to days was
+ * meant to remove. `absence.util.spec.ts` asserts it over every month of the
+ * derivation window rather than leaving it here in prose, because prose does not
+ * go red.
  *
  * `0` cannot arise from a BENCH cell (a BENCH month is not fully absent, so it
  * contributes at least one available day), but it degrades to 'B' rather than
@@ -395,7 +404,7 @@ export function benchRollup(input: BenchRollupInput, today: string): BenchRollup
       // Employment is measured in DAYS, not months — the same `employedWorkingDays`
       // gate `rollupMonthly` uses, and the same granularity the server enforces a
       // booking at (`bookingOutsideEmploymentError`). This used to be the coarse
-      // `isActiveInMonth`, which compares `hireDate` with the month's START: someone
+      // a month-granular gate, which compares `hireDate` with the month's START: someone
       // hired on the 15th was "not active" for the whole month, so /bench DROPPED
       // her row while /capacity — already on the day-granular gate — kept it. Two
       // screens over one endpoint's data disagreeing about whether a person exists

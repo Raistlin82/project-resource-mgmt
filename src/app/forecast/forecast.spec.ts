@@ -371,14 +371,24 @@ describe('Forecast — a period with no capacity renders as unavailable, never a
   });
 
   it('drops the unmeasurable weeks from the trend chart instead of plotting them as zero', async () => {
-    // A leaver whose last day is TODAY: every period whose start falls in the
-    // current month still has her capacity, every later-month period has none.
-    // The split point depends on the run date, so the assertions below are about
-    // the INVARIANT (some measured, some not, axes index-aligned) rather than a
-    // fixed count — an 8-week horizon from today always crosses a month boundary.
+    // A leaver who goes THREE WEEKS into the 8-week horizon: weeks 1-3 keep her
+    // capacity, weeks 4-8 have none. The offset is what makes the split robust.
+    //
+    // This used to terminate her on TODAY — the boundary case, where the last day
+    // of employment is the first day of the horizon — and it failed under UTC+14
+    // while passing under UTC+2 and UTC-8. The horizon is anchored on
+    // `todayLocalIso()` and so was the fixture, so in far-eastern zones the two
+    // could resolve either side of the boundary and EVERY period start landed past
+    // the termination date: `measured.length` was 0 and the mixed-horizon
+    // precondition below became unsatisfiable. The comment claimed "an 8-week
+    // horizon from today always crosses a month boundary", which is true and was
+    // not the property under test — what mattered was that she be employed for
+    // SOME of it. Three weeks in is unambiguous in every zone, and this repo's date
+    // arithmetic is deliberately zone-independent (`calendar.util.ts`,
+    // `absence.util.ts`: "a test that only passes under TZ=UTC proves nothing").
     const fixture = await setup(evenDemandStub(100, 400, {
       getResources: () => of([
-        { id: 'leaver', name: 'Leaving Today', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 100, kind: 'internal', terminationDate: TODAY },
+        { id: 'leaver', name: 'Leaving In Three Weeks', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 100, kind: 'internal', terminationDate: isoPlusDays(TODAY, 21) },
       ] as Resource[]),
     }));
     await flush(fixture);

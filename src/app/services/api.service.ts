@@ -970,7 +970,17 @@ export interface AuditLog {
   path: string;
   statusCode: number;
   // AUDIT INTEGRITY: append-only entries capture which keys changed on a
-  // PUT/DELETE mutation, with before/after snapshots of just those keys.
+  // PUT/DELETE mutation. `changedKeys` names the keys that moved; `before`/`after`
+  // are the WHOLE entity rows, not just those keys — this said "snapshots of just
+  // those keys" and was wrong, in a way that had already spread into the RPT
+  // comparison registry. Whole rows are deliberate (reconstruction), and the
+  // privacy consequence plus its recorded decision are written out at the
+  // `AuditEntry` doc comment in `src/server.ts`.
+  //
+  // A CONSUMER MUST SCOPE ITS RENDER TO `changedKeys`. Iterating `before`/`after`
+  // directly puts untouched fields on screen — and on an `/absences` entry those
+  // include an absence reason, which is special-category data. `audit-trail.ts`
+  // does this; a second reader must too.
   changedKeys?: string[];
   before?: Record<string, unknown>;
   after?: Record<string, unknown>;

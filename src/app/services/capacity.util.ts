@@ -71,24 +71,6 @@ export function monthsInRange(from: string, to: string): string[] {
   }
   return out;
 }
-/**
- * COARSE, month-granularity employment test: hired on or before the month's START
- * and not terminated before it.
- *
- * It is WRONG AT BOTH ENDS, which is why `rollupMonthly` and `benchRollup` both use
- * {@link employedWorkingDays} instead. The only remaining caller is
- * `forecast.util.ts`, whose horizon is WEEKLY and which asks a different question —
- * "was this person employed at all in the period's month" — against a `capacity`
- * scalar it never pro-rates. Substituting the day-granular gate there changes which
- * weeks report supply at all (register P1-17/P1-18, still open), so it is that
- * file's own change, not a drive-by.
- */
-export function isActiveInMonth(r: { hireDate?: string; terminationDate?: string }, month: string): boolean {
-  const monthStart = `${month}-01`;
-  if (r.hireDate && r.hireDate > monthStart) return false;
-  if (r.terminationDate && r.terminationDate < monthStart) return false;
-  return true;
-}
 
 /**
  * The month's working days on which this person was actually employed: the month's
@@ -101,7 +83,7 @@ export function isActiveInMonth(r: { hireDate?: string; terminationDate?: string
  * src/server/operational-integrity.util.ts). Measuring capacity by the month made
  * this screen disagree with the API at both ends:
  *
- *  - JOINER: `isActiveInMonth` compares `hireDate` with the month's START, so
+ *  - JOINER: a month-granular gate compares `hireDate` with the month's START, so
  *    someone hired on the 17th was "not active" for the whole month and
  *    `rollupMonthly` skipped the cell entirely — taking her ALREADY-BOOKED hours
  *    with it. The grid showed no row, the planned-FTE totals under-reported, and

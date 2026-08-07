@@ -155,7 +155,7 @@ export const resources: Resource[] = [
     externalExperience: [], profilePicture: '', resume: '', utilization: 100, utilizationPlanned: 100, capacity: 40,
     organization: 'Engineering', location: 'Remote', hireDate: '2020-01-01', contractHoursPerDay: 8 },
   // BLOCK F fixture (design spec §11, row 5): hireDate IS the '2026-04' anchor
-  // month's own start, with NO booking ever. Proves `isActiveInMonth`'s guard
+  // month's own start, with NO booking ever. Proves the month-granular guard
   // truncates the look-back at Feb/Mar (both inactive) instead of reading the
   // absence of earlier months as "idle since forever" — April must bucket B,
   // never D.

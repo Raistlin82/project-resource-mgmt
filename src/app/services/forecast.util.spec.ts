@@ -519,7 +519,7 @@ describe('forecast.util — employment is measured per DAY, and supply is pro-ra
   const WORKING_DAYS_PER_WEEK = 5;
 
   it('gives a mid-month joiner the weeks she works — and still nothing for the weeks before she arrives', () => {
-    // THE JOINER DEFECT. `isActiveInMonth` compared hireDate ('2026-08-17') with
+    // THE JOINER DEFECT. The month-granular gate compared hireDate ('2026-08-17') with
     // the month's START, so every August week reported 0 supply for a person whose
     // August hours /allocation-calendar books and the API accepts.
     const data: ForecastData = {
