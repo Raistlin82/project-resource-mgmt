@@ -1,3 +1,4 @@
+import { AbsenceInterval, availableWorkingDays } from './absence.util';
 import { monthOf, monthlyTargetHours, workingDaysInMonth } from './calendar.util';
 import { countsTowardInternalCapacity, kindOf } from './resource-kind.util';
 
@@ -32,6 +33,16 @@ export interface RollupInput {
   /** B3: per-month lifecycle state — the classifier for confirmed/planned. */
   assignmentMonths: RollupMonth[];
   months: string[]; hoursPerDay: number; holidays: ReadonlySet<string>;
+  /**
+   * H: absences, which shrink the days a person can be staffed on. OPTIONAL, and
+   * that is a DECLARED TRAP (spec §5.2 C1, §8.2): omitting it — or passing `[]` —
+   * reproduces the pre-H arithmetic exactly, so every fixture in the codebase
+   * stays green while exercising not one new line. The only thing that proves
+   * this field is read is a DIFFERENTIAL test: the same fixture with and without
+   * rows, asserted to disagree. One lives in this file's spec; do not delete it
+   * on the grounds that the value assertions next to it already pass.
+   */
+  absences?: readonly AbsenceInterval[];
 }
 
 const CONFIRMED = new Set(['Allocated']);
@@ -141,10 +152,38 @@ export function hoursByResourceMonth(
   return byResMonth;
 }
 
+/**
+ * TWO DENOMINATORS, ON PURPOSE (H, spec §4.4/§5.2). Once absences exist, "how
+ * loaded is this person" and "how much supply does the org have" stop having the
+ * same answer, and collapsing them would make one of the two false:
+ *
+ *  - The CELL (`targetHours`, `fteConfirmed`, `ftePlanned`, `band`) divides by the
+ *    STAFFABLE slice of the standard month — the standard month less this
+ *    person's absent working days. Somebody present 5 days of 22 and booked solid
+ *    on all five reads ~100%, not ~23% (spec §1.2). That is the metric H exists
+ *    to fix.
+ *  - The TOTALS (`demandFteConfirmed`, `demandFtePlanned`, `demandFteUncovered`,
+ *    `capacityFte`) keep dividing by the WHOLE standard month, so they stay
+ *    comparable across people and months. Booked hours do not change when an
+ *    absence is recorded, so org demand must not move either; feeding the totals
+ *    the pro-rated figure would have that same person contribute a full 1.0 FTE
+ *    of demand for 40 booked hours.
+ *
+ * The visible consequence, stated rather than discovered: with an absence in the
+ * window, `Σ cell.ftePlanned ≠ totals.demandFtePlanned`. Without one they are
+ * identical, which is exactly why only a differential test can see this working.
+ *
+ * The pro-ration deducts absent days at the COMPANY rate (`hoursPerDay`), not at
+ * the resource's own `contractHoursPerDay`, so the cell target stays "the standard
+ * month scaled by the fraction of it she was staffable". Using her own rate would
+ * change every part-timer's and every mid-month joiner's percentage even with no
+ * absences at all — a silent re-definition of the demand denominator that H did
+ * not ask for, and one `bench.util.ts` documents as a deliberate divergence.
+ */
 export function rollupMonthly(input: RollupInput): CapacityRollup {
-  const { resources, assignments, assignmentDays, assignmentMonths, months, hoursPerDay, holidays } = input;
+  const { resources, assignments, assignmentDays, assignmentMonths, months, hoursPerDay, holidays, absences = [] } = input;
   const byResMonth = hoursByResourceMonth({ assignments, assignmentDays, assignmentMonths });
-  const targetByMonth = new Map(months.map(m => [m, standardMonthlyHours(m, hoursPerDay, holidays)]));
+  const standardByMonth = new Map(months.map(m => [m, standardMonthlyHours(m, hoursPerDay, holidays)]));
   const totals: Record<string, CapacityTotals> = {};
   for (const m of months) {
     totals[m] = { demandFteConfirmed: 0, demandFtePlanned: 0, capacityFte: 0, resourceCount: 0, demandFteUncovered: 0 };
@@ -165,7 +204,16 @@ export function rollupMonthly(input: RollupInput): CapacityRollup {
       // month, so a mid-month joiner keeps her row and her already-booked hours.
       const employedDays = employedWorkingDays(r, m, holidays);
       if (employedDays.length === 0) continue;
-      const target = targetByMonth.get(m)!;
+      // H: the days she was employed AND not absent. A month she is absent for
+      // ENTIRELY is not skipped — it keeps a cell, with a zero target and zero
+      // capacity (spec §5.2 C9): "we did not employ her" and "we employed her and
+      // she could not work" are opposite facts, and only the first drops a row.
+      const availableDays = availableWorkingDays(r.id, absences, employedDays);
+      const standard = standardByMonth.get(m)!;
+      // Non-negative by construction: `availableWorkingDays` returns a subset, and
+      // `absenceDaysFor` returns a Set, so two overlapping absences cannot subtract
+      // the same day twice and push the target above the standard month.
+      const target = standard - (employedDays.length - availableDays.length) * hoursPerDay;
       const src = byResMonth.get(r.id)?.get(m) ?? { confirmed: 0, planned: 0 };
       const fteConfirmed = fteOf(src.confirmed, target);
       const ftePlanned = fteOf(src.planned, target);
@@ -173,21 +221,34 @@ export function rollupMonthly(input: RollupInput): CapacityRollup {
       if (isInternal) {
         monthly[m] = { confirmedHours: src.confirmed, plannedHours: src.planned, targetHours: target,
           fteConfirmed, ftePlanned, band: semaphoreBand(ftePlanned * 100) };
-        t.demandFteConfirmed += fteConfirmed;
-        t.demandFtePlanned += ftePlanned;
-        // Capacity is PRO-RATED to the days actually employed. It used to be
+        // Totals divide by the WHOLE standard month, never by the pro-rated cell
+        // target — see this function's header for why the two must diverge.
+        t.demandFteConfirmed += fteOf(src.confirmed, standard);
+        t.demandFtePlanned += fteOf(src.planned, standard);
+        // Capacity is PRO-RATED to the days actually AVAILABLE. It used to be
         // `monthlyTargetHours(...)` — the whole month — so a leaver who went on the
         // 15th supplied a full FTE the API would refuse to book against.
         // `monthlyTargetHours` is `workingDays × contractHoursPerDay`, so the
-        // pro-rated form is the same product over the employed subset.
-        t.capacityFte += fteOf(employedDays.length * (r.contractHoursPerDay ?? hoursPerDay), target);
+        // pro-rated form is the same product over the employed subset. H narrows
+        // that subset once more, from employed to available, and the answer to
+        // "zero capacity, or full capacity left unused?" is ZERO (spec §5.2 C6):
+        // capacity the API would refuse to book is not capacity, which is the same
+        // argument the leaver comment above makes.
+        t.capacityFte += fteOf(availableDays.length * (r.contractHoursPerDay ?? hoursPerDay), standard);
+        // NOT narrowed by absence: an absent person is still headcount, because she
+        // is still employed. `capacityFte` falls and `resourceCount` does not — the
+        // gap between them is what makes "how many people" readable next to "how
+        // much capacity" (spec §5.2 C7).
         t.resourceCount += 1;
       } else {
         // Inert placeholder band: demand rows share the CapacityCell type but
         // are never tinted by the UI (Task 6 renders them without a band).
         monthly[m] = { confirmedHours: src.confirmed, plannedHours: src.planned, targetHours: target,
           fteConfirmed, ftePlanned, band: 'idle' };
-        t.demandFteUncovered += ftePlanned;
+        // Standard month, like the other three totals: uncovered demand is measured
+        // in the same comparable FTE, and a subco's sick week must not inflate it
+        // (spec §5.2 C10). A subco CAN be absent — only dummies cannot.
+        t.demandFteUncovered += fteOf(src.planned, standard);
       }
       hasAny = true;
     }
