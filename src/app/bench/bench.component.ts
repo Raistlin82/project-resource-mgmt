@@ -1,16 +1,19 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
-import { DecimalPipe, NgTemplateOutlet } from '@angular/common';
+import { ChangeDetectionStrategy, Component, PLATFORM_ID, computed, inject, signal } from '@angular/core';
+import { DecimalPipe, NgTemplateOutlet, isPlatformBrowser } from '@angular/common';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { forkJoin, map, of } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
-import { ApiService } from '../services/api.service';
+import { ApiService, BASE_CURRENCY, type Resource, type ResourceOrganization } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
+import { NotificationService } from '../services/notification.service';
 import { authGatedResource } from '../services/auth-gated-resource.util';
 import { fteOf, standardMonthlyHours } from '../services/capacity.util';
 import {
   EMPTY_BENCH_ROLLUP,
   type AvailabilityDate, type BenchRollup, type BenchRow, type UnallocatedHistory,
 } from '../services/bench.util';
+import { downloadXlsx, type XlsxSheet } from '../services/export.util';
+import { unchargeableRows, unchargeableSheets } from '../services/rpt-xlsx.util';
 import { todayLocalIso } from '../services/local-date.util';
 import { ListStateComponent } from '../shared/list-state.component';
 
@@ -18,6 +21,16 @@ interface BenchPageData {
   rollup: BenchRollup;
   hoursPerDay: number;
   holidays: string[];
+}
+
+/**
+ * The join data the Unchargeable workbook needs and the bench rollup does not carry
+ * (job role, org structure + its managers, skills, day rates) — see
+ * `rpt-xlsx.util.ts`'s `UnchargeableContext`.
+ */
+interface UnchargeableJoinData {
+  resources: Resource[];
+  organizations: ResourceOrganization[];
 }
 
 /**
@@ -48,6 +61,34 @@ interface BenchPageData {
           <div class="command-eyebrow">Capacity Control</div>
           <h1 class="command-title">Bench</h1>
           <p class="command-subtitle">Unallocated and partially-allocated resources, aging, and the 6-month availability outlook.</p>
+        </div>
+        <!-- RPT parity, comparison matrix row 53: the Unchargeable report, in the
+             workbook SHAPE the manual defines — four sheets, one per category.
+
+             P2-18, the convention seven other screens already follow: a control
+             whose only possible outcome is a toast (or a file of four empty tabs)
+             is DISABLED with the reason stated beside it, readable BEFORE the
+             click, and reaching a screen reader through aria-describedby. The
+             hint IS the accessible description, so it is referenced only while
+             the button is actually disabled — a dangling aria-describedby on an
+             enabled control describes something that is not on the page.
+
+             There are FOUR distinct reasons the export can have nothing to say
+             (loading, a failed read, a window with no present tense, and nobody
+             unchargeable this month) and exportBlockedReason() names whichever
+             applies rather than one catch-all: "nobody is on the bench" and "we
+             could not load the bench" are opposite facts. -->
+        <div class="flex flex-col items-start gap-1">
+          <button type="button" (click)="exportUnchargeableXlsx()"
+                  [disabled]="exportBlockedReason() !== ''"
+                  [attr.aria-describedby]="exportBlockedReason() === '' ? null : 'unchargeableExportHint'"
+                  data-test="export-unchargeable-xlsx"
+                  class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
+            <mat-icon class="text-[20px] w-[20px] h-[20px]">table_view</mat-icon> Unchargeable (.xlsx)
+          </button>
+          @if (exportBlockedReason(); as reason) {
+            <p id="unchargeableExportHint" class="max-w-xs text-xs text-[var(--cc-muted)]" data-test="export-unchargeable-hint">{{ reason }}</p>
+          }
         </div>
       </header>
 
@@ -313,6 +354,8 @@ interface BenchPageData {
 export class BenchComponent {
   private readonly api = inject(ApiService);
   private readonly auth = inject(AuthService);
+  private readonly notificationService = inject(NotificationService);
+  private readonly platformId = inject(PLATFORM_ID);
 
   /**
    * ABSENT's canonical presentation, transcribed from `staffing/
@@ -548,5 +591,98 @@ export class BenchComponent {
   fteFor(month: string, hours: number): number {
     const holSet = new Set(this.dataRes.value().holidays);
     return fteOf(hours, standardMonthlyHours(month, this.dataRes.value().hoursPerDay, holSet));
+  }
+
+  // --- RPT Unchargeable .xlsx (comparison matrix row 53) ---------------------
+
+  private static readonly EMPTY_JOIN: UnchargeableJoinData = { resources: [], organizations: [] };
+
+  /**
+   * The workbook's join data, loaded in its OWN gated resource rather than folded
+   * into `dataRes`'s forkJoin.
+   *
+   * That is a resilience decision, not a stylistic one: the bench tables need none
+   * of this (the rollup is self-contained), so a `/resources` outage must not blank
+   * the whole page. Kept separate, it disables ONE button with the reason beside it
+   * — which is the same P2-18 affordance the other three blocked cases use — and
+   * leaves every figure on screen intact.
+   *
+   * No new audience is exposed: `/resources` and `/resource-organizations` are
+   * readable by exactly the roles `AVAILABILITY_READ_ROLES` already admits to
+   * `/bench`, so nobody can reach this page and be refused this read.
+   */
+  private readonly joinRes = authGatedResource<UnchargeableJoinData>(
+    () => forkJoin({
+      resources: this.api.getResources(),
+      organizations: this.api.getResourceOrganizations(),
+    }),
+    BenchComponent.EMPTY_JOIN,
+  );
+
+  private readonly joinError = computed(() => this.joinRes.status() === 'error');
+
+  /**
+   * The rows the workbook would carry for the current month — the SAME reduction
+   * the sheets are built from, so the button's enabled/disabled state and the file's
+   * contents can never disagree about whether there is anything to export.
+   *
+   * Reads `joinRes.value()` only after {@link exportBlockedReason} has ruled the
+   * error out; an errored resource's `value()` throws, and `status() === 'error' ? []`
+   * is the accessor this codebase has banned four times for turning a failed read
+   * into confident good news.
+   */
+  private readonly unchargeable = computed(() => unchargeableRows(
+    this.rollup(),
+    this.currentMonth(),
+    { resources: this.joinRes.value().resources, organizations: this.joinRes.value().organizations },
+  ));
+
+  /**
+   * Why the export is unavailable, or `''` when it is available. ORDER IS
+   * LOAD-BEARING: every reason that would make a `value()` read throw (or lie) comes
+   * before the read of `unchargeable()`.
+   */
+  readonly exportBlockedReason = computed<string>(() => {
+    if (this.loading() || this.joinRes.isLoading()) return 'Still loading — the report needs the bench data first.';
+    if (this.hasError()) return "Couldn't load the bench data, so a workbook built now would be a file of confident zeros.";
+    if (this.joinError()) return "Couldn't load the resource master (roles, skills, rates), so the report's columns would be blank.";
+    if (this.currentMonth() === '') {
+      return 'This window has no current month, so there is no snapshot to report.';
+    }
+    if (this.unchargeable().length === 0) {
+      return `Nobody is unchargeable in ${this.monthLabel(this.currentMonth())}, so all four sheets would be empty.`;
+    }
+    return '';
+  });
+
+  /**
+   * The four sheets, split out from the click handler so the exact rows and columns
+   * written are assertable without a DOM download — the pattern `reporting.ts`'s
+   * `buildPlanningSheet` and `capacity.component.ts`'s `buildCsv` established.
+   */
+  protected buildUnchargeableSheets(): XlsxSheet[] {
+    return unchargeableSheets(
+      this.rollup(),
+      this.currentMonth(),
+      { resources: this.joinRes.value().resources, organizations: this.joinRes.value().organizations },
+      { currency: BASE_CURRENCY, hoursPerDay: this.dataRes.value().hoursPerDay },
+    );
+  }
+
+  /**
+   * `downloadXlsx` is async because the ~260 kB (gzipped) spreadsheet writer is
+   * imported lazily on first use; a rejection is a failed chunk fetch, which must
+   * surface as a toast rather than an unhandled rejection that leaves the user
+   * staring at a button that did nothing. The `isPlatformBrowser` guard mirrors
+   * every other export on the app (and `downloadXlsx` no-ops on its own besides).
+   */
+  async exportUnchargeableXlsx(): Promise<void> {
+    if (!isPlatformBrowser(this.platformId) || this.exportBlockedReason() !== '') return;
+    try {
+      await downloadXlsx(`Unchargeable_${this.currentMonth()}.xlsx`, this.buildUnchargeableSheets());
+      this.notificationService.show('Unchargeable exported', 'success');
+    } catch {
+      this.notificationService.show('Could not build the Unchargeable workbook', 'error');
+    }
   }
 }

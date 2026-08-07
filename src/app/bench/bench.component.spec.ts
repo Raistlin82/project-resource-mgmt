@@ -2,9 +2,13 @@ import { TestBed } from '@angular/core/testing';
 import { provideZonelessChangeDetection } from '@angular/core';
 import { NEVER, of, throwError, type Observable } from 'rxjs';
 import { BenchComponent } from './bench.component';
-import { ApiService } from '../services/api.service';
+import { ApiService, type Resource, type ResourceOrganization } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import type { BenchCell, BenchRollup, BenchRow, UnallocatedHistory } from '../services/bench.util';
+import type { XlsxSheet } from '../services/export.util';
+import {
+  SHEET_UNCHARGEABLE_A, SHEET_UNCHARGEABLE_B, SHEET_UNCHARGEABLE_C, SHEET_UNCHARGEABLE_D,
+} from '../services/rpt-xlsx.util';
 import { todayLocalIso } from '../services/local-date.util';
 
 /** Stub for the per-resource history read; receives what the component actually asked for. */
@@ -108,7 +112,38 @@ const ZERO_DENOM_ROLLUP: BenchRollup = {
   hiringDemand: [],
 };
 
-async function setupWith(rollup: BenchRollup, authReady = true, holidayIds: string[] = [], history: HistoryStub = NO_HISTORY) {
+/**
+ * The join data the Unchargeable export needs — job role, org structure, skills and
+ * day rates — which the bench rollup deliberately does not carry. Loaded by the
+ * component in its OWN gated resource, so every stub here must answer both reads.
+ */
+const EXPORT_RESOURCES: Resource[] = [
+  {
+    id: 'i1', name: 'Internal Bench One', role: 'Developer', organization: 'Backend', managerId: 'm1',
+    skills: [{ name: 'Bash', level: 1 }, { name: 'Kubernetes', level: 5 }, { name: 'Java', level: 4 }, { name: 'Terraform', level: 3 }],
+    projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, costRateDay: 640, billRateDay: 1200,
+  },
+  {
+    id: 'm1', name: 'Marta Manager', role: 'Manager', organization: 'Engineering',
+    skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40,
+  },
+];
+
+const EXPORT_ORGS: ResourceOrganization[] = [
+  { id: 'O1', name: 'Engineering', description: '', costCenters: [], level: 'capability', managerId: 'm1' },
+  { id: 'O2', name: 'Backend', description: '', costCenters: [], level: 'competence', parentId: 'O1' },
+];
+
+interface SetupOpts {
+  authReady?: boolean;
+  holidayIds?: string[];
+  history?: HistoryStub;
+  /** Override the two export-only reads (e.g. to fail one of them). */
+  resources?: () => Observable<Resource[]>;
+  organizations?: () => Observable<ResourceOrganization[]>;
+}
+
+async function setupWith(rollup: BenchRollup, authReady = true, holidayIds: string[] = [], history: HistoryStub = NO_HISTORY, extra: SetupOpts = {}) {
   // Reset first so ONE test can render the same component twice under different
   // providers — the holiday-threading cases below compare two renders, and
   // configureTestingModule throws once the module has been instantiated.
@@ -122,6 +157,8 @@ async function setupWith(rollup: BenchRollup, authReady = true, holidayIds: stri
         getHoursPerDay: () => of({ value: 8 }),
         getHolidays: () => of(holidayIds.map(id => ({ id, name: id }))),
         getUnallocatedHistory: history,
+        getResources: extra.resources ?? (() => of(EXPORT_RESOURCES)),
+        getResourceOrganizations: extra.organizations ?? (() => of(EXPORT_ORGS)),
       } },
       { provide: AuthService, useValue: { authReady: () => authReady } },
     ],
@@ -326,6 +363,8 @@ describe('BenchComponent', () => {
           getBenchMonthly: () => throwError(() => new Error('boom')),
           getHoursPerDay: () => of({ value: 8 }),
           getHolidays: () => of([]),
+          getResources: () => of(EXPORT_RESOURCES),
+          getResourceOrganizations: () => of(EXPORT_ORGS),
         } },
         { provide: AuthService, useValue: { authReady: () => true } },
       ],
@@ -949,5 +988,175 @@ describe('BenchComponent — the anchor month is TODAY, in the LOCAL calendar', 
     const note = host.querySelector('[data-test="bench-window-note"]')?.textContent ?? '';
     expect(note).toContain('does not include the current month');
     expect(note).toContain('Oct 26');
+  });
+});
+
+/**
+ * The Unchargeable .xlsx control (RPT comparison row 53), under the P2-18 convention
+ * seven other screens already follow.
+ *
+ * BOTH HALVES ARE ASSERTED FOR EVERY BLOCKED CASE — the button disabled AND the hint
+ * present AND `aria-describedby` wired — because each half alone goes green on a
+ * half-fix: a disabled button with no reason is the affordance P2-18 exists to
+ * replace, and a hint beside a live button is decoration.
+ *
+ * `buildXlsx` is deliberately never called from this file. It pulls exceljs through a
+ * dynamic import (5-9s on the first call in a worker) and the warm-up scan in
+ * `export.util.spec.ts` only guards the services directory, so a workbook built here
+ * would be an unguarded flake. The SHEETS are asserted instead — the component splits
+ * `buildUnchargeableSheets()` out of the click handler for exactly that reason — and
+ * `rpt-xlsx.util.spec.ts` takes them through the real writer.
+ */
+describe('BenchComponent — the Unchargeable .xlsx export (P2-18)', () => {
+  /** One resource per RPT category, plus one in none, keyed on the current month. */
+  const EXPORTABLE: BenchRollup = {
+    months: WINDOW,
+    internalRows: [
+      { resourceId: 'i1', resourceName: 'Internal Bench One', kind: 'internal', monthly: { [NOW_MONTH]: { state: 'BENCH', agingBucket: 'C', upcomingUnallocated: false, unallocatedPct: 62.5, unallocatedDays: 13.125 } }, availabilityDate: { kind: 'date', date: '2026-08-07' } },
+      { resourceId: 'i4', resourceName: 'Internal Allocated', kind: 'internal', monthly: { [NOW_MONTH]: { state: 'ALLOCATED', upcomingUnallocated: false } }, availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: WINDOW_END } },
+    ],
+    subcoRows: [],
+    hiringDemand: [],
+  };
+
+  /** Nobody in any category: every cell is ALLOCATED. */
+  const NOTHING_TO_EXPORT: BenchRollup = {
+    months: WINDOW,
+    internalRows: [
+      { resourceId: 'i4', resourceName: 'Internal Allocated', kind: 'internal', monthly: { [NOW_MONTH]: { state: 'ALLOCATED', upcomingUnallocated: false } }, availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: WINDOW_END } },
+    ],
+    subcoRows: [],
+    hiringDemand: [],
+  };
+
+  function control(fixture: Awaited<ReturnType<typeof setupWith>>) {
+    const host = fixture.nativeElement as HTMLElement;
+    return {
+      button: host.querySelector<HTMLButtonElement>('[data-test="export-unchargeable-xlsx"]'),
+      hint: host.querySelector('[data-test="export-unchargeable-hint"]'),
+    };
+  }
+
+  it('is ENABLED, unlabelled and un-described when there IS something to export', async () => {
+    const fixture = await setupWith(EXPORTABLE);
+    const { button, hint } = control(fixture);
+    expect(button).toBeTruthy();
+    expect(button!.disabled).toBe(false);
+    // ASSERTION OF ABSENCE, twice. No hint on the page, and no dangling
+    // aria-describedby pointing at an element that is not there — a description
+    // that does not resolve is worse for a screen reader than none.
+    expect(hint).toBeNull();
+    expect(button!.getAttribute('aria-describedby')).toBeNull();
+    expect(fixture.componentInstance.exportBlockedReason()).toBe('');
+  });
+
+  it('is DISABLED with the reason beside it when nobody is unchargeable this month', async () => {
+    const fixture = await setupWith(NOTHING_TO_EXPORT);
+    const { button, hint } = control(fixture);
+    expect(button!.disabled).toBe(true);
+    expect(hint).toBeTruthy();
+    expect(hint!.textContent).toContain('Nobody is unchargeable');
+    // The hint IS the accessible description, so the wiring must resolve.
+    expect(button!.getAttribute('aria-describedby')).toBe(hint!.id);
+    expect(hint!.id).toBe('unchargeableExportHint');
+  });
+
+  it('is DISABLED with a DIFFERENT reason when the bench read failed', async () => {
+    TestBed.resetTestingModule();
+    await TestBed.configureTestingModule({
+      imports: [BenchComponent],
+      providers: [
+        provideZonelessChangeDetection(),
+        { provide: ApiService, useValue: {
+          getBenchMonthly: () => throwError(() => new Error('boom')),
+          getHoursPerDay: () => of({ value: 8 }),
+          getHolidays: () => of([]),
+          getResources: () => of(EXPORT_RESOURCES),
+          getResourceOrganizations: () => of(EXPORT_ORGS),
+        } },
+        { provide: AuthService, useValue: { authReady: () => true } },
+      ],
+    }).compileComponents();
+    const fixture = TestBed.createComponent(BenchComponent);
+    fixture.detectChanges();
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    const { button, hint } = control(fixture);
+    expect(button!.disabled).toBe(true);
+    expect(hint!.textContent).toContain("Couldn't load the bench data");
+    // NOT the empty-report reason: "we could not load the bench" and "nobody is on
+    // the bench" are opposite facts, and one catch-all string would tell the reader
+    // the reassuring one.
+    expect(hint!.textContent).not.toContain('Nobody is unchargeable');
+  });
+
+  it('is DISABLED with its OWN reason when only the resource master failed', async () => {
+    // The whole point of loading the join data separately: the bench tables still
+    // render, and exactly one control goes dark with an accurate reason.
+    const fixture = await setupWith(EXPORTABLE, true, [], NO_HISTORY, {
+      resources: () => throwError(() => new Error('resources down')),
+    });
+    const host = fixture.nativeElement as HTMLElement;
+    const { button, hint } = control(fixture);
+    expect(button!.disabled).toBe(true);
+    expect(hint!.textContent).toContain('resource master');
+    // ASSERTION OF ABSENCE: the page itself is NOT in its error state, and the bench
+    // row is still on screen.
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    expect(host.querySelector('[data-test="internal-section"]')?.textContent ?? '').toContain('Internal Bench One');
+  });
+
+  it('is DISABLED with the window reason when the fetched window has no current month', async () => {
+    const past = [-5, -4, -3, -2, -1].map(d => shiftMonth(NOW_MONTH, d));
+    const fixture = await setupWith({
+      months: past,
+      internalRows: [{ resourceId: 'i1', resourceName: 'Internal Bench One', kind: 'internal', monthly: { [past[0]]: { state: 'BENCH', agingBucket: 'D', upcomingUnallocated: false } }, availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: past[past.length - 1] } }],
+      subcoRows: [], hiringDemand: [],
+    });
+    const { button, hint } = control(fixture);
+    expect(button!.disabled).toBe(true);
+    expect(hint!.textContent).toContain('no current month');
+  });
+
+  it('builds FOUR sheets and puts the row in the tab its category names', async () => {
+    const fixture = await setupWith(EXPORTABLE);
+    // `buildUnchargeableSheets` is protected; the cast is the same one the codebase
+    // uses to assert a builder without going through the DOM download.
+    const sheets = (fixture.componentInstance as unknown as { buildUnchargeableSheets(): XlsxSheet[] }).buildUnchargeableSheets();
+    expect(sheets.map(s => s.name)).toStrictEqual([
+      SHEET_UNCHARGEABLE_A, SHEET_UNCHARGEABLE_B, SHEET_UNCHARGEABLE_C, SHEET_UNCHARGEABLE_D,
+    ]);
+    const rowsPerSheet = sheets.map(s => s.rows.length);
+    // The C row and ONLY the C row — a builder that dumped everything into one tab,
+    // or that emitted four header-only tabs, reads [1,0,0,0] or [0,0,0,0] here.
+    expect(rowsPerSheet).toStrictEqual([0, 0, 1, 0]);
+
+    const c = sheets[2];
+    const at = (header: string) => c.rows[0][c.header.indexOf(header)];
+    expect(at('Resource')).toBe('Internal Bench One');
+    // The join data really was joined: role, org walk, top-proficiency skill, rate.
+    expect(at('Job Role')).toBe('Developer');
+    expect(at('Capability')).toBe('Engineering');
+    expect(at('Competence')).toBe('Backend');
+    expect(at('Capability Leader')).toBe('Marta Manager');
+    expect(at('Skill 1')).toBe('Kubernetes');
+    expect(at('Standard Cost Rate (EUR/day)')).toBe(640);
+    expect(at('Unallocated Days')).toBe(13.13);
+    // ASSERTION OF ABSENCE: the ALLOCATED colleague is in no tab at all.
+    expect(sheets.flatMap(s => s.rows.map(r => r[c.header.indexOf('Resource')]))).not.toContain('Internal Allocated');
+  });
+
+  it('does nothing at all when clicked while blocked', async () => {
+    // The affordance is the gate, but the handler must not rely on the template:
+    // a programmatic call (or a stale click) must not produce an empty workbook.
+    const fixture = await setupWith(NOTHING_TO_EXPORT);
+    const clicks: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      clicks.push(this.download);
+    });
+    await fixture.componentInstance.exportUnchargeableXlsx();
+    expect(clicks).toStrictEqual([]);
+    vi.restoreAllMocks();
   });
 });
