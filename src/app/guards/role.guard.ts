@@ -79,3 +79,63 @@ export const ALLOCATION_APPROVAL_ROLES: readonly UserRole[] = ['resource-manager
 
 /** Allows matching only for {@link ALLOCATION_APPROVAL_ROLES}. */
 export const allocationApprovalsGuard: CanMatchFn = roleGuard(auth => auth.hasAnyRole([...ALLOCATION_APPROVAL_ROLES]));
+
+// ---------------------------------------------------------------------------
+// Block H — absences and engagement classification (design spec §7).
+//
+// THESE THREE LISTS MIRROR SERVER CONSTANTS, and the mirroring is CHECKED, not
+// hoped for: `role.guard.spec.ts` imports the originals from
+// `src/server/absence-policy.util.ts` and compares them element for element.
+// They are re-declared here rather than imported because `role.guard.ts` ships
+// in the browser bundle and that server module drags in the whole
+// operational-integrity graph; a guard is UX, and it must not cost the user a
+// kilobyte of write-path validators. A guard that DIVERGES from the server is
+// the defect this arrangement exists to catch — too strict and a permitted
+// role is redirected home, too loose and the user reaches a page that then
+// answers 403.
+// ---------------------------------------------------------------------------
+
+/**
+ * Roles the server admits to `GET /absences`, the level that carries the REASON
+ * (GDPR art. 9 special-category data) — mirrors `ABSENCE_REASON_READ_ROLES`.
+ *
+ * `employee` is in the set on purpose: a READ_RULE is per-PATH, so the server
+ * has to admit the role and then narrow an employee to their OWN rows inside
+ * the handler. The screen must therefore treat an empty list from an employee
+ * as "you have none", never as "the organization has none".
+ *
+ * `pm`, `finance` and `sales` are absent, and their absence is the point: a
+ * planner learns that somebody is away from `/bench` and `/capacity`, never why.
+ */
+export const ABSENCE_REASON_READ_ROLES: readonly UserRole[] =
+  ['resource-manager', 'delivery-executive', 'admin', 'employee'];
+
+/** Allows matching only for {@link ABSENCE_REASON_READ_ROLES}. */
+export const absenceRegisterGuard: CanMatchFn =
+  roleGuard(auth => auth.hasAnyRole([...ABSENCE_REASON_READ_ROLES]));
+
+/**
+ * Roles the server admits to `POST`/`PUT`/`DELETE /absences` — mirrors
+ * `ABSENCE_WRITE_ROLES`. A STRICT SUBSET of the read set above, which is why
+ * the register's write controls are gated separately from its route: a
+ * `delivery-executive` may read the reason (product decision Q5) and may not
+ * record one, and the screen has to say so before the click rather than let
+ * the server answer 403 after it.
+ *
+ * Not a route guard: no route is restricted to it. Exported for the write
+ * controls inside the register and for the parity test.
+ */
+export const ABSENCE_WRITE_ROLES: readonly UserRole[] = ['resource-manager', 'admin'];
+
+/**
+ * Roles the server admits to `PUT /projects/:id/classification` — mirrors
+ * `PROJECT_CLASSIFICATION_ROLES`. `pm` is excluded although it may mutate
+ * `/projects`: whoever is measured on an engagement's margin must not be able
+ * to declare that the engagement has no margin.
+ */
+export const PROJECT_CLASSIFICATION_ROLES: readonly UserRole[] =
+  ['delivery-executive', 'finance', 'admin'];
+
+/** Allows matching only for {@link PROJECT_CLASSIFICATION_ROLES}. */
+export const projectClassificationGuard: CanMatchFn =
+  roleGuard(auth => auth.hasAnyRole([...PROJECT_CLASSIFICATION_ROLES]));
