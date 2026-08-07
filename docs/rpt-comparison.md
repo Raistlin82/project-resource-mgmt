@@ -61,7 +61,7 @@ Quindi la domanda "chi è meglio" ha **tre risposte diverse** a seconda di cosa 
 | 19 | cancellazione risorsa solo per i nuovi inserimenti mai salvati; altrimenti solo azzeramento | guardie di delete su request/assignment; azzeramento via Clear | PARI |
 | 20 | **Multi-FTE 1,5 → 30 FTE solo per Dummy/Subco**; se la selezione include un interno il sistema blocca a 1 FTE per risorsa | `MULTI_FTE_MAX = 30`, `dailyCapFor` *kind-aware*, interni bloccati a 1 FTE | PARI — identico, tetto di 30 incluso |
 | 21 | Campo Note del pianificatore per (risorsa, commessa, mese), salvabile solo dopo la bozza | `assignment_months.planner_note` e `approver_note`, editabili nel calendario | PARI (la notifica all'approvatore è riga 43) |
-| 22 | **Dettaglio Storico** per riga: tutte le modifiche alla pianificazione di quella risorsa (§3.4) | audit trail append-only **più ricco** (attore, ruolo, metodo, path, diff before/after per chiave, incluse le master data che muovono denaro) — ma **nessuna schermata lo legge**: `/audit-logs` non ha una rotta Angular | PARZIALE — dato migliore, finestra assente |
+| 22 | **Dettaglio Storico** per riga: tutte le modifiche alla pianificazione di quella risorsa (§3.4) | schermata `/audit-trail` (`admin` + `delivery-executive`), con il diff reso **solo sulle chiavi effettivamente cambiate**, un `undefined` distinto da un valore vuoto («not present» ≠ «empty text»), e l'avviso che il registro può contenere dati di categoria particolare | **AVANTI** — RPT mostra lo storico della *pianificazione*; il nostro copre ogni mutazione di ogni collezione, incluse le master data che muovono denaro (FX, rate card, ore/giorno), con attore e ruolo verificati. **Correzione a una mia affermazione precedente**: qui c'era scritto «diff before/after **per chiave**», ed è falso del dato *memorizzato* — `before`/`after` sono l'entità intera e solo `changedKeys` nomina ciò che si è mosso. La schermata restringe la resa a quelle chiavi, quindi la per-chiave è vera dell'interfaccia e non dello storage. Cambiare la forma memorizzata è un'altra decisione, non un ritocco |
 | 23 | **"Visualizza PCP"**: Totale Costi PCP / Totale Costi Pianificato / Delta € / Delta % per mese | `costBaselineComparison`: baseline **congelata** (`cost_baselines`, con `frozenAt`/`frozenBy`) contro piano live, delta e delta% per mese, più flag `outOfBaselineHorizon` per i mesi mai congelati | **AVANTI** — RPT confronta con un PCP letto live; noi con una baseline congelata e attribuita, quindi contestabile a posteriori |
 | 24 | Report PM → **.xlsx**, un foglio "Pianificazione" | **.xlsx nativo** (`rpt-xlsx.util.ts`, foglio unico per commessa con i costi mensili), più CSV/JSON | PARI — in xlsx il tipo di cella sta nel file, quindi `=SUM(A1)` viene scritto come testo (`t="s"`, nessun `<f>`) invece di essere neutralizzato con l'apostrofo del CSV |
 
@@ -120,7 +120,9 @@ Quindi la domanda "chi è meglio" ha **tre risposte diverse** a seconda di cosa 
 >
 > Misurato sul seed, prima e dopo: Marco Belli leggeva `BENCH` per sei mesi con bucket `B C D D D D`; ora legge `ABSENT` a giugno, luglio e agosto — **tre bucket `D` falsi rimossi** — e settembre resta `D` perché un giorno di assenza contribuisce **zero** giorni di inattività (decisione Q1), quindi la serie pre-congedo continua invece di azzerarsi. `/bench` diceva anche «Available: 7 agosto 2026» per un uomo in congedo per tutto agosto: ora dice `2026-09-01`.
 >
-> Restano fuori due cose, dichiarate: **`capacityForecast` e `skillGap`** sovrastimano ancora la capacità settimanale per chi è assente (registro P1-17/P1-18) — su `/what-if` il KPI del bench e quello dell'utilizzo medio stanno nella stessa riga di tile e dissentono sulla stessa persona; e il modello **non ha un workflow di richiesta ferie**, perché una scrittura self-service permetterebbe a chiunque di togliersi dal bench.
+> **Il residuo P1-17/P1-18 è chiuso.** `capacityForecast` non pubblicizza più le ore di una settimana passata in congedo (misurato: 40 h/settimana → 16 con tre giorni di assenza, 0 con la settimana intera, e **zero** quando l'assenza cade solo nel weekend o su un festivo — il gemello che distingue «legge il calendario» da «sottrae giorni a caso»), e in `skillGap` chi è assente **tutto il mese** non copre più la sua skill. La restrizione è monotona nel verso sicuro: può solo far emergere una carenza, mai nasconderne una. I due KPI di `/what-if` ora concordano sulla stessa persona, e l'accordo è asserito in **entrambi** i versi.
+>
+> Resta fuori una cosa sola, e per scelta: **non esiste un workflow di richiesta ferie**, perché una scrittura self-service permetterebbe a chiunque di togliersi dal bench. Se servirà sarà un flusso di approvazione, non una scrittura diretta.
 
 ### 3.7 Integrazioni con i sistemi di record (manuale §1.1, §3.2.4, §7.1)
 
@@ -147,7 +149,7 @@ RPT legge le commesse: tutta la catena che le genera e le monetizza è fuori dal
 | 67 | schedule drag-and-drop con rilevamento conflitti di sovra-allocazione **a livello di data** (sweep-line) | — |
 | 68 | **16 schermate di master data in self-service** (skill, cataloghi, proficiency, ruoli progetto, centri di costo, org di servizio e di risorsa, sedi, industry, categorie di costo, ruoli partner, fornitori, rate card, disponibilità, integrazioni, lingua) | in RPT dummy e fornitori si aggiungono **scrivendo a `rpt.wfm@lutech.it`** |
 | 69 | rate card + **tariffe di vendita negoziate** per progetto/ruolo | — |
-| 70 | doppia persistenza (in-memory / Postgres+Drizzle) con parità garantita dagli stessi handler, 19 migrazioni forward, 1852 test unitari, 710 check smoke API | — |
+| 70 | doppia persistenza (in-memory / Postgres+Drizzle) con parità garantita dagli stessi handler, 20 migrazioni forward, 2453 test unitari, 790 check smoke API (792 e un solo skip su Postgres) | SOLO DC — non è una feature utente: è la ragione per cui dev e prod si comportano identicamente |
 
 ---
 
@@ -158,15 +160,19 @@ Su **56 capacità di RPT** valutate una per una contro il codice:
 | Stato | Righe | Quota | vs. prima wave |
 |---:|---:|---|---|
 | **PARI** | 25 | 45% | +5 |
-| **AVANTI** | 15 | 27% | +4 |
-| **PARZIALE** | 10 | 18% | −2 |
+| **AVANTI** | 16 | 29% | +5 |
+| **PARZIALE** | 9 | 16% | −3 |
 | **MANCA** | 6 | 11% | **−7** |
 
-**40 su 56 (71%) coperte o superate. 10 parziali. 6 mancanti.** Più 14 aree che RPT non ha affatto.
+**41 su 56 (73%) coperte o superate. 9 parziali. 6 mancanti.** Più 14 aree che RPT non ha affatto.
+
+_Ogni conteggio in questa tabella è ricalcolato programmaticamente scorrendo la matrice, non aggiornato a mano: una quota che non torna con le righe è il primo modo in cui un registro comincia a mentire._
 
 _Aggiornato il 2026-08-07, dopo la prima wave di chiusura: XLSX Pianificazione e Allocazione (righe 24 e 44) da MANCA a PARI, Unchargeable (53) da MANCA a PARZIALE, strip disponibilità sulla card (13) e auto-avanzamento dell'approvazione multipla (40) da PARZIALE ad AVANTI, percentuale di disallocazione (50) da MANCA ad AVANTI e storico mensile per risorsa (51) da MANCA a PARI. Le faccette (11) restano PARZIALE con due esclusioni motivate._
 
 _Aggiornato di nuovo il 2026-08-07 a **blocco H completo** (BASKET/non fatturabile + assenze, T1-T8): righe 54 e 55 da MANCA ad AVANTI e a PARI. È il gap che rendeva falsi numeri già a schermo, e la sua conseguenza è ora misurata come chiusa nel riquadro sotto._
+
+_Aggiornato una quarta volta il 2026-08-07, chiusura dei punti residui: **riga 22 da PARZIALE ad AVANTI** — esiste la schermata `/audit-trail` (`admin` + `delivery-executive`), che rende il diff solo sulle chiavi cambiate, distingue un `undefined` da un valore vuoto («not present» ≠ «empty text») e dichiara che il registro può contenere dati di categoria particolare. E il **residuo P1-17/P1-18 è chiuso**: vedi il riquadro sopra. Correzione a una mia affermazione nella riga 22 precedente: «diff before/after per chiave» era falso del dato **memorizzato** — `before`/`after` sono l'entità intera, solo `changedKeys` nomina ciò che si è mosso. La per-chiave è vera dell'interfaccia, non dello storage._
 
 _Aggiornato una terza volta il 2026-08-07: **riga 53 da PARZIALE a PARI** — il report Unchargeable a 4 fogli e il suo pulsante su `/bench`. La cosa da sapere, perché la matrice stessa invita all'errore: la riga 45 elenca A/B/C/D di fila, ma **A non è un bucket di aging**. `UNALLOCATED_AGING_BUCKETS` ha tre membri, e A è il segnale prospettico `upcomingUnallocated` su un ALTRO campo di `BenchCell`, mutuamente esclusivo con i bucket per costruzione. Un builder che leggesse un solo campo per quattro fogli ne lascerebbe uno vuoto per sempre. Sul seed, a 2026-08, la ripartizione è **A=3, B=0, C=0, D=1**: leggendo solo `agingBucket` il file avrebbe 1 riga invece di 4, e due delle tre righe in A sono persone che RIENTRANO da un congedo — il caso che `freeingUpNextMonth` conta di proposito. Nessuna causale di assenza raggiunge il file (asserito sui byte decompressi, non sullo zip: un xlsx è un archivio DEFLATE e cercare 'Maternity' nei byte compressi non troverebbe nulla in ogni caso)._
 
@@ -215,7 +221,7 @@ Contare le feature per decidere non ha senso: **non sono lo stesso prodotto.** R
 
 RPT vince sull'**ergonomia del pianificatore**: 13 faccette con la disponibilità dentro la card di ricerca, codici digitabili, XLSX multi-foglio, IT/EN, Storico visibile per riga, email, auto-avanzamento nell'approvazione. Sono tutte scelte di chi ha visto un pianificatore lavorare.
 
-Noi vinciamo sul **rigore**: ogni scrittura passa da RBAC + SoD + audit; la parità dev/prod è garantita dagli stessi handler su due adapter e verificata da 1852 test e 710 check; i semafori rispettano WCAG 1.4.1; la sostituzione non può corrompere ore prenotate; la baseline è congelata e attribuita.
+Noi vinciamo sul **rigore**: ogni scrittura passa da RBAC + SoD + audit; la parità dev/prod è garantita dagli stessi handler su due adapter e verificata da 2453 test e 790 check; i semafori rispettano WCAG 1.4.1; la sostituzione non può corrompere ore prenotate; la baseline è congelata e attribuita.
 
 ---
 

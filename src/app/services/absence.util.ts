@@ -180,9 +180,17 @@ export const LONGEST_WORKING_MONTH_DAYS: number = (() => {
  * {@link idleWorkingDaysAt}).
  *
  * Boundaries are INCLUSIVE at the top, so the three buckets tile the line with
- * no gap and no overlap: B is `[1, 21]`, C is `[22, 42]`, D is `[43, ∞)`. The
- * spec's prose "C 21-42" is ambiguous about the endpoint; this is the reading —
- * 21 days is still "about one working month", so it belongs to B.
+ * no gap and no overlap: B is `[1, 23]`, C is `[24, 46]`, D is `[47, ∞)` — read
+ * off the constants below, never retyped, because this comment already went stale
+ * once. It said `[1, 21]` / `[22, 42]` and offered "a single 22-working-day month
+ * now reads C" as the example, both of which were true only of the FLOORED-MEAN
+ * ceiling that this file no longer uses: 22 reads B. The prose survived the fix
+ * to the numbers and the tests, and a reader following it would have drawn the
+ * wrong boundary — which is why the xlsx report interpolates these constants into
+ * its category labels instead of typing month phrases.
+ *
+ * The spec's own "C 21-42" is ambiguous about the endpoint; inclusive-at-top is
+ * the reading, and a full working month belongs to B whichever month it is.
  *
  * `bench.util.ts` owns the bucket union and the classifier that reads these
  * (they are its labels); this file owns the numbers, so the classifier never has
