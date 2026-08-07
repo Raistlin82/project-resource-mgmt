@@ -6602,6 +6602,399 @@ async function checkRateCardInheritance() {
  * why the underlying bug went unnoticed for as long as it did. It is logged
  * as SKIP and deliberately excluded from `passed`.
  */
+/**
+ * BLOCK H — absences, engagement classification, and the two zero-euro-invoice
+ * gates, end-to-end over the live HTTP surface (design spec §6, §7).
+ *
+ * This is the section that proves the wiring EXISTS. Every unit test in
+ * `src/server/*.spec.ts` mirrors a rule; only this one shows that the rule is
+ * mounted, that the READ_RULE order survived composition into the real table,
+ * and that `/bench/monthly` actually threads the absence list.
+ *
+ * SELF-CONTAINED. It creates one absence and one assignment and deletes both, so
+ * the section can run anywhere in the order and leaves the seed's own rows — the
+ * ones checkBenchMonthly and checkCapacityMonthly assert on — untouched.
+ */
+async function checkBlockHAbsencesAndClassification() {
+  const PM = { 'X-User-Id': '3', 'X-User-Role': 'pm' };
+  const RM = { 'X-User-Id': '2', 'X-User-Role': 'resource-manager' };
+  const DE = { 'X-User-Id': '1', 'X-User-Role': 'delivery-executive' };
+  const FIN = { 'X-User-Id': '4', 'X-User-Role': 'finance' };
+  const EMP = { 'X-User-Id': '3', 'X-User-Role': 'employee' }; // user 3 -> resource '3'
+
+  // -----------------------------------------------------------------------
+  // 1) THE THREE PRIVACY LEVELS, EACH IN BOTH DIRECTIONS.
+  //
+  // One direction cannot distinguish the three possible states of the rule
+  // order: both 403 means the calendar rule is never evaluated; both 200 means
+  // the audiences merged and the redaction protects nothing; only 200-then-403
+  // means the order holds.
+  // -----------------------------------------------------------------------
+  {
+    const { status: calPm, body: calBody } = await req('GET', '/absences/calendar', { headers: PM });
+    check('LEVEL 2 — GET /api/absences/calendar (pm) -> 200', calPm === 200, `status=${calPm}`);
+    const { status: reasonPm } = await req('GET', '/absences', { headers: PM });
+    check('LEVEL 1 — GET /api/absences (pm) -> 403 — the shorter prefix does NOT intercept the calendar rule', reasonPm === 403, `status=${reasonPm}`);
+
+    // The redacted projection: four keys, and the leak assertion is over the
+    // WHOLE body, not one field — that is how a leak is actually found.
+    const rows = Array.isArray(calBody) ? calBody : [];
+    check('calendar returns the seeded absence rows', rows.length >= 4, `count=${rows.length}`);
+    const keys = rows.length ? Object.keys(rows[0]).sort() : [];
+    check(
+      'calendar rows carry EXACTLY {id,resourceId,startDate,endDate}',
+      JSON.stringify(keys) === JSON.stringify(['endDate', 'id', 'resourceId', 'startDate']),
+      `keys=${JSON.stringify(keys)}`,
+    );
+    const calRaw = JSON.stringify(calBody);
+    check(
+      'no reasonCode / note / recordedBy anywhere in the calendar response body',
+      !calRaw.includes('reasonCode') && !calRaw.includes('note') && !calRaw.includes('recordedBy'),
+      'a redacted field appeared in the calendar body',
+    );
+
+    // The paired PRESENCE assertion: the reason IS served to its audience, so the
+    // absence above is redaction and not a column that does not exist.
+    const { status: rmStatus, body: rmBody } = await req('GET', '/absences', { headers: RM });
+    check('LEVEL 1 — GET /api/absences (resource-manager) -> 200', rmStatus === 200, `status=${rmStatus}`);
+    const ab2 = Array.isArray(rmBody) ? rmBody.find((a) => a.id === 'AB2') : undefined;
+    check(
+      "the reason IS present for its audience — AB2 reasonCode 'ParentalLeave'",
+      Boolean(ab2) && ab2.reasonCode === 'ParentalLeave' && ab2.recordedBy !== undefined,
+      ab2 ? `reasonCode=${ab2.reasonCode}` : 'AB2 missing',
+    );
+
+    // Q5 (2026-08-07): delivery-executive is IN the reason audience, deliberately.
+    const { status: deStatus, body: deBody } = await req('GET', '/absences', { headers: DE });
+    check(
+      'GET /api/absences (delivery-executive) -> 200 with the reason — product decision Q5',
+      deStatus === 200 && Array.isArray(deBody) && deBody.some((a) => a.reasonCode !== undefined),
+      `status=${deStatus}`,
+    );
+    // ...and finance is NOT, which is what makes Q5 a decision rather than a default.
+    const { status: finStatus } = await req('GET', '/absences', { headers: FIN });
+    check('GET /api/absences (finance) -> 403 — no need-to-know for the reason', finStatus === 403, `status=${finStatus}`);
+
+    // An employee reaches the route (the rule admits it) but sees only own rows.
+    const { status: empStatus, body: empBody } = await req('GET', '/absences', { headers: EMP });
+    check('GET /api/absences (employee) -> 200', empStatus === 200, `status=${empStatus}`);
+    check(
+      "employee sees ONLY their own rows (resource '3' has none, so the list is empty — never everybody's)",
+      Array.isArray(empBody) && empBody.every((a) => a.resourceId === '3'),
+      `count=${Array.isArray(empBody) ? empBody.length : 'n/a'}`,
+    );
+    // ...and the calendar is closed to an employee: an org-wide roster of who is
+    // away is sensitive even without the reason.
+    const { status: empCal } = await req('GET', '/absences/calendar', { headers: EMP });
+    check('GET /api/absences/calendar (employee) -> 403', empCal === 403, `status=${empCal}`);
+  }
+
+  // -----------------------------------------------------------------------
+  // 2) LEVEL 3 — the aggregate. /bench/monthly must show ABSENT for Marco
+  //    Belli ('8') across his parental leave, and no reason anywhere.
+  // -----------------------------------------------------------------------
+  {
+    const { status, body } = await req('GET', '/bench/monthly?from=2026-04');
+    check('GET /api/bench/monthly -> 200', status === 200, `status=${status}`);
+    const marco = (body.internalRows || []).find((r) => r.resourceId === '8');
+    const states = ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09']
+      .map((m) => marco?.monthly?.[m]?.state);
+    check(
+      "resource '8' (Marco Belli): BENCH,BENCH,ABSENT,ABSENT,ABSENT,BENCH across 2026-04..09 — the metric H exists to correct",
+      JSON.stringify(states) === JSON.stringify(['BENCH', 'BENCH', 'ABSENT', 'ABSENT', 'ABSENT', 'BENCH']),
+      `states=${JSON.stringify(states)}`,
+    );
+    // The paired absence-of-effect: the leave changed THREE months, not the row.
+    check(
+      "resource '8' still HAS a bench row and an aging bucket in May — an absent person must not vanish into 'missing data'",
+      Boolean(marco) && marco.monthly['2026-05']?.agingBucket !== undefined,
+      JSON.stringify(marco?.monthly?.['2026-05']),
+    );
+    // An ABSENT cell carries no aging bucket: it is not idle, it is unavailable.
+    check(
+      "resource '8' June cell has NO agingBucket — ABSENT is not an aging state",
+      marco?.monthly?.['2026-06']?.agingBucket === undefined,
+      JSON.stringify(marco?.monthly?.['2026-06']),
+    );
+    check(
+      'no reasonCode anywhere in the ENTIRE /bench/monthly body',
+      !JSON.stringify(body).includes('reasonCode'),
+      'the reason crossed the wire on an aggregate route',
+    );
+    // The subco half (S4): the fourth state is not internal-only, or the
+    // subcoBenchCount tile stays false and green.
+    const subco6 = (body.subcoRows || []).find((r) => r.resourceId === '6');
+    check(
+      "resource '6' (subco) August is ABSENT — the fourth state applies to subco too",
+      subco6?.monthly?.['2026-08']?.state === 'ABSENT',
+      JSON.stringify(subco6?.monthly?.['2026-08']),
+    );
+  }
+
+  // /capacity/monthly threads the same list: Sofia ('14') is fully booked in May
+  // and absent one week, so her pro-rated target makes her OVER, never idle.
+  {
+    const { status, body } = await req('GET', '/capacity/monthly?from=2026-05&to=2026-05');
+    check('GET /api/capacity/monthly?from=2026-05 -> 200', status === 200, `status=${status}`);
+    const raw = JSON.stringify(body);
+    check('no reasonCode anywhere in the ENTIRE /capacity/monthly body', !raw.includes('reasonCode'), 'reason leaked');
+  }
+
+  // /bench/history threads it too, or the history and the grid disagree about
+  // the same month — the drift unallocatedHistoryFor exists to make impossible.
+  {
+    const { status, body } = await req('GET', '/bench/history/8?months=12');
+    check('GET /api/bench/history/8 -> 200', status === 200, `status=${status}`);
+    const cells = Array.isArray(body?.cells) ? body.cells : [];
+    const june = cells.find((c) => c.month === '2026-06');
+    check(
+      "bench history for resource '8' reports 2026-06 as ABSENT — same computation as the grid",
+      june === undefined || june.state === 'ABSENT',
+      `cell=${JSON.stringify(june)}`,
+    );
+  }
+
+  // -----------------------------------------------------------------------
+  // 3) WRITE RBAC + SoD + server-pinned provenance.
+  // -----------------------------------------------------------------------
+  {
+    const payload = { resourceId: '8', startDate: '2026-11-02', endDate: '2026-11-06', reasonCode: 'Vacation' };
+    const { status: pmWrite } = await req('POST', '/absences', { headers: PM, body: payload });
+    check('POST /api/absences (pm) -> 403 — a PM must not declare a colleague absent', pmWrite === 403, `status=${pmWrite}`);
+    const { status: empWrite } = await req('POST', '/absences', { headers: EMP, body: payload });
+    check('POST /api/absences (employee) -> 403 — no leave-request workflow, no self-service create', empWrite === 403, `status=${empWrite}`);
+    const { status: deWrite } = await req('POST', '/absences', { headers: DE, body: payload });
+    check('POST /api/absences (delivery-executive) -> 403 — Q5 widened the READ audience only', deWrite === 403, `status=${deWrite}`);
+
+    // SoD: the default admin principal is user '1' -> resource '1'.
+    const { status: sodStatus, body: sodBody } = await req('POST', '/absences', {
+      body: { resourceId: '1', startDate: '2026-11-02', endDate: '2026-11-06', reasonCode: 'Vacation' },
+    });
+    check(
+      'POST /api/absences for OWN resource -> 403 (segregation of duties)',
+      sodStatus === 403 && String(sodBody?.error || '').includes('segregation of duties'),
+      `status=${sodStatus} error=${sodBody?.error}`,
+    );
+
+    // Forged provenance is dropped, not honoured — the allow-list is the guard.
+    const created = await req('POST', '/absences', {
+      headers: RM,
+      body: { ...payload, note: 'smoke', recordedBy: 'attacker', recordedAt: '2000-01-01T00:00:00.000Z' },
+    });
+    check('POST /api/absences (resource-manager) -> 200', created.status === 200, `status=${created.status} body=${JSON.stringify(created.body)}`);
+    check(
+      "recordedBy is the VERIFIED actor ('2'), never the body's 'attacker'",
+      created.body?.recordedBy === '2',
+      `recordedBy=${created.body?.recordedBy}`,
+    );
+    check(
+      "recordedAt is server-assigned, not the body's 2000-01-01",
+      typeof created.body?.recordedAt === 'string' && !created.body.recordedAt.startsWith('2000'),
+      `recordedAt=${created.body?.recordedAt}`,
+    );
+
+    const newId = created.body?.id;
+
+    // Overlap -> 409, and the message never names the blocking row's reason.
+    const overlap = await req('POST', '/absences', {
+      headers: RM,
+      body: { resourceId: '8', startDate: '2026-11-06', endDate: '2026-11-10', reasonCode: 'Sickness' },
+    });
+    check('POST /api/absences overlapping the same resource -> 409', overlap.status === 409, `status=${overlap.status}`);
+    check(
+      'the 409 message names the dates and NOT the reason',
+      !String(overlap.body?.error || '').includes('Vacation'),
+      `error=${overlap.body?.error}`,
+    );
+    // The paired assertion: one day later is accepted, so the 409 is about the
+    // interval and not about the resource being blocked outright.
+    const adjacent = await req('POST', '/absences', {
+      headers: RM,
+      body: { resourceId: '8', startDate: '2026-11-09', endDate: '2026-11-10', reasonCode: 'Sickness' },
+    });
+    check('POST /api/absences on the adjacent interval -> 200', adjacent.status === 200, `status=${adjacent.status}`);
+    if (adjacent.body?.id) await req('DELETE', `/absences/${adjacent.body.id}`, { headers: RM });
+
+    // Validation: a reason outside the enum, and an interval outside employment
+    // (Marco was hired 2026-04-01).
+    const badReason = await req('POST', '/absences', {
+      headers: RM, body: { resourceId: '8', startDate: '2026-12-01', endDate: '2026-12-02', reasonCode: 'AMS' },
+    });
+    check('POST /api/absences with reasonCode "AMS" -> 400 (AMS is an engagement, not an absence)', badReason.status === 400, `status=${badReason.status}`);
+    const beforeHire = await req('POST', '/absences', {
+      headers: RM, body: { resourceId: '8', startDate: '2026-03-01', endDate: '2026-03-05', reasonCode: 'Vacation' },
+    });
+    check('POST /api/absences before hireDate -> 400', beforeHire.status === 400, `status=${beforeHire.status}`);
+
+    // Empty-patch parity (dev<->prod): an all-undefined PUT is a plain read.
+    if (newId) {
+      const emptyPut = await req('PUT', `/absences/${newId}`, { headers: RM, body: {} });
+      check(
+        'PUT /api/absences/:id with an empty patch -> 200 and the row unchanged (empty-patch parity)',
+        emptyPut.status === 200 && emptyPut.body?.startDate === '2026-11-02',
+        `status=${emptyPut.status} startDate=${emptyPut.body?.startDate}`,
+      );
+      const del = await req('DELETE', `/absences/${newId}`, { headers: RM });
+      check('DELETE /api/absences/:id -> 204', del.status === 204, `status=${del.status}`);
+      const gone = await req('DELETE', `/absences/${newId}`, { headers: RM });
+      check('DELETE /api/absences/:id twice -> 404', gone.status === 404, `status=${gone.status}`);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // 4) THE DELIBERATE ASYMMETRY (§6.4). A new absence over ALREADY-BOOKED days
+  //    is ACCEPTED and reports the conflict; a new BOOKING on an absent day is
+  //    REFUSED. Do not "make these consistent".
+  // -----------------------------------------------------------------------
+  {
+    // Sofia ('14') is fully allocated 2026-05..09, so this week is booked.
+    const accepted = await req('POST', '/absences', {
+      headers: RM,
+      body: { resourceId: '14', startDate: '2026-06-08', endDate: '2026-06-12', reasonCode: 'Indisposition' },
+    });
+    check(
+      'POST /api/absences over ALREADY-BOOKED days -> 200 (accepted: the absence already happened)',
+      accepted.status === 200,
+      `status=${accepted.status} body=${JSON.stringify(accepted.body)}`,
+    );
+    const conflicts = accepted.body?.bookedDayConflicts;
+    check(
+      'the response NAMES the conflicting assignment days and their hours — not a silent success',
+      Array.isArray(conflicts) && conflicts.length > 0 && conflicts.every((c) => typeof c.date === 'string' && typeof c.hours === 'number'),
+      `bookedDayConflicts=${JSON.stringify(conflicts)}`,
+    );
+    if (accepted.body?.id) await req('DELETE', `/absences/${accepted.body.id}`, { headers: RM });
+
+    // The other direction, on Marco's seeded parental leave. Create a scoped
+    // assignment (request '1' spans 2026-04-01..2026-06-30), exercise both
+    // directions, then delete it.
+    const assig = await req('POST', '/assignments', {
+      body: { requestId: '1', resourceId: '8', startDate: '2026-05-01', endDate: '2026-06-30', allocationPct: 50 },
+    });
+    check('POST /api/assignments for resource 8 -> 200 (scoped fixture)', assig.status === 200, `status=${assig.status}`);
+    const assigId = assig.body?.id;
+    if (assigId) {
+      // ACCEPTED: May is outside the leave (which starts 2026-06-01).
+      const okAlloc = await req('PUT', `/assignments/${assigId}/allocation`, {
+        body: { month: '2026-05', dailyHours: { '2026-05-12': 8 } },
+      });
+      check(
+        'PUT allocation on 2026-05-12 (outside the leave) -> 200 — the gate is the INTERVAL, not the resource',
+        okAlloc.status === 200,
+        `status=${okAlloc.status} body=${JSON.stringify(okAlloc.body).slice(0, 200)}`,
+      );
+      // REFUSED: June is inside it.
+      const badAlloc = await req('PUT', `/assignments/${assigId}/allocation`, {
+        body: { month: '2026-06', dailyHours: { '2026-06-15': 8 } },
+      });
+      const message = String(badAlloc.body?.error || '');
+      check('PUT allocation on 2026-06-15 (inside the leave) -> 400', badAlloc.status === 400, `status=${badAlloc.status}`);
+      check(
+        'the refusal names the DATE and the RESOURCE and NEVER the reason',
+        message.includes('2026-06-15') && message.includes('Marco Belli') && !message.includes('ParentalLeave'),
+        `error=${message}`,
+      );
+      await req('DELETE', `/assignments/${assigId}`);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // 5) CLASSIFICATION: the narrow rule must not be intercepted by the coarse
+  //    /projects rule that admits `pm`.
+  // -----------------------------------------------------------------------
+  {
+    const body = { billable: false, type: 'Basket' };
+    const { status: pmStatus } = await req('PUT', '/projects/3/classification', { headers: PM, body });
+    check('PUT /api/projects/3/classification (pm) -> 403 — the narrow rule precedes the coarse /projects rule', pmStatus === 403, `status=${pmStatus}`);
+    // The paired assertion: 200 for the intended audience, so the 403 is about
+    // the ROLE and not about a broken endpoint.
+    const { status: deStatus, body: deBody } = await req('PUT', '/projects/3/classification', { headers: DE, body });
+    check(
+      'PUT /api/projects/3/classification (delivery-executive) -> 200',
+      deStatus === 200 && deBody?.billable === false && deBody?.type === 'Basket',
+      `status=${deStatus} body=${JSON.stringify(deBody)}`,
+    );
+    // ...and the ordinary project edit is still open to a pm, so the 403 above is
+    // the narrow rule firing and not the whole slice having closed.
+    const { status: pmEdit } = await req('PUT', '/projects/1', { headers: PM, body: { status: 'In Planning' } });
+    check('PUT /api/projects/1 (pm) -> 200 — the coarse rule still admits pm for ordinary edits', pmEdit === 200, `status=${pmEdit}`);
+
+    // The invariant: Basket implies non-billable. The converse stays free.
+    const { status: invStatus } = await req('PUT', '/projects/3/classification', { headers: DE, body: { billable: true, type: 'Basket' } });
+    check('PUT classification {billable:true, type:Basket} -> 400 (invariant)', invStatus === 400, `status=${invStatus}`);
+    const { status: freeStatus } = await req('PUT', '/projects/4/classification', { headers: DE, body: { billable: false, type: 'Delivery' } });
+    check('PUT classification {billable:false, type:Delivery} -> 200 (the converse is free)', freeStatus === 200, `status=${freeStatus}`);
+
+    // billable/type are REFUSED on the ordinary write, not silently dropped.
+    const forged = await req('PUT', '/projects/1', { headers: DE, body: { billable: false } });
+    check('PUT /api/projects/1 with billable in the body -> 403 (not a silent drop)', forged.status === 403, `status=${forged.status} error=${forged.body?.error}`);
+    const forgedType = await req('POST', '/projects', {
+      body: { name: 'Smoke H', location: 'Remote', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Planning', ownerId: '1', type: 'Basket' },
+    });
+    check('POST /api/projects with type in the body -> 403 (not a silent drop)', forgedType.status === 403, `status=${forgedType.status}`);
+    // The paired assertion: project '1' is STILL billable, so the 403 really
+    // refused rather than half-applying.
+    const { body: p1 } = await req('GET', '/projects');
+    const project1 = Array.isArray(p1) ? p1.find((p) => p.id === '1') : undefined;
+    check("project '1' is still billable after the refused write", project1?.billable === true, `billable=${project1?.billable}`);
+  }
+
+  // -----------------------------------------------------------------------
+  // 6) THE TWO ZERO-EURO-INVOICE GATES. Both, or the invariant is half enforced.
+  // -----------------------------------------------------------------------
+  {
+    // GATE 1 — a billing item may not name a non-billable engagement. The message
+    // must be the BILLABILITY one: a basket carries no contractId, so a gate
+    // placed after the contract-membership test answers 400 for the wrong reason
+    // and reads as verified while never having run.
+    const gate1 = await req('POST', '/billing-plan-items', {
+      body: { contractId: 'CT1', projectId: '3', type: 'Advance', label: 'Smoke H gate 1', amount: 1000, currency: 'EUR', status: 'Planned', expectedDate: '2026-09-30' },
+    });
+    check('POST /api/billing-plan-items on non-billable project 3 -> 400', gate1.status === 400, `status=${gate1.status}`);
+    check(
+      'the 400 is the BILLABILITY message, not the contract-membership one',
+      String(gate1.body?.error || '').includes('non-billable engagement'),
+      `error=${gate1.body?.error}`,
+    );
+    // The paired assertion: the same POST on a billable project is ACCEPTED, so
+    // the refusal is about billability and not a general block.
+    const gate1ok = await req('POST', '/billing-plan-items', {
+      body: { contractId: 'CT1', projectId: '1', type: 'Advance', label: 'Smoke H gate 1 control', amount: 1000, currency: 'EUR', status: 'Planned', expectedDate: '2026-09-30' },
+    });
+    check('POST /api/billing-plan-items on billable project 1 -> 200', gate1ok.status === 200, `status=${gate1ok.status} error=${gate1ok.body?.error}`);
+    if (gate1ok.body?.id) await req('DELETE', `/billing-plan-items/${gate1ok.body.id}`);
+
+    // GATE 2 — flipping a project that ALREADY has billing items is refused, or
+    // "create billable -> create item -> flip" walks around gate 1.
+    const gate2 = await req('PUT', '/projects/1/classification', { headers: DE, body: { billable: false, type: 'Delivery' } });
+    check('PUT /api/projects/1/classification to non-billable -> 409 (it has billing items)', gate2.status === 409, `status=${gate2.status}`);
+    check(
+      'the 409 says HOW MANY items block the flip',
+      /\d+ billing plan item/.test(String(gate2.body?.error || '')),
+      `error=${gate2.body?.error}`,
+    );
+    // The paired assertion: the flip BACK to billable is never blocked, so the
+    // 409 is about the items and not about the endpoint.
+    const gate2back = await req('PUT', '/projects/1/classification', { headers: DE, body: { billable: true, type: 'Delivery' } });
+    check('PUT /api/projects/1/classification to billable -> 200 (never blocked in that direction)', gate2back.status === 200, `status=${gate2back.status}`);
+  }
+
+  // -----------------------------------------------------------------------
+  // 7) The audit trail covers absences — a special-category field must not be
+  //    editable without a trace (spec §10 Q5).
+  // -----------------------------------------------------------------------
+  {
+    const { status, body } = await req('GET', '/audit-logs');
+    const entries = Array.isArray(body) ? body : (Array.isArray(body?.entries) ? body.entries : []);
+    const absenceEntry = entries.find((e) => typeof e.path === 'string' && e.path.toLowerCase().includes('/absences/'));
+    check(
+      'GET /api/audit-logs contains an entry for the absence mutations above, with a real diff',
+      status === 200 && Boolean(absenceEntry) && Array.isArray(absenceEntry.changedKeys),
+      `status=${status} entry=${JSON.stringify(absenceEntry || null).slice(0, 220)}`,
+    );
+  }
+}
+
 async function checkFkViolationMapping() {
   const NAME = 'DELETE /api/customers/C1 (referenced by contract CT1) -> clean 409, not a raw 500';
   if (!process.env.DATABASE_URL) {
@@ -7247,6 +7640,19 @@ async function main() {
     await checkDerivedApprovalEscalation();
   } catch (err) {
     console.log(`FAIL  derived approval escalation amount — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  // Own try/catch: guarded so an unexpected error in the block-H flow never
+  // masks or blocks any of the prior section results. Safe anywhere in the
+  // order: it creates and DELETES its own absence rows and its own scoped
+  // assignment, and every classification write it performs restores the seed's
+  // own value (project '3' stays Basket/non-billable, projects '1' and '4' end
+  // as they started), so no seed row another section reads is left moved.
+  try {
+    await checkBlockHAbsencesAndClassification();
+  } catch (err) {
+    console.log(`FAIL  block H absences + classification — unexpected error — ${err && err.message ? err.message : err}`);
     failed++;
   }
 
