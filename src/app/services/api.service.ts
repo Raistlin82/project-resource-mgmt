@@ -543,6 +543,32 @@ export interface PlanningPeriod {
   status: 'Open' | 'Closed';
 }
 
+// ---------------------------------------------------------------------------
+// Block H — non-billable engagements ("BASKET") and resource absences.
+// Design spec: docs/superpowers/specs/2026-08-06-h-basket-non-billable-design.md
+//
+// TWO entities, deliberately, because the gap has TWO distinct numeric
+// consequences (spec §2.1): a person full-time on AMS *is* allocated — what is
+// wrong is her engagement's MARGIN, which `Project.billable` fixes; a person on
+// parental leave has no booked hours — what is wrong is the BENCH, which
+// `ResourceAbsence` fixes. Neither model can correct the other's number.
+// ---------------------------------------------------------------------------
+
+/**
+ * Engagement classification (spec §3.2). `Delivery` is a normal customer
+ * engagement; `Basket` is the manual's dedicated non-billable engagement (one
+ * per Practice) used for staffing when no real engagement exists.
+ *
+ * `type` is a LABEL — the wizard/reporting selector. **`billable` is the only
+ * one of the two the arithmetic reads**: two fields that can contradict each
+ * other would force every consumer to choose which to believe.
+ *
+ * Server-enforced invariant: `type === 'Basket'` ⇒ `billable === false`. The
+ * converse stays free — an internal non-basket project is legitimate.
+ */
+export const PROJECT_TYPES = ['Delivery', 'Basket'] as const;
+export type ProjectType = typeof PROJECT_TYPES[number];
+
 export interface Project {
   id: string;
   name: string;
@@ -553,7 +579,94 @@ export interface Project {
   description?: string;
   ownerId?: string;
   contractId?: string;
+  /**
+   * H — does this engagement produce customer revenue? `false` means "consumes
+   * cost, earns no customer revenue" (AMS, technical groups, SW Factory, GCC).
+   *
+   * OPTIONAL ON THE WIRE, exactly like `Resource.kind` (C1): the column is
+   * `NOT NULL DEFAULT true`, so a pre-existing row needs no backfill, but the
+   * in-memory adapter serves back whatever the seed literal holds. Read it
+   * DEFENSIVELY — `project.billable ?? true` — so an absent value means
+   * "billable", which is the safe default: it keeps margin alerts ON rather
+   * than silently switching them off for every project.
+   *
+   * ADAPTER PARITY (the C1 lesson, `src/db/seed.ts:93`): seed rows MUST spell
+   * the value out. Omitting it diverges the backends — Postgres applies the
+   * column DEFAULT and serves the field back, the in-memory adapter serves no
+   * field at all. Same seed, two different JSON shapes.
+   *
+   * Never client-settable: NOT in `PROJECT_FIELDS`, only
+   * `PUT /projects/:id/classification` moves it (spec §6.2).
+   */
+  billable?: boolean;
+  /** H — engagement classification label. Optional on the wire; read as
+   *  `project.type ?? 'Delivery'`. Same server-pinned rules as `billable`. */
+  type?: ProjectType;
 }
+
+/**
+ * The six reasons the RPT manual lists for a BASKET absence (spec §1.3, §3.3),
+ * plus `Other` as the escape hatch. `AMS` and `technical groups` are NOT
+ * absence reasons — they are engagements (`ProjectType`), which is the criterion
+ * that keeps the two halves of block H apart down to the enum level.
+ *
+ * SPECIAL-CATEGORY DATA (GDPR art. 9). The arithmetic NEVER branches on it
+ * (spec §3.4) — every derivation reads only `resourceId`/`startDate`/`endDate`
+ * — which is precisely what makes `RedactedAbsence` numerically complete and
+ * the audience separation of spec §7.3 implementable rather than aspirational.
+ */
+export const ABSENCE_REASON_CODES = [
+  'Maternity', 'ParentalLeave', 'Vacation', 'Sickness', 'Indisposition', 'Other',
+] as const;
+export type AbsenceReasonCode = typeof ABSENCE_REASON_CODES[number];
+
+/**
+ * A recorded period during which a resource is not available to be staffed.
+ * NOT a project, NOT an assignment: it carries no customer, raises no
+ * allocation approval, and costs nothing (spec §2.2).
+ *
+ * `startDate`/`endDate` are ISO 'YYYY-MM-DD' and BOTH INCLUSIVE — a one-day
+ * absence has `startDate === endDate`.
+ */
+export interface ResourceAbsence {
+  id: string;
+  resourceId: string;
+  startDate: string;
+  endDate: string;
+  /** Special-category data — see `ABSENCE_REASON_CODES`. Restricted audience
+   *  (spec §7.3); never present on the redacted projection or in any export. */
+  reasonCode: AbsenceReasonCode;
+  note?: string;
+  /**
+   * SERVER-PINNED — never read from the request body, same class as
+   * `createdBy`/`requestedBy`. Set from the verified actor so the SoD rule
+   * (the recorder may not be the subject, spec §7.4) has something trustworthy
+   * to compare against. Enforcement is the server task's (T6); the contract is
+   * declared here so no client is written believing it may send them.
+   */
+  recordedBy: string;
+  /** SERVER-PINNED — see `recordedBy`. ISO timestamp. */
+  recordedAt: string;
+}
+
+/**
+ * The availability-only projection of an absence — the feed that drives
+ * `/bench`, `/capacity`, `/forecast`, `/what-if`, `/utilization` and
+ * `/dashboard`. Numerically COMPLETE: because the arithmetic never branches on
+ * the reason (spec §3.4), these four fields produce every figure those surfaces
+ * show.
+ *
+ * A SEPARATE TYPE, not `Partial<ResourceAbsence>`: a `Partial` would merely make
+ * `reasonCode` optional and would happily accept a row that still carries it.
+ * The `?: never` members go further than the spec's bare `Pick` and make the
+ * leak a COMPILE error — a full `ResourceAbsence` is not assignable here, so the
+ * redacted route cannot be served by handing back the stored rows, nor by
+ * `delete`-ing a key off them. That is spec §6.1's "a projection built in the
+ * handler" turned into something the compiler checks.
+ */
+export type RedactedAbsence =
+  Pick<ResourceAbsence, 'id' | 'resourceId' | 'startDate' | 'endDate'>
+  & { reasonCode?: never; note?: never; recordedBy?: never };
 
 // --- Project sub-resources (shared types; import these, do not redefine locally) ---
 

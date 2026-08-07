@@ -133,6 +133,16 @@ async function seedDemoDatabase(database: DrizzleDb): Promise<void> {
   // ahead of its own "Customizing catalogs" batch below is safe.
   await seedIfEmpty(database, schema.vendors, seed.vendors);
   await seedIfEmpty(database, schema.resources, seed.resources); // -> vendors (C1, subco only)
+  // H — resource_absences FKs to resources, so it MUST stay after the line
+  // above. The in-memory adapter enforces no foreign keys, so a wrong position
+  // here is invisible in dev and stops the server booting on Postgres — which
+  // is exactly what happened in C1 (see the negotiatedRates note below).
+  //
+  // T1 WIRES THE ORDER, T2 SUPPLIES THE ROWS (design spec §9): `seed.ts` has no
+  // `resourceAbsences` export yet and `seedIfEmpty` no-ops on an empty array,
+  // so this call is a positioned placeholder. T2 MUST swap `[]` for
+  // `seed.resourceAbsences` here AND in `repositories.ts`.
+  await seedIfEmpty(database, schema.resourceAbsences, []); // -> resources
   await seedIfEmpty(database, schema.languages, seed.languages);
   await seedIfEmpty(database, schema.fxRates, seed.fxRates);
   await seedIfEmpty(database, schema.settings, seed.settings); // global settings (hoursPerDay)

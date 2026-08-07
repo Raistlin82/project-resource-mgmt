@@ -89,6 +89,7 @@ import type {
   AssignmentMonth,
   Holiday,
   PlanningPeriod,
+  ResourceAbsence,
 } from '../app/services/api.service';
 
 // ---------------------------------------------------------------------------
@@ -309,6 +310,9 @@ class NaturalKeyPgRepository<TRow extends Entity, KCol extends string>
 
 export interface Repositories {
   resources: Repository<Resource>;
+  // H — recorded non-availability per resource. FKs to `resources`, so it is
+  // seeded parent-after-child in bootstrap.ts (see the note there).
+  resourceAbsences: Repository<ResourceAbsence>;
   users: Repository<User>;
   requests: Repository<ResourceRequest>;
   assignments: Repository<Assignment>;
@@ -382,6 +386,7 @@ function buildPgRepositories(database: DrizzleDb): Repositories {
 
   return {
     resources: pg<Resource>(schema.resources),
+    resourceAbsences: pg<ResourceAbsence>(schema.resourceAbsences),
     users: pg<User>(schema.users),
     requests: pg<ResourceRequest>(schema.requests),
     assignments: pg<Assignment>(schema.assignments),
@@ -454,6 +459,16 @@ function buildInMemoryRepositories(): Repositories {
 
   return {
     resources: mem<Resource>(seed.resources),
+    // H/T1 — WIRING ONLY, NO FIXTURE YET. The seed rows are task T2's (design
+    // spec §9); `src/db/seed.ts` therefore carries no `resourceAbsences` export
+    // and this adapter starts EMPTY.
+    //
+    // T2 MUST replace `[]` with `seed.resourceAbsences` in the same change that
+    // adds the export — and the matching `seedIfEmpty` argument in
+    // `bootstrap.ts`. Left as `[]`, every typed gate stays green while the
+    // whole feature is invisible in dev and unexercised by any test: the exact
+    // blind-green-gate shape this project has already paid for repeatedly.
+    resourceAbsences: mem<ResourceAbsence>([]),
     users: mem<User>(seed.users),
     requests: mem<ResourceRequest>(seed.requests),
     assignments: mem<Assignment>(seed.assignments),

@@ -42,6 +42,8 @@ import type {
   ApprovalStep,
   AssignmentMonth,
   ResourceKind,
+  ProjectType,
+  AbsenceReasonCode,
 } from '../app/services/api.service';
 import type { OrgLevel } from '../app/services/org-scope.util';
 
@@ -119,6 +121,44 @@ export const resources = pgTable(
   },
   (t) => [
     index('resources_manager_id_idx').on(t.managerId),
+  ],
+);
+
+// RESOURCE ABSENCES — a recorded period a person cannot be staffed in (design
+// spec, block H §3.3). Deliberately NOT modelled as an assignment against a
+// "BASKET — Vacation" project, which is how the RPT manual does it: an
+// assignment is readable by the whole /assignments audience, and there the
+// sensitive fact IS the project reference ("X -> BASKET Maternity"), so there
+// would be no column left to redact. Here the reason is one column, and the
+// availability projection that feeds every derived surface simply omits it.
+//
+// `startDate`/`endDate` are ISO 'YYYY-MM-DD' and BOTH INCLUSIVE (a one-day
+// absence has start === end), matching this schema's text-date convention.
+// `reason_code` is SPECIAL-CATEGORY DATA (GDPR art. 9): no derivation ever
+// branches on it (spec §3.4), which is what keeps the redacted projection
+// numerically complete.
+export const resourceAbsences = pgTable(
+  'resource_absences',
+  {
+    id: text('id').primaryKey(),
+    resourceId: text('resource_id')
+      .notNull()
+      .references(() => resources.id),
+    startDate: text('start_date').notNull(),
+    endDate: text('end_date').notNull(),
+    reasonCode: text('reason_code').$type<AbsenceReasonCode>().notNull(),
+    note: text('note'),
+    // SERVER-PINNED, never from the request body — same class as
+    // `createdBy`/`requestedBy`, so the SoD rule "the recorder is not the
+    // subject" has a trustworthy actor to compare against.
+    recordedBy: text('recorded_by').notNull(),
+    recordedAt: text('recorded_at').notNull(),
+  },
+  (t) => [
+    index('resource_absences_resource_id_idx').on(t.resourceId),
+    // The hot query is "this resource's absences intersecting [from,to]" — the
+    // same shape as cost_baselines' composite (project_id, period) index.
+    index('resource_absences_resource_start_idx').on(t.resourceId, t.startDate),
   ],
 );
 
@@ -541,6 +581,23 @@ export const projects = pgTable(
     startDate: text('start_date').notNull(),
     endDate: text('end_date').notNull(),
     status: text('status').notNull(),
+    // H — non-billable engagements. `notNull().default(...)` is the SAME pattern
+    // as `resources.kind` (C1, migration 0011): every pre-existing row becomes a
+    // billable Delivery engagement, which is exactly what it is, so the
+    // migration needs NO backfill.
+    //
+    // `billable` is the ONLY one of the two the arithmetic reads; `type` is a
+    // label for the wizard/reporting selector ("one basket per Practice" cannot
+    // be expressed as "any non-billable project" — internal non-basket projects
+    // exist). Two readable fields, one source of truth. Server-enforced
+    // invariant: type 'Basket' implies billable false.
+    //
+    // NOT derived from `contractId === null`: `validateProjectContract` makes
+    // the contract legitimately optional, so deriving billability from a
+    // missing FK would silence margin alerts on every project awaiting
+    // signature — precisely when they are needed. This is a DECLARATION.
+    billable: boolean('billable').notNull().default(true),
+    type: text('type').$type<ProjectType>().notNull().default('Delivery'),
     description: text('description'),
     // owner is a user/resource — ambiguous which; leave soft.
     ownerId: text('owner_id'), // TODO: FK once owner entity (user vs resource) is settled
