@@ -109,7 +109,19 @@ interface TotalsVm {
   confirmed: number;
   planned: number;
   capacity: number;
+  /** H: this month's cells do NOT add up to this total — see {@link CapacityComponent.proRatedMonths}. */
+  proRated: boolean;
 }
+
+/**
+ * How far Σ(cell.ftePlanned) may sit from `totals.demandFtePlanned` before the
+ * screen says so: HALF the last digit the totals row prints ('1.1-1', one
+ * decimal). Above it the discrepancy is visible to anyone who adds the column
+ * up; below it the two figures render identically and a note would be pointing
+ * at nothing. It also absorbs float-summation noise, which is why the
+ * comparison is never `!==`.
+ */
+const FTE_SUM_TOLERANCE = 0.05;
 
 /** Shift a 'YYYY-MM' month by `delta` months (may be negative). */
 function shiftMonth(month: string, delta: number): string {
@@ -358,6 +370,19 @@ function roundTotals(totals: Record<string, CapacityTotals>): Record<string, Cap
                           {{ t.planned | number:'1.1-1' }} <span class="text-ink-muted font-normal">/ {{ t.capacity | number:'1.1-1' }}</span>
                         </div>
                         <div class="text-[10px] font-mono tabular-nums text-ink-muted font-normal">conf {{ t.confirmed | number:'1.1-1' }}</div>
+                        <!-- H: WORDS, never a tint (WCAG 1.4.1) — and words placed
+                             ON the column that diverges, because the note under
+                             the grid can name the months but cannot point at them
+                             across a 12-month range. The sr-only half carries the
+                             whole sentence: a screen-reader user gets no benefit
+                             from a two-word marker whose meaning is a paragraph
+                             below, in a region they may never reach. -->
+                        @if (t.proRated) {
+                          <div data-test="totals-prorated" class="mt-1 text-[10px] font-semibold text-info-text">
+                            <span aria-hidden="true">cells pro-rated</span>
+                            <span class="sr-only">Cells in this column are pro-rated to staffable days and do not add up to this total.</span>
+                          </div>
+                        }
                       </td>
                     }
                   </tr>
@@ -365,6 +390,23 @@ function roundTotals(totals: Record<string, CapacityTotals>): Record<string, Cap
               </table>
             </div>
           </div>
+
+          <!-- H — the two denominators, declared where they meet.
+               Rendered ONLY when the figures on this screen actually disagree
+               (proRatedMonths derives it from them), so it is never boilerplate a
+               reader learns to skip, and it cannot claim a divergence that is not
+               there. Placed under the grid rather than in the subtitle for the
+               same reason the band legend is: an explanation of a table belongs
+               with the table. -->
+          @if (proRatedMonths().length > 0) {
+            <p data-test="prorated-note" role="note" class="text-xs text-ink-secondary">
+              <strong class="text-info-text">Cells and totals use different denominators in {{ proRatedMonthsLabel() }}.</strong>
+              Each cell divides by the days that person was staffable; the Demand / Capacity row divides by the whole
+              standard month, so it stays comparable across people and months. Recording an absence does not create work
+              — organisation demand is unchanged while the individual's saturation rises — which is why the cells in
+              {{ proRatedMonths().length === 1 ? 'that month' : 'those months' }} do not add up to the total below them.
+            </p>
+          }
         } @else if (!dataLoading() && !dataError()) {
           <div class="command-card p-12 text-center">
             <mat-icon class="text-[40px] w-[40px] h-[40px] text-ink-muted">calendar_view_month</mat-icon>
@@ -575,9 +617,49 @@ export class CapacityComponent {
   /** Either block has something to write — see the export buttons' disabled state. */
   protected hasExportableRows = computed(() => this.rows().length > 0 || this.demandRows().length > 0);
 
+  /**
+   * H — the months where the grid's cells and the totals row DO NOT ADD UP, read
+   * off the data rather than assumed.
+   *
+   * `rollupMonthly` keeps two denominators on purpose (its own header states it):
+   * a CELL divides by the days that person was staffable — the standard month
+   * less her absent working days — while the TOTALS keep dividing by the whole
+   * standard month, so they stay comparable across people and months. Recording
+   * an absence does not create work, so organisation demand must not move, but
+   * that person's saturation must. The declared consequence is
+   * `Σ cell.ftePlanned ≠ totals.demandFtePlanned`.
+   *
+   * This screen puts those two numbers in the same table, one directly under the
+   * other. Two numbers side by side that do not reconcile, with nothing saying
+   * why, is a defect however correct each one is on its own — so the divergence
+   * is DECLARED, and declared only where it is real.
+   *
+   * DERIVED, NOT FLAGGED: `/capacity/monthly` carries no absence marker (a
+   * `CapacityCell` has no state), and asking for one would mean a second read of
+   * data whose audience this screen is not in. The discrepancy is its own
+   * evidence — and being computed from the rendered figures it cannot drift from
+   * them, which a separately-fetched flag could. Only `rows` (internal) are
+   * summed: `demandRows` land in `demandFteUncovered`, a different total.
+   */
+  protected proRatedMonths = computed<string[]>(() => {
+    const value = this.envelope();
+    return value.months.filter((m) => {
+      const total = value.totals[m]?.demandFtePlanned;
+      if (total === undefined) return false;
+      const summed = value.rows.reduce((acc, r) => acc + (r.monthly[m]?.ftePlanned ?? 0), 0);
+      return Math.abs(summed - total) > FTE_SUM_TOLERANCE;
+    });
+  });
+
+  /** The divergent months, spelled out for the note under the grid. */
+  protected proRatedMonthsLabel = computed<string>(() =>
+    this.proRatedMonths().map((m) => this.monthLabelLong(m)).join(', '),
+  );
+
   /** Per-month totals row: confirmed/planned demand vs capacity FTE. */
   protected totalsRow = computed<TotalsVm[]>(() => {
     const value = this.envelope();
+    const proRated = new Set(this.proRatedMonths());
     return value.months.map((m) => {
       const t = value.totals[m];
       return {
@@ -585,6 +667,7 @@ export class CapacityComponent {
         confirmed: t?.demandFteConfirmed ?? 0,
         planned: t?.demandFtePlanned ?? 0,
         capacity: t?.capacityFte ?? 0,
+        proRated: proRated.has(m),
       };
     });
   });
