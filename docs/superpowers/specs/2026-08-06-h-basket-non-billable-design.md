@@ -509,13 +509,63 @@ Un file, un proprietario. I file toccati in parallelo da altri branch (`bench.ut
 | **T8** | UI di registrazione assenza + classificazione progetto (schermate ristrette per ruolo) | nuovo componente sotto `src/app/`, `src/app/app.routes.ts`, `src/app/guards/role.guard.ts` | T6 |
 | **T9** | Smoke + documentazione | `scripts/smoke-api.mjs`, `docs/roles-and-permissions.md`, `docs/rpt-comparison.md` (righe 54-55, riquadro, sintesi) | T6, T7 |
 
-**Il camminamento critico è T1 → T3 → T4 → T6 → T7.** T2 e T5 si agganciano presto e in parallelo. **Q1 va risposta prima di T4; Q5 prima di T6; Q2/Q3/Q4 prima di T5/T7** (§10).
+**Il camminamento critico è T1 → T3 → T4 → T6 → T7.** T2 e T5 si agganciano presto e in parallelo. Le cinque domande di prodotto sono state **decise il 2026-08-07** (§10): nessun task è bloccato da una decisione. Due note del piano che le decisioni cambiano: **T4 conta giorni lavorativi, non mesi** (Q1), e **T6 non deve costruire la redazione per campo** nell'audit (Q5).
 
 ---
 
-## 10. Domande di prodotto aperte
+## 10. Domande di prodotto — DECISE dall'utente il 2026-08-07
 
-Cinque. Nessuna è decisa qui: tutte muovono numeri visibili o toccano la privacy.
+**Tutte e cinque risposte. Nessun task è più bloccato da una decisione di prodotto.** Le risposte sono qui sotto in testa a ciascuna domanda; il testo originale delle opzioni resta come contesto del perché.
+
+| Q | Decisione | Effetto sul piano |
+|---|---|---|
+| **Q1** | **Giorni lavorativi esatti**, non mesi interi | Sblocca T4 e **cancella la variante che toccava lo schema**: contando i giorni, la causale non entra mai nell'aritmetica, quindi la proiezione oscurata del §3.4 resta sufficiente così com'è. T1 non cambia |
+| **Q2** | Margine **fully loaded** (include il costo non fatturabile) | Sblocca T5 |
+| **Q3** | Assente **fuori dal numeratore, dentro il denominatore** | Sblocca T7 |
+| **Q4** | Assente **marcato in modo distinto** sul grafico di `/reporting` | Sblocca T7 |
+| **Q5** | `delivery-executive` **entra nell'audience** della causale | Sblocca T6, **senza** costruire la redazione per campo |
+
+### Q1 — DECISO: giorni lavorativi esatti
+
+**La domanda posta era mal impostata, e l'utente l'ha smontata.** Chiedeva se un mese di assenza spezzasse la serie, dando per scontata l'unità **mese** — eredità delle etichette di RPT (A/B/C/D come «dal mese successivo / <1 mese / 1-2 mesi / >2 mesi») e dell'unità di pianificazione (`assignment_months`, `planning_periods`). Le tre opzioni che ne derivavano erano tutte cattive: una gonfia i bucket C/D con le ferie, una li deflaziona, la terza chiede di inventare una soglia.
+
+Sono cattive perché la premessa era sbagliata. **Il dato a giorni esiste già**: `unallocatedDays` per risorsa-mese è atterrato su `main` il 2026-08-07 (commit `23ffe08`).
+
+Contando i giorni il dilemma svanisce: **un giorno di assenza contribuisce zero giorni di inattività**, perché la persona non era staffabile. Non gonfia e non spezza. Ferma da gennaio più 20 giorni di ferie ad agosto ⇒ i 20 giorni semplicemente non contano, e la serie continua da dove era. Chi rientra da un congedo lungo riparte dai giorni di inattività che aveva accumulato **prima** del congedo — zero, se era allocata.
+
+Conseguenze per T4:
+- I bucket restano etichettati A/B/C/D (è il linguaggio che gli utenti RPT riconoscono) ma sono calcolati su **giorni lavorativi consecutivi di inattività**, non su mesi consecutivi `BENCH`.
+- Le soglie vanno espresse in giorni lavorativi come **costanti nominate e documentate**, ancorate a «circa un mese lavorativo»: B fino a ~21, C 21-42, D oltre 42. Da fissare leggendo come `employedWorkingDays` conta un mese tipico, **non** hardcodando 21 senza derivarlo.
+- Contare **giorni** e non **ore** gestisce il part-time da sé: chi lavora 4 ore al giorno e non è staffato è inattivo quel giorno quanto un full-time.
+- `reasonCode` **non** entra nell'aritmetica. La variante schema è chiusa.
+
+### Q2 — DECISO: fully loaded
+
+Il costo del lavoro non fatturabile **entra** nel margine di portafoglio. Il margine scende e riflette il costo vero dell'azienda.
+
+**Conseguenza da gestire in T5, non da scoprire dopo:** il numero non è più confrontabile con il margine di delivery dei singoli progetti, e qualcuno farà quel confronto. La tile deve dire *fully loaded* nell'etichetta, non solo nella didascalia, e il documento di reporting va aggiornato di conseguenza.
+
+### Q3 — DECISO: fuori dal numeratore, dentro il denominatore
+
+La correzione è monodirezionale: la percentuale di bench **scende sempre**, che è facile da spiegare.
+
+**Il vincolo del §8 resta valido e obbligatorio:** il pannello deve mostrare il **conteggio degli assenti** accanto alle percentuali. Con questa scelta il denominatore include persone che non potevano essere staffate, quindi senza quel numero a fianco la percentuale è più difficile da giustificare, non più facile.
+
+### Q4 — DECISO: marcato in modo distinto
+
+Ogni persona resta sul grafico, con barra distinta e motivo leggibile dello 0%.
+
+**Conseguenza accettata:** la platea di `/reporting` (`canViewPortfolioDashboard()`) vede **chi** è via. Non perché — la causale non compare qui. La didascalia va aggiornata.
+
+### Q5 — DECISO: `delivery-executive` entra nell'audience della causale
+
+Coerenza fra i due percorsi senza costruire meccanismi nuovi: nessuna redazione per campo nel middleware di audit.
+
+**Va registrato come decisione consapevole, non come dimenticanza.** L'accesso a un dato di categoria particolare si allarga deliberatamente da `admin` a `admin` + `delivery-executive`. T6 deve scriverlo in `docs/roles-and-permissions.md` accanto alla regola, con la data e il fatto che è una scelta di prodotto — così una revisione futura trova il perché e non un buco.
+
+---
+
+### Testo originale delle cinque domande (contesto delle decisioni sopra)
 
 ### Q1 — Un mese di assenza spezza la serie di inattività, o è trasparente?
 
