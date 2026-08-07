@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { inflateRawSync } from 'node:zlib';
+import { readFileSync, readdirSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   escapeCsv,
   toCsv,
@@ -480,5 +482,43 @@ describe('export.util — downloadXlsx (SSR safety)', () => {
     expect(blobs).toHaveLength(1);
     expect(blobs[0].type).toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     expect(blobs[0].size).toBeGreaterThan(0);
+  });
+});
+
+// =============================================================================
+// The warm-up above is a protection a future edit can silently remove: delete it,
+// or add a THIRD spec file that calls buildXlsx without one, and the flake comes
+// back with nothing to notice. So the convention is scanned, not trusted.
+//
+// This is the absence assertion for the fix itself. Every other test in these two
+// files would stay green while the exposure quietly returned.
+// =============================================================================
+describe('every spec that builds a workbook pays the exceljs load up front', () => {
+  const SERVICES_DIR = resolve(__dirname);
+
+  /** Spec files in this directory that actually CALL buildXlsx (not just mention it). */
+  function specsCallingBuildXlsx(): string[] {
+    return readdirSync(SERVICES_DIR)
+      .filter(f => f.endsWith('.spec.ts'))
+      .filter(f => /\bbuildXlsx\s*\(/.test(readFileSync(resolve(SERVICES_DIR, f), 'utf8')));
+  }
+
+  it('finds the callers it is meant to guard — the scan is not vacuously empty', () => {
+    // Without this, a broken glob would make the guard below pass over zero files.
+    const callers = specsCallingBuildXlsx();
+    expect(callers).toContain('export.util.spec.ts');
+    expect(callers).toContain('rpt-xlsx.util.spec.ts');
+  });
+
+  it('every one of them warms the module before its first test', () => {
+    const missing = specsCallingBuildXlsx().filter(f => {
+      const src = readFileSync(resolve(SERVICES_DIR, f), 'utf8');
+      // A beforeAll that calls buildXlsx, with an explicit timeout: the default
+      // 5000ms would make the warm-up itself the thing that times out.
+      return !/beforeAll\(\s*async[\s\S]{0,200}?buildXlsx\([\s\S]{0,80}?\}\s*,\s*\d/.test(src);
+    });
+    expect(missing,
+      'these specs call buildXlsx with no warm-up, so whichever of their tests runs first pays the 5-9s module load'
+    ).toStrictEqual([]);
   });
 });
