@@ -1,7 +1,7 @@
 # Lutech RPT vs Delivery Control — comparativa side by side
 
 _Fonte lato RPT: **Manuale Utente Resource Planning Tool (RPT), v04 del 07/07/2026**, 49 pagine, letto integralmente._
-_Fonte lato nostro: **il codice su `main`**, verificato riga per riga il 2026-08-06 e riverificato dopo la prima wave di chiusura il 2026-08-07 — 45 tabelle, 19 migrazioni, 48 rotte, **2072 test unitari** su 109 file, 732 check smoke API. Non la roadmap, non la memoria di sessione (che su due punti si è rivelata già superata)._
+_Fonte lato nostro: **il codice su `main`**, verificato riga per riga il 2026-08-06 e riverificato dopo la prima wave di chiusura il 2026-08-07 — **2378 test unitari** su 114 file, 790 check smoke API (792 e un solo skip su Postgres). 46 tabelle, 20 migrazioni, 50 rotte. Non la roadmap, non la memoria di sessione (che su due punti si è rivelata già superata)._
 
 ---
 
@@ -113,10 +113,14 @@ Quindi la domanda "chi è meglio" ha **tre risposte diverse** a seconda di cosa 
 
 | # | RPT | Delivery Control | Stato |
 |---|---|---|---|
-| 54 | commessa **BASKET** per maternità e congedi parentali, ferie, AMS, gruppi tecnici, malattia, indisposizione; creata **solo in RPT**, non in PCP/InforLN; una per Practice; per SW Factory / AMS / GCC anche piani annuali su base storica | **nessun concetto di progetto non fatturabile né di assenza/ferie per risorsa**: `projects` non ha campo type/basket/billable, e non esiste una tabella di assenze | **MANCA** |
-| 55 | wizard **Crea Nuova Commessa Basket** (codice, cliente preimpostato, descrizione, tipo preimpostato BASKET, validità, capability, practice, PM, CDE, EM) + notifica email ai ruoli indicati | assente | **MANCA** |
+| 54 | commessa **BASKET** per maternità e congedi parentali, ferie, AMS, gruppi tecnici, malattia, indisposizione; creata **solo in RPT**, non in PCP/InforLN; una per Practice; per SW Factory / AMS / GCC anche piani annuali su base storica | **DUE entità, non una**: `projects.billable` + `type` per AMS, gruppi tecnici, SW Factory e GCC (commesse vere che non fatturano), e la tabella `resource_absences` con intervallo e causale per maternità, congedi, ferie e malattia (fatti della **persona**, non progetti) | **AVANTI** — la ragione è aritmetica, non tassonomica: chi è a tempo pieno su AMS è **già** ALLOCATO, quindi il bench su di lei è giusto e il margine sbagliato; chi è in maternità non ha prenotazioni, quindi il bench è sbagliato e il margine non c'entra. Una sola entità non può correggere entrambe. In più la causale è un dato di categoria particolare, e modellarla come prenotazione su un progetto (la scelta di RPT) la renderebbe leggibile a chiunque veda un'allocazione |
+| 55 | wizard **Crea Nuova Commessa Basket** (codice, cliente preimpostato, descrizione, tipo preimpostato BASKET, validità, capability, practice, PM, CDE, EM) + notifica email ai ruoli indicati | due schermate: `/project-classification` (`delivery-executive`, `finance`, `admin`) e `/absences` (scrittura `resource-manager` + `admin`) | PARI — senza la notifica email (riga 43). La UI **impedisce di comporre lo stato invalido** invece di lasciarlo rifiutare al server: scegliere Basket blocca la fatturabilità con la ragione visibile, e la SoD («non puoi registrare la tua assenza») disabilita il salvataggio **prima** del click invece di far scoprire un 403 |
 
-> **Questo è l'unico gap con una conseguenza numerica immediata.** Senza commesse BASKET, una persona in maternità o in ferie risulta BENCH: i nostri numeri di unchargeable **sovrastimano l'inattività**, e le categorie C e D si popolano di casi che non sono un problema di delivery. Il difetto non è "manca una feature": è che una metrica che già mostriamo è falsa in quei casi.
+> **Era l'unico gap con una conseguenza numerica immediata, ed è chiuso.** Senza commesse BASKET una persona in maternità o in ferie risultava BENCH: i numeri di unchargeable sovrastimavano l'inattività e le categorie C e D si popolavano di casi che non erano problemi di delivery.
+>
+> Misurato sul seed, prima e dopo: Marco Belli leggeva `BENCH` per sei mesi con bucket `B C D D D D`; ora legge `ABSENT` a giugno, luglio e agosto — **tre bucket `D` falsi rimossi** — e settembre resta `D` perché un giorno di assenza contribuisce **zero** giorni di inattività (decisione Q1), quindi la serie pre-congedo continua invece di azzerarsi. `/bench` diceva anche «Available: 7 agosto 2026» per un uomo in congedo per tutto agosto: ora dice `2026-09-01`.
+>
+> Restano fuori due cose, dichiarate: **`capacityForecast` e `skillGap`** sovrastimano ancora la capacità settimanale per chi è assente (registro P1-17/P1-18) — su `/what-if` il KPI del bench e quello dell'utilizzo medio stanno nella stessa riga di tile e dissentono sulla stessa persona; e il modello **non ha un workflow di richiesta ferie**, perché una scrittura self-service permetterebbe a chiunque di togliersi dal bench.
 
 ### 3.7 Integrazioni con i sistemi di record (manuale §1.1, §3.2.4, §7.1)
 
@@ -153,20 +157,21 @@ Su **56 capacità di RPT** valutate una per una contro il codice:
 
 | Stato | Righe | Quota | vs. prima wave |
 |---:|---:|---|---|
-| **PARI** | 23 | 41% | +3 |
-| **AVANTI** | 14 | 25% | +3 |
+| **PARI** | 24 | 43% | +4 |
+| **AVANTI** | 15 | 27% | +4 |
 | **PARZIALE** | 11 | 20% | −1 |
-| **MANCA** | 8 | 14% | **−5** |
+| **MANCA** | 6 | 11% | **−7** |
 
-**37 su 56 (66%) coperte o superate. 11 parziali. 8 mancanti.** Più 14 aree che RPT non ha affatto.
+**39 su 56 (70%) coperte o superate. 11 parziali. 6 mancanti.** Più 14 aree che RPT non ha affatto.
 
 _Aggiornato il 2026-08-07, dopo la prima wave di chiusura: XLSX Pianificazione e Allocazione (righe 24 e 44) da MANCA a PARI, Unchargeable (53) da MANCA a PARZIALE, strip disponibilità sulla card (13) e auto-avanzamento dell'approvazione multipla (40) da PARZIALE ad AVANTI, percentuale di disallocazione (50) da MANCA ad AVANTI e storico mensile per risorsa (51) da MANCA a PARI. Le faccette (11) restano PARZIALE con due esclusioni motivate._
 
-Gli 8 gap residui, in chiaro:
+_Aggiornato di nuovo il 2026-08-07 a **blocco H completo** (BASKET/non fatturabile + assenze, T1-T8): righe 54 e 55 da MANCA ad AVANTI e a PARI. È il gap che rendeva falsi numeri già a schermo, e la sua conseguenza è ora misurata come chiusa nel riquadro sotto._
+
+I 6 gap residui, in chiaro:
 
 | Gap | Peso |
 |---|---|
-| commesse **BASKET** / non fatturabile (+ assenze) | **bloccante** — rende falsa una metrica che già mostriamo. Progettato: `docs/superpowers/specs/2026-08-06-h-basket-non-billable-design.md`, con 5 domande di prodotto aperte |
 | **deleghe** + act-as | **bloccante** — necessità operativa quotidiana (ferie, handover), e tocca il confine di autenticazione |
 | **integrazioni live** con Zucchetti / PCP / InforLN / People Portal / ServiceNow | **bloccante** — dipende da terzi, non solo da noi |
 | ServiceNow hiring demand + linkage del codice RES sul dummy | alto |
@@ -175,7 +180,9 @@ Gli 8 gap residui, in chiaro:
 | codici risorsa leggibili e digitabili | medio — è una colonna `code` additiva, **non** un cambio di id: `resources.id` è referenziato per FK da assignment, time entry e mesi di allocazione, e compare nei path dell'audit trail |
 | schermata Storico sull'audit trail che **già abbiamo** | basso — è solo una vista |
 
-Degli 8, **due sono progetti veri** (BASKET/non fatturabile con le assenze; deleghe con act-as e provisioning), **uno dipende da terzi** (le 5 integrazioni), **cinque sono piccoli e ben delimitati** — e di questi, uno (Storico dell'audit trail) è solo una superficie su dati che già abbiamo.
+I sei sono, per numero di riga: i18n IT/EN (2), deleghe (7), codici risorsa leggibili (10), demand ServiceNow con il codice RES (29), notifiche email (43), integrazioni live (56). **Uno è un progetto vero** — le deleghe, perché toccano il confine di autenticazione e la SoD deve decidere se valutare il delegato o il delegante. **Due dipendono da terzi**: le integrazioni live e la demand ServiceNow, che ne è un pezzo. **Tre sono piccoli e ben delimitati**: i18n, i codici leggibili (una colonna `code` additiva, mai un cambio di id) e le notifiche email.
+
+Fra i parziali, il più economico resta la **schermata Storico**: l'audit trail esiste già ed è più ricco di quello di RPT — manca solo una vista che lo legga.
 
 ---
 

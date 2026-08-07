@@ -664,6 +664,28 @@ export interface ResourceAbsence {
  * `delete`-ing a key off them. That is spec §6.1's "a projection built in the
  * handler" turned into something the compiler checks.
  */
+/**
+ * What `POST`/`PUT /absences` answer with: the stored row, plus the days it now
+ * overlaps that already carried bookings.
+ *
+ * The asymmetry is deliberate and is the inverse of the booking gate: a NEW
+ * BOOKING on an absent day is REFUSED (400), while a NEW ABSENCE over booked days
+ * is ACCEPTED and reports the conflict. Which direction is safe depends on which
+ * of the two facts is already true in the world — the absence has happened, the
+ * booking is still a plan, and refusing the absence would leave the system
+ * declaring somebody present who is not.
+ *
+ * It belongs to the WRITE RESPONSE, not to `ResourceAbsence`: it is computed at
+ * the moment of the write against the bookings that existed then, and is not a
+ * property of the stored row. `GET /absences` does not carry it.
+ *
+ * Always present, including empty — omitting it on "no conflicts" would make that
+ * indistinguishable from "not computed".
+ */
+export interface AbsenceWriteResult extends ResourceAbsence {
+  bookedDayConflicts: { date: string; hours: number }[];
+}
+
 export type RedactedAbsence =
   Pick<ResourceAbsence, 'id' | 'resourceId' | 'startDate' | 'endDate'>
   & { reasonCode?: never; note?: never; recordedBy?: never };
@@ -1283,13 +1305,20 @@ export class ApiService {
     return this.http.get<ResourceAbsence[]>(`${this.baseUrl}/absences`);
   }
 
-  /** `recordedBy`/`recordedAt` are pinned server-side from the verified actor and
-   *  are never read from this body, so `Partial` cannot smuggle them. */
-  createAbsence(a: Partial<ResourceAbsence>): Observable<ResourceAbsence> {
-    return this.http.post<ResourceAbsence>(`${this.baseUrl}/absences`, a);
+  /**
+   * `recordedBy`/`recordedAt` are pinned server-side from the verified actor and
+   * are never read from this body, so `Partial` cannot smuggle them.
+   *
+   * The response is the row PLUS `bookedDayConflicts`, and the declared type has
+   * to say so: typed as `Observable<ResourceAbsence>` — as it was when T8 needed
+   * it — a caller written to the declared type drops the field silently, and the
+   * whole reason the write is ACCEPTED rather than refused is lost.
+   */
+  createAbsence(a: Partial<ResourceAbsence>): Observable<AbsenceWriteResult> {
+    return this.http.post<AbsenceWriteResult>(`${this.baseUrl}/absences`, a);
   }
-  updateAbsence(id: string, a: Partial<ResourceAbsence>): Observable<ResourceAbsence> {
-    return this.http.put<ResourceAbsence>(`${this.baseUrl}/absences/${id}`, a);
+  updateAbsence(id: string, a: Partial<ResourceAbsence>): Observable<AbsenceWriteResult> {
+    return this.http.put<AbsenceWriteResult>(`${this.baseUrl}/absences/${id}`, a);
   }
   deleteAbsence(id: string): Observable<void> {
     return this.http.delete<void>(`${this.baseUrl}/absences/${id}`);
