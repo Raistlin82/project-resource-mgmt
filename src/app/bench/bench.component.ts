@@ -61,7 +61,8 @@ interface BenchPageData {
               <div class="command-card-header">
                 <div>
                   <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Internal</h2>
-                  <p class="mt-1 text-sm text-[var(--cc-muted)]">{{ internalBenchCount() }} on bench &middot; {{ internalBenchPct() | number:'1.0-0' }}% of active</p>
+                  <p class="mt-1 text-sm text-[var(--cc-muted)]">{{ internalBenchCount() }} on bench &middot; {{ internalBenchPct() | number:'1.0-0' }}% of active &middot;
+                    <span data-test="internal-away-count" [title]="AWAY_COUNT_HINT">{{ internalAbsentCount() }} away</span></p>
                 </div>
                 <span class="command-status" [class.red]="internalBenchCount() > 0" [class.green]="internalBenchCount() === 0">{{ internalBenchCount() }}</span>
               </div>
@@ -80,7 +81,7 @@ interface BenchPageData {
                     @for (row of internalRows(); track row.resourceId) {
                       <tr>
                         <td><ng-container [ngTemplateOutlet]="nameCell" [ngTemplateOutletContext]="{ row }" /></td>
-                        <td><span class="command-status" [class.red]="cellState(row) === 'BENCH'" [class.amber]="cellState(row) === 'PARTIAL'" [class.green]="cellState(row) === 'ALLOCATED'">{{ cellState(row) }}{{ agingSuffix(row) }}</span></td>
+                        <td><ng-container [ngTemplateOutlet]="stateChip" [ngTemplateOutletContext]="{ state: cellState(row), suffix: agingSuffix(row), key: row.resourceId }" /></td>
                         <td class="num"><ng-container [ngTemplateOutlet]="unallocatedCell" [ngTemplateOutletContext]="{ row }" /></td>
                         <td>@if (isFreeingUp(row)) { <span class="command-status amber">Freeing up next month</span> }</td>
                         <td class="font-mono tabular-nums">{{ availabilityLabel(row.availabilityDate) }}</td>
@@ -100,7 +101,8 @@ interface BenchPageData {
               <div class="command-card-header">
                 <div>
                   <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Subcontractors</h2>
-                  <p class="mt-1 text-sm text-[var(--cc-muted)]">{{ subcoBenchCount() }} on bench &middot; {{ subcoBenchPct() | number:'1.0-0' }}% of active</p>
+                  <p class="mt-1 text-sm text-[var(--cc-muted)]">{{ subcoBenchCount() }} on bench &middot; {{ subcoBenchPct() | number:'1.0-0' }}% of active &middot;
+                    <span data-test="subco-away-count" [title]="AWAY_COUNT_HINT">{{ subcoAbsentCount() }} away</span></p>
                 </div>
                 <span class="command-status" [class.red]="subcoBenchCount() > 0" [class.green]="subcoBenchCount() === 0">{{ subcoBenchCount() }}</span>
               </div>
@@ -119,7 +121,7 @@ interface BenchPageData {
                     @for (row of subcoRows(); track row.resourceId) {
                       <tr>
                         <td><ng-container [ngTemplateOutlet]="nameCell" [ngTemplateOutletContext]="{ row }" /></td>
-                        <td><span class="command-status" [class.red]="cellState(row) === 'BENCH'" [class.amber]="cellState(row) === 'PARTIAL'" [class.green]="cellState(row) === 'ALLOCATED'">{{ cellState(row) }}{{ agingSuffix(row) }}</span></td>
+                        <td><ng-container [ngTemplateOutlet]="stateChip" [ngTemplateOutletContext]="{ state: cellState(row), suffix: agingSuffix(row), key: row.resourceId }" /></td>
                         <td class="num"><ng-container [ngTemplateOutlet]="unallocatedCell" [ngTemplateOutletContext]="{ row }" /></td>
                         <td>@if (isFreeingUp(row)) { <span class="command-status amber">Freeing up next month</span> }</td>
                         <td class="font-mono tabular-nums">{{ availabilityLabel(row.availabilityDate) }}</td>
@@ -184,15 +186,77 @@ interface BenchPageData {
         </button>
       </ng-template>
 
-      <!-- An ABSENT percentage is rendered as "n/a", never as 0%: the value is
-           absent exactly when the resource has no contracted target for the
-           month, and "0% unallocated" would claim they are fully allocated. -->
+      <!-- A MISSING percentage is rendered as "n/a", never as 0%: the value is
+           absent exactly when the resource has no target for the month, and
+           "0% unallocated" would claim they are fully allocated.
+           H adds a SECOND reason for a 0 target — a month the person was away
+           for entirely (bench.util.ts's own note on BenchCell.unallocatedPct) —
+           and noTargetReason() names whichever one applies, because "nobody
+           contracted them" and "they were not here" are opposite facts, and one
+           tooltip claiming the first for the second is a small lie the reader
+           has no way to check. -->
       <ng-template #unallocatedCell let-row="row">
         @if (unallocatedPctOf(row) !== undefined) {
           <span class="font-mono tabular-nums" [attr.data-test]="'unallocated-pct-' + row.resourceId">{{ unallocatedPctOf(row) | number:'1.0-2' }}%</span>
         } @else {
           <span class="text-[var(--cc-muted)]" [attr.data-test]="'unallocated-pct-' + row.resourceId"
-                title="No contracted target for this month, so the unallocated share cannot be computed.">n/a</span>
+                [title]="noTargetReason(row)">n/a</span>
+        }
+      </ng-template>
+
+      <!-- THE ONE PRESENTATION OF A BENCH STATE ON THIS PAGE — used by both
+           section tables AND by the history panel, so /bench cannot render the
+           same fact three ways. Three outcomes are kept apart because they are
+           three different facts and collapsing any pair is the defect this
+           codebase keeps re-paying:
+             FREE      — BENCH, the red/amber/green pill with the state spelled out;
+             AWAY      — ABSENT, the info tone below;
+             NOT KNOWN — no cell in the rollup for this month at all, a grey en
+                         dash. It used to render an EMPTY pill, which reads as a
+                         rendering bug rather than as "we have nothing for this
+                         month", and sat one glance away from ABSENT.
+
+           ABSENT's treatment is COPIED, not invented:
+           staffing/availability-strip.component.ts already fixed glyph 'L' (the
+           initial of "leave" — 'A' was taken by ALLOCATED) and the label below,
+           on tones measured at 6.15:1 light / 7.24:1 dark. Four surfaces
+           rendering one state four ways is worse than any one of the four.
+
+           "command-chip is-info" rather than the literal "bg-info-tint
+           text-info-text ring-info" the strip carries, and that is a cascade
+           fact rather than a preference: those utilities live in Tailwind's
+           utilities LAYER while .command-status is UNLAYERED CSS in styles.css,
+           and unlayered normal declarations beat layered ones — so the utility
+           triplet would sit in the class list, satisfy any class-name
+           assertion, and render the accent pill anyway. .command-chip.is-info
+           resolves to exactly --color-info-tint / --color-info-text /
+           --color-info, is the same pill idiom (styles.css says so where the two
+           primitives are defined), and needs no important modifier to win.
+
+           WCAG 1.4.1: colour is never the only signal. The glyph is visible
+           text, the state is spelled out beside it, and role="img" plus an
+           aria-label give a screen reader the words rather than the letter.
+
+           THE LABEL NAMES NO CAUSE, and that is a privacy requirement (spec
+           §7.3), not a style choice: absence reasons are special-category data,
+           BenchCell cannot carry one and /bench/monthly does not transmit one.
+           Do not add a field to pass it in. -->
+      <ng-template #stateChip let-state="state" let-suffix="suffix" let-key="key">
+        @switch (state) {
+          @case ('ABSENT') {
+            <span class="command-chip is-info" [attr.data-test]="'state-' + key"
+                  role="img" [attr.aria-label]="ABSENT_LABEL" [title]="ABSENT_LABEL">
+              <span aria-hidden="true" class="font-bold">{{ ABSENT_GLYPH }}</span> ABSENT
+            </span>
+          }
+          @case ('') {
+            <span class="command-chip is-neutral" [attr.data-test]="'state-' + key"
+                  role="img" [attr.aria-label]="UNTRACKED_LABEL" [title]="UNTRACKED_LABEL">{{ UNTRACKED_GLYPH }}</span>
+          }
+          @default {
+            <span class="command-status" [attr.data-test]="'state-' + key"
+                  [class.red]="state === 'BENCH'" [class.amber]="state === 'PARTIAL'" [class.green]="state === 'ALLOCATED'">{{ state }}{{ suffix }}</span>
+          }
         }
       </ng-template>
 
@@ -234,7 +298,7 @@ interface BenchPageData {
               @for (cell of historyCells(); track cell.month) {
                 <tr [attr.data-test]="'history-row-' + cell.month">
                   <td class="font-mono tabular-nums">{{ monthLabel(cell.month) }}</td>
-                  <td><span class="command-status" [class.red]="cell.state === 'BENCH'" [class.amber]="cell.state === 'PARTIAL'" [class.green]="cell.state === 'ALLOCATED'">{{ cell.state }}{{ cell.agingBucket ? ' (' + cell.agingBucket + ')' : '' }}</span></td>
+                  <td><ng-container [ngTemplateOutlet]="stateChip" [ngTemplateOutletContext]="{ state: cell.state, suffix: cell.agingBucket ? ' (' + cell.agingBucket + ')' : '', key: cell.month }" /></td>
                   <td class="num font-mono tabular-nums">{{ cell.unallocatedDays !== undefined ? (cell.unallocatedDays | number:'1.0-2') : 'n/a' }}</td>
                   <td class="num font-mono tabular-nums">{{ cell.unallocatedPct !== undefined ? (cell.unallocatedPct | number:'1.0-2') + '%' : 'n/a' }}</td>
                 </tr>
@@ -249,6 +313,31 @@ interface BenchPageData {
 export class BenchComponent {
   private readonly api = inject(ApiService);
   private readonly auth = inject(AuthService);
+
+  /**
+   * ABSENT's canonical presentation, transcribed from `staffing/
+   * availability-strip.component.ts` — the one surface that already shipped it —
+   * so /bench and /staffing name the same state with the same word. 'L' for
+   * leave, because 'A' was already ALLOCATED's initial. The label deliberately
+   * names NO cause (spec §7.3).
+   */
+  protected readonly ABSENT_GLYPH = 'L';
+  protected readonly ABSENT_LABEL = 'Away (on leave) — not staffable';
+  /** En dash, not em: the same character and the same words the strip uses for a
+   *  month the rollup simply does not cover. */
+  protected readonly UNTRACKED_GLYPH = '–';
+  protected readonly UNTRACKED_LABEL = 'No bench state for this month (not tracked)';
+  /**
+   * Why the away count sits beside the percentage rather than instead of it.
+   * Q3 (spec §10) put an absent person OUT of the numerator and left them IN the
+   * denominator, so the figure only ever falls — but the denominator now contains
+   * people nobody could have staffed, and a percentage whose denominator you
+   * cannot see is harder to defend, not easier. This is the number that makes it
+   * checkable.
+   */
+  protected readonly AWAY_COUNT_HINT =
+    'Away (on leave) this month. Not counted on bench, but still counted in the "% of active" '
+    + 'denominator — so the percentage falls while somebody is away, and this is the figure that says by how much.';
 
   private static readonly EMPTY: BenchPageData = { rollup: EMPTY_BENCH_ROLLUP, hoursPerDay: 8, holidays: [] };
   private static readonly DATE_FMT = new Intl.DateTimeFormat('en-US', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
@@ -368,10 +457,45 @@ export class BenchComponent {
     return row.monthly[this.currentMonth()]?.unallocatedPct;
   }
 
+  /**
+   * Which of the TWO reasons a share is unanswerable applies to this row, for the
+   * "n/a" cell's tooltip. `bench.util.ts` documents both on
+   * `BenchCell.unallocatedPct`: no contracted target at all, or (H) a month spent
+   * entirely away, in which case none of it was staffable and "how much of it is
+   * unfilled" has no answer. Naming the wrong one would be a claim the reader
+   * cannot check — and the away case is now the more common of the two.
+   */
+  noTargetReason(row: BenchRow): string {
+    return this.cellState(row) === 'ABSENT'
+      ? 'Away for the whole month, so there was no staffable target to take a share of.'
+      : 'No contracted target for this month, so the unallocated share cannot be computed.';
+  }
+
   readonly internalRows = computed<BenchRow[]>(() => this.rollup().internalRows);
   readonly subcoRows = computed<BenchRow[]>(() => this.rollup().subcoRows);
   readonly hiringDemand = computed(() => this.rollup().hiringDemand);
 
+  /**
+   * The two "% on bench" figures, under product decision Q3 (spec §10): somebody
+   * away is OUT of the numerator and IN the denominator.
+   *
+   * NEITHER line below changes for that, and the fact that they do not is the
+   * whole argument for 'ABSENT' being a fourth STATE rather than a flag beside a
+   * three-valued one (spec §4.3):
+   *   - the numerator tests `state === 'BENCH'`, which an `'ABSENT'` cell simply
+   *     is not, so it drops out by itself — the headline correction;
+   *   - the denominator tests that a cell EXISTS, and `benchRollup` deliberately
+   *     still emits a cell for a fully-away month (B11: disappearing "would put
+   *     her back among the missing data"), so she stays counted as active.
+   * The correction is therefore monodirectional — the percentage can only fall —
+   * which is what makes it explainable. A boolean flag beside a 3-valued state
+   * would have left both lines silently unchanged AND wrong: the signature of C1.
+   *
+   * Because nothing here moved, only a DIFFERENTIAL test can show the decision is
+   * implemented at all: the same fixture, with the away rows kept in and taken out
+   * of the denominator, has to disagree. That test is in the spec beside this
+   * file; asserting 20% on its own would pass under either rule.
+   */
   readonly internalBenchCount = computed(() => this.internalRows().filter(r => r.monthly[this.currentMonth()]?.state === 'BENCH').length);
   private readonly internalActiveCount = computed(() => this.internalRows().filter(r => r.monthly[this.currentMonth()] !== undefined).length);
   readonly internalBenchPct = computed(() => (this.internalActiveCount() > 0 ? (this.internalBenchCount() / this.internalActiveCount()) * 100 : 0));
@@ -379,6 +503,17 @@ export class BenchComponent {
   readonly subcoBenchCount = computed(() => this.subcoRows().filter(r => r.monthly[this.currentMonth()]?.state === 'BENCH').length);
   private readonly subcoActiveCount = computed(() => this.subcoRows().filter(r => r.monthly[this.currentMonth()] !== undefined).length);
   readonly subcoBenchPct = computed(() => (this.subcoActiveCount() > 0 ? (this.subcoBenchCount() / this.subcoActiveCount()) * 100 : 0));
+
+  /**
+   * The count Q3 makes MANDATORY beside each percentage — see {@link AWAY_COUNT_HINT}.
+   *
+   * DERIVED from the rows, never read from the payload. `BenchRollup` gains no
+   * total for this on purpose (`bench.util.ts`'s note on `EMPTY_BENCH_ROLLUP`):
+   * a second number that can disagree with the first is worse than no number, and
+   * four states make the count derivable by any consumer.
+   */
+  readonly internalAbsentCount = computed(() => this.internalRows().filter(r => r.monthly[this.currentMonth()]?.state === 'ABSENT').length);
+  readonly subcoAbsentCount = computed(() => this.subcoRows().filter(r => r.monthly[this.currentMonth()]?.state === 'ABSENT').length);
 
   cellState(row: BenchRow): string {
     return row.monthly[this.currentMonth()]?.state ?? '';
