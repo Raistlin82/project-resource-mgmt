@@ -948,6 +948,91 @@ describe('forecast.util — H: the /what-if bench tile and the utilization tile 
   });
 });
 
+/**
+ * H — `skillGap` coverage, and the DIRECTION of the risk (spec §11).
+ *
+ * Two defects face each other and are not symmetric: declaring a shortage that does
+ * not exist costs a hiring conversation, hiding a real one costs the signal this
+ * table exists to raise and nothing else re-raises it. Narrowing `covering` can only
+ * ever flip `shortage` false → true, never the reverse, so the rule cannot suppress
+ * a shortage that exists today. The threshold — FULLY absent, never "any absent
+ * day" — is what stops it overshooting in the other direction, and it is the same
+ * threshold `BenchState = 'ABSENT'` already uses rather than a second one.
+ */
+describe('forecast.util — H: skillGap coverage counts only staffable holders', () => {
+  const goDev = (id: string) =>
+    res(id, 40, 0, [{ name: 'Go', level: 3 }], 'internal', { hireDate: '2020-01-01' });
+
+  function gapFor(resources: Resource[], absences: RedactedAbsence[], month = '2026-08') {
+    return skillGap(
+      {
+        resources,
+        requests: [req('r1', 80, 'Open', { skills: ['Go'] })],
+        assignments: [],
+        ...NO_ALLOCATION_ROWS,
+        absences,
+      },
+      month,
+    )[0];
+  }
+
+  it('stops counting the ONLY holder of a skill when she is absent all month', () => {
+    const without = gapFor([goDev('go1')], []);
+    const withRows = gapFor([goDev('go1')], [absence('go1', '2026-08-01', '2026-08-31')]);
+
+    expect(without.supplyCount).toStrictEqual(1);
+    expect(without.shortage).toStrictEqual(false);
+    // THE DIFFERENTIAL: the shortage appears, which is the signal a month with no
+    // Go developer in it should raise.
+    expect(withRows.supplyCount).toStrictEqual(0);
+    expect(withRows.shortage).toStrictEqual(true);
+  });
+
+  it('still counts a holder who is away for three days of a month', () => {
+    // THE DIRECTION-OF-RISK ASSERTION, written as an assertion because a
+    // requirement left in prose never goes red. Excluding anyone with ANY absent
+    // day would report a shortage here — a hire requisition raised because the Go
+    // developer took Tuesday to Thursday off, when she can still be booked on the
+    // month's other nineteen working days.
+    const withRows = gapFor([goDev('go1')], [absence('go1', '2026-08-18', '2026-08-20')]);
+    expect(withRows.supplyCount).toStrictEqual(1);
+    expect(withRows.shortage).toStrictEqual(false);
+  });
+
+  it('measures the absence against WORKING days, not calendar days', () => {
+    // The fixture in which the two wrong answers would otherwise coincide, made
+    // sharp: hired Friday the 28th, so her only August working days are Fri 28 and
+    // Mon 31 (29-30 are the weekend).
+    const lateHire = res('go1', 40, 0, [{ name: 'Go', level: 3 }], 'internal', { hireDate: '2026-08-28' });
+    // Both of her two days covered ⇒ fully absent ⇒ no coverage.
+    expect(gapFor([lateHire], [absence('go1', '2026-08-28', '2026-08-31')]).supplyCount).toStrictEqual(0);
+    // TWIN: an interval over the weekend in between covers neither of them, so she
+    // is still coverage. A calendar-day implementation would call this "absent".
+    expect(gapFor([lateHire], [absence('go1', '2026-08-29', '2026-08-30')]).supplyCount).toStrictEqual(1);
+  });
+
+  it('never turns an existing shortage into coverage, and never overshoots past one holder', () => {
+    // Monotonicity, asserted rather than argued: `supplyCount` can only fall, so
+    // `shortage` can only flip false → true. With two holders and one of them out
+    // the count drops to 1 and the shortage badge stays quiet — the table must not
+    // shout for a hire the org already has present.
+    const two = [goDev('go1'), goDev('go2')];
+    expect(gapFor(two, []).supplyCount).toStrictEqual(2);
+    const oneOut = gapFor(two, [absence('go1', '2026-08-01', '2026-08-31')]);
+    expect(oneOut.supplyCount).toStrictEqual(1);
+    expect(oneOut.shortage).toStrictEqual(false);
+    // ...and an interval belonging to nobody in the fixture changes nothing.
+    expect(gapFor(two, [absence('nobody', '2026-08-01', '2026-08-31')])).toStrictEqual(gapFor(two, []));
+  });
+
+  it('does not carry an absence into a month it does not cover', () => {
+    // The month-scoping twin: August off is not September off, and `asOfMonth` is
+    // still the only thing that decides which days are looked at.
+    const august = [absence('go1', '2026-08-01', '2026-08-31')];
+    expect(gapFor([goDev('go1')], august, '2026-08').shortage).toStrictEqual(true);
+    expect(gapFor([goDev('go1')], august, '2026-09').shortage).toStrictEqual(false);
+  });
+});
 
 describe('forecast.util — scenario validation and KPI tone', () => {
   it('requires a complete, ordered demand window', () => {

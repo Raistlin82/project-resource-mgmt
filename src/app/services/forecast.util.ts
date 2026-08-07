@@ -558,21 +558,58 @@ export function overAllocated(data: ForecastData, thresholdPct = 110): OverAlloc
  * of a skill `shortage` flipped from true to false, suppressing exactly the
  * hire/subcontract signal this table exists to raise. Making the parameter
  * mandatory is the point: an omitted month would silently restore that hole.
+ *
+ * H — ABSENCE IS SUBTRACTED AT THE **FULLY-ABSENT** THRESHOLD, AND THE DIRECTION
+ * OF THE RISK IS WHY (spec §11, P1-17/P1-18).
+ *
+ * Two defects face each other here and they are NOT symmetric. Declaring a
+ * shortage that does not exist wastes a hiring conversation; HIDING a real one is
+ * worse, because this table's only job is to raise the hire/subcontract signal and
+ * a suppressed signal is never re-raised by anything else. So the rule has to be
+ * one that can only ever ADD shortages relative to the pre-H answer, never remove
+ * one — and narrowing `covering` does exactly that: `supplyCount` is monotonically
+ * non-increasing, so `shortage` (`supplyCount === 0`) can only flip false → true.
+ * No absence row can ever silence a shortage that exists today.
+ *
+ * Given that floor, the threshold is chosen NOT to overshoot. Excluding anyone
+ * with ANY absent day would report a shortage because the one Go developer took
+ * three days off in a twenty-two-day month — she can still be booked on the other
+ * nineteen, and a hire requisition is not the answer to a holiday. So a person
+ * counts as coverage unless she is absent for the WHOLE month:
+ * `availableWorkingDays(...).length === 0`.
+ *
+ * That is the SAME threshold Block H already picked for `BenchState = 'ABSENT'`
+ * (spec §4.3: "`ABSENT` è assegnato solo quando `monthAvailability` ===
+ * 'fully-absent'"), reused rather than re-derived — a second threshold for the
+ * same word is how two screens come to disagree about one person. It is also the
+ * SAME argument the employment gate below already makes, extended by one step:
+ * this is a COUNT OF PEOPLE, not a sum of hours, so there is nothing to pro-rate
+ * and the only question is whether she can work AT ALL in the month. "Employed for
+ * zero working days" and "available for zero working days" are the two ways the
+ * answer is no.
  */
 export function skillGap(data: ForecastData, asOfMonth: string): SkillGapEntry[] {
   const openRequests = data.requests.filter(isOpenRequest);
 
-  // Supply: employed resources possessing each skill (case-insensitive match).
-  // Employment is measured in DAYS here too (`employedWorkingDays`), so somebody
-  // hired on the 17th covers her skill in her hire month — she can be booked on
-  // every one of those days. The month-granular test used to answer "no", which
-  // reported a shortage the org had just hired against. This is a COUNT of people,
-  // not a sum of hours, so there is nothing to pro-rate: the question is only
-  // whether the person can work at all in the month.
+  // Supply: employed, staffable resources possessing each skill (case-insensitive
+  // match). Employment is measured in DAYS here too (`employedWorkingDays`), so
+  // somebody hired on the 17th covers her skill in her hire month — she can be
+  // booked on every one of those days. The month-granular test used to answer "no",
+  // which reported a shortage the org had just hired against. This is a COUNT of
+  // people, not a sum of hours, so there is nothing to pro-rate: the question is
+  // only whether the person can work at all in the month.
   const holidaySet: ReadonlySet<string> = new Set(data.holidays.map(h => h.id));
-  const covering = data.resources.filter(
-    r => countsTowardDeliveryCapacity(kindOf(r)) && employedWorkingDays(r, asOfMonth, holidaySet).length > 0,
-  );
+  const absences = data.absences ?? [];
+  const covering = data.resources.filter(r => {
+    if (!countsTowardDeliveryCapacity(kindOf(r))) return false;
+    const employed = employedWorkingDays(r, asOfMonth, holidaySet);
+    if (employed.length === 0) return false;
+    // H, fully-absent only — see this function's header for why the threshold is
+    // here and not at "any absent day". Passing `employed` (not the raw month)
+    // keeps the two gates composed rather than competing: a leaver's remaining days
+    // are the only ones an absence can still take away from her.
+    return availableWorkingDays(r.id, absences, employed).length > 0;
+  });
   const supplyBySkill = new Map<string, number>();
   for (const res of covering) {
     for (const s of res.skills ?? []) {
