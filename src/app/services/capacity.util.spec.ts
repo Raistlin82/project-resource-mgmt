@@ -404,3 +404,211 @@ describe('employedWorkingDays / mid-month employment in rollupMonthly', () => {
     expect(employed.length).toBe(employedWorkingDays({ hireDate: '2026-05-18' }, MONTH, NO_HOL).length - 1);
   });
 });
+
+/**
+ * H (spec §5.2). `absences` is OPTIONAL with a default of `[]`, so every fixture
+ * above keeps its exact numbers while exercising not one new line — the declared
+ * trap of §8.2. The differential case below is the only gate that can tell "the
+ * arithmetic is right" from "the parameter is never read".
+ *
+ * The fixture carries all four shapes the pro-ration needs, because a fixture
+ * where every month looks alike distinguishes nothing: a month with NO absence
+ * (April, the control), a PARTLY absent month with a non-trivial fraction (May:
+ * 16 of 21 working days gone, five left), a FULLY absent month (June), and a
+ * PART-TIMER alongside the full-timer.
+ */
+describe('rollupMonthly with absences', () => {
+  const MONTHS = ['2026-04', '2026-05', '2026-06'];
+  const HPD = 8;
+  const APR_DAYS = workingDaysInMonth('2026-04', NO_HOL).length;
+  const MAY_DAYS = workingDaysInMonth('2026-05', NO_HOL).length;
+
+  // 2026-05-01..22 swallows 16 of May's 21 working days and leaves the last week,
+  // 25-29: exactly the spec §1.2 case — present five days, booked solid on all five.
+  const MAY_LEAVE = { startDate: '2026-05-01', endDate: '2026-05-22' };
+  const MAY_AVAILABLE = 5;
+  const JUN_LEAVE = { startDate: '2026-06-01', endDate: '2026-06-30' };
+
+  const resources = [
+    { id: 'full', name: 'Full timer', contractHoursPerDay: 8 },
+    { id: 'part', name: 'Part timer', contractHoursPerDay: 4 },
+  ];
+  const assignments = [{ id: 'aF', resourceId: 'full' }, { id: 'aP', resourceId: 'part' }];
+  const assignmentMonths = [
+    { assignmentId: 'aF', month: '2026-04', status: 'Allocated' },
+    { assignmentId: 'aF', month: '2026-05', status: 'Allocated' },
+    { assignmentId: 'aP', month: '2026-04', status: 'Allocated' },
+  ];
+  const assignmentDays = [
+    { assignmentId: 'aF', date: '2026-04-01', hours: APR_DAYS * HPD },
+    { assignmentId: 'aF', date: '2026-05-25', hours: MAY_AVAILABLE * HPD },
+    { assignmentId: 'aP', date: '2026-04-01', hours: APR_DAYS * 4 },
+  ];
+  const absences = [
+    { resourceId: 'full', ...MAY_LEAVE },
+    { resourceId: 'full', ...JUN_LEAVE },
+    { resourceId: 'part', ...MAY_LEAVE },
+  ];
+  const base = { resources, assignments, assignmentDays, assignmentMonths, months: MONTHS, hoursPerDay: HPD, holidays: NO_HOL };
+  const withAbs = rollupMonthly({ ...base, absences });
+  const without = rollupMonthly({ ...base, absences: [] });
+  const cellOf = (roll: ReturnType<typeof rollupMonthly>, id: string, month: string) =>
+    roll.rows.find(r => r.resourceId === id)!.monthly[month];
+
+  it('fixture guard: the May leave really does leave exactly five working days', () => {
+    // Without this the whole file could be asserting against a window that covers
+    // the month — the "fixture that does not contain the case" failure mode.
+    expect(MAY_DAYS).toBe(21);
+    expect(workingDaysInMonth('2026-05', NO_HOL).filter(d => d > MAY_LEAVE.endDate))
+      .toEqual(['2026-05-25', '2026-05-26', '2026-05-27', '2026-05-28', '2026-05-29']);
+  });
+
+  it('DIFFERENTIAL: the same fixture with and without absence rows disagrees, and the default really is []', () => {
+    // §8.2 #1. A value assertion alone stays green when `absences` is never read;
+    // only the same input twice can show the parameter is load-bearing.
+    const omitted = rollupMonthly({ ...base });
+    expect(omitted).toStrictEqual(without);
+    expect(withAbs.rows).not.toStrictEqual(without.rows);
+    expect(withAbs.totals).not.toStrictEqual(without.totals);
+    expect(cellOf(withAbs, 'full', '2026-05').targetHours).not.toBe(cellOf(without, 'full', '2026-05').targetHours);
+    expect(withAbs.totals['2026-05'].capacityFte).toBeLessThan(without.totals['2026-05'].capacityFte);
+    expect(withAbs.totals['2026-06'].capacityFte).toBeLessThan(without.totals['2026-06'].capacityFte);
+  });
+
+  it('reads ~100% for somebody booked solid on the days she was there, not ~24%', () => {
+    const cell = cellOf(withAbs, 'full', '2026-05');
+    expect(cell.targetHours).toBe(MAY_AVAILABLE * HPD);
+    expect(cell.plannedHours).toBe(MAY_AVAILABLE * HPD);
+    expect(cell.ftePlanned).toBeCloseTo(1, 10);
+    expect(cell.band).toBe('healthy');
+    // ABSENCE TWIN — the false reading H exists to correct (spec §1.2): against the
+    // whole month those same 40h are 23.8%, which tints 'idle' and files a fully
+    // booked person under "available for reallocation".
+    expect(cell.band).not.toBe('idle');
+    expect(cellOf(without, 'full', '2026-05').band).toBe('idle');
+    expect(cellOf(without, 'full', '2026-05').targetHours).toBe(MAY_DAYS * HPD);
+  });
+
+  it('supplies only the available fraction of an FTE, and ZERO for a month taken entirely as leave', () => {
+    const only = rollupMonthly({ ...base, resources: [resources[0]], absences });
+    expect(only.totals['2026-04'].capacityFte).toBeCloseTo(1, 10);
+    expect(only.totals['2026-05'].capacityFte).toBeCloseTo(MAY_AVAILABLE / MAY_DAYS, 10);
+    expect(only.totals['2026-06'].capacityFte).toBe(0);
+    // ABSENCE TWIN: "full capacity, merely unused" is what NOT reading absences
+    // gives, and it advertises supply the API would refuse to book — spec §5.2 C6
+    // answers ZERO, the same argument the mid-month leaver comment makes.
+    expect(only.totals['2026-06'].capacityFte).not.toBeCloseTo(1, 6);
+    expect(rollupMonthly({ ...base, resources: [resources[0]], absences: [] }).totals['2026-06'].capacityFte)
+      .toBeCloseTo(1, 10);
+  });
+
+  it('keeps a fully absent person as headcount, with a cell and a zero target', () => {
+    // C7/C9: capacity falls, headcount does not — that gap is what makes "how many
+    // people" readable next to "how much capacity".
+    expect(withAbs.totals['2026-06'].resourceCount).toBe(2);
+    expect(withAbs.totals['2026-06'].resourceCount).toBe(without.totals['2026-06'].resourceCount);
+    const cell = cellOf(withAbs, 'full', '2026-06');
+    expect(cell.targetHours).toBe(0);
+    expect(cell.ftePlanned).toBe(0);
+    expect(Number.isFinite(cell.ftePlanned)).toBe(true);
+    // ABSENCE TWIN: a dropped cell is how a person on leave becomes "missing data"
+    // instead of "on leave". Only a month with NO employed day drops one.
+    expect(Object.keys(withAbs.rows.find(r => r.resourceId === 'full')!.monthly)).toContain('2026-06');
+  });
+
+  it('leaves org demand on the whole standard month while the cell pro-rates', () => {
+    // 40 booked hours are 40 booked hours: recording an absence does not create work,
+    // so the org-level demand totals must not move at all.
+    expect(withAbs.totals['2026-05'].demandFtePlanned).toBeCloseTo(without.totals['2026-05'].demandFtePlanned, 10);
+    expect(withAbs.totals['2026-05'].demandFteConfirmed).toBeCloseTo(without.totals['2026-05'].demandFteConfirmed, 10);
+    // PRESENCE TWIN: the CELL does move, so the equality above is the deliberate
+    // divergence of the two denominators, not "absences are ignored".
+    expect(cellOf(withAbs, 'full', '2026-05').ftePlanned)
+      .toBeGreaterThan(cellOf(without, 'full', '2026-05').ftePlanned);
+    // And the consequence, stated rather than discovered: cell FTE no longer sums
+    // to the total once an absence exists.
+    expect(cellOf(withAbs, 'full', '2026-05').ftePlanned)
+      .not.toBeCloseTo(withAbs.totals['2026-05'].demandFtePlanned, 6);
+  });
+
+  it('applies an absence to its own resource only', () => {
+    const onlyPart = rollupMonthly({ ...base, absences: [{ resourceId: 'part', ...MAY_LEAVE }] });
+    expect(cellOf(onlyPart, 'full', '2026-05')).toStrictEqual(cellOf(without, 'full', '2026-05'));
+    // PRESENCE TWIN: the row the absence does belong to changes, so the equality
+    // above is the resource filter and not an unread parameter.
+    expect(cellOf(onlyPart, 'part', '2026-05')).not.toStrictEqual(cellOf(without, 'part', '2026-05'));
+  });
+
+  it('ignores an absence outside the rolled-up months, and does not ignore the same absence inside them', () => {
+    // The same row in two positions (spec §8.1): the window is respected in both
+    // directions, and neither direction is inferred from the other.
+    const outside = rollupMonthly({ ...base, absences: [{ resourceId: 'full', startDate: '2026-02-02', endDate: '2026-02-27' }] });
+    expect(outside).toStrictEqual(without);
+    const inside = rollupMonthly({ ...base, absences: [{ resourceId: 'full', startDate: '2026-04-06', endDate: '2026-04-30' }] });
+    expect(inside).not.toStrictEqual(without);
+    expect(cellOf(inside, 'full', '2026-04').targetHours).toBeLessThan(cellOf(without, 'full', '2026-04').targetHours);
+  });
+
+  it('deducts absent days at the company rate for the target, and at her own rate for supply', () => {
+    const only = rollupMonthly({ ...base, resources: [resources[1]], absences: [{ resourceId: 'part', ...MAY_LEAVE }] });
+    // Counting DAYS, not hours, is what makes part-time need no special case (Q1):
+    // she loses the same days as the full-timer, so she gets the same pro-rated target.
+    expect(only.rows[0].monthly['2026-05'].targetHours).toBe(MAY_AVAILABLE * HPD);
+    expect(only.rows[0].monthly['2026-05'].targetHours).toBe(cellOf(withAbs, 'full', '2026-05').targetHours);
+    // Supply, by contrast, is her own contract: half a full-timer's, before and after.
+    expect(only.totals['2026-04'].capacityFte).toBeCloseTo(0.5, 10);
+    expect(only.totals['2026-05'].capacityFte).toBeCloseTo((MAY_AVAILABLE * 4) / (MAY_DAYS * HPD), 10);
+    // ABSENCE TWIN: her supply must actually move — 0.5 is the un-absent figure.
+    expect(only.totals['2026-05'].capacityFte).toBeLessThan(0.5);
+  });
+
+  it('never drives the target negative when two absences overlap', () => {
+    const only = rollupMonthly({
+      ...base, resources: [resources[0]],
+      absences: [{ resourceId: 'full', ...MAY_LEAVE }, { resourceId: 'full', startDate: '2026-05-11', endDate: '2026-05-22' }],
+    });
+    expect(only.rows[0].monthly['2026-05'].targetHours).toBe(MAY_AVAILABLE * HPD);
+    // ABSENCE TWIN: double subtraction gives 168 − (16+10)×8 = −40, and a negative
+    // target inverts every percentage and band downstream of it.
+    expect(only.rows[0].monthly['2026-05'].targetHours).toBeGreaterThan(0);
+  });
+
+  it('pro-rates a subco’s cell without inflating uncovered demand', () => {
+    const subcoBase = {
+      resources: [{ id: 's1', name: 'Subco', kind: 'subco', contractHoursPerDay: 8 }],
+      assignments: [{ id: 'aS', resourceId: 's1' }],
+      assignmentMonths: [{ assignmentId: 'aS', month: '2026-05', status: 'Requested' }],
+      assignmentDays: [{ assignmentId: 'aS', date: '2026-05-25', hours: MAY_AVAILABLE * HPD }],
+      months: ['2026-05'], hoursPerDay: HPD, holidays: NO_HOL,
+    };
+    const absent = rollupMonthly({ ...subcoBase, absences: [{ resourceId: 's1', ...MAY_LEAVE }] });
+    const present = rollupMonthly({ ...subcoBase, absences: [] });
+    expect(absent.demandRows[0].monthly['2026-05'].targetHours).toBe(MAY_AVAILABLE * HPD);
+    // A subco CAN be absent (only a dummy cannot), and her sick week must not make
+    // the org look as though it has more uncovered demand than it booked — C10.
+    expect(absent.totals['2026-05'].demandFteUncovered)
+      .toBeCloseTo(present.totals['2026-05'].demandFteUncovered, 10);
+    // PRESENCE TWIN: the cell moved even though the total did not.
+    expect(absent.demandRows[0].monthly['2026-05'].targetHours)
+      .not.toBe(present.demandRows[0].monthly['2026-05'].targetHours);
+  });
+
+  it('still reports hours booked on a month taken entirely as leave, without inventing a percentage', () => {
+    // §6.4 accepts an absence recorded over already-booked days, so this row exists.
+    const stale = rollupMonthly({
+      resources: [{ id: 'full', name: 'Full timer', contractHoursPerDay: 8 }],
+      assignments: [{ id: 'aX', resourceId: 'full' }],
+      assignmentMonths: [{ assignmentId: 'aX', month: '2026-06', status: 'Allocated' }],
+      assignmentDays: [{ assignmentId: 'aX', date: '2026-06-08', hours: 16 }],
+      months: ['2026-06'], hoursPerDay: HPD, holidays: NO_HOL,
+      absences: [{ resourceId: 'full', ...JUN_LEAVE }],
+    });
+    const cell = stale.rows[0].monthly['2026-06'];
+    expect(cell.plannedHours).toBe(16);
+    expect(cell.targetHours).toBe(0);
+    // A share of no capacity is 0, guarded by fteOf — never Infinity, never NaN.
+    expect(cell.ftePlanned).toBe(0);
+    expect(Number.isFinite(cell.ftePlanned)).toBe(true);
+    expect(Number.isFinite(cell.fteConfirmed)).toBe(true);
+  });
+});
