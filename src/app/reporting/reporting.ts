@@ -3,9 +3,10 @@ import { MatIconModule } from '@angular/material/icon';
 import { isPlatformBrowser, CurrencyPipe, DecimalPipe } from '@angular/common';
 import { forkJoin, of, map } from 'rxjs';
 import { rxResource } from '@angular/core/rxjs-interop';
-import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, OrderLine, FinancialItem, TimeEntry, Issue, ChangeRequest, Milestone, BillingPlanItem, Contract, Customer, FxRate, NegotiatedRate, BASE_CURRENCY, AssignmentDay, AssignmentMonth, CostBaseline } from '../services/api.service';
+import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, OrderLine, FinancialItem, TimeEntry, Issue, ChangeRequest, Milestone, BillingPlanItem, Contract, Customer, FxRate, NegotiatedRate, BASE_CURRENCY, AssignmentDay, AssignmentMonth, CostBaseline, BenchRollup } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
-import { computeProjectFinancials, costBaselineComparison, FinanceData, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, realizationMetrics, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, recognitionSchedule, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity } from '../services/finance.util';
+import { computeProjectFinancials, costBaselineComparison, FinanceData, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, recognitionSchedule, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity, portfolioMarginFullyLoaded, PortfolioMargin, portfolioRealization, PortfolioRealization } from '../services/finance.util';
+import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
 import { NotificationService } from '../services/notification.service';
 import { toCsv, downloadCsv, downloadXlsx, XlsxSheet } from '../services/export.util';
 import { allocationSheets, planningSheet, RptOpts, RptPlanData } from '../services/rpt-xlsx.util';
@@ -26,6 +27,18 @@ interface Kpi {
   trend: PeriodDelta | null;
   icon: string;
   colorClass: string;
+  /**
+   * H (Q4 / spec §5.4 U6) — what the figure LEAVES OUT, when it leaves anything
+   * out. Added because the utilization average now drops whoever is away on
+   * leave for the whole current month from its DENOMINATOR: a mean that quietly
+   * counts fewer people than the headcount is a number nobody can reproduce.
+   * Absent (undefined) whenever there is nothing to qualify, so the note is
+   * never a permanent decoration that stops being read.
+   *
+   * It is also carried into the CSV summary (see `buildSummaryCsv`), because an
+   * export that keeps the corrected value and drops the caveat is the worse half.
+   */
+  note?: string;
 }
 
 interface ReportingData {
@@ -55,6 +68,20 @@ interface ReportingData {
   assignmentDays: AssignmentDay[];
   assignmentMonths: AssignmentMonth[];
   costBaselines: CostBaseline[];
+  /**
+   * H (Q4, spec §5.4 U4-U6) — the monthly bench rollup, read ONLY for its
+   * fourth state (`ABSENT`). This is the *aggregate* privacy level of §7.3: it
+   * carries who cannot be staffed this month and carries NO `reasonCode`, so
+   * this screen can mark an away person without ever receiving the cause.
+   *
+   * `/absences` is deliberately NOT read here. Its audience is the reason's
+   * audience (`resource-manager`, `admin`, `delivery-executive`), which is not
+   * this screen's audience, and the cause is special-category data (GDPR art. 9).
+   * `/bench/monthly` is already served to every role that can reach /reporting —
+   * AVAILABILITY_READ_ROLES is a superset of `canViewPortfolioDashboard()` — so
+   * this leg cannot turn a permitted reader's page into a 403.
+   */
+  benchRollup: BenchRollup;
 }
 
 interface ArAgingBarRow extends ArAgingBucketTotal {
@@ -71,7 +98,7 @@ const EMPTY_DATA: ReportingData = {
   resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [],
   timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [],
   customers: [], negotiatedRates: [], hoursPerDay: DEFAULT_HOURS_PER_DAY, assignmentDays: [],
-  assignmentMonths: [], costBaselines: [],
+  assignmentMonths: [], costBaselines: [], benchRollup: EMPTY_BENCH_ROLLUP,
 };
 
 @Component({
@@ -181,6 +208,10 @@ const EMPTY_DATA: ReportingData = {
             </div>
             <h3 class="command-kpi-label">{{ kpi.label }}</h3>
             <p class="command-kpi-value">{{ kpi.value }}</p>
+            <!-- Only present when the figure leaves something out (H, U6). -->
+            @if (kpi.note; as note) {
+              <p class="command-note" data-test="kpi-note">{{ note }}</p>
+            }
           </div>
         }
       </div>
@@ -195,13 +226,29 @@ const EMPTY_DATA: ReportingData = {
           <p class="command-kpi-label">Portfolio Revenue</p>
           <p class="command-kpi-value font-mono tabular-nums">{{ totalRevenue() | currency:'EUR':'symbol':'1.0-0' }}</p>
         </div>
-        <div class="command-kpi" [class.danger]="totalMargin() < 0">
-          <p class="command-kpi-label">Total Margin</p>
+        <!--
+          Q2 (spec §10, decided 2026-08-07): FULLY LOADED belongs in the LABEL,
+          not only in a caption. The cost of non-billable work is inside this
+          figure, which makes it a different quantity from the margin of any
+          single delivery project — and the comparison WILL be attempted, because
+          both are called "margin" and both are in euro. The note below states
+          the term that reconciles them (delivery margin = this + non-billable
+          cost), so the reader who makes the comparison can make it correctly
+          instead of concluding the portfolio is under-performing its own projects.
+        -->
+        <div class="command-kpi" [class.danger]="totalMargin() < 0" data-test="fully-loaded-margin-tile">
+          <p class="command-kpi-label">Total Margin (fully loaded)</p>
           <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="totalMargin() >= 0" [class.text-critical-text]="totalMargin() < 0">{{ totalMargin() | currency:'EUR':'symbol':'1.0-0' }}</p>
+          @if (nonBillableCount() > 0) {
+            <p class="command-note" data-test="fully-loaded-note">Includes {{ portfolioMargin().nonBillableCost | currency:'EUR':'symbol':'1.0-0' }} of non-billable cost across {{ nonBillableCount() }} {{ nonBillableCount() === 1 ? 'engagement' : 'engagements' }} — not comparable with a single project&rsquo;s delivery margin</p>
+          } @else {
+            <p class="command-note" data-test="fully-loaded-note">No non-billable engagement in the cost base, so this equals delivery margin today</p>
+          }
         </div>
         <div class="command-kpi" [class.warning]="portfolioMarginPct() >= 0 && portfolioMarginPct() < 15" [class.danger]="portfolioMarginPct() < 0">
-          <p class="command-kpi-label">Margin %</p>
+          <p class="command-kpi-label">Margin % (fully loaded)</p>
           <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="portfolioMarginPct() >= 0" [class.text-critical-text]="portfolioMarginPct() < 0">{{ portfolioMarginPct() | number:'1.0-1' }}%</p>
+          <p class="command-note">Fully-loaded margin over portfolio revenue</p>
         </div>
         <div class="command-kpi info">
           <p class="command-kpi-label">Backlog</p>
@@ -228,7 +275,20 @@ const EMPTY_DATA: ReportingData = {
       <!-- Realization & revenue-per-FTE strip (real, recognised revenue vs rate-card) -->
       <div class="command-section-label flex items-center justify-between">
         <span>Realization &amp; Productivity</span>
-        <span class="text-xs font-semibold text-ink-muted normal-case tracking-normal">Recognised revenue vs rate-card &middot; {{ baseCurrency }} (base)</span>
+        <!--
+          H (spec §5.3 F-7): a non-billable engagement has revenue 0 against a
+          positive rate-card value, i.e. a 0% realization that drags every mean it
+          enters. portfolioRealization excludes those, and the subtitle names
+          HOW MANY — a mean that silently changed population is not defensible.
+        -->
+        <span class="text-xs font-semibold text-ink-muted normal-case tracking-normal" data-test="realization-scope">
+          Recognised revenue vs rate-card &middot;
+          @if (realizationExcludedCount() > 0) {
+            billable engagements only ({{ realizationExcludedCount() }} non-billable excluded)
+          } @else {
+            all engagements are billable
+          } &middot; {{ baseCurrency }} (base)
+        </span>
       </div>
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
         <div class="command-kpi" [class.warning]="realization().realizationPct > 0 && realization().realizationPct < 85">
@@ -285,7 +345,31 @@ const EMPTY_DATA: ReportingData = {
                   [height]="256"
                   [format]="utilizationPctFormat"
                   ariaLabel="Utilization by internal resource"
-                  caption="Current utilization percentage per internal resource (dummy and subco are uncovered demand, not capacity)" />
+                  caption="Current utilization percentage per internal resource. Dummy and subco are uncovered demand, not capacity. Anyone away on leave for the whole month stays on the chart, labelled &quot;(away)&quot;, and leaves the average — the reason for the leave is never shown." />
+                <!--
+                  Q4's annotation. It is not decoration: it is the only channel
+                  with a drawable area, since an away person's bar is 0% tall (see
+                  utilizationData). It also carries the canonical glyph and wording
+                  ONCE, where they can be explained, instead of pushing an
+                  unexplained 'L' onto the axis. Rendered only when there is
+                  something to say; absenceScopeNote covers the two cases where
+                  there is not.
+                -->
+                @if (awayOnChart().length > 0) {
+                  <ul class="mt-4 flex flex-wrap items-center gap-2 border-t border-line pt-4" data-test="utilization-away-legend">
+                    @for (b of awayOnChart(); track b.id) {
+                      <li class="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold {{ AWAY_TONE }}"
+                          role="img" [attr.aria-label]="b.month + ': ' + AWAY_LABEL" [title]="AWAY_LABEL">
+                        <span class="font-mono font-bold tabular-nums leading-none">{{ AWAY_GLYPH }}</span>
+                        {{ b.month }}
+                      </li>
+                    }
+                    <li class="text-xs font-medium text-ink-muted">{{ AWAY_LABEL }}</li>
+                  </ul>
+                }
+                @if (absenceScopeNote(); as note) {
+                  <p class="mt-3 text-xs text-ink-muted" data-test="utilization-absence-scope">{{ note }}</p>
+                }
               } @else {
                 <p class="text-ink-muted text-sm">No resources to chart yet.</p>
               }
@@ -980,6 +1064,15 @@ export class Reporting {
             assignmentDays: this.api.getAssignmentDays(),
             assignmentMonths: this.api.getAssignmentMonths(),
             costBaselines: this.api.getCostBaselines(),
+            // H (Q4) — the fourth bench state, appended AFTER costBaselines
+            // rather than inserted mid-block, this forkJoin's own convention
+            // (see the negotiatedRates/hoursPerDay comments above). REQUIRED
+            // leg, deliberately no catchError: a failed bench read must surface
+            // as this page's error state, never silently render an unmarked
+            // chart in which someone on leave is indistinguishable from someone
+            // nobody managed to staff — which is the exact defect this leg
+            // exists to fix.
+            benchRollup: this.api.getBenchMonthly(),
           })
         : of<ReportingData>(EMPTY_DATA),
     defaultValue: EMPTY_DATA,
@@ -1096,9 +1189,31 @@ export class Reporting {
       .filter(p => p.revenue > 0),
   );
 
-  totalRevenue = computed(() => this.projectMargins().reduce((s, p) => s + p.revenue, 0));
-  totalMargin = computed(() => this.projectMargins().reduce((s, p) => s + p.margin, 0));
-  portfolioMarginPct = computed(() => this.totalRevenue() > 0 ? (this.totalMargin() / this.totalRevenue()) * 100 : 0);
+  /**
+   * THE portfolio margin, fully loaded (Q2, decided 2026-08-07 — spec §10).
+   *
+   * WHY THIS IS A CALL AND NOT THREE SUMS. The three tiles below used to
+   * open-code `Σ projectMargins()`, and `projectMargins()` filters
+   * `revenue > 0` — so a non-billable engagement, whose revenue is 0 by
+   * construction, was DROPPED from this page's Total Margin while the dashboard's
+   * same-named tile (an unfiltered Σ over every project) kept it. Two tiles
+   * called "Total Margin"/"Portfolio Margin", two different questions, and
+   * nothing on either screen said so. Q2 answers the question once; routing both
+   * screens through `portfolioMarginFullyLoaded` is what makes them the same
+   * answer, and makes "fully loaded" a property of one named function rather
+   * than of two hand-rolled reducers that can drift again.
+   *
+   * `projectMargins()` is deliberately left as it is: it feeds the PER-PROJECT
+   * margin chart and list, where "projects carrying customer revenue" is the
+   * right population and a project's own margin is unchanged by H (spec §11).
+   */
+  protected readonly portfolioMargin = computed<PortfolioMargin>(() =>
+    portfolioMarginFullyLoaded(this.financeData()),
+  );
+
+  totalRevenue = computed(() => this.portfolioMargin().revenue);
+  totalMargin = computed(() => this.portfolioMargin().fullyLoadedMargin);
+  portfolioMarginPct = computed(() => this.portfolioMargin().fullyLoadedMarginPct);
   totalBacklog = computed(() =>
     this.envelope().projects.reduce((s, p) => s + computeProjectFinancials(p.id, this.financeData()).backlog, 0),
   );
@@ -1272,48 +1387,99 @@ export class Reporting {
     this.envelope().resources.filter(r => countsTowardInternalCapacity(kindOf(r))),
   );
 
+  /**
+   * The month the ABSENT marks describe: TODAY's month, and only if the fetched
+   * bench window covers it. Same rule and same clock helper as
+   * `dashboard.component.ts`'s `currentBenchMonth` and `bench.component.ts` —
+   * `todayLocalIso()` rather than `new Date().toISOString()`, which names the
+   * wrong month around midnight on the 1st (east of UTC) or the last (west of it).
+   *
+   * `''` when the window has no present tense, and every consumer below then
+   * marks NOBODY. That is the honest answer — an unmarked chart is what the
+   * screen showed before H — but it is also why `absenceScopeNote()` exists: an
+   * unmarked chart must not silently pass for "nobody is away".
+   */
+  private readonly currentBenchMonth = computed(() => {
+    const now = todayLocalIso().slice(0, 7);
+    return this.envelope().benchRollup.months.includes(now) ? now : '';
+  });
+
+  /**
+   * Q4 — who cannot be staffed at all this month. Read off the bench rollup's
+   * fourth state, so this screen inherits T4's arithmetic (a month is `ABSENT`
+   * only when `monthAvailability === 'fully-absent'`) rather than re-deriving
+   * "away" from date intervals it would have to fetch from a route whose
+   * audience is not this one.
+   *
+   * BOTH row sets are walked. `internalResources()` filters the CHART to
+   * internals, but a subco can be on sick leave too, and building the set from
+   * `internalRows` alone would make the correctness of this signal depend on a
+   * filter applied three computeds away.
+   */
+  private readonly absentResourceIds = computed<ReadonlySet<string>>(() => {
+    const month = this.currentBenchMonth();
+    const out = new Set<string>();
+    if (!month) return out;
+    const rollup = this.envelope().benchRollup;
+    for (const row of [...rollup.internalRows, ...rollup.subcoRows]) {
+      if (row.monthly[month]?.state === 'ABSENT') out.add(row.resourceId);
+    }
+    return out;
+  });
+
+  /** The internal resources the utilization average is actually computed over. */
+  private readonly countedForAverage = computed(() => {
+    const away = this.absentResourceIds();
+    return this.internalResources().filter(r => !away.has(r.id));
+  });
+
+  /**
+   * Org-wide mean utilization (spec §5.4 U6, the twin of `/utilization`'s U2).
+   *
+   * Someone on leave for the whole month carries the scalar their profile
+   * happened to hold — usually 0, since nothing is booked on them — and averaging
+   * it in reads as an internal-capacity problem that is not one: nobody failed to
+   * staff her, she could not be staffed. So the ABSENT rows leave the
+   * DENOMINATOR, and `kpis()` says how many left it. Same shape as the C1 fix
+   * one line up, which took dummy and subco out of this same mean.
+   */
   private avgUtilization = computed(() => {
-    const resources = this.internalResources();
+    const resources = this.countedForAverage();
     if (!resources.length) return 0;
     const total = resources.reduce((sum, r) => sum + (r.utilization ?? 0), 0);
     return total / resources.length;
   });
 
+  /** How many internal rows the mean above dropped for being away all month. */
+  private readonly absentFromAverageCount = computed(() =>
+    this.internalResources().length - this.countedForAverage().length,
+  );
+
   // --- Realization & productivity (portfolio roll-up of realizationMetrics) ----
   /**
-   * Portfolio realization & revenue-per-FTE. realizationMetrics is per-project, so
-   * we sum its additive parts (recognised revenue, approved hours, rate-card value,
-   * headcount, FTE) across every project and re-derive the ratios on the totals.
-   * headcount is de-duplicated across projects so a resource on several projects
-   * counts once. Pass-through of the hoursPerFte basis keeps FTE comparable.
+   * Portfolio realization & revenue-per-FTE, from the pure roll-up (H, spec §5.3
+   * F-7). The additive parts are summed and the ratios re-derived on the totals;
+   * headcount is de-duplicated across projects. That arithmetic used to be
+   * open-coded here, which is precisely why the non-billable exclusion had to
+   * move into `finance.util.ts`: re-implementing it in a component would have
+   * put a money rule where the money rules are not tested.
+   *
+   * Two behavioural changes come with the swap, both deliberate:
+   *   • non-billable engagements are OUT (0% realization on a positive rate-card
+   *     value is not a realization, it is a missing customer);
+   *   • the universe is `attributableProjectIds` (every id money can be attributed
+   *     to), not `envelope().projects` — so an engagement with approved time and
+   *     no project master row no longer silently drops out of the denominator.
    */
-  realization = computed(() => {
-    const d = this.financeData();
-    const heads = new Set<string>();
-    let revenue = 0, hours = 0, standardBillValue = 0, fte = 0;
-    for (const p of this.envelope().projects) {
-      const m = realizationMetrics(p.id, d, { hoursPerFte: this.hoursPerFte });
-      revenue += m.revenue;
-      hours += m.hours;
-      standardBillValue += m.standardBillValue;
-      fte += m.fte;
-      for (const t of d.timeEntries ?? []) {
-        if (t.projectId === p.id && t.status === 'Approved') heads.add(t.resourceId);
-      }
-    }
-    const headcount = heads.size;
-    const revenuePerHead = headcount > 0 ? revenue / headcount : 0;
-    return {
-      revenue,
-      hours,
-      standardBillValue,
-      realizationPct: standardBillValue > 0 ? (revenue / standardBillValue) * 100 : 0,
-      headcount,
-      fte,
-      revenuePerHead,
-      revenuePerFte: fte > 0 ? revenue / fte : revenuePerHead,
-    };
-  });
+  realization = computed<PortfolioRealization>(() =>
+    portfolioRealization(this.financeData(), { hoursPerFte: this.hoursPerFte }),
+  );
+
+  /** How many engagements the realization strip leaves out for being non-billable. */
+  protected readonly realizationExcludedCount = computed(() => this.realization().excludedProjectIds.length);
+
+  /** How many engagements contribute cost, and no customer revenue, to the margin. */
+  protected readonly nonBillableCount = computed(() => this.portfolioMargin().nonBillableProjectIds.length);
 
   /**
    * Real recognised-revenue trend across the selected window vs the immediately
@@ -1390,7 +1556,14 @@ export class Reporting {
     // HIDDEN (never a fabricated %). The one metric we can trend honestly —
     // recognised revenue — drives the Realization strip below via recognizedTrend().
     { label: 'Total Active Projects', value: String(this.activeProjectsCount()), trend: null, icon: 'folder', colorClass: 'bg-accent' },
-    { label: 'Avg Resource Utilization', value: `${Math.round(this.avgUtilization())}%`, trend: null, icon: 'bar_chart', colorClass: 'bg-positive' },
+    {
+      label: 'Avg Resource Utilization', value: `${Math.round(this.avgUtilization())}%`, trend: null, icon: 'bar_chart', colorClass: 'bg-positive',
+      // U6: the denominator changed, so it says so. `undefined` when nobody was
+      // dropped, so the qualification never becomes wallpaper.
+      note: this.absentFromAverageCount() > 0
+        ? `Excludes ${this.absentFromAverageCount()} away on leave all month`
+        : undefined,
+    },
     { label: 'Open Resource Requests', value: String(this.openRequestsCount()), trend: null, icon: 'person_add', colorClass: 'bg-caution' },
     { label: 'Delivery Risk Items', value: String(this.highRiskIssues() + this.openChanges() + this.pendingMilestones()), trend: null, icon: 'warning', colorClass: 'bg-critical' },
   ]);
@@ -1402,11 +1575,78 @@ export class Reporting {
     return `Trend ${dir} ${Math.abs(t.deltaPct).toFixed(0)}% versus prior period`;
   }
 
-  /** Per-person utilization bars. Internal only — see `internalResources()`. */
-  utilizationData = computed(() => this.internalResources().map(r => ({
-    month: r.name.split(' ')[0] || r.name,
-    value: Math.round(r.utilization ?? 0),
-  })));
+  /**
+   * Q4 — the ONE spelling of "away" this screen uses, kept beside the chart it
+   * marks. The glyph, the wording and the tone are `availability-strip`'s
+   * canonical treatment verbatim (`bg-info-tint` / `text-info-text` / `ring-info`
+   * measures 6.15:1 in light and 7.24:1 in dark, AA with margin in both), so
+   * /staffing, /bench, /utilization and this chart read alike instead of three
+   * screens agreeing and one not. 'L' rather than 'A' because ALLOCATED already
+   * owns 'A' on that strip.
+   *
+   * NO CAUSE IS NAMED, and that is a privacy requirement rather than a wording
+   * choice: absence reasons are special-category data (§7.3), this screen's
+   * audience is not the reason's audience, and the rollup it reads carries no
+   * `reasonCode` to leak even by accident.
+   */
+  protected readonly AWAY_GLYPH = 'L';
+  protected readonly AWAY_LABEL = 'Away (on leave) — not staffable';
+  protected readonly AWAY_TONE = 'bg-info-tint text-info-text ring-1 ring-info';
+
+  /**
+   * Per-person utilization bars. Internal only — see `internalResources()`.
+   *
+   * WHY THE MARK IS IN THE LABEL AND NOT IN THE BAR. Q4 asks for a distinct
+   * rendering, and a hatch or pattern on the bar CANNOT be it: the bar chart maps
+   * a value of 0 to `h = |valueToPos(0) − valueToPos(0)| = 0`
+   * (command-bar-chart.component.ts's `makeGroupedRect`), so an away person's bar
+   * has literally no area to fill — a pattern would render nothing at all, and
+   * the tone would too. The signals that survive a zero-area bar are the CATEGORY
+   * LABEL (text, so it also survives monochrome, a screen reader and the chart's
+   * own a11y table) and the annotation beside the chart. The `info` tone is still
+   * applied per-datum, as the third redundant channel for the case the bar does
+   * have area — the scalar `utilization` is a whole-of-time profile value that H
+   * deliberately leaves alone (spec §11), so an away person can read non-zero,
+   * and that is the case where a bare 0-height assumption would have marked
+   * nothing.
+   */
+  utilizationData = computed(() => {
+    const away = this.absentResourceIds();
+    return this.internalResources().map(r => {
+      const absent = away.has(r.id);
+      const first = r.name.split(' ')[0] || r.name;
+      return {
+        // The resource id, carried purely so the annotation below has a UNIQUE
+        // track key. The chart's own category axis has always been first names,
+        // which two people can share; a `@for` keyed on that would throw on a
+        // duplicate, and a screen that crashes because two colleagues are both
+        // called Marco is not a theoretical failure.
+        id: r.id,
+        month: absent ? `${first} (away)` : first,
+        value: Math.round(r.utilization ?? 0),
+        absent,
+      };
+    });
+  });
+
+  /** The away rows the chart is currently marking, for the annotation beside it. */
+  protected readonly awayOnChart = computed(() => this.utilizationData().filter(b => b.absent));
+
+  /**
+   * What the marks can and cannot say right now — the assertion of absence the
+   * caption alone cannot make. With no present-tense column in the fetched bench
+   * window there is nothing to mark, and an unmarked chart must not be readable
+   * as "nobody is away": that is the same defect as the bench tile's bare "0 / 0"
+   * (dashboard.component.ts's `benchTileNote`), and the same remedy.
+   */
+  protected readonly absenceScopeNote = computed<string>(() => {
+    if (this.envelope().benchRollup.months.length === 0) return '';
+    if (!this.currentBenchMonth()) return 'Leave is not marked: the fetched availability window does not reach the current month.';
+    const n = this.awayOnChart().length;
+    return n === 0
+      ? 'Nobody internal is away for the whole of this month.'
+      : `${n} ${n === 1 ? 'person is' : 'people are'} away for the whole of this month, kept on the chart at their profile figure and left out of the average.`;
+  });
 
   // --- Chart input contracts (Ledger SVG chart library) -----------------------
   /**
@@ -1417,7 +1657,14 @@ export class Reporting {
    */
   utilizationChartCategories = computed<readonly string[]>(() => this.utilizationData().map(b => b.month));
   utilizationChartSeries = computed<readonly BarSeries[]>(() => [
-    { name: 'Utilization', values: this.utilizationData().map(b => b.value) },
+    {
+      name: 'Utilization',
+      values: this.utilizationData().map(b => b.value),
+      // `undefined` keeps the series' own themed default for everyone present —
+      // per-datum overrides win only where one is defined — so this tones the
+      // away bars without recolouring the chart.
+      colors: this.utilizationData().map(b => (b.absent ? 'var(--color-info)' : undefined)),
+    },
   ]);
   protected readonly utilizationPctFormat = (v: number): string => `${Math.round(v)}%`;
 
@@ -1510,13 +1757,31 @@ export class Reporting {
     return /[",\n\r]/.test(out) ? `"${out.replace(/"/g, '""')}"` : out;
   }
 
-  exportReport(): void {
-    if (!isPlatformBrowser(this.platformId)) return;
+  /**
+   * The KPI summary CSV, split out from `exportReport` so it is assertable
+   * without a Blob or an object URL — the export is where a privacy leak would
+   * actually leave the building, so it needs a test that reads the bytes.
+   *
+   * The `Note` column is H's addition (U6/U19): the utilization average now
+   * excludes whoever is away all month, and a file that keeps the corrected
+   * figure while dropping the caveat is the half that gets forwarded by mail.
+   * What the column CANNOT carry is a reason for the leave — not by policy alone
+   * but by construction: this screen reads `/bench/monthly`, whose aggregate
+   * projection has no `reasonCode` field to write out.
+   */
+  private buildSummaryCsv(): string {
     // Trend column carries the REAL period delta % (or blank when not derivable) — never a fabricated figure (#15).
     const trendCell = (t: PeriodDelta | null): string =>
       t && t.deltaPct !== null && t.direction !== null ? `${t.deltaPct > 0 ? '+' : ''}${t.deltaPct.toFixed(0)}%` : '';
-    const csvContent = 'KPI,Value,Trend\n' +
-      this.kpis().map(k => `${this.escapeCsv(k.label)},${this.escapeCsv(k.value)},${this.escapeCsv(trendCell(k.trend))}`).join('\n');
+    return 'KPI,Value,Trend,Note\n' +
+      this.kpis()
+        .map(k => [k.label, k.value, trendCell(k.trend), k.note ?? ''].map(c => this.escapeCsv(c)).join(','))
+        .join('\n');
+  }
+
+  exportReport(): void {
+    if (!isPlatformBrowser(this.platformId)) return;
+    const csvContent = this.buildSummaryCsv();
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');

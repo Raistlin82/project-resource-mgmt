@@ -35,6 +35,8 @@ import {
   PeriodDelta,
   PortfolioAlertRow,
   portfolioAlerts,
+  PortfolioMargin,
+  portfolioMarginFullyLoaded,
   ProjectAlerts,
   recognitionSchedule,
   recognizedRevenueTrend,
@@ -222,12 +224,25 @@ interface ProjectCommandRow {
       </div>
 
       <section class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-7 gap-4">
-        <div class="command-kpi xl:col-span-2" [class.danger]="portfolioMarginPct() < 0" [class.warning]="portfolioMarginPct() >= 0 && portfolioMarginPct() < 15">
+        <!--
+          Q2 (spec §10, decided 2026-08-07): FULLY LOADED is in the LABEL, not
+          only in a caption. The arithmetic behind this tile did not change — it
+          already carried non-billable cost — but its MEANING now has a name, and
+          the reader who compares it with a single project's delivery margin needs
+          to be told the two are different quantities. The second note line gives
+          the term that reconciles them.
+        -->
+        <div class="command-kpi xl:col-span-2" data-test="portfolio-margin-tile" [class.danger]="portfolioMarginPct() < 0" [class.warning]="portfolioMarginPct() >= 0 && portfolioMarginPct() < 15">
           <div class="flex items-start justify-between gap-3">
             <div>
-              <div class="command-kpi-label">Portfolio Margin</div>
+              <div class="command-kpi-label">Portfolio Margin (fully loaded)</div>
               <div class="command-kpi-value">{{ portfolioMarginPct() | number:'1.0-1' }}%</div>
               <div class="command-kpi-note">{{ totalMargin() | currency:'EUR':'symbol':'1.0-0' }} on {{ totalRevenue() | currency:'EUR':'symbol':'1.0-0' }} revenue</div>
+              @if (nonBillableCount() > 0) {
+                <div class="command-kpi-note" data-test="fully-loaded-note">Includes {{ portfolioMargin().nonBillableCost | currency:'EUR':'symbol':'1.0-0' }} of non-billable cost across {{ nonBillableCount() }} {{ nonBillableCount() === 1 ? 'engagement' : 'engagements' }} — not comparable with a single project&rsquo;s delivery margin</div>
+              } @else {
+                <div class="command-kpi-note" data-test="fully-loaded-note">No non-billable engagement in the cost base, so this equals delivery margin today</div>
+              }
               @if (hasRecognizedRevTrend()) {
                 <div class="mt-2 flex items-center gap-1.5">
                   <span class="command-status" [class.green]="trendChipClass(recognizedRevTrend()) === 'green'" [class.red]="trendChipClass(recognizedRevTrend()) === 'red'">
@@ -246,8 +261,8 @@ interface ProjectCommandRow {
               [thickness]="12"
               [tone]="marginGaugeTone()"
               [displayText]="(portfolioMarginPct() | number:'1.0-0') + '%'"
-              ariaLabel="Portfolio margin gauge"
-              caption="Portfolio margin percent of a 40 percent target ring" />
+              ariaLabel="Fully loaded portfolio margin gauge"
+              caption="Fully loaded portfolio margin percent (non-billable cost included) of a 40 percent target ring" />
           </div>
           @if (hasRecognitionChart()) {
             <!-- Real trailing-6-month recognised-revenue spark (same dated source as the chip). -->
@@ -346,6 +361,17 @@ interface ProjectCommandRow {
                whether nobody is benched or the fetched window has no present tense. -->
           @if (benchTileNote()) {
             <div class="mt-1 text-xs text-[var(--cc-muted)]" data-test="bench-tile-month">{{ benchTileNote() }}</div>
+          }
+          <!-- H (U7/U8): the counts above self-corrected the moment BenchState
+               gained a fourth value — somebody on leave is no longer BENCH. But a
+               tile whose number simply drops is unexplainable at the point of
+               reading, which is the same failure the "fully loaded" label above
+               exists to prevent. So the people who LEFT the counts are named here,
+               with no reason attached (spec §7.3) and never summed with them. -->
+          @if (internalAbsentCount() + subcoAbsentCount() > 0) {
+            <div class="mt-1 text-xs text-[var(--cc-muted)]" data-test="bench-tile-away">
+              Not counted: {{ internalAbsentCount() }} int. / {{ subcoAbsentCount() }} subco away on leave
+            </div>
           }
         </div>
       </section>
@@ -927,13 +953,33 @@ export class DashboardComponent {
     return this.allProjectRows().reduce((acc, p) => ({ ...acc, [p.health]: acc[p.health] + 1 }), base);
   });
 
-  totalRevenue = computed(() =>
-    this.data().projects.reduce((sum, p) => sum + computeProjectFinancials(p.id, this.financeData()).revenue, 0),
+  /**
+   * THE portfolio margin, fully loaded (Q2, decided 2026-08-07 — spec §10): the
+   * cost of non-billable work is IN it.
+   *
+   * The three sums this replaced were already fully loaded in EFFECT — an
+   * unfiltered Σ over every project, and `computeProjectFinancials` is unchanged
+   * by H (spec §11) — so the headline number does not move. That is exactly why
+   * the change is worth making: the figure whose MEANING changed is the one
+   * nobody will see change, and the label is the only thing that can close that
+   * gap. Routing through the named rollup also makes this tile and /reporting's
+   * answer the same question by construction; before H they did not (that page
+   * summed only revenue-bearing projects, which silently dropped every
+   * non-billable engagement).
+   *
+   * The universe also widens from `data().projects` to `attributableProjectIds`,
+   * so an engagement carrying approved time but no project master row can no
+   * longer drop its cost out of a total whose whole purpose is to carry it.
+   */
+  protected readonly portfolioMargin = computed<PortfolioMargin>(() =>
+    portfolioMarginFullyLoaded(this.financeData()),
   );
-  totalMargin = computed(() =>
-    this.data().projects.reduce((sum, p) => sum + computeProjectFinancials(p.id, this.financeData()).margin, 0),
-  );
-  portfolioMarginPct = computed(() => this.totalRevenue() > 0 ? (this.totalMargin() / this.totalRevenue()) * 100 : 0);
+
+  totalRevenue = computed(() => this.portfolioMargin().revenue);
+  totalMargin = computed(() => this.portfolioMargin().fullyLoadedMargin);
+  portfolioMarginPct = computed(() => this.portfolioMargin().fullyLoadedMarginPct);
+  /** How many engagements contribute cost, and no customer revenue, to the figure. */
+  protected readonly nonBillableCount = computed(() => this.portfolioMargin().nonBillableProjectIds.length);
   totalEac = computed(() =>
     this.data().projects.reduce((sum, p) => sum + computeProjectFinancials(p.id, this.financeData()).eac, 0),
   );
@@ -1021,6 +1067,24 @@ export class DashboardComponent {
   );
   readonly subcoBenchCount = computed(() =>
     this.data().benchRollup.subcoRows.filter(r => r.monthly[this.currentBenchMonth()]?.state === 'BENCH').length,
+  );
+
+  /**
+   * H (spec §5.4 U7/U8) — the rows the two counts above stopped counting.
+   *
+   * Derived from the same `monthly[...]` cells rather than a new rollup field:
+   * `EMPTY_BENCH_ROLLUP`'s own comment (bench.util.ts B9) rejects an added total
+   * precisely because two numbers over the same rows can disagree, and this is
+   * the consumer that would have asked for one. Kept SEPARATE by kind, matching
+   * the tile's own grammar and decision 4's never-summed rule for the counts they
+   * explain: an internal on parental leave and a subco off sick are different
+   * facts with different consequences for the same reason bench is.
+   */
+  readonly internalAbsentCount = computed(() =>
+    this.data().benchRollup.internalRows.filter(r => r.monthly[this.currentBenchMonth()]?.state === 'ABSENT').length,
+  );
+  readonly subcoAbsentCount = computed(() =>
+    this.data().benchRollup.subcoRows.filter(r => r.monthly[this.currentBenchMonth()]?.state === 'ABSENT').length,
   );
 
   /**
