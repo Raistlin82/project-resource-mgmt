@@ -24,6 +24,25 @@ interface UtilizationData {
   benchRollup: BenchRollup;
 }
 
+/**
+ * Everything the bench badge renders, resolved once per row. Four channels rather
+ * than one string, because H's fourth state has to be tellable from the third
+ * WITHOUT relying on colour (WCAG 1.4.1): `glyph` is the visible non-colour
+ * marker, `text` the word, `label` the spoken form, `classes` the tone.
+ */
+interface BenchBadgeVm {
+  /** Visible word, e.g. 'BENCH' / 'ABSENT' / 'Not applicable' / an en dash. */
+  text: string;
+  /** Visible single-character marker, '' when the word already stands alone. */
+  glyph: string;
+  /** Accessible name and tooltip — words, never a colour and never a bare glyph. */
+  label: string;
+  /** The complete class list for the pill (there is no static `class` on it). */
+  classes: string;
+  /** How the state is SPOKEN in the row's accessible name, '' when nothing is known. */
+  spoken: string;
+}
+
 @Component({
   selector: 'app-utilization',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -78,7 +97,7 @@ interface UtilizationData {
                    offset it out of vertical alignment; the mt-0! Tailwind v4 important
                    modifier (same pattern as border-critical! on list-state.component.ts)
                    zeroes it for this one usage without a new command-* rule. -->
-              <span data-test="kpi-internal-note" class="command-kpi-note mt-0!">internal only</span>
+              <span data-test="kpi-internal-note" class="command-kpi-note mt-0!">{{ uncountedNote() }}</span>
             }
           }
         </div>
@@ -116,6 +135,7 @@ interface UtilizationData {
             <app-list-state [loading]="loading()" [error]="hasError()" skeleton="cards" [rows]="4" label="team utilization" (retry)="dataResource.reload()">
               <ng-template>
                 @for (res of managedResources(); track res.id) {
+                  @let badge = benchBadgeVm(res);
                   <!-- role="button" below makes this card a COMPOSITE: ARIA prunes
                        every descendant from the accessibility tree, so the
                        utilization % and the BENCH/PARTIAL/ALLOCATED badge rendered
@@ -149,11 +169,24 @@ interface UtilizationData {
                           <p class="text-xs font-semibold tracking-wide text-[var(--cc-muted)] uppercase mt-0.5">{{ res.role }}</p>
                         </div>
                       </div>
-                      <span class="command-status" data-test="bench-badge"
-                            [class.neutral]="benchBadge(res) === 'Not applicable'"
-                            [class.red]="benchBadge(res) === 'BENCH'"
-                            [class.amber]="benchBadge(res) === 'PARTIAL'"
-                            [class.green]="benchBadge(res) === 'ALLOCATED'">{{ benchBadge(res) }}</span>
+                      <!-- FOUR outcomes, and H's fourth is the one that must not
+                           be allowed to fall through to the third. See
+                           benchBadgeVm(): ABSENT renders the canonical away
+                           treatment, NEVER the empty string a resource outside
+                           this month's rollup gets — "we do not know" and "she is
+                           away" are opposite facts, and the row that confuses
+                           them is the one somebody tries to staff. The two now
+                           differ in tone, in glyph and in accessible name.
+                           The class list is entirely bound (no static class
+                           attribute) because two of the four outcomes are a
+                           command-chip rather than a command-status. -->
+                      <span data-test="bench-badge" [class]="badge.classes"
+                            role="img" [attr.aria-label]="badge.label" [title]="badge.label">
+                        @if (badge.glyph) {
+                          <span aria-hidden="true" class="font-bold">{{ badge.glyph }}</span>
+                        }
+                        {{ badge.text }}
+                      </span>
                     </div>
                     <div class="mt-4">
                       <div class="flex items-center justify-between text-xs mb-2">
@@ -527,15 +560,94 @@ export class UtilizationComponent {
   }
 
   /**
+   * True when the rollup says this person is away for the whole of the badge's
+   * month. Reads the row directly rather than `benchBadge()`, so it cannot be
+   * fooled by the dummy short-circuit and cannot drift if that method's return
+   * type ever widens.
+   */
+  private isAwayThisMonth(res: Resource): boolean {
+    return this.benchByResourceId().get(res.id)?.monthly[this.currentBenchMonth()]?.state === 'ABSENT';
+  }
+
+  /**
+   * ABSENT's canonical presentation, transcribed from `staffing/
+   * availability-strip.component.ts` (the surface that shipped it first) so the
+   * two screens name the same state with the same word. 'L' for leave — 'A' was
+   * already ALLOCATED's initial. THE LABEL NAMES NO CAUSE, and that is a privacy
+   * requirement (spec §7.3), not a style choice: absence reasons are
+   * special-category data, `BenchCell` cannot carry one and `/bench/monthly` does
+   * not transmit one. Do not add a field to pass it in.
+   */
+  private static readonly ABSENT_GLYPH = 'L';
+  private static readonly ABSENT_LABEL = 'Away (on leave) — not staffable';
+
+  /**
+   * The badge, all four outcomes in one place (spec §5.4 U1).
+   *
+   * The critical pair is the last two. Before H a resource the rollup had no cell
+   * for rendered `''`, meaning "not active in the shown window" — and H's away
+   * state, if it fell through to that same branch, would render as the SAME
+   * nothing. They are opposite facts: one is "we have no information", the other
+   * is "we know precisely where she is, and you cannot staff her". So the away
+   * row gets a tone, a glyph and a spoken label, and the unknown row stops being
+   * an EMPTY pill (which reads as a rendering fault) and becomes an explicit grey
+   * en dash — the same character and words `availability-strip.component.ts` uses
+   * for an untracked month.
+   *
+   * `command-chip is-info` rather than the literal `bg-info-tint text-info-text
+   * ring-info` the strip carries, and that is a cascade fact, not a preference:
+   * those utilities live in Tailwind's utilities LAYER while `.command-status` is
+   * UNLAYERED CSS in styles.css, and unlayered normal declarations beat layered
+   * ones — the triplet would sit in the class list, satisfy any class-name
+   * assertion, and render the accent pill anyway. `.command-chip.is-info` resolves
+   * to exactly `--color-info-tint` / `--color-info-text` / `--color-info`, is the
+   * same pill idiom (styles.css says so where the two are defined), and needs no
+   * important modifier to win.
+   *
+   * A failed/forbidden read never reaches here: `hasError()` gates the whole list
+   * through `app-list-state` before any row is rendered.
+   */
+  protected benchBadgeVm(res: Resource): BenchBadgeVm {
+    const badge = this.benchBadge(res);
+    switch (badge) {
+      case 'ABSENT':
+        return {
+          text: 'ABSENT', glyph: UtilizationComponent.ABSENT_GLYPH,
+          label: UtilizationComponent.ABSENT_LABEL, spoken: UtilizationComponent.ABSENT_LABEL,
+          classes: 'command-chip is-info',
+        };
+      case '':
+        // En dash, not em, and NOT an empty pill: "nothing is known about this
+        // month" has to look like a stated fact rather than a gap. `spoken` stays
+        // empty — the accessible name must not end in a dangling ", " for a state
+        // there is nothing to say about.
+        return {
+          text: '–', glyph: '', label: 'No bench state for this month (not tracked)',
+          spoken: '', classes: 'command-chip is-neutral',
+        };
+      case 'Not applicable':
+        return { text: badge, glyph: '', label: 'Not applicable — a placeholder is nobody’s bench', spoken: badge, classes: 'command-status neutral' };
+      case 'BENCH':
+        return { text: badge, glyph: '', label: 'Bench (free)', spoken: badge, classes: 'command-status red' };
+      case 'PARTIAL':
+        return { text: badge, glyph: '', label: 'Partially allocated', spoken: badge, classes: 'command-status amber' };
+      case 'ALLOCATED':
+        return { text: badge, glyph: '', label: 'Fully allocated', spoken: badge, classes: 'command-status green' };
+      default:
+        return { text: badge, glyph: '', label: badge, spoken: badge, classes: 'command-status' };
+    }
+  }
+
+  /**
    * The bench state as it appears in the row's accessible name: ', BENCH' or ''.
-   * The separator belongs WITH the value — benchBadge() legitimately returns ''
-   * for a real resource with no row in this month's rollup (see above), and
+   * The separator belongs WITH the value — the badge legitimately has nothing to
+   * say for a real resource with no row in this month's rollup (see above), and
    * concatenating a bare ', ' + '' in the template would end the spoken name in
    * a dangling comma on exactly those rows.
    */
   protected benchBadgeSuffix(res: Resource): string {
-    const badge = this.benchBadge(res);
-    return badge ? `, ${badge}` : '';
+    const spoken = this.benchBadgeVm(res).spoken;
+    return spoken ? `, ${spoken}` : '';
   }
 
   private selectedResourceId = signal<string | null>(null);
@@ -568,15 +680,29 @@ export class UtilizationComponent {
   });
 
   /**
-   * Only INTERNAL resources carry a meaningful `utilization`: a placeholder is
-   * nobody's capacity, and a subco is not internal saturation. `scopeOf` reaches
-   * into org subtrees where placeholders live, so without this filter the mean
-   * would sink toward zero as the tree grows — the exact defect C1 fixed on
-   * /reporting, where the seed alone halved the average. Applies to BOTH views:
-   * a placeholder given a manager would otherwise land in the direct one too.
+   * TWO exclusions, for two different reasons (spec §5.4 U2).
+   *
+   * 1. Only INTERNAL resources carry a meaningful `utilization`: a placeholder is
+   *    nobody's capacity, and a subco is not internal saturation. `scopeOf`
+   *    reaches into org subtrees where placeholders live, so without this filter
+   *    the mean would sink toward zero as the tree grows — the exact defect C1
+   *    fixed on /reporting, where the seed alone halved the average. Applies to
+   *    BOTH views: a placeholder given a manager would land in the direct one too.
+   * 2. H: somebody away for the whole month carries `utilization: 0` — a scalar
+   *    nobody recomputed for her leave — and dragged the team mean down with it.
+   *    Her zero is not slack a manager can sell; there was no capacity to fill.
+   *    `benchRollup` is ALREADY a required leg of this component's forkJoin, so
+   *    this costs no new read and cannot desynchronise from the badge beside it.
+   *
+   * NOTE the asymmetry with /bench's Q3 rule, which is deliberate and not an
+   * inconsistency: /bench answers "what share of the people we have is unsold",
+   * where an away person is part of "the people we have"; this tile answers "how
+   * saturated are the people who could be sold", where she is not. Same fact, two
+   * questions, two denominators — which is why {@link uncountedNote} has to say
+   * out loud what this one omits.
    */
   protected countedForAverage = computed(() =>
-    this.managedResources().filter(r => countsTowardInternalCapacity(kindOf(r))));
+    this.managedResources().filter(r => countsTowardInternalCapacity(kindOf(r)) && !this.isAwayThisMonth(r)));
 
   averageUtilization = computed(() => {
     const counted = this.countedForAverage();
@@ -587,6 +713,30 @@ export class UtilizationComponent {
   /** True when the list shows rows the average deliberately does not count. */
   protected hasUncountedRows = computed(() =>
     this.countedForAverage().length !== this.managedResources().length);
+
+  /** How many listed rows the average drops for being away this month. */
+  protected awayFromAverageCount = computed(() =>
+    this.managedResources().filter(r => countsTowardInternalCapacity(kindOf(r)) && this.isAwayThisMonth(r)).length);
+
+  /**
+   * What the note beside the average actually omits (spec §5.4 U3).
+   *
+   * It used to be the constant "internal only", which after U2 under-declares:
+   * the mean now also drops people on leave, and a caption naming one of two
+   * exclusions is a caption that will be believed about both. The two clauses are
+   * independent — a view can trigger either, both or neither — so the string is
+   * assembled from whichever apply rather than switched between three canned
+   * sentences, and the away clause carries its COUNT, because "some rows are
+   * missing" is not a number anyone can reconcile against the list.
+   */
+  protected uncountedNote = computed<string>(() => {
+    const away = this.awayFromAverageCount();
+    const nonInternal = this.managedResources().filter(r => !countsTowardInternalCapacity(kindOf(r))).length;
+    const parts: string[] = [];
+    if (nonInternal > 0) parts.push('internal only');
+    if (away > 0) parts.push(`${away} away not counted`);
+    return parts.join(', ');
+  });
 
   resourceAssignments = computed(() => {
     const resId = this.selectedResource()?.id;

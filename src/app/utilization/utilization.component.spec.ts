@@ -164,8 +164,18 @@ function rowFor(host: HTMLElement, name: string): HTMLElement {
   return row as HTMLElement;
 }
 
+function benchBadge(host: HTMLElement, name: string): HTMLElement {
+  return rowFor(host, name).querySelector<HTMLElement>('[data-test="bench-badge"]')!;
+}
+
+/**
+ * Runs of whitespace collapsed, not merely trimmed: H's away badge renders its
+ * glyph in its own element, so the raw textContent carries the template's
+ * indentation between the two. Every pre-existing single-word assertion
+ * ('BENCH', 'Not applicable', …) is unaffected by the normalisation.
+ */
 function benchBadgeText(host: HTMLElement, name: string): string {
-  return rowFor(host, name).querySelector('[data-test="bench-badge"]')!.textContent?.trim() ?? '';
+  return (benchBadge(host, name).textContent ?? '').replace(/\s+/g, ' ').trim();
 }
 
 /** `getResources()`/`getResourceOrganizations()` (an rxResource, like every
@@ -418,15 +428,23 @@ describe('UtilizationComponent — bench badge', () => {
   // three SEPARATE tests, not one collapsed check. The two tests above cover
   // dummy vs. real-with-a-row; this one covers the third meaning: a real
   // resource that the (successfully loaded) rollup simply has no row for.
-  // EMPTY_BENCH_ROLLUP (the default) has no rows at all — Dana must render
-  // blank, NEVER 'Not applicable' (that would misreport her as a dummy) and
-  // never a stale/failed-looking value.
-  it('renders no bench state at all — never "Not applicable" — for a real resource absent from this month\'s rollup', async () => {
+  // EMPTY_BENCH_ROLLUP (the default) has no rows at all — Dana must render the
+  // explicit "not tracked" marker, NEVER 'Not applicable' (that would misreport
+  // her as a dummy) and never a stale/failed-looking value.
+  //
+  // The marker used to be the empty string, i.e. an EMPTY PILL. H changed it to a
+  // grey en dash on purpose: once a FOURTH outcome exists next door, a blank pill
+  // is one glance away from the away badge and reads as a rendering fault rather
+  // than as the stated fact "we have nothing for this month". The assertion's
+  // point is unchanged — this row must not be confused with a dummy or with a
+  // state — and it now also pins that the marker is actually rendered.
+  it('renders an explicit "not tracked" marker — never "Not applicable" — for a real resource absent from this month\'s rollup', async () => {
     const { fixture, host } = setup();
     await flush(fixture);
     const badge = benchBadgeText(host, 'Direct Dana');
-    expect(badge).toBe('');
+    expect(badge).toBe('–');
     expect(badge).not.toBe('Not applicable');
+    expect(badge).not.toBe('BENCH');
   });
 
   // Third leg of the three-way distinction: the bench read itself fails.
@@ -450,6 +468,181 @@ describe('UtilizationComponent — bench badge', () => {
     const avg = host.querySelector('[data-test="team-average"]');
     expect(avg?.textContent).toContain('Unavailable');
     expect(avg?.textContent).not.toContain('—');
+  });
+});
+
+/**
+ * BLOCK H on /utilization: the fourth badge (U1) and the average that stops
+ * counting somebody who was never staffable (U2/U3).
+ *
+ * STATIC: jsdom lays out nothing. These assert markup, class lists, accessible
+ * names and numbers — not that the badge is visible, not that the card header
+ * fits it, and not the measured contrast (that was taken on
+ * `availability-strip.component.ts`, where the tone was fixed).
+ *
+ * THE FIXTURE CONTAINS EVERY CASE the four outcomes need: an away resource, a
+ * bench one, an allocated one, a placeholder, and a resource the rollup has no
+ * row for. The two rollups differ in ONE cell, which is what makes the average
+ * assertions differential rather than a value anybody can hard-code.
+ */
+describe('UtilizationComponent — the fourth badge and the away-adjusted average (static: jsdom lays out nothing)', () => {
+  beforeEach(() => TestBed.resetTestingModule());
+
+  const AWAY_LABEL = 'Away (on leave) — not staffable';
+
+  // Utilizations chosen so the two means are far apart and neither is round-trip
+  // reachable from the other: with Ben counted (90 + 0 + 30)/3 = 40; without him
+  // (90 + 30)/2 = 60. His own 0 is the whole point — it is the stale scalar
+  // nobody recomputed for his leave.
+  const AVA = { ...base, id: 'av', name: 'Ava Internal', role: 'Developer', utilization: 90, kind: 'internal', managerId: 'm1' } as Resource;
+  const BEN = { ...base, id: 'be', name: 'Ben Away', role: 'Developer', utilization: 0, kind: 'internal', managerId: 'm1' } as Resource;
+  const CY = { ...base, id: 'cy', name: 'Cy Internal', role: 'Developer', utilization: 30, kind: 'internal', managerId: 'm1' } as Resource;
+  const DUM = { ...base, id: 'du', name: 'Dee Placeholder', role: 'Developer', utilization: 0, kind: 'dummy', managerId: 'm1' } as Resource;
+  /** In the team list but in NEITHER rollup — the "we have nothing for this month" case. */
+  const ELI = { ...base, id: 'el', name: 'Eli Untracked', role: 'Developer', utilization: 50, kind: 'internal', managerId: 'm1' } as Resource;
+
+  const rollupWithBen = (benState: 'ABSENT' | 'BENCH'): BenchRollup => ({
+    months: [BENCH_MONTH],
+    internalRows: [
+      { resourceId: 'av', resourceName: 'Ava Internal', kind: 'internal', monthly: { [BENCH_MONTH]: { state: 'BENCH', upcomingUnallocated: false } }, availabilityDate: { kind: 'date', date: '2026-04-01' } },
+      { resourceId: 'be', resourceName: 'Ben Away', kind: 'internal', monthly: { [BENCH_MONTH]: { state: benState, upcomingUnallocated: false } }, availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: BENCH_MONTH } },
+      { resourceId: 'cy', resourceName: 'Cy Internal', kind: 'internal', monthly: { [BENCH_MONTH]: { state: 'ALLOCATED', upcomingUnallocated: false } }, availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: BENCH_MONTH } },
+    ],
+    subcoRows: [],
+    hiringDemand: [],
+  });
+
+  const AWAY_ROLLUP = rollupWithBen('ABSENT');
+  const NO_ABSENCE_ROLLUP = rollupWithBen('BENCH');
+  /** All four outcomes on one screen, for the badge assertions. */
+  const TEAM = [AVA, BEN, CY, DUM, ELI];
+  /**
+   * The average's team drops Eli, and deliberately: she is internal and never
+   * away, so she is in BOTH denominators and only blurs them — (90+30)/2 = 60
+   * against (90+0+30)/3 = 40 are two clean, far-apart integers, whereas with her
+   * 50 in the mix the second lands on 42.5 and the whole differential would hang
+   * off which way a rounding mode breaks a tie.
+   */
+  const AVG_TEAM = [AVA, BEN, CY, DUM];
+
+  const noteText = (host: HTMLElement): string | null =>
+    host.querySelector('[data-test="kpi-internal-note"]')?.textContent?.trim() ?? null;
+  const averageText = (host: HTMLElement): string =>
+    host.querySelector('[data-test="team-average"]')?.textContent?.trim() ?? '';
+
+  // U1, BOTH DIRECTIONS ON ONE FIXTURE. "the away row shows the info chip" alone
+  // also passes against a page that puts the info chip on every row; "the bench
+  // row is red" alone passes against a page that never renders ABSENT at all.
+  it('gives an ABSENT row the canonical away badge — and never gives it to the BENCH row beside it', async () => {
+    const { fixture, host } = setup({ resources: TEAM, benchRollup: AWAY_ROLLUP });
+    await flush(fixture);
+
+    expect(benchBadgeText(host, 'Ben Away')).toBe('L ABSENT');
+    expect(benchBadge(host, 'Ben Away').className).toContain('is-info');
+    expect(benchBadge(host, 'Ben Away').getAttribute('aria-label')).toBe(AWAY_LABEL);
+    expect(benchBadge(host, 'Ben Away').getAttribute('title')).toBe(AWAY_LABEL);
+    // `red` is BENCH's tone. Sharing it would make the two states one on screen —
+    // fault injection (a) in the task brief, and the reason this line exists.
+    expect(benchBadge(host, 'Ben Away').className).not.toContain('red');
+
+    expect(benchBadgeText(host, 'Ava Internal')).toBe('BENCH');
+    expect(benchBadge(host, 'Ava Internal').className).toContain('red');
+    expect(benchBadge(host, 'Ava Internal').className).not.toContain('is-info');
+  });
+
+  // U1's critical pair: an away row must NEVER get the treatment a row with no
+  // data gets. Before H both would have rendered through the same fall-through.
+  it('never renders an away row the way it renders a row the rollup has no data for', async () => {
+    const { fixture, host } = setup({ resources: TEAM, benchRollup: AWAY_ROLLUP });
+    await flush(fixture);
+
+    expect(benchBadgeText(host, 'Eli Untracked')).toBe('–');
+    expect(benchBadge(host, 'Eli Untracked').className).toContain('is-neutral');
+    expect(benchBadge(host, 'Eli Untracked').className).not.toContain('is-info');
+    expect(benchBadge(host, 'Eli Untracked').getAttribute('aria-label')).toContain('not tracked');
+
+    // The four outcomes on one screen must be four different strings.
+    const four = [
+      benchBadgeText(host, 'Ava Internal'), benchBadgeText(host, 'Ben Away'),
+      benchBadgeText(host, 'Dee Placeholder'), benchBadgeText(host, 'Eli Untracked'),
+    ];
+    expect(four).toStrictEqual(['BENCH', 'L ABSENT', 'Not applicable', '–']);
+  });
+
+  // The row is role="button", an ARIA composite: the badge inside it is pruned, so
+  // the accessible NAME is the only carrier. It must speak the words, never the
+  // glyph — "L" tells a screen-reader user nothing.
+  it('speaks the away state in the row\'s accessible name, in words and not as the glyph', async () => {
+    const { fixture, host } = setup({ resources: TEAM, benchRollup: AWAY_ROLLUP });
+    await flush(fixture);
+    const ben = rowFor(host, 'Ben Away').getAttribute('aria-label') ?? '';
+    expect(ben).toContain(AWAY_LABEL);
+    expect(ben).not.toContain('BENCH');
+    expect(ben.endsWith(AWAY_LABEL)).toBe(true);
+
+    // The twin, on the same fixture: Ava carries her own state and none of Ben's.
+    const ava = rowFor(host, 'Ava Internal').getAttribute('aria-label') ?? '';
+    expect(ava).toContain('BENCH');
+    expect(ava).not.toContain(AWAY_LABEL);
+
+    // ...and the untracked row still ends on its percentage, with no dangling
+    // separator and no invented state — the en dash is a screen marker, not
+    // something to read aloud.
+    const eli = rowFor(host, 'Eli Untracked').getAttribute('aria-label') ?? '';
+    expect(eli.endsWith('%')).toBe(true);
+    expect(eli).not.toContain('–');
+  });
+
+  /**
+   * U2, as a DIFFERENTIAL. The two rollups differ in exactly ONE cell, so if the
+   * away state were not read at all the two means would be identical and both
+   * halves would still "pass" as value assertions. The disagreement IS the test.
+   */
+  it('drops an away person from the team average — and counts the very same person when she is on bench instead', async () => {
+    const away = setup({ resources: AVG_TEAM, benchRollup: AWAY_ROLLUP });
+    await flush(away.fixture);
+    // (90 + 30) / 2 — Ben's stale 0 is not slack anyone could have sold.
+    expect(averageText(away.host)).toContain('60');
+
+    TestBed.resetTestingModule();
+    const onBench = setup({ resources: AVG_TEAM, benchRollup: NO_ABSENCE_ROLLUP });
+    await flush(onBench.fixture);
+    // (90 + 0 + 30) / 3 — an idle person's 0 IS slack, and still belongs in the mean.
+    expect(averageText(onBench.host)).toContain('40');
+
+    // Spelled out: one cell of one rollup moved the figure. If these ever agree,
+    // the exclusion is not being read and every assertion above is decorative.
+    expect(averageText(away.host)).not.toBe(averageText(onBench.host));
+  });
+
+  /**
+   * U3. The caption used to be the constant "internal only", which after U2
+   * under-declares: the mean now also drops people on leave, and a caption naming
+   * one of two exclusions will be believed about both.
+   */
+  it('says how many rows the average dropped for being away — and stops saying it when nobody is', async () => {
+    const away = setup({ resources: AVG_TEAM, benchRollup: AWAY_ROLLUP });
+    await flush(away.fixture);
+    // Both clauses: the placeholder is excluded for its kind, Ben for his leave.
+    expect(noteText(away.host)).toBe('internal only, 1 away not counted');
+
+    TestBed.resetTestingModule();
+    const onBench = setup({ resources: AVG_TEAM, benchRollup: NO_ABSENCE_ROLLUP });
+    await flush(onBench.fixture);
+    // THE TWIN: same team, no absences — the away clause must be gone, not merely
+    // read "0 away", and the pre-existing clause must survive untouched.
+    expect(noteText(onBench.host)).toBe('internal only');
+  });
+
+  // The away exclusion is about the STATE, not about a zero: a placeholder is
+  // excluded for its kind and an away person for her leave, and the note has to
+  // hold when only one of the two applies.
+  it('names the away exclusion on its own when every listed row is internal', async () => {
+    const { fixture, host } = setup({ resources: [AVA, BEN, CY], benchRollup: AWAY_ROLLUP });
+    await flush(fixture);
+    expect(noteText(host)).toBe('1 away not counted');
+    expect(noteText(host)).not.toContain('internal only');
+    expect(averageText(host)).toContain('60');
   });
 });
 
@@ -527,10 +720,10 @@ describe('UtilizationComponent — the bench badge reads TODAY, in the LOCAL cal
     // THE ABSENCE TWIN: today this reads 'BENCH', from a July cell rendered beside a
     // present-tense utilisation figure. The two distinct wrong answers are named
     // separately so a fix that lands on the UTC month cannot pass either.
-    expect(badge).toBe('');
+    expect(badge).toBe('–');
     expect(badge).not.toBe('BENCH');
     expect(badge).not.toBe('ALLOCATED');
-    // ...and blank must still mean "no bench state here", never "dummy".
+    // ...and the marker must still mean "no bench state here", never "dummy".
     expect(badge).not.toBe('Not applicable');
   });
 });

@@ -4,7 +4,7 @@ import { NEVER, of, throwError, type Observable } from 'rxjs';
 import { BenchComponent } from './bench.component';
 import { ApiService } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
-import type { BenchRollup, UnallocatedHistory } from '../services/bench.util';
+import type { BenchCell, BenchRollup, BenchRow, UnallocatedHistory } from '../services/bench.util';
 import { todayLocalIso } from '../services/local-date.util';
 
 /** Stub for the per-resource history read; receives what the component actually asked for. */
@@ -606,6 +606,245 @@ describe('BenchComponent — the per-resource monthly unallocated history', () =
     const host = fixture.nativeElement as HTMLElement;
     expect(host.querySelector(`[data-test="history-toggle-${ROW_ID}"]`)).toBeNull();
     expect(calls).toBe(0);
+  });
+});
+
+/**
+ * BLOCK H — the fourth state on /bench: the away treatment (U11) and the two
+ * percentages Q3 governs (U10).
+ *
+ * STATIC: jsdom lays out nothing. Everything below is about which markup, class
+ * list, accessible name and number the component produces. None of it can show
+ * that a chip is visible, that the Status column does not clip it, or that the
+ * measured contrast holds — the tones are taken on trust from
+ * `availability-strip.component.ts`, which is where they were measured.
+ *
+ * THE FIXTURE HAS TO CONTAIN THE CASE. One row per outcome, because a suite where
+ * every row shares an answer passes against a renderer that prints one thing:
+ * a BENCH row, an ABSENT row, a PARTIAL row, an ALLOCATED row and a row the
+ * rollup has NO cell for this month. And, for Q3, counts chosen so the two
+ * candidate denominators give visibly different percentages — the fixture
+ * asserts that of itself below, so it cannot quietly stop exercising the
+ * decision.
+ */
+describe('BenchComponent — ABSENT, the fourth state (static: jsdom lays out nothing)', () => {
+  const AWAY_LABEL = 'Away (on leave) — not staffable';
+
+  /** BENCH carries a share and a bucket; ABSENT carries NEITHER (bench.util.ts B8 +
+   *  the note on `unallocatedPct`), which is what the "n/a" pair below relies on. */
+  const BENCH: BenchCell = { state: 'BENCH', agingBucket: 'C', upcomingUnallocated: false, unallocatedPct: 100, unallocatedDays: 21 };
+  const AWAY: BenchCell = { state: 'ABSENT', upcomingUnallocated: false };
+  const PARTIAL: BenchCell = { state: 'PARTIAL', upcomingUnallocated: false, unallocatedPct: 40, unallocatedDays: 8.4 };
+  const ALLOCATED: BenchCell = { state: 'ALLOCATED', upcomingUnallocated: false, unallocatedPct: 0, unallocatedDays: 0 };
+
+  const mk = (id: string, kind: 'internal' | 'subco', cell?: BenchCell): BenchRow => ({
+    resourceId: id, resourceName: `Person ${id}`, kind,
+    monthly: cell ? { [NOW_MONTH]: cell } : { [shiftMonth(NOW_MONTH, 1)]: BENCH },
+    availabilityDate: { kind: 'beyond-horizon', horizonEndMonth: WINDOW_END },
+  });
+
+  /**
+   * Internal: 1 BENCH, 2 ABSENT, 1 PARTIAL, 1 ALLOCATED (denominator 5) -> 20%.
+   *           Drop the two away rows from the denominator and it reads 1/3 = 33%.
+   * Subco:    3 BENCH, 4 ABSENT, 1 ALLOCATED (denominator 8) -> 38%.
+   *           Without the away rows: 3/4 = 75%.
+   * Eight numbers, all distinct (1 / 2 / 20 / 33 and 3 / 4 / 38 / 75), so a
+   * swapped numerator, a section mix-up, a hard-coded count and the WRONG
+   * denominator each show up as a different figure rather than coinciding.
+   * `i-nocell` is active only next month: it is in neither denominator, which is
+   * the third fact the page has to keep apart from the other two.
+   */
+  const Q3_ROLLUP: BenchRollup = {
+    months: WINDOW,
+    internalRows: [
+      mk('i-bench', 'internal', BENCH),
+      mk('i-away-1', 'internal', AWAY),
+      mk('i-away-2', 'internal', AWAY),
+      mk('i-partial', 'internal', PARTIAL),
+      mk('i-alloc', 'internal', ALLOCATED),
+      mk('i-nocell', 'internal'),
+    ],
+    subcoRows: [
+      mk('s-bench-1', 'subco', BENCH), mk('s-bench-2', 'subco', BENCH), mk('s-bench-3', 'subco', BENCH),
+      mk('s-away-1', 'subco', AWAY), mk('s-away-2', 'subco', AWAY), mk('s-away-3', 'subco', AWAY), mk('s-away-4', 'subco', AWAY),
+      mk('s-alloc', 'subco', ALLOCATED),
+    ],
+    hiringDemand: [],
+  };
+
+  /** Chip text with runs of whitespace collapsed: the away chip renders its glyph
+   *  in its own element, so the raw textContent carries the template's indentation. */
+  function chip(host: HTMLElement, key: string): HTMLElement {
+    const el = host.querySelector<HTMLElement>(`[data-test="state-${key}"]`);
+    if (!el) throw new Error(`no state chip rendered for "${key}"`);
+    return el;
+  }
+  const chipText = (host: HTMLElement, key: string): string =>
+    (chip(host, key).textContent ?? '').replace(/\s+/g, ' ').trim();
+  const headerText = (host: HTMLElement, section: 'internal' | 'subco'): string =>
+    (host.querySelector(`[data-test="${section}-section"] .command-card-header`)?.textContent ?? '')
+      .replace(/\s+/g, ' ').trim();
+
+  // THE PAIR THAT MATTERS FOR THE TONE. One direction alone — "the away row shows
+  // the info chip" — also passes against a page that puts the info chip on every
+  // row, and "the bench row is red" alone passes against a page that never renders
+  // ABSENT at all. Both directions, on ONE fixture, is the only shape that pins it.
+  it('renders the canonical away treatment on an ABSENT row — and never on the BENCH row of the same fixture', async () => {
+    const host = (await setupWith(Q3_ROLLUP)).nativeElement as HTMLElement;
+
+    // The away row: the strip's glyph, the state spelled out, the info tone.
+    expect(chipText(host, 'i-away-1')).toBe('L ABSENT');
+    expect(chip(host, 'i-away-1').className).toContain('is-info');
+    expect(chip(host, 'i-away-1').getAttribute('aria-label')).toBe(AWAY_LABEL);
+    expect(chip(host, 'i-away-1').getAttribute('title')).toBe(AWAY_LABEL);
+
+    // ...and it is NOT wearing bench's clothes. `red` is the class the BENCH pill
+    // carries; if ABSENT ever picks it up, the two states become one on screen.
+    expect(chip(host, 'i-away-1').className).not.toContain('red');
+    expect(chip(host, 'i-away-1').className).not.toContain('command-status');
+
+    // The BENCH row on the SAME fixture: red, spelled out with its bucket, and
+    // carrying none of the away treatment.
+    expect(chipText(host, 'i-bench')).toBe('BENCH (C)');
+    expect(chip(host, 'i-bench').className).toContain('red');
+    expect(chip(host, 'i-bench').className).not.toContain('is-info');
+    expect(chip(host, 'i-bench').getAttribute('aria-label')).toBeNull();
+    expect(chipText(host, 'i-bench')).not.toContain('L');
+  });
+
+  // The THIRD fact. Before H this rendered an empty pill, one glance away from
+  // ABSENT and indistinguishable from a rendering fault.
+  it('renders "not tracked" as a grey en dash — distinct from BOTH the away chip and the bench pill', async () => {
+    const host = (await setupWith(Q3_ROLLUP)).nativeElement as HTMLElement;
+    expect(chipText(host, 'i-nocell')).toBe('–');
+    expect(chip(host, 'i-nocell').className).toContain('is-neutral');
+    expect(chip(host, 'i-nocell').className).not.toContain('is-info');
+    expect(chip(host, 'i-nocell').getAttribute('aria-label')).toContain('not tracked');
+    // The three, side by side, must be three different strings on screen.
+    const three = [chipText(host, 'i-bench'), chipText(host, 'i-away-1'), chipText(host, 'i-nocell')];
+    expect(new Set(three).size).toBe(3);
+  });
+
+  // ABSENT never carries an aging bucket (bench.util.ts B8): being on leave is not
+  // a delivery problem to age, and a bucket would put the person straight back on
+  // the ladder the fourth state took her off.
+  it('never stamps an aging bucket on an away row', async () => {
+    const host = (await setupWith(Q3_ROLLUP)).nativeElement as HTMLElement;
+    expect(chipText(host, 'i-away-1')).not.toMatch(/\((A|B|C|D)\)/);
+    // ...while the bench row on the same fixture still shows one, so this is
+    // about the STATE and not about a suffix that stopped rendering everywhere.
+    expect(chipText(host, 'i-bench')).toContain('(C)');
+  });
+
+  /**
+   * Q3, as a DIFFERENTIAL. The two candidate rules are spelled out and asserted to
+   * disagree on this fixture FIRST — without that, both halves below pass under
+   * either rule and the test certifies nothing (spec §8.2's exact trap).
+   */
+  it('keeps an away row OUT of the bench count and IN the "% of active" denominator (Q3)', async () => {
+    // The fixture's own precondition. Internal: 1 of 5 vs 1 of 3.
+    expect(Math.round((1 / 5) * 100)).not.toBe(Math.round((1 / 3) * 100));
+    // Subco: 3 of 8 vs 3 of 4.
+    expect(Math.round((3 / 8) * 100)).not.toBe(Math.round((3 / 4) * 100));
+
+    const host = (await setupWith(Q3_ROLLUP)).nativeElement as HTMLElement;
+
+    const internal = headerText(host, 'internal');
+    expect(internal).toContain('1 on bench');   // the two away rows left the numerator
+    expect(internal).toContain('20% of active');
+    // THE OTHER RULE, named: 33% is what dropping them from the denominator reads.
+    expect(internal).not.toContain('33% of active');
+    // ...and 60% is what counting them as bench would read (3 of 5), i.e. pre-H.
+    expect(internal).not.toContain('60% of active');
+
+    const subco = headerText(host, 'subco');
+    expect(subco).toContain('3 on bench');
+    expect(subco).toContain('38% of active');
+    expect(subco).not.toContain('75% of active');   // away out of the denominator
+    expect(subco).not.toContain('88% of active');   // away counted as bench (7 of 8)
+  });
+
+  // The count Q3 makes mandatory. Asserted TOGETHER with the percentage above and
+  // below, because either one can be wired without the other.
+  it('shows the away count beside each percentage, per section and never swapped', async () => {
+    const host = (await setupWith(Q3_ROLLUP)).nativeElement as HTMLElement;
+    expect(host.querySelector('[data-test="internal-away-count"]')?.textContent?.trim()).toBe('2 away');
+    expect(host.querySelector('[data-test="subco-away-count"]')?.textContent?.trim()).toBe('4 away');
+    // Cross-section swap: each section's own header must not carry the other's figure.
+    expect(headerText(host, 'internal')).not.toContain('4 away');
+    expect(headerText(host, 'subco')).not.toContain('2 away');
+    // The count has to justify the denominator, so it says so on hover rather than
+    // leaving a bare number the reader has to reverse-engineer.
+    expect(host.querySelector('[data-test="internal-away-count"]')?.getAttribute('title')).toContain('denominator');
+  });
+
+  // THE ABSENCE TWIN of both assertions above: on a rollup with no away rows at
+  // all, the count is an honest 0 and BOTH percentages are byte-identical to what
+  // they were before this block. A page that always printed a non-zero count, or
+  // that changed the arithmetic for everybody, fails here and only here.
+  it('reads 0 away — and leaves both percentages exactly as they were — on a rollup with no absences', async () => {
+    const host = (await setupWith(COUNTS_ROLLUP)).nativeElement as HTMLElement;
+    expect(host.querySelector('[data-test="internal-away-count"]')?.textContent?.trim()).toBe('0 away');
+    expect(host.querySelector('[data-test="subco-away-count"]')?.textContent?.trim()).toBe('0 away');
+    expect(headerText(host, 'internal')).toContain('50% of active');
+    expect(headerText(host, 'subco')).toContain('33% of active');
+  });
+
+  // The unallocated share is unanswerable for an away month, and it is unanswerable
+  // for a never-contracted month, but for DIFFERENT reasons — and the tooltip is
+  // the only place the reader can find out which. One string for both would be a
+  // claim they cannot check.
+  it('names the AWAY reason on an away row\'s "n/a", and the no-contract reason on an untracked one', async () => {
+    const host = (await setupWith(Q3_ROLLUP)).nativeElement as HTMLElement;
+    const away = host.querySelector('[data-test="unallocated-pct-i-away-1"]')!;
+    const untracked = host.querySelector('[data-test="unallocated-pct-i-nocell"]')!;
+
+    expect(away.textContent?.trim()).toBe('n/a');
+    expect(away.getAttribute('title')).toContain('Away for the whole month');
+    expect(away.getAttribute('title')).not.toContain('No contracted target');
+
+    expect(untracked.textContent?.trim()).toBe('n/a');
+    expect(untracked.getAttribute('title')).toContain('No contracted target');
+    expect(untracked.getAttribute('title')).not.toContain('Away for the whole month');
+  });
+
+  // The rendered strings are pinned EXACTLY, not by substring, and that is the
+  // privacy gate on this surface: an absence reason is special-category data (spec
+  // §7.3), `BenchCell` cannot carry one and /bench/monthly does not transmit one,
+  // so the only way one could reach the screen is somebody appending it here.
+  // `toStrictEqual` on the whole triple makes that a red test rather than a review
+  // comment.
+  it('says exactly "away", never why', async () => {
+    const host = (await setupWith(Q3_ROLLUP)).nativeElement as HTMLElement;
+    const el = chip(host, 'i-away-1');
+    expect({
+      text: (el.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      label: el.getAttribute('aria-label'),
+      title: el.getAttribute('title'),
+    }).toStrictEqual({ text: 'L ABSENT', label: AWAY_LABEL, title: AWAY_LABEL });
+  });
+
+  // The expandable history renders the same four states, and rendering them a
+  // second way on the same page is the drift this fragment exists to prevent.
+  it('gives an ABSENT month in the history panel the same treatment as the grid — beside a BENCH month that keeps its own', async () => {
+    const history: UnallocatedHistory = {
+      resourceId: 'i-bench', resourceName: 'Person i-bench',
+      cells: [
+        { month: '2026-03', state: 'BENCH', agingBucket: 'D', unallocatedPct: 100, unallocatedDays: 21 },
+        { month: '2026-04', state: 'ABSENT' },
+      ],
+    };
+    const fixture = await setupWith(Q3_ROLLUP, true, [], () => of(history));
+    const host = fixture.nativeElement as HTMLElement;
+    host.querySelector<HTMLButtonElement>('[data-test="history-toggle-i-bench"]')!.click();
+    fixture.detectChanges();
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    expect(chipText(host, '2026-04')).toBe('L ABSENT');
+    expect(chip(host, '2026-04').className).toContain('is-info');
+    expect(chipText(host, '2026-03')).toBe('BENCH (D)');
+    expect(chip(host, '2026-03').className).not.toContain('is-info');
   });
 });
 
