@@ -5,7 +5,7 @@ import { DeferBlockState, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { NEVER, of } from 'rxjs';
 import { DashboardComponent } from './dashboard.component';
-import { ApiService, UserRole, type BenchRollup, type Issue } from '../services/api.service';
+import { ABSENCE_REASON_CODES, ApiService, UserRole, type BenchCell, type BenchRollup, type Issue } from '../services/api.service';
 import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
 import { todayLocalIso } from '../services/local-date.util';
 import { AuthService } from '../services/auth.service';
@@ -415,6 +415,244 @@ describe('Dashboard — Baseline vs Planned portfolio tile (design spec, block E
   it('is absent for a pm — portfolio dashboard stays finance/delivery-executive/admin only, unchanged by this block', async () => {
     const { fixture } = await render('pm');
     expect(fixture.nativeElement.textContent).not.toContain('Baseline vs Planned');
+  });
+});
+
+// -----------------------------------------------------------------------------
+// BLOCK H — Q2 (fully-loaded portfolio margin) and U7/U8 (a fourth bench state).
+//
+// jsdom DOES NOT LAY OUT: nothing here can prove a tile is legible or unclipped.
+// Every assertion below is structural — a label, a note, a computed count.
+// -----------------------------------------------------------------------------
+
+/**
+ * The same four project shapes /reporting's spec uses, for the same reason: a
+ * billable control, a non-billable NON-basket, a Basket, and a row carrying NO
+ * `billable` field (which must read as billable). Rates are 100/200 EUR per hour
+ * so every figure is a product of two numbers written here.
+ *
+ *   PB  revenue 100000  cost 300h x 100 = 30000   billable
+ *   PN  revenue      0  cost 100h x 100 = 10000   NON-billable (Delivery)
+ *   PK  revenue      0  cost  40h x 100 =  4000   NON-billable (Basket)
+ *   PL  revenue  20000  cost  50h x 100 =  5000   billable by DEFAULT
+ *
+ *   fully loaded = 120000 - 35000 - 14000 = 71000  (59.17%)
+ *
+ * The point of running it HERE as well: this tile's pre-H arithmetic was an
+ * unfiltered sum over every project, so the headline must come out at the SAME
+ * 71000 either way. That equality is the thing to confirm, not to assume — it is
+ * the whole reason the label had to change when the number did not.
+ */
+const H_PROJECTS = [
+  { id: 'PB', name: 'Billable Delivery', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution', billable: true, type: 'Delivery' },
+  { id: 'PN', name: 'Internal Platform', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution', billable: false, type: 'Delivery' },
+  { id: 'PK', name: 'BASKET Engineering', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution', billable: false, type: 'Basket' },
+  { id: 'PL', name: 'Legacy Row', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution' },
+];
+
+const H_PROJECTS_UNFLAGGED = H_PROJECTS.map(p => {
+  const copy: Partial<typeof p> = { ...p };
+  delete copy.billable;
+  delete copy.type;
+  return copy;
+});
+
+function hMoneyOverrides(projects: unknown[]) {
+  return {
+    getProjects: vi.fn(() => of(projects)),
+    getResources: vi.fn(() => of([
+      { id: 'R1', name: 'Rita One', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 80, capacity: 40, kind: 'internal', costRate: 100, billRate: 200 },
+      { id: 'R2', name: 'Ravi Two', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 60, capacity: 40, kind: 'internal', costRate: 100, billRate: 200 },
+    ])),
+    getTimeEntries: vi.fn(() => of([
+      { id: 'T1', assignmentId: 'a', requestId: 'r', resourceId: 'R1', projectId: 'PB', date: '2026-05-04', hours: 300, status: 'Approved' },
+      { id: 'T2', assignmentId: 'a', requestId: 'r', resourceId: 'R2', projectId: 'PN', date: '2026-05-04', hours: 100, status: 'Approved' },
+      { id: 'T3', assignmentId: 'a', requestId: 'r', resourceId: 'R2', projectId: 'PK', date: '2026-05-04', hours: 40, status: 'Approved' },
+      { id: 'T4', assignmentId: 'a', requestId: 'r', resourceId: 'R1', projectId: 'PL', date: '2026-05-04', hours: 50, status: 'Approved' },
+    ])),
+    getOrders: vi.fn(() => of([{ id: 'O1', contractId: 'CT', type: 'Customer', amount: 120000, currency: 'EUR', status: 'Invoiced', orderDate: '2026-01-01' }])),
+    getOrderLines: vi.fn(() => of([
+      { id: 'L-PB', orderId: 'O1', projectId: 'PB', description: 'x', amount: 100000 },
+      { id: 'L-PL', orderId: 'O1', projectId: 'PL', description: 'x', amount: 20000 },
+    ])),
+  } as unknown as Partial<Record<(typeof DASHBOARD_METHODS)[number], ReturnType<typeof vi.fn>>>;
+}
+
+function marginTile(fixture: { nativeElement: unknown }): HTMLElement {
+  const tile = (fixture.nativeElement as HTMLElement).querySelector<HTMLElement>('[data-test="portfolio-margin-tile"]');
+  expect(tile, 'the portfolio margin tile must exist').not.toBeNull();
+  return tile!;
+}
+
+describe('Dashboard — the portfolio margin tile is FULLY LOADED and says so (Q2; structure only, jsdom does not lay out)', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('names "fully loaded" in the LABEL and reconciles the figure with a project delivery margin', async () => {
+    const { fixture } = await render('finance', hMoneyOverrides(H_PROJECTS));
+    const tile = marginTile(fixture);
+
+    const label = tile.querySelector('.command-kpi-label')?.textContent ?? '';
+    expect(label.toLowerCase()).toContain('fully loaded');
+
+    // The figures, hand-derived above.
+    const text = tile.textContent ?? '';
+    expect(text).toContain('59.2%');
+    expect(text).toContain('€71,000');
+    expect(text).toContain('€120,000');
+
+    const note = tile.querySelector('[data-test="fully-loaded-note"]')?.textContent ?? '';
+    expect(note).toContain('€14,000');
+    expect(note).toContain('2 engagements');
+    expect(note.toLowerCase()).toContain('not comparable');
+  });
+
+  it('CONFIRMS Q2 — the headline does NOT move with the flags; only the split and the note do', async () => {
+    // The answer worth confirming rather than hiding: this tile already summed
+    // every project, so fully-loading it changes no digit. That is precisely why
+    // the LABEL is the fix — a number whose meaning changed and whose value did
+    // not is one nobody will notice on their own.
+    const { fixture: flagged } = await render('finance', hMoneyOverrides(H_PROJECTS));
+    // Snapshotted BEFORE the TestBed reset: these are signals, and re-reading one
+    // after its injector is destroyed answers from the empty default — which
+    // would silently turn the comparison below into "0 equals 0".
+    const flaggedMargin = flagged.componentInstance.totalMargin();
+    const flaggedRevenue = flagged.componentInstance.totalRevenue();
+    const flaggedPct = flagged.componentInstance.portfolioMarginPct();
+    const flaggedNote = marginTile(flagged).querySelector('[data-test="fully-loaded-note"]')?.textContent ?? '';
+    const flaggedSplit = flagged.componentInstance['portfolioMargin']().nonBillableCost;
+
+    TestBed.resetTestingModule();
+
+    const { fixture: plain } = await render('finance', hMoneyOverrides(H_PROJECTS_UNFLAGGED));
+    const without = plain.componentInstance;
+
+    expect(flaggedMargin).toBe(71000);
+    expect(flaggedPct).toBeCloseTo(59.1667, 3);
+    expect(without.totalMargin()).toBe(flaggedMargin);
+    expect(without.totalRevenue()).toBe(flaggedRevenue);
+    expect(without.portfolioMarginPct()).toBeCloseTo(flaggedPct, 9);
+
+    // …and what DOES move, so this is not a test that would pass against a tile
+    // wired to a constant.
+    expect(flaggedSplit).toBe(14000);
+    expect(without['portfolioMargin']().nonBillableCost).toBe(0);
+    expect(without['portfolioMargin']().nonBillableProjectIds).toStrictEqual([]);
+
+    const plainNote = marginTile(plain).querySelector('[data-test="fully-loaded-note"]')?.textContent ?? '';
+    expect(plainNote.toLowerCase()).toContain('no non-billable engagement');
+    expect(plainNote).not.toBe(flaggedNote);
+  });
+
+  it('treats the row with NO billable field as billable, never as an unflagged basket', async () => {
+    const { fixture } = await render('finance', hMoneyOverrides(H_PROJECTS));
+    const ids = fixture.componentInstance['portfolioMargin']().nonBillableProjectIds;
+    expect(ids).not.toContain('PL');
+    expect(ids).toStrictEqual(['PK', 'PN']);
+  });
+
+  it('carries the cost of an engagement that has approved time but NO project master row', async () => {
+    // The universe widened from `data().projects` to `attributableProjectIds`,
+    // and this is the case that separates them. It is also the ONLY thing on this
+    // screen that can catch a revert to the old open-coded sum: that sum happened
+    // to equal the fully-loaded figure on every project the master data knows
+    // about, so with a tidy fixture the revert is arithmetically invisible here.
+    // A total whose purpose is to carry every euro must not lose one to a missing
+    // row.
+    const base = hMoneyOverrides(H_PROJECTS);
+    const { fixture } = await render('finance', {
+      ...base,
+      getTimeEntries: vi.fn(() => of([
+        { id: 'T1', assignmentId: 'a', requestId: 'r', resourceId: 'R1', projectId: 'PB', date: '2026-05-04', hours: 300, status: 'Approved' },
+        { id: 'T2', assignmentId: 'a', requestId: 'r', resourceId: 'R2', projectId: 'PN', date: '2026-05-04', hours: 100, status: 'Approved' },
+        { id: 'T3', assignmentId: 'a', requestId: 'r', resourceId: 'R2', projectId: 'PK', date: '2026-05-04', hours: 40, status: 'Approved' },
+        { id: 'T4', assignmentId: 'a', requestId: 'r', resourceId: 'R1', projectId: 'PL', date: '2026-05-04', hours: 50, status: 'Approved' },
+        // The ghost: 20h x 100 = 2000 of real cost on an id no `projects` row covers.
+        { id: 'T5', assignmentId: 'a', requestId: 'r', resourceId: 'R2', projectId: 'PG', date: '2026-05-04', hours: 20, status: 'Approved' },
+      ])),
+    });
+
+    const c = fixture.componentInstance;
+    // 71000 - 2000. The pre-H sum over `data().projects` answers 71000 and loses
+    // the ghost's cost entirely.
+    expect(c.totalMargin()).toBe(69000);
+    // An unresolvable id is BILLABLE by the same `?? true` rule as everywhere
+    // else, so its cost lands in deliveryCost, not in the non-billable bucket.
+    expect(c['portfolioMargin']().deliveryCost).toBe(37000);
+    expect(c['portfolioMargin']().nonBillableProjectIds).toStrictEqual(['PK', 'PN']);
+  });
+});
+
+describe('Dashboard "In Bench" tile — an ABSENT row leaves the counts (U7/U8; structure only, jsdom does not lay out)', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  const bench = { state: 'BENCH' as const, upcomingUnallocated: false };
+  const absent = { state: 'ABSENT' as const, upcomingUnallocated: false };
+
+  /**
+   * Two internals and two subcos, with ONE cell per kind as the variable. Calling
+   * this twice — 'BENCH' then 'ABSENT' — is the differential: the fixtures are one
+   * state value apart per kind, and the tile must disagree on both counts.
+   *
+   * The subco half is not symmetry for its own sake: a subcontractor can be off
+   * sick, and if the fourth state were only threaded through the internal rows
+   * `subcoBenchCount` would stay false AND green (spec §8.3, fixture S4).
+   */
+  function rollup(variable: BenchCell): BenchRollup {
+    const month = todayLocalIso().slice(0, 7);
+    return {
+      months: [month],
+      internalRows: [
+        { resourceId: 'int-1', resourceName: 'Steady Internal', kind: 'internal', monthly: { [month]: bench }, availabilityDate: { kind: 'date', date: month + '-01' } },
+        { resourceId: 'int-2', resourceName: 'Variable Internal', kind: 'internal', monthly: { [month]: variable }, availabilityDate: { kind: 'date', date: month + '-01' } },
+      ],
+      subcoRows: [
+        { resourceId: 'sub-1', resourceName: 'Steady Subco', kind: 'subco', monthly: { [month]: bench }, availabilityDate: { kind: 'date', date: month + '-01' } },
+        { resourceId: 'sub-2', resourceName: 'Variable Subco', kind: 'subco', monthly: { [month]: variable }, availabilityDate: { kind: 'date', date: month + '-01' } },
+      ],
+      hiringDemand: [],
+    };
+  }
+
+  it('DIFFERENTIAL — the same four rows, one state apart, give different bench counts for BOTH kinds', async () => {
+    const { fixture: benched } = await render('finance', { getBenchMonthly: vi.fn(() => of(rollup(bench))) });
+    const before = { int: benched.componentInstance.internalBenchCount(), sub: benched.componentInstance.subcoBenchCount() };
+
+    TestBed.resetTestingModule();
+
+    const { fixture: away } = await render('finance', { getBenchMonthly: vi.fn(() => of(rollup(absent))) });
+    const after = away.componentInstance;
+
+    // PRESENCE: a BENCH row is counted.
+    expect(before).toStrictEqual({ int: 2, sub: 2 });
+    // ABSENCE: the very same row, flipped to ABSENT, is not — the headline
+    // correction, asserted rather than deduced from "the fourth state does it".
+    expect(after.internalBenchCount()).toBe(1);
+    expect(after.subcoBenchCount()).toBe(1);
+    // …and the person did not vanish: she moved to the away counts.
+    expect(after.internalAbsentCount()).toBe(1);
+    expect(after.subcoAbsentCount()).toBe(1);
+  });
+
+  it('says who left the counts, without saying why, and says nothing when nobody did', async () => {
+    const { fixture: away } = await render('finance', { getBenchMonthly: vi.fn(() => of(rollup(absent))) });
+    const tile = (away.nativeElement as HTMLElement).querySelector('[data-test="bench-tile"]')!;
+    const line = tile.querySelector('[data-test="bench-tile-away"]')?.textContent ?? '';
+    expect(line).toContain('1 int.');
+    expect(line).toContain('1 subco');
+    expect(line).toContain('away on leave');
+
+    // PRIVACY over the whole page: an absence reason is special-category data and
+    // never reaches this screen — /bench/monthly carries none to render.
+    const page = (away.nativeElement as HTMLElement).textContent ?? '';
+    for (const reason of ABSENCE_REASON_CODES) expect(page).not.toContain(reason);
+    // Vacuity control: the scan ran against a page that DID render the marking.
+    expect(page).toContain('away on leave');
+
+    TestBed.resetTestingModule();
+
+    // THE ABSENCE TWIN: the line is data-driven, not a permanent footnote.
+    const { fixture: benched } = await render('finance', { getBenchMonthly: vi.fn(() => of(rollup(bench))) });
+    expect((benched.nativeElement as HTMLElement).querySelector('[data-test="bench-tile-away"]')).toBeNull();
   });
 });
 
