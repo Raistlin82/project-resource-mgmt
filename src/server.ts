@@ -22,7 +22,7 @@ import { convertToBase, computeProjectFinancials, recognitionJournal, plannedCos
 import { negotiatedRateCurrencyError, sellRateFor } from './app/services/sell-rate.util';
 import { pickRateCard } from './app/services/rate-card.util';
 import { billingPlanValidationError, customerFacingBillingAmount } from './app/services/billing-validation.util';
-import type { FxRate, RateCard } from './app/services/api.service';
+import type { FxRate, RateCard, ResourceAbsence } from './app/services/api.service';
 import { isResourceKind, RESOURCE_KINDS, kindOf, dailyCapFor } from './app/services/resource-kind.util';
 import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, scopeOf, accountableApproversOf, nodeManagersAbove, isTerminatedAsOf, type OrgLevel, type OrgNode } from './app/services/org-scope.util';
 import { maxIdSeq } from './server/id-seq.util';
@@ -124,6 +124,29 @@ import {
   writeResourceOrganizationBinding,
   ORG_TREE_LOCK,
 } from './server/operational-integrity.util';
+import {
+  ABSENCE_FIELDS,
+  ABSENCE_MUTATION_RULES,
+  ABSENCE_READ_RULES,
+  AVAILABILITY_READ_ROLES,
+  absenceCreateError,
+  absenceOutsideEmploymentError,
+  absenceOverlapError,
+  absencePatchError,
+  absenceRangeError,
+  absenceReadScope,
+  absenceSelfRecordError,
+  absencesInMonthRange,
+  bookedDaysInAbsence,
+  bookingOnAbsenceError,
+  nonBillableBillingItemError,
+  nonBillableFlipError,
+  parseProjectClassification,
+  pinnedAbsenceFields,
+  PROJECT_MUTATION_RULES,
+  projectClassificationFieldError,
+  redactAbsence,
+} from './server/absence-policy.util';
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
 import { EInvoiceValidationError } from './server/integrations/fatturapa.adapter';
@@ -407,6 +430,15 @@ const auditRepoBySegment = new Map<string, AuditReadable>([
   // revaluation could not be reconstructed from it.
   ['rate-cards', repos.rateCards], ['negotiated-rates', repos.negotiatedRates],
   ['fx-rates', repos.fxRates], ['settings', repos.settings],
+  // H — absences. Registered DELIBERATELY, with its privacy consequence stated
+  // rather than discovered: the middleware diffs the whole row, so an audit
+  // entry for an absence carries `reasonCode`, and `GET /audit-logs` is read by
+  // admin AND delivery-executive. That is admissible only because product
+  // decision Q5 (2026-08-07, spec §10) put delivery-executive in the reason
+  // audience; the alternative was to invent per-field redaction in the
+  // middleware, which was considered and rejected. Leaving the collection OUT
+  // would make special-category data editable with no trail at all.
+  ['absences', repos.resourceAbsences],
 ]);
 // Fail loudly at boot rather than silently blinding the trail again: the map above
 // is the ONLY thing standing between a money-defining mutation and an empty diff.
@@ -750,7 +782,18 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
     // Time entries incl. approval. Self-approval is additionally blocked in the PUT handler (SoD).
     { test: p => p.startsWith('/time-entries'), roles: ['employee', 'pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
     { test: p => ['/assignments', '/requests'].some(prefix => p.startsWith(prefix)), roles: ['pm', 'resource-manager', 'delivery-executive', 'admin'] },
-    { test: p => ['/projects', '/project-partners', '/project-documents', '/work-packages', '/milestones', '/project-tasks', '/project-issues', '/change-requests'].some(prefix => p.startsWith(prefix)), roles: ['pm', 'delivery-executive', 'admin'] },
+    // H — recording an absence is an HR fact: resource-manager/admin only. A PM
+    // must not be able to declare a colleague absent (it removes them from the
+    // bench, a metric the PM is measured on); an employee must not be able to
+    // take themselves off it. Spec §7.1.
+    ...ABSENCE_MUTATION_RULES,
+    // The project slice comes from ONE exported, order-sensitive array, for the
+    // same reason as COMMERCIAL_MUTATION_RULES above: the narrow
+    // /projects/:id/classification rule (finance-grade) precedes the coarse
+    // /projects prefix rule that admits `pm`. Inlining the two here again is how
+    // the narrow rule would end up after the coarse one and become dead code
+    // that still reads as a guard.
+    ...PROJECT_MUTATION_RULES,
     { test: p => ['/skill-catalogs', '/proficiency-sets', '/skills', '/project-roles', '/resource-organizations', '/languages'].some(prefix => p.startsWith(prefix)), roles: ['admin', 'delivery-executive'] },
     // Customizing catalogs (Phase F1): location/industry/cost-category/partner-role/
     // vendor master data — mutations restricted to admin/delivery-executive (reads
@@ -791,7 +834,7 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
  *   - /approval-requests     -> governance queue: approver/finance-grade roles only.
  *   - /time-entries          -> the whole org's timesheets: any authenticated role.
  */
-const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
+const READ_RULES: { test: (path: string) => boolean; roles: readonly UserRole[] }[] = [
   { test: p => p.startsWith('/audit-logs'), roles: ['admin', 'delivery-executive'] },
   { test: p => ['/customers', '/contracts', '/orders', '/order-lines', '/billing-plan-items', '/negotiated-rates'].some(prefix => p.startsWith(prefix)), roles: ['sales', 'finance', 'delivery-executive', 'admin'] },
   // Internal budget/cost-center plans expose financial planning data and must
@@ -814,7 +857,15 @@ const READ_RULES: { test: (path: string) => boolean; roles: UserRole[] }[] = [
   // Extended (not duplicated) for Block F's '/bench/monthly': same audience,
   // deliberately excluding 'employee' (an org-wide idle-staff roster is
   // sensitive) and 'sales' (no staffing need-to-know) — design spec §8.
-  { test: p => p.startsWith('/capacity') || p.startsWith('/bench'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
+  { test: p => p.startsWith('/capacity') || p.startsWith('/bench'), roles: AVAILABILITY_READ_ROLES },
+  // H — the two absence reads have DIFFERENT audiences, and the order between
+  // them is load-bearing. `find` returns the first match, so the exact-path
+  // '/absences/calendar' rule (redacted availability, planner audience) MUST
+  // precede the '/absences' prefix rule (the reason, GDPR art. 9). Reversed,
+  // the redacted feed inherits the reason audience and the redaction protects
+  // nothing while still reading like it does. Both live in ONE exported array
+  // so the order cannot be lost here — see ABSENCE_READ_RULES.
+  ...ABSENCE_READ_RULES,
   // Cost baselines (design spec, block E, §5): read is DISJOINT from freeze —
   // pm/resource-manager can read the variance to act on it early, but cannot
   // freeze or re-freeze (§3.4: whoever is measured on the variance must not be
@@ -2544,6 +2595,16 @@ apiRouter.put('/assignments/:id', async (req, res) => {
         if (employmentErr) {
           return { status: 400, error: `retarget would invalidate an existing ${employmentErr}` };
         }
+        // H — a retarget IS a new booking for the receiving resource: the day rows
+        // travel wholesale on a resourceId change and nothing else re-validates
+        // them. Without this line, moving an assignment onto someone on leave is
+        // the door around the day-level gate, and the two numbers then become true
+        // and contradictory (allocated AND absent).
+        const absenceErr = bookingOnAbsenceError(
+          movingDays.map(day => day.date), targetResource, await repos.resourceAbsences.list());
+        if (absenceErr) {
+          return { status: 400, error: `retarget would create a ${absenceErr}` };
+        }
         const targetAssignmentIds = new Set((await repos.assignments.list())
           .filter(a => a.resourceId === effectiveResourceId && a.id !== current.id)
           .map(a => a.id));
@@ -2891,6 +2952,19 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
   const employmentBookingErr = bookingOutsideEmploymentError(positiveDates, resource);
   if (employmentBookingErr) { res.status(400).json({ error: employmentBookingErr }); return; }
 
+  // H — ABSENCE GATE (design spec §6.4). Same shape and the same call site as
+  // the employment gate above, because it is the same kind of fact: a day on
+  // which the API must not accept hours. THIS DIRECTION REFUSES; the other
+  // (recording an absence over already-booked days) accepts and reports the
+  // conflict, and the asymmetry is deliberate — see POST /absences.
+  //
+  // Only the DAY-level write paths carry this gate, never the window-level ones
+  // (POST/PUT /assignments): an assignment window is not a booking, and refusing
+  // a six-month assignment because it contains one vacation day would be a
+  // different, wrong rule.
+  const absenceBookingErr = bookingOnAbsenceError(positiveDates, resource, await repos.resourceAbsences.list());
+  if (absenceBookingErr) { res.status(400).json({ error: absenceBookingErr }); return; }
+
   // Daily-capacity gate. assignmentDays carry assignmentId (not resourceId), so
   // gather this resource's OTHER assignment ids, sum their day-hours on the
   // affected dates, and check other+new against the effective per-day cap.
@@ -2947,6 +3021,13 @@ apiRouter.put('/assignments/:id/allocation', async (req, res) => {
       if (!currentResource) return { status: 409, error: 'assignment resource disappeared while allocating' };
       const currentEmploymentErr = bookingOutsideEmploymentError(positiveDates, currentResource);
       if (currentEmploymentErr) return { status: 400, error: currentEmploymentErr };
+      // H — the in-transaction re-check of the absence gate, for exactly the
+      // reason the employment one is re-checked here: the pre-lock read above is
+      // a snapshot, and an absence recorded concurrently must not be overtaken by
+      // a booking that read the world before it existed.
+      const currentAbsenceErr = bookingOnAbsenceError(
+        positiveDates, currentResource, await transactionRepos.resourceAbsences.list());
+      if (currentAbsenceErr) return { status: 400, error: currentAbsenceErr };
       cap = dailyCapFor(
         kindOf(currentResource),
         await resolveBaseCap(currentResource, transactionRepos),
@@ -3162,6 +3243,20 @@ async function transferDummyMonth(
         targetAssig: existingTargetAssig,
         baseline: {},
         blocked: employmentErr,
+      };
+    }
+    // H — substituting a dummy books a REAL person on the dummy's days, so the
+    // absence gate belongs here too. It reports through `blocked` rather than a
+    // throw, like the employment gate beside it, so the month is reported
+    // un-substituted with a reason instead of failing the whole batch.
+    const absenceErr = bookingOnAbsenceError(
+      Object.keys(dummyByDate), currentTarget, await transactionRepos.resourceAbsences.list());
+    if (absenceErr) {
+      return {
+        plan: planSubstitution(dummyByDate, {}, 0),
+        targetAssig: existingTargetAssig,
+        baseline: {},
+        blocked: absenceErr,
       };
     }
     cap = dailyCapFor(kindOf(currentTarget), await resolveBaseCap(currentTarget, transactionRepos));
@@ -3601,6 +3696,12 @@ async function returnHoursToDummy(
       console.warn(`give-back: dummy resource ${dummyAssig.resourceId} disappeared while settling month ${row.id} — returning no hours`);
       return { giveBackHours: 0, shortfallHours: blockedHours, settled: false };
     }
+    // H — NO ABSENCE GATE HERE, and the verdict is explicit rather than an
+    // omission: this path returns hours to the DUMMY placeholder they came from.
+    // It is a restoration, not a new booking, the receiving row is a placeholder
+    // that models unmet demand rather than a person who can be on leave, and
+    // refusing it would strand the hours in neither resource's plan. Same reason
+    // the resource-PUT re-check above stays employment-only.
     const employmentErr = bookingOutsideEmploymentError(Object.keys(replacedDays), currentDummyResource);
     if (employmentErr) {
       // Fail closed: never recreate assignmentDays outside employment. The
@@ -3873,18 +3974,25 @@ apiRouter.get('/capacity/monthly', async (req, res) => {
   if (monthToIdx(to) - monthToIdx(from) + 1 > 24) { res.status(400).json({ error: 'range must span at most 24 months' }); return; }
   const months = monthsInRange(from, to);
 
-  const [resources, assignments, assignmentDays, assignmentMonthRows, holidays, hoursPerDay] = await Promise.all([
+  const [resources, assignments, assignmentDays, assignmentMonthRows, holidays, absenceRows, hoursPerDay] = await Promise.all([
     repos.resources.list(),
     repos.assignments.list(),
     repos.assignmentDays.list(),
     repos.assignmentMonths.list(),
     repos.holidays.list(),
+    repos.resourceAbsences.list(),
     getHoursPerDay(),
   ]);
   const holSet = new Set(holidays.map(h => h.id));
   const assignmentMonths = assignmentMonthRows.map(m => ({ assignmentId: m.assignmentId, month: m.month, status: m.status }));
+  // REDACTED AT THE BOUNDARY (H, spec §6.5). The rollup answers with aggregates
+  // only, so the reason could not reach the wire from here in any case — but it
+  // is dropped before the derivation rather than merely unread by it, so the
+  // guarantee is a property of the data flow and not of what the arithmetic
+  // happens to look at today.
+  const absences = absenceRows.map(redactAbsence);
 
-  res.json(rollupMonthly({ resources, assignments, assignmentDays, assignmentMonths, months, hoursPerDay, holidays: holSet }));
+  res.json(rollupMonthly({ resources, assignments, assignmentDays, assignmentMonths, months, hoursPerDay, holidays: holSet, absences }));
 });
 
 // ---------------------------------------------------------------------------
@@ -3918,19 +4026,24 @@ apiRouter.get('/bench/monthly', async (req, res) => {
   const months = monthsInRange(fetchFrom, fetchTo);   // 9 months: 2 look-back + 6 shown + 1 look-ahead
   const displayMonths = monthsInRange(from, to);        // the 6 shown months
 
-  const [resources, assignments, assignmentDays, assignmentMonthRows, holidays, hoursPerDay] = await Promise.all([
+  const [resources, assignments, assignmentDays, assignmentMonthRows, holidays, absenceRows, hoursPerDay] = await Promise.all([
     repos.resources.list(),
     repos.assignments.list(),
     repos.assignmentDays.list(),
     repos.assignmentMonths.list(),
     repos.holidays.list(),
+    repos.resourceAbsences.list(),
     getHoursPerDay(),
   ]);
   const holSet = new Set(holidays.map(h => h.id));
   const assignmentMonths = assignmentMonthRows.map(m => ({ assignmentId: m.assignmentId, month: m.month, status: m.status }));
   const today = new Date().toISOString().slice(0, 10);
+  // Redacted at the boundary — see the note on /capacity/monthly. This is the
+  // endpoint that turns an absence into the fourth bench state: without this
+  // one line the whole of block H is inert from a client's point of view.
+  const absences = absenceRows.map(redactAbsence);
 
-  res.json(benchRollup({ resources, assignments, assignmentDays, assignmentMonths, months, displayMonths, hoursPerDay, holidays: holSet }, today));
+  res.json(benchRollup({ resources, assignments, assignmentDays, assignmentMonths, months, displayMonths, hoursPerDay, holidays: holSet, absences }, today));
 });
 
 // ---------------------------------------------------------------------------
@@ -3967,25 +4080,188 @@ apiRouter.get('/bench/history/:resourceId', async (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
   const { months, displayMonths } = benchHistoryWindow(today.slice(0, 7), parsed.months);
 
-  const [assignments, assignmentDays, assignmentMonthRows, holidays, hoursPerDay] = await Promise.all([
+  const [assignments, assignmentDays, assignmentMonthRows, holidays, absenceRows, hoursPerDay] = await Promise.all([
     repos.assignments.list(),
     repos.assignmentDays.list(),
     repos.assignmentMonths.list(),
     repos.holidays.list(),
+    repos.resourceAbsences.list(),
     getHoursPerDay(),
   ]);
   const holSet = new Set(holidays.map(h => h.id));
   const assignmentMonths = assignmentMonthRows.map(m => ({ assignmentId: m.assignmentId, month: m.month, status: m.status }));
+  // Redacted at the boundary — see /capacity/monthly. Omitting this list here
+  // would make the per-resource history disagree with the /bench grid's own
+  // cells about the same month, which is the exact drift `unallocatedHistoryFor`
+  // was written (by reusing benchRollup) to make impossible.
+  const absences = absenceRows.map(redactAbsence);
 
   const cells = unallocatedHistoryFor(
     {
       resources: [resource], assignments, assignmentDays, assignmentMonths,
-      months, displayMonths, hoursPerDay, holidays: holSet,
+      months, displayMonths, hoursPerDay, holidays: holSet, absences,
     },
     resourceId,
     today,
   );
   res.json({ resourceId, resourceName: resource.name, cells });
+});
+
+// ---------------------------------------------------------------------------
+// BLOCK H — RESOURCE ABSENCES (design spec §6.1, §7.3, §7.4).
+//
+// Bespoke, NOT crud(): crud() can express neither the server-pinned fields nor
+// the overlap/employment/SoD rules below.
+//
+// THREE PRIVACY LEVELS, and the whole design rests on their being three:
+//   1. reason      GET /absences           — reasonCode + note. Restricted.
+//   2. availability GET /absences/calendar — {id,resourceId,startDate,endDate}.
+//   3. aggregate   /bench/monthly, /capacity/monthly — the ABSENT state only.
+// The arithmetic never branches on the reason (spec §3.4), so level 2 is
+// NUMERICALLY COMPLETE — that is what makes levels 1 and 2 separable at all
+// rather than a wish.
+// ---------------------------------------------------------------------------
+
+/** The resource's own assignment day rows, used for the conflict report below. */
+async function assignmentDaysForResource(resourceId: string): Promise<{ date: string; hours: number }[]> {
+  const [assignments, days] = await Promise.all([repos.assignments.list(), repos.assignmentDays.list()]);
+  const mine = new Set(assignments.filter(a => a.resourceId === resourceId).map(a => a.id));
+  return days.filter(d => mine.has(d.assignmentId)).map(d => ({ date: d.date, hours: d.hours }));
+}
+
+/**
+ * LEVEL 1 — the reason. Gated by the '/absences' READ_RULE to the reason
+ * audience plus `employee`; a READ_RULE is per-PATH, so the per-ROW narrowing
+ * for an employee has to happen here. An employee whose principal maps to no
+ * resource sees an empty list, never everybody's.
+ */
+apiRouter.get('/absences', async (req, res) => {
+  const all = await repos.resourceAbsences.list();
+  if (absenceReadScope(trustedRoles(req)) === 'all') { res.json(all); return; }
+  const mine = await actorResourceId(req);
+  res.json(mine === undefined ? [] : all.filter(a => a.resourceId === mine));
+});
+
+/**
+ * LEVEL 2 — the redacted availability feed. Registered BEFORE nothing in
+ * particular (Express matches these two literal paths exactly), but authorized
+ * by a rule that MUST precede '/absences' in READ_RULES — see ABSENCE_READ_RULES.
+ *
+ * `from`/`to` are optional 'YYYY-MM' bounds; omitting both returns the whole
+ * table, redacted. Every row goes through `redactAbsence`, which builds a fresh
+ * object — the stored row is never handed back and never `delete`d from.
+ */
+apiRouter.get('/absences/calendar', async (req, res) => {
+  const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+  const qParam = (name: string): string | undefined => {
+    const v = req.query[name];
+    return typeof v === 'string' ? v : undefined;
+  };
+  const fromRaw = qParam('from');
+  const toRaw = qParam('to');
+  if (fromRaw !== undefined && !MONTH_RE.test(fromRaw)) { res.status(400).json({ error: 'from must be a YYYY-MM month' }); return; }
+  if (toRaw !== undefined && !MONTH_RE.test(toRaw)) { res.status(400).json({ error: 'to must be a YYYY-MM month' }); return; }
+  const from = fromRaw ?? '0000-01';
+  const to = toRaw ?? '9999-12';
+  if (from > to) { res.status(400).json({ error: 'from must be <= to' }); return; }
+  const rows = await repos.resourceAbsences.list();
+  res.json(absencesInMonthRange(rows, from, to).map(redactAbsence));
+});
+
+apiRouter.post('/absences', async (req, res) => {
+  const body = pick<ResourceAbsence>(req.body, ABSENCE_FIELDS) as Record<string, unknown>;
+  const validationErr = absenceCreateError(body);
+  if (validationErr) { res.status(400).json({ error: validationErr }); return; }
+  const range = {
+    resourceId: body['resourceId'] as string,
+    startDate: body['startDate'] as string,
+    endDate: body['endDate'] as string,
+  };
+  const rangeErr = absenceRangeError(range);
+  if (rangeErr) { res.status(400).json({ error: rangeErr }); return; }
+  const resource = await repos.resources.get(range.resourceId);
+  if (resource === undefined) { res.status(400).json({ error: 'resourceId must reference an existing resource' }); return; }
+  const employmentErr = absenceOutsideEmploymentError(range, resource);
+  if (employmentErr) { res.status(400).json({ error: employmentErr }); return; }
+  // SoD (spec §7.4): the recorder may not be the subject. `recordedBy` is
+  // server-pinned below, which is what gives this comparison something
+  // trustworthy on the other side. Declared consequence: a resource-manager
+  // cannot record their own absence — it takes a colleague or an admin.
+  const sodErr = absenceSelfRecordError(await actorResourceId(req), range.resourceId);
+  if (sodErr) { res.status(403).json({ error: sodErr }); return; }
+
+  // The overlap test is a read-modify-write over this resource's absence set and
+  // Express handlers run concurrently, so it is serialized on the same `res:`
+  // lock family the allocation writes use.
+  const outcome = await withLock(`res:${range.resourceId}`, async (): Promise<{ status: number; body: unknown }> => {
+    const overlapErr = absenceOverlapError(range, await repos.resourceAbsences.list());
+    if (overlapErr) return { status: 409, body: { error: overlapErr } };
+    const row = {
+      id: newId(),
+      ...range,
+      reasonCode: body['reasonCode'],
+      ...(body['note'] !== undefined ? { note: body['note'] } : {}),
+      ...pinnedAbsenceFields(actorId(req), new Date().toISOString()),
+    } as ResourceAbsence;
+    return { status: 200, body: await repos.resourceAbsences.create(row) };
+  });
+  if (outcome.status !== 200) { res.status(outcome.status).json(outcome.body); return; }
+
+  // THE DELIBERATE ASYMMETRY (spec §6.4). A NEW BOOKING on an absent day is
+  // REFUSED; a NEW ABSENCE over booked days is ACCEPTED and REPORTS the
+  // collision. An absence is a fact that already happened — refusing it would
+  // leave the system asserting that somebody is present who is not. The report
+  // is what stops this being a silent success: the planner is told exactly which
+  // days to un-book. Always present, empty array included, so "no conflicts" and
+  // "the field was not computed" cannot be confused.
+  const bookedDayConflicts = bookedDaysInAbsence(range, await assignmentDaysForResource(range.resourceId));
+  res.json({ ...(outcome.body as ResourceAbsence), bookedDayConflicts });
+});
+
+apiRouter.put('/absences/:id', async (req, res) => {
+  const existing = await repos.resourceAbsences.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const body = pick<ResourceAbsence>(req.body, ABSENCE_FIELDS) as Record<string, unknown>;
+  const validationErr = absencePatchError(body);
+  if (validationErr) { res.status(400).json({ error: validationErr }); return; }
+  // Validate the MERGED row, never the patch in isolation: a PUT that moves only
+  // `endDate` must still be checked against the stored `startDate`, or a partial
+  // edit walks around every rule below.
+  const merged = { ...existing, ...body } as ResourceAbsence;
+  const range = { resourceId: merged.resourceId, startDate: merged.startDate, endDate: merged.endDate };
+  const rangeErr = absenceRangeError(range);
+  if (rangeErr) { res.status(400).json({ error: rangeErr }); return; }
+  const resource = await repos.resources.get(range.resourceId);
+  if (resource === undefined) { res.status(400).json({ error: 'resourceId must reference an existing resource' }); return; }
+  const employmentErr = absenceOutsideEmploymentError(range, resource);
+  if (employmentErr) { res.status(400).json({ error: employmentErr }); return; }
+  const sodErr = absenceSelfRecordError(await actorResourceId(req), range.resourceId);
+  if (sodErr) { res.status(403).json({ error: sodErr }); return; }
+
+  // A re-targeting PUT touches TWO resources' absence sets, so both locks are
+  // taken, in lexicographic order — the ordering C2 documented, and the reason
+  // two handlers that each take two res: locks cannot deadlock against each other.
+  const mutate = async (): Promise<{ status: number; body: unknown }> => {
+    const overlapErr = absenceOverlapError({ ...range, id: existing.id }, await repos.resourceAbsences.list());
+    if (overlapErr) return { status: 409, body: { error: overlapErr } };
+    // The picked patch, not `merged`: an all-undefined patch is short-circuited
+    // to a plain read by PgRepository.update (dev↔prod parity), and passing the
+    // merged row would defeat that by always having values to set.
+    return { status: 200, body: await repos.resourceAbsences.update(req.params.id, body as Partial<ResourceAbsence>) };
+  };
+  const [firstLock, secondLock] = [existing.resourceId, range.resourceId].sort();
+  const outcome = firstLock === secondLock
+    ? await withLock(`res:${firstLock}`, mutate)
+    : await withLock(`res:${firstLock}`, () => withLock(`res:${secondLock}`, mutate));
+  if (outcome.status !== 200) { res.status(outcome.status).json(outcome.body); return; }
+  const bookedDayConflicts = bookedDaysInAbsence(range, await assignmentDaysForResource(range.resourceId));
+  res.json({ ...(outcome.body as ResourceAbsence), bookedDayConflicts });
+});
+
+apiRouter.delete('/absences/:id', async (req, res) => {
+  const removed = await repos.resourceAbsences.remove(req.params.id);
+  if (!removed) { res.status(404).json({ error: 'Not found' }); return; }
+  res.status(204).send();
 });
 
 /**
@@ -4804,6 +5080,13 @@ apiRouter.put('/planning-periods/:id', async (req, res) => {
   res.json(updated);
 });
 
+// H: `billable` and `type` are DELIBERATELY ABSENT from this list. Were they in
+// it, `pick()` — the mass-assignment guard — would admit them like any other
+// field and a `pm`'s ordinary project edit could flip an engagement to
+// non-billable, switching off the margin alerts they are measured by. They stay
+// server-pinned at the schema default (billable: true, type: 'Delivery') on
+// create, exactly like `status` on a new time entry and `invoiceNumber` on an
+// invoice, and move only through PUT /projects/:id/classification below.
 const PROJECT_FIELDS = ['name', 'location', 'startDate', 'endDate', 'status', 'description', 'ownerId', 'contractId'] as const;
 
 /**
@@ -4825,6 +5108,13 @@ apiRouter.get('/projects', async (req, res) => {
   res.json(q === undefined ? all : searchPage(all, ['name', 'location'], q, clampSearchPage(req.query)));
 });
 apiRouter.post('/projects', async (req, res) => {
+  // H — REFUSE, do not silently drop. `pick()` is silent by design and that is
+  // right for a stray field; it is wrong for these two. A creation wizard that
+  // "works" while quietly producing a BILLABLE project is worse than one that
+  // errors, because the mistake surfaces months later as a margin alert on an
+  // engagement that never had a customer, with nothing to trace it to.
+  const classificationFieldErr = projectClassificationFieldError(req.body);
+  if (classificationFieldErr) { res.status(403).json({ error: classificationFieldErr }); return; }
   // BLANK NULLABLE FK: the form leaves the Contract select on its empty default for
   // a project with no contract — a legitimate choice — and sends `contractId:''`.
   // Postgres raises 23503 (no contracts row has id '') and the error mapper answered
@@ -4855,6 +5145,11 @@ apiRouter.post('/projects', async (req, res) => {
   res.json(await repos.projects.create(item));
 });
 apiRouter.put('/projects/:id', async (req, res) => {
+  // H — same refusal as POST, and needed here MORE: this is the path a `pm` may
+  // call. Checked BEFORE the 404 on purpose, so probing for a project's
+  // existence with a forbidden field answers 403 either way.
+  const classificationFieldErr = projectClassificationFieldError(req.body);
+  if (classificationFieldErr) { res.status(403).json({ error: classificationFieldErr }); return; }
   const existing = await repos.projects.get(req.params.id);
   if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
   // Same blank-FK normalisation as POST: clearing an existing project's contract
@@ -4877,6 +5172,33 @@ apiRouter.put('/projects/:id', async (req, res) => {
   const updated = await repos.projects.update(req.params.id, body);
   res.json(updated);
 });
+/**
+ * H — RE-CLASSIFY AN ENGAGEMENT (design spec §6.2, §6.3, §7.2).
+ *
+ * A separate endpoint, not two more fields on PUT /projects/:id, because the
+ * AUDIENCE is different: RPT's Basket engagements are created by WFM / Delivery
+ * Excellence, never by the PM. The narrow mutation rule that expresses this
+ * (`delivery-executive`, `finance`, `admin`) is only reachable because
+ * PROJECT_MUTATION_RULES puts it BEFORE the coarse '/projects' rule that admits
+ * `pm` — reversed, it is dead code that still reads as a guard.
+ *
+ * GATE 2 OF 2 against a zero-euro invoice lives here. Gate 1 refuses a billing
+ * item on a non-billable engagement; without gate 2 the sequence "create
+ * billable → create billing item → flip to non-billable" walks straight around
+ * gate 1 and produces the invoice anyway. Both, or the invariant is half
+ * enforced.
+ */
+apiRouter.put('/projects/:id/classification', async (req, res) => {
+  const existing = await repos.projects.get(req.params.id);
+  if (existing === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  const parsed = parseProjectClassification(req.body);
+  if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
+  const blocking = (await repos.billingPlanItems.list()).filter(item => item.projectId === req.params.id);
+  const flipErr = nonBillableFlipError(parsed.value, blocking.length);
+  if (flipErr) { res.status(409).json({ error: flipErr }); return; }
+  res.json(await repos.projects.update(req.params.id, parsed.value));
+});
+
 apiRouter.delete('/projects/:id', async (req, res) => { await repos.projects.remove(req.params.id); res.status(204).send(); });
 
 // --- B1: project sub-resources (real endpoints, seeded on REAL ids 1/2) -----
@@ -5641,6 +5963,23 @@ async function validateBillingPlanReferences(item: BillingPlanEntry): Promise<st
   if (item.projectId) {
     const project = await repos.projects.get(item.projectId);
     if (!project) return 'projectId must reference an existing project';
+    // H — GATE 1 OF 2 (design spec §6.3). A non-billable engagement has no
+    // customer revenue to bill, so a billing plan item on it is a zero-euro
+    // invoice waiting to be issued. Placed here rather than in the recognition
+    // derivation ON PURPOSE: filtering downstream would leave the rows in the
+    // database, visible in /commercial/billing, and invisible only in the
+    // recognition — the write is the only place the row can be prevented from
+    // existing. Shared by POST and the fully-merged PUT, so neither can be the
+    // way in. Gate 2 (the flip) is on PUT /projects/:id/classification.
+    //
+    // BEFORE the contract-membership test, not after, and this ORDER IS THE GATE.
+    // A basket engagement carries no `contractId`, so every request naming one
+    // fails the membership test first — the gate would answer 400 on the seeded
+    // fixture for the WRONG reason and read as verified while never having run.
+    // Billability is also a property of the project alone: no change of contract
+    // can fix it, so it is the more actionable of the two messages.
+    const nonBillableErr = nonBillableBillingItemError(project);
+    if (nonBillableErr) return nonBillableErr;
     if (project.contractId !== item.contractId) return 'projectId must belong to the billing contract';
   }
   if (item.type === 'Milestone' && item.milestoneId) {
@@ -5651,6 +5990,13 @@ async function validateBillingPlanReferences(item: BillingPlanEntry): Promise<st
     if (!milestoneProject || milestoneProject.contractId !== item.contractId) {
       return 'milestoneId must belong to a project on the billing contract';
     }
+    // The same gate on the OTHER route to an engagement. Today a basket project
+    // carries no contractId so the contract test above already closes this path,
+    // but that is a property of the seed, not of the model: `billable: false`
+    // with a contract is legitimate (an internal engagement under a frame
+    // agreement), and relying on the coincidence is how a gate becomes half a gate.
+    const milestoneNonBillableErr = nonBillableBillingItemError(milestoneProject);
+    if (milestoneNonBillableErr) return milestoneNonBillableErr;
   }
   if (item.orderId) {
     const order = await repos.orders.get(item.orderId);
