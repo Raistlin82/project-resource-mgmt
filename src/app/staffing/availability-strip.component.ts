@@ -27,6 +27,28 @@ const STATE_META: Record<BenchState, { glyph: string; label: string; tone: strin
   BENCH: { glyph: 'B', label: 'Bench (free)', tone: 'bg-positive-tint text-positive-text ring-positive' },
   PARTIAL: { glyph: 'P', label: 'Partially allocated', tone: 'bg-caution-tint text-caution-text ring-caution' },
   ALLOCATED: { glyph: 'A', label: 'Fully allocated', tone: 'bg-critical-tint text-critical-text ring-critical' },
+  /**
+   * H's fourth state (`BenchState` gained `'ABSENT'`, spec §4.3), which makes this
+   * `Record` incomplete and the build red until it is filled — so this entry is
+   * the minimum needed to keep the tree compiling, and PROVISIONAL: T7 owns the
+   * consumer sweep and will settle the final treatment across /bench,
+   * /utilization, /dashboard and /reporting so all four read alike.
+   *
+   * Three things must stay TELLABLE APART on this strip, because they are three
+   * different facts: FREE (`BENCH`, green B), AWAY (here), and WE DO NOT KNOW
+   * (`UNTRACKED_META` below, grey en dash). Hence the `info` tone — the only
+   * status family not already spoken for — plus its own glyph, so a monochrome
+   * screenshot still separates it from both neighbours. 'A' was taken by
+   * ALLOCATED, so 'L' (leave) breaks the initial-letter convention on purpose
+   * rather than colliding with it.
+   *
+   * THE LABEL NAMES NO CAUSE, and that is a privacy requirement, not a style
+   * choice. Absence reasons are special-category data (§7.3) and /staffing's
+   * audience is not the reason's audience; the whole arithmetic of this block is
+   * built so `reasonCode` never reaches a screen (§3.4), and the `BenchCell` this
+   * component reads cannot carry one. Do not add a prop to pass it in.
+   */
+  ABSENT: { glyph: 'L', label: 'Away (on leave) — not staffable', tone: 'bg-info-tint text-info-text ring-info' },
 };
 
 const UNTRACKED_META = {

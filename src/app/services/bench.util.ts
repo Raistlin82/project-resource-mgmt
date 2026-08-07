@@ -1,6 +1,8 @@
 /**
- * Bench / Unchargeable and availability (design spec, Block F). PURE: no I/O,
- * no clock — `today` is always a caller-supplied value, never read here.
+ * Bench / Unchargeable and availability (design spec, Block F; extended by Block
+ * H §4.3-§4.4). PURE: no I/O, no clock — `today` is always a caller-supplied
+ * value, never read here. UTC throughout: every date is an ISO 'YYYY-MM-DD'
+ * string compared lexicographically, so no host time zone can move an answer.
  *
  * Mirrors `finance.util.ts`'s A/R aging shape (`AR_AGING_BUCKETS` /
  * `bucketForDaysOverdue` / `arAging`, `src/app/services/finance.util.ts:370-462`):
@@ -9,18 +11,54 @@
  * resource has ALREADY been idle (B/C/D, retrospective) and whether it is ABOUT
  * to become idle next month (forward-looking) — and the two are mutually
  * exclusive by construction, never merged into one bucket set (spec §5).
+ *
+ * H adds a FOURTH state, `'ABSENT'`, and the idle aging it feeds is counted in
+ * WORKING DAYS (`idleWorkingDaysAt`, `absence.util.ts`) rather than in whole
+ * BENCH months — product decision Q1, spec §10. This file keeps the bucket
+ * LABELS (B/C/D, the language RPT users recognise) and the classifier; the
+ * thresholds themselves live next to the day arithmetic that derives them.
  */
 
+import {
+  IDLE_WORKING_DAYS_B_MAX, IDLE_WORKING_DAYS_C_MAX, type IdleMonth,
+  availableWorkingDays, idleWorkingDaysAt, monthAvailability,
+} from './absence.util';
 import { RollupInput, employedWorkingDays, standardMonthlyHours, hoursByResourceMonth } from './capacity.util';
 import { countsTowardDeliveryCapacity, kindOf } from './resource-kind.util';
 
-export type BenchState = 'BENCH' | 'PARTIAL' | 'ALLOCATED';
+/**
+ * FOUR values, and `'ABSENT'` is a STATE rather than a flag beside one (spec
+ * §4.3). That choice is the design, not a shortcut: every existing consumer
+ * filters either on `state === 'BENCH'` (the /dashboard tiles, /bench's own
+ * counters, /forecast's list) or on `state !== 'ALLOCATED'`
+ * ({@link notFullyAllocatedAt}). A fourth value fixes the first group BY ITSELF
+ * — a person on leave stops being counted as bench, which is the headline
+ * correction — and leaves the second group visibly wrong until each is fixed by
+ * hand, which is the point: `!== 'ALLOCATED'` now admits `'ABSENT'`, i.e. it
+ * would list somebody on parental leave among the reallocatable. A boolean flag
+ * beside a 3-valued state would have left BOTH groups silently unchanged: four
+ * green, wrong surfaces, which is the exact signature of block C1.
+ */
+export type BenchState = 'BENCH' | 'PARTIAL' | 'ALLOCATED' | 'ABSENT';
 
 /**
  * Classifies a single resource-month on RAW (unrounded) hours — never on a
  * percentage already rounded for display. A resource with 0.4h booked out of
  * ~160 standard hours rounds to "0.00%" on screen but is NOT bench: it has a
  * real, if tiny, booking (spec §3).
+ *
+ * UNCHANGED BY H as a function, and it never returns `'ABSENT'`: the caller
+ * decides that from {@link monthAvailability} and does not call this at all on a
+ * fully-absent month. That guard matters — `benchStateFor(0, 0)` answers
+ * `'BENCH'`, the one false answer the old function can still give (spec §4.4),
+ * and a fully-absent MID-MONTH JOINER would not even hit the `0` target: her
+ * absent days deduct less than the whole standard month, so the wrong answer
+ * would be a confident `'BENCH'` against a positive target. Branching on
+ * availability FIRST is therefore not belt-and-braces, it is the only correct
+ * order.
+ *
+ * What H changes is the `targetHours` the caller passes: the standard month LESS
+ * this person's absent working days (see {@link benchRollup}).
  */
 export function benchStateFor(plannedHours: number, targetHours: number): BenchState {
   if (plannedHours === 0) return 'BENCH';
@@ -33,7 +71,7 @@ export function benchStateFor(plannedHours: number, targetHours: number): BenchS
  * the RPT "% di disallocazione" figure (comparison matrix row 50).
  *
  * THE DENOMINATOR IS THE RESOURCE'S OWN TARGET, not the company standard month:
- * `employedWorkingDayCount × ownHoursPerDay`, i.e. the same product
+ * `availableWorkingDayCount × ownHoursPerDay`, i.e. the same product
  * `rollupMonthly` pro-rates capacity by (`capacity.util.ts`, the `capacityFte`
  * line). A part-timer on 4h/day and a mid-month joiner each have their own
  * target, so neither is reported as half-idle for working every hour they are
@@ -45,19 +83,33 @@ export function benchStateFor(plannedHours: number, targetHours: number): BenchS
  * idle against their own contract"); the divergence is pinned by a test rather
  * than left to be rediscovered as a bug.
  *
+ * H NARROWS THE DAY COUNT FROM EMPLOYED TO AVAILABLE, and that is a deliberate
+ * change of meaning rather than a mechanical one. `unallocatedDays` is read as
+ * "days a planner could still fill", and an absent day cannot be filled — the
+ * server refuses a NEW booking on one (spec §6.4). Counting it would repeat, on
+ * this field, exactly the leaver defect `capacity.util.ts` documents at its
+ * `capacityFte` line: advertising capacity the API would decline. Concretely, a
+ * person employed 22 days and absent 5 with nothing booked reads 17 idle days,
+ * not 22; a person absent for the WHOLE month reads no answer at all (target 0 →
+ * `undefined`, below), which is right — she was not staffable, so the share of
+ * her staffable time is unanswerable rather than 100%. With no absence rows
+ * `availableWorkingDays` returns the employed list verbatim, so every pre-H
+ * figure is reproduced to the digit.
+ *
  * `undefined`, never a number, when the own target is 0 — a percentage of no
  * capacity is UNANSWERABLE, not 0%. Reporting 0 there would say "fully
  * allocated" about someone who has no contracted hours at all, which is the
  * error direction that hides people.
  *
  * Truncated to [0, 100]: an OVER-allocated month is 0% unallocated, never
- * negative (there is no fourth state above ALLOCATED either — see
- * {@link benchStateFor}).
+ * negative (there is no state above ALLOCATED either — see
+ * {@link benchStateFor}; `'ABSENT'` is not "more than allocated", it is a
+ * different question).
  */
 export function unallocatedShare(
-  plannedHours: number, ownHoursPerDay: number, employedWorkingDayCount: number,
+  plannedHours: number, ownHoursPerDay: number, availableWorkingDayCount: number,
 ): { unallocatedPct: number; unallocatedDays: number } | undefined {
-  const targetHours = employedWorkingDayCount * ownHoursPerDay;
+  const targetHours = availableWorkingDayCount * ownHoursPerDay;
   // `!(x > 0)` rather than `x <= 0` so NaN lands here too; a non-finite booking is
   // likewise unanswerable, and must never reach a template as "NaN%".
   if (!(targetHours > 0) || !Number.isFinite(plannedHours)) return undefined;
@@ -71,23 +123,31 @@ export const UNALLOCATED_AGING_BUCKETS = ['B', 'C', 'D'] as const;
 export type UnallocatedAgingBucket = (typeof UNALLOCATED_AGING_BUCKETS)[number];
 
 /**
- * How many consecutive months (walking backward from `index`, capped at 3 —
- * the cap is `bucketForMonthsIdle`'s own top bucket 'D', so counting further
- * back would never change the answer) `benchFlags` has held true, INCLUDING
- * `index` itself. `benchFlags[i]` must already read false for any month the
- * resource was not active in (design spec §5.1) — that guard lives in the
- * caller (`benchRollup`), not here.
+ * B/C/D from CONSECUTIVE IDLE WORKING DAYS (product decision Q1, spec §10) —
+ * what `bucketForMonthsIdle` used to answer from a count of whole BENCH months.
+ * The count itself comes from `idleWorkingDaysAt` (`absence.util.ts`), which is
+ * where the absence rule lives; this function is only the labelling, and it is
+ * here because B/C/D are this file's vocabulary.
+ *
+ * The boundaries are INCLUSIVE at the top and tile the line with no gap and no
+ * overlap: B is `[1, 21]`, C is `[22, 42]`, D is `[43, ∞)`. They are NOT
+ * hardcoded — `IDLE_WORKING_DAYS_B_MAX`/`_C_MAX` are derived from how
+ * `workingDaysInMonth` actually counts a typical month, so "about one working
+ * month" stays true if the derivation window moves.
+ *
+ * THE MOVED NUMBERS, stated because they are visible to users on day one: a
+ * single 22-working-day month of idleness now reads C, where the month count read
+ * B. That is the unit change doing its job, not an off-by-one — "one calendar
+ * month idle" and "21 idle working days" are different facts and the thresholds
+ * are anchored to the second.
+ *
+ * `0` cannot arise from a BENCH cell (a BENCH month is not fully absent, so it
+ * contributes at least one available day), but it degrades to 'B' rather than
+ * throwing — the same posture the rest of this file takes on impossible input.
  */
-export function monthsIdleAt(benchFlags: readonly boolean[], index: number): number {
-  let n = 0;
-  for (let i = index; i >= 0 && benchFlags[i]; i--) { n++; if (n >= 3) break; }
-  return n;
-}
-
-/** `monthsIdleAt`'s count is only ever called for a month where state === 'BENCH', so `monthsIdle` is always >= 1 in practice. */
-export function bucketForMonthsIdle(monthsIdle: number): UnallocatedAgingBucket {
-  if (monthsIdle <= 1) return 'B';
-  if (monthsIdle === 2) return 'C';
+export function bucketForIdleWorkingDays(idleWorkingDays: number): UnallocatedAgingBucket {
+  if (idleWorkingDays <= IDLE_WORKING_DAYS_B_MAX) return 'B';
+  if (idleWorkingDays <= IDLE_WORKING_DAYS_C_MAX) return 'C';
   return 'D';
 }
 
@@ -99,6 +159,16 @@ export function bucketForMonthsIdle(monthsIdle: number): UnallocatedAgingBucket 
  * `activeNext` is deliberate: a resource that TERMINATES between this month
  * and the next is not marked "freeing up" — that is an offboarding event, not
  * a reallocation to plan for (out of scope — spec §12).
+ *
+ * UNCHANGED BY H, and both directions of the fourth state fall out of the
+ * existing tests rather than needing a branch (spec §5.1 B5), which is why they
+ * are ASSERTED in both directions instead of deduced:
+ *  - going ON leave next month is NOT "freeing up" — `stateNext === 'ABSENT'`
+ *    fails the `=== 'BENCH'` test, and a person who cannot be booked is not
+ *    capacity coming free;
+ *  - RETURNING from leave into a bench month IS — `stateThis === 'ABSENT'`
+ *    satisfies `!== 'BENCH'`, and that person genuinely does need staffing next
+ *    month. Wanted, not tolerated.
  */
 export function freeingUpNextMonth(
   activeThis: boolean, stateThis: BenchState,
@@ -117,6 +187,16 @@ export type AvailabilityDate =
  * ONLY the shown `cells`, in order — deliberately never the look-ahead month
  * fetched for `freeingUpNextMonth` (spec §7's explicit non-unification: the
  * two fields have different data scopes on purpose).
+ *
+ * H REQUIRES ABSENT MONTHS TO BE SKIPPED (spec §5.1 B6: "the most user-visible
+ * falsehood — a table declaring somebody on maternity leave available today"),
+ * and BOTH branches below already do, because both test `=== 'BENCH'` rather
+ * than `!== 'ALLOCATED'`. No line changes here; the tests are what make that a
+ * guarantee instead of a coincidence. THE INVERSION IS THE HAZARD: rewriting
+ * either predicate to `!== 'ALLOCATED'` — the shape {@link notFullyAllocatedAt}
+ * uses one screen over — silently starts answering "available today" for
+ * everyone on leave. A month on leave still yields an answer, never an empty
+ * field: the first genuinely bench month after it, or `beyond-horizon`.
  */
 export function availabilityDateFor(
   cells: readonly { month: string; state: BenchState }[],
@@ -169,6 +249,12 @@ export function hiringDemandByMonth(
 
 export interface BenchCell {
   state: BenchState;
+  /**
+   * Present ONLY when `state === 'BENCH'` — so never on an `'ABSENT'` cell (spec
+   * §5.1 B8). Idleness is a delivery problem to age; being on leave is not one,
+   * and stamping a bucket on it would put the person back into the very ladder
+   * the fourth state removes her from.
+   */
   agingBucket?: UnallocatedAgingBucket;
   upcomingUnallocated: boolean;
   /**
@@ -182,6 +268,12 @@ export interface BenchCell {
    * kind of semantic absence `agingBucket` already has on this type. A renderer
    * must therefore distinguish "no answer" from "0%" — showing 0% for an absent
    * value claims someone is fully allocated when nothing is known.
+   *
+   * H adds a second, more common way for the target to be 0: a month the person
+   * was absent for ENTIRELY. So an `'ABSENT'` cell carries neither field, and
+   * that is the honest shape — "how much of her staffable month is unfilled" has
+   * no answer when none of it was staffable. A partly-absent month DOES carry
+   * both, counted over the days she was actually there.
    *
    * Raw and unrounded, like every other figure crossing this boundary; the 2-decimal
    * cap is a rendering step.
@@ -201,6 +293,14 @@ export interface BenchRollup {
   subcoRows: BenchRow[];
   hiringDemand: HiringDemandRow[];
 }
+/**
+ * H VERDICT (spec §5.1 B9): `BenchRollup` gains NO field, so this literal stays
+ * as it is. B9 warns that an added field would leave a stale empty default that
+ * still type-checks — a divergence no typed test can see. The absence count Q3
+ * requires next to /bench's percentages needs no new field: four states make
+ * `rows.filter(state === 'ABSENT').length` derivable by any consumer, and adding
+ * a redundant total would create two numbers that can disagree.
+ */
 export const EMPTY_BENCH_ROLLUP: BenchRollup = { months: [], internalRows: [], subcoRows: [], hiringDemand: [] };
 
 export interface BenchRollupInput extends RollupInput {
@@ -212,6 +312,16 @@ export interface BenchRollupInput extends RollupInput {
   resources: (RollupInput['resources'][number] & { role: string })[];
   /** The 6 months to return as rows — see the server's window construction (Task 6). */
   displayMonths: string[];
+  // `absences` is INHERITED from `RollupInput`, not redeclared here (spec §5.1
+  // B10 asks for the field; T3 had already put it on the parent so /capacity and
+  // /bench cannot be handed different absence sets). It is OPTIONAL with an empty
+  // default, and that is a DECLARED TRAP: omitting it reproduces the pre-H
+  // arithmetic to the digit, so every fixture in this file's spec stays green
+  // while exercising not one new line. Only a DIFFERENTIAL test — the same
+  // fixture with and without rows, asserted to disagree on state, on the aging
+  // bucket, on `availabilityDate` and on `notFullyAllocatedAt` — can show the
+  // field is read at all. Those tests are in the spec; do not delete them on the
+  // grounds that the value assertions beside them already pass.
 }
 
 /**
@@ -227,9 +337,16 @@ export interface BenchRollupInput extends RollupInput {
  * DELIBERATE narrowing from `rollupMonthly`'s own `hasAny` gate (which
  * considers every fetched month): a resource whose only booking falls in the
  * look-back window (spec §11 fixture 6) must NOT surface a row here.
+ *
+ * THE ROW GATE STAYS ON *EMPLOYED*, NEVER ON AVAILABLE (spec §5.1 B11). Someone
+ * absent for all six shown months keeps her row and reads `'ABSENT'` six times.
+ * Narrowing the gate would delete her instead, which puts her back among the
+ * "missing data" the fourth state exists to distinguish her from — and a person
+ * who has silently vanished from the grid is worse than one wrongly counted as
+ * bench, because nothing on screen says anything is wrong.
  */
 export function benchRollup(input: BenchRollupInput, today: string): BenchRollup {
-  const { resources, months, displayMonths, hoursPerDay, holidays } = input;
+  const { resources, months, displayMonths, hoursPerDay, holidays, absences = [] } = input;
   const hoursByResMonth = hoursByResourceMonth(input);
   const targetByMonth = new Map(months.map(m => [m, standardMonthlyHours(m, hoursPerDay, holidays)]));
   const monthIndex = new Map(months.map((m, i) => [m, i]));
@@ -243,11 +360,19 @@ export function benchRollup(input: BenchRollupInput, today: string): BenchRollup
 
     const activeOf = new Map<string, boolean>();
     const stateOf = new Map<string, BenchState>();
-    // The resource's OWN monthly target, per month: employed working days ×
+    // The facts `idleWorkingDaysAt` walks backward over, one entry per FETCHED
+    // month, so an aging count can reach into the look-back window. Built from
+    // primitives rather than from the derived `state` on purpose: `staffed` is
+    // `planned > 0`, which differs from `state !== 'BENCH'` on exactly the
+    // fully-absent months where stale bookings can survive (§6.4 accepts an
+    // absence recorded over already-booked days), and the whole Q1 rule depends
+    // on those months contributing nothing WITHOUT breaking the run.
+    const idleMonths: IdleMonth[] = [];
+    // The resource's OWN monthly target, per month: AVAILABLE working days ×
     // their own contracted hours. Kept alongside `stateOf` (whose target is the
-    // company standard month) because `unallocatedShare` needs the pro-rated
-    // one — see its doc comment for why the two denominators differ on purpose.
-    const ownTargetOf = new Map<string, { days: number; hoursPerDay: number }>();
+    // standard month less absent days) because `unallocatedShare` needs the
+    // pro-rated one — see its doc comment for why the two denominators differ.
+    const ownTargetOf = new Map<string, { availableDays: number; hoursPerDay: number }>();
     for (const m of months) {
       // Employment is measured in DAYS, not months — the same `employedWorkingDays`
       // gate `rollupMonthly` uses, and the same granularity the server enforces a
@@ -258,28 +383,56 @@ export function benchRollup(input: BenchRollupInput, today: string): BenchRollup
       // screens over one endpoint's data disagreeing about whether a person exists
       // this month is the defect; there is no bench-specific reason to answer the
       // employment question differently from the capacity grid.
+      //
+      // H does NOT touch this call. `employedWorkingDays` answers "was she
+      // employed", which an absence does not change, and it is shared with the
+      // server's write gate — injecting absence would make it REFUSE legitimate
+      // bookings. `availableWorkingDays` is its sibling (spec §4.1), never an
+      // override.
       const employedDays = employedWorkingDays(r, m, holidays);
       const active = employedDays.length > 0;
       activeOf.set(m, active);
-      if (!active) continue;
       const cell = hoursByResMonth.get(r.id)?.get(m) ?? { confirmed: 0, planned: 0 };
-      stateOf.set(m, benchStateFor(cell.planned, targetByMonth.get(m)!));
-      ownTargetOf.set(m, { days: employedDays.length, hoursPerDay: r.contractHoursPerDay ?? hoursPerDay });
+      if (!active) { idleMonths.push({ employed: false, staffed: false, availableDays: 0 }); continue; }
+      const availableDays = availableWorkingDays(r.id, absences, employedDays);
+      idleMonths.push({ employed: true, staffed: cell.planned > 0, availableDays: availableDays.length });
+      if (monthAvailability(employedDays, availableDays) === 'fully-absent') {
+        // The FOURTH STATE, and the only place it is assigned (spec §4.3). Note
+        // this branch comes BEFORE `benchStateFor` is reached at all — see that
+        // function for why the order, not a zero target, is what makes it safe.
+        stateOf.set(m, 'ABSENT');
+      } else {
+        // The pro-rated target: the standard month LESS her absent working days,
+        // deducted at the COMPANY rate. Byte-identical to the old
+        // `standardMonthlyHours(...)` when there are no absences, and identical to
+        // the denominator `rollupMonthly` gives its own cell — so /bench's
+        // PARTIAL/ALLOCATED boundary and /capacity's semaphore keep answering
+        // from ONE number. Deliberately NOT the spec §4.4 sketch
+        // `availableDays × contractHoursPerDay`: that would be a THIRD
+        // convention, and it would move every part-timer's and every mid-month
+        // joiner's state with no absence in sight, breaking the invariant that
+        // `absences: []` reproduces today exactly. The part-timer divergence
+        // between this state and `unallocatedPct` is deliberate and pinned by a
+        // test — see `unallocatedShare`.
+        const absentDays = employedDays.length - availableDays.length;
+        stateOf.set(m, benchStateFor(cell.planned, targetByMonth.get(m)! - absentDays * hoursPerDay));
+      }
+      ownTargetOf.set(m, { availableDays: availableDays.length, hoursPerDay: r.contractHoursPerDay ?? hoursPerDay });
     }
 
     if (!displayMonths.some(m => activeOf.get(m))) continue; // never active in a SHOWN month -> no row
-
-    const benchFlags = months.map(m => (activeOf.get(m) ?? false) && stateOf.get(m) === 'BENCH');
 
     const monthly: Record<string, BenchCell> = {};
     for (const m of displayMonths) {
       if (!activeOf.get(m)) continue;
       const state = stateOf.get(m)!;
       const cell: BenchCell = { state, upcomingUnallocated: false };
-      if (state === 'BENCH') cell.agingBucket = bucketForMonthsIdle(monthsIdleAt(benchFlags, monthIndex.get(m)!));
+      if (state === 'BENCH') cell.agingBucket = bucketForIdleWorkingDays(idleWorkingDaysAt(idleMonths, monthIndex.get(m)!));
       const own = ownTargetOf.get(m)!;
-      const share = unallocatedShare(hoursByResMonth.get(r.id)?.get(m)?.planned ?? 0, own.hoursPerDay, own.days);
-      // Left ABSENT, never zeroed, when the own target is 0 — see BenchCell.
+      const share = unallocatedShare(hoursByResMonth.get(r.id)?.get(m)?.planned ?? 0, own.hoursPerDay, own.availableDays);
+      // Left ABSENT, never zeroed, when the own target is 0 — see BenchCell. A
+      // fully-absent month lands here with 0 available days, so its share keys are
+      // absent for the same reason and by the same code path.
       if (share) { cell.unallocatedPct = share.unallocatedPct; cell.unallocatedDays = share.unallocatedDays; }
       monthly[m] = cell;
     }
@@ -328,6 +481,12 @@ export interface UnallocatedHistoryCell {
  * excludes by design, or anyone employed in none of the window's months) and means
  * NOT TRACKED — never "allocated the whole time". Same rule the availability strip
  * already renders explicitly.
+ *
+ * A month spent entirely on leave is `{ month, state: 'ABSENT' }` and NOTHING else:
+ * no bucket, no percentage, no day count. That is the third distinct shape this
+ * list can hold, and the three must stay distinguishable — absent ENTRY ("we did
+ * not employ her"), `'ABSENT'` state ("we did, and she could not work"), and a real
+ * percentage ("we did, and this much went unfilled").
  *
  * `upcomingUnallocated` is deliberately NOT carried: it is a forward-looking claim
  * about the month AFTER the one it sits on, which is meaningless in a retrospective
@@ -395,6 +554,16 @@ export function unallocatedHistoryFor(
  * caller touches hiring demand, a fake role becomes silently wrong data with
  * nothing red to catch it. The honest type says the input requires role,
  * because the delegate does.
+ *
+ * THE `'ABSENT'` EXCLUSION IS THE WHOLE REASON THE FOURTH STATE IS A STATE (spec
+ * §5.1 B12). This predicate is `!== 'ALLOCATED'`, so a fourth value joins it for
+ * free — and the result would be a panel headed "available for reallocation"
+ * listing people on parental leave. It is the one filter in the codebase that a
+ * new state makes WORSE rather than better, which is exactly why the design
+ * chose a state over a boolean flag: the flag would have left this line green,
+ * unchanged and wrong. Correcting it here fixes all three call sites downstream
+ * (`forecast.ts`, and `what-if.ts`'s two scenario counters) at once, none of
+ * which this task owns.
  */
 export function notFullyAllocatedAt(
   input: Omit<BenchRollupInput, 'months' | 'displayMonths'>,
@@ -406,5 +575,8 @@ export function notFullyAllocatedAt(
   const c = idx(month);
   const months = [c - 2, c - 1, c, c + 1].map(toMonth);
   const roll = benchRollup({ ...input, months, displayMonths: [month] }, today);
-  return [...roll.internalRows, ...roll.subcoRows].filter(r => r.monthly[month]?.state !== 'ALLOCATED');
+  return [...roll.internalRows, ...roll.subcoRows].filter(r => {
+    const state = r.monthly[month]?.state;
+    return state !== 'ALLOCATED' && state !== 'ABSENT';
+  });
 }
