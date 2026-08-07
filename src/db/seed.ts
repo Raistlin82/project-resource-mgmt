@@ -221,7 +221,15 @@ export const resources: Resource[] = [
   { id: '14', name: 'Sofia Ferrari', role: 'Developer', kind: 'internal',
     skills: [{ name: 'Java', level: 3 }], projectRoles: ['Senior Developer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 100, utilizationPlanned: 100, capacity: 40,
-    organization: 'Engineering', location: 'Remote', hireDate: '2022-03-01', contractHoursPerDay: 8 },
+    organization: 'Engineering', location: 'Remote', hireDate: '2022-03-01', contractHoursPerDay: 8,
+    // Sofia is the ONE resource whose fixture depends on having rates. She was
+    // added (H/T2) to carry both billable and non-billable hours on one person,
+    // so that `resourceBillability` has exactly one right answer and the two
+    // plausible wrong ones — uncorrected (all her hours) and over-corrected
+    // (none) — are excluded. With no rates all three collapse to 0 and the
+    // fixture distinguishes nothing: the blind green gate it exists to prevent.
+    // Same €/day scale as the other internals.
+    costRate: 600, billRate: 1120 },
 ];
 
 export const users: User[] = [

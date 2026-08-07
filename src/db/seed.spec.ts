@@ -314,6 +314,41 @@ describe('block H — the absences bite exactly where they claim to (S1-S4)', ()
     expect(DISPLAY_MONTHS.filter(m => absentWorkingDaysIn('14', m) > 0)).toStrictEqual(['2026-05']);
   });
 
+  it('F-8 fixture: Sofia can actually TELL the three candidate billability answers apart', () => {
+    // T2 built Sofia to carry billable and non-billable hours on one person, so
+    // that a corrected `resourceBillability` has one right answer and the two
+    // plausible wrong ones are excluded: uncorrected (every hour priced) and
+    // over-corrected (none). That only works if she has RATES — with a rate of
+    // 0 all three answers are 0 and the fixture proves nothing. She had none
+    // until this assertion existed, so the fixture written to prevent a blind
+    // green gate WAS one.
+    const sofia = resources.find(r => r.id === '14')!;
+    expect(sofia.billRate, 'no bill rate collapses all three candidate answers to 0').toBeGreaterThan(0);
+    expect(sofia.costRate, 'no cost rate makes her cost read 0 against real hours').toBeGreaterThan(0);
+
+    // And the hours really are split, or the right answer coincides with the
+    // uncorrected one and the fixture still distinguishes nothing.
+    const mine = assignments.filter(a => a.resourceId === '14');
+    const requestProject = new Map(requests.map(r => [r.id, r.projectId]));
+    const nonBillable = new Set(projects.filter(p => p.billable === false).map(p => p.id));
+    const split = mine.reduce((acc, a) => {
+      const pid = requestProject.get(a.requestId);
+      const key = pid !== undefined && nonBillable.has(pid) ? 'nonBillable' : 'billable';
+      acc[key] += a.assignedHours;
+      return acc;
+    }, { billable: 0, nonBillable: 0 });
+
+    expect(split.billable, 'she must have billable hours').toBeGreaterThan(0);
+    expect(split.nonBillable, 'she must have NON-billable hours, or nothing is excluded').toBeGreaterThan(0);
+
+    // The three candidate answers, in money, must be three different numbers.
+    const correct = split.billable * sofia.billRate!;
+    const uncorrected = (split.billable + split.nonBillable) * sofia.billRate!;
+    const overCorrected = 0;
+    expect(new Set([correct, uncorrected, overCorrected]).size,
+      'the fixture must separate correct / uncorrected / over-corrected').toBe(3);
+  });
+
   it('touches exactly three resources and leaves every block-F pin alone', () => {
     // Priya ('7') and Elena ('9') carry block F's `availabilityDate` and
     // termination assertions; an absence on either would break another block's
