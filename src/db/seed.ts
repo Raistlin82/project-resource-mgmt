@@ -29,6 +29,7 @@ import type {
   ResourceRequest,
   Assignment,
   TimeEntry,
+  ResourceAbsence,
   Language,
   SkillCatalog,
   ProficiencySet,
@@ -188,6 +189,39 @@ export const resources: Resource[] = [
     skills: [{ name: 'Java', level: 2 }], projectRoles: ['Backend Engineer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 0, utilizationPlanned: 0, capacity: 40,
     organization: 'Backend', location: 'Remote', hireDate: '2026-02-01', contractHoursPerDay: 8 },
+  // BLOCK H fixture S2/S3 (design spec §8.3) — the PRO-RATED TARGET case, and
+  // the only new person this block needs.
+  //
+  // Fully booked across the whole displayed window (assignment '16', May-Sep,
+  // plus the April basket booking '15'), so nothing except an absence can move
+  // her percentages. May is the point: 21 working days x 8h = 168h booked
+  // against a 168h month reads 100.00% today. The five-working-day Vacation
+  // AB2 leaves 16 AVAILABLE days, so the SAME unchanged 168h must read
+  // 168 / (16 x 8) = 131.25% and band `over`. The signal is visible rather
+  // than silent, which is the whole reason the fixture books the absence days
+  // instead of dodging them: it is also §6.4's accepted direction (an absence
+  // recorded OVER existing bookings is accepted and reports the conflict; only
+  // a NEW booking onto an absence day is refused).
+  //
+  // hireDate is 2022, not 2026: AB3 records a FEBRUARY absence (S3) and an
+  // absence outside the employment window is a 400 on the write path. A seed
+  // row the API itself would refuse is a fixture that lies about its own
+  // legality.
+  //
+  // organization 'Engineering' is LOAD-BEARING, do not move her to
+  // 'Platform'/'Backend': scripts/rate-inheritance-impact.mjs states it must
+  // print EXACTLY ONE row (Nora, above). 'Engineering' is RC_DEV_ENG's own
+  // node, so she resolves 640/1200 both before and after the ancestor walk and
+  // contributes no row. Her resolved rates are therefore 80 EUR/h cost and
+  // 150 EUR/h bill — the figures every arithmetic comment below is built on.
+  //
+  // Id '14' continues the id discipline the '13' comment above started: ids are
+  // taken to be GLOBAL across resources/requests/assignments, so this block's
+  // four new requests+assignments start at '15' rather than reusing '13'/'14'.
+  { id: '14', name: 'Sofia Ferrari', role: 'Developer', kind: 'internal',
+    skills: [{ name: 'Java', level: 3 }], projectRoles: ['Senior Developer'],
+    externalExperience: [], profilePicture: '', resume: '', utilization: 100, utilizationPlanned: 100, capacity: 40,
+    organization: 'Engineering', location: 'Remote', hireDate: '2022-03-01', contractHoursPerDay: 8 },
 ];
 
 export const users: User[] = [
@@ -239,6 +273,31 @@ export const requests: ResourceRequest[] = [
   { id: '11', name: 'Project Alpha - Elena (pre-termination)', requiredRole: 'Developer', requiredEffort: 408, staffedEffort: 408, staffedEffortPlanned: 408, status: 'Fulfilled', skills: ['Java'], description: 'Work booked before her termination date', startDate: '2026-01-01', endDate: '2026-03-15', requesterId: '1', projectId: '1' },
   // COST BASELINE (block E) — the request that staffs the assignment below.
   { id: '12', name: 'Project Alpha - PCP Baseline Demo', requiredRole: 'Consultant', requiredEffort: 8, staffedEffort: 8, staffedEffortPlanned: 8, status: 'Fulfilled', skills: ['Project Management'], description: 'Demonstrates the frozen monthly cost baseline vs the live plan (design spec, block E)', startDate: '2026-10-05', endDate: '2026-10-05', requesterId: '1', projectId: '1' },
+  // BLOCK H fixtures (design spec §8.3, S5/S8 and the non-basket control).
+  // Ids start at '15' because resources '13'/'14' already claimed those two in
+  // this seed's global id discipline. staffedEffort === requiredEffort on every
+  // row so `requestStatusFor` derives 'Fulfilled' (B9), like every row above.
+  //
+  // '15' and '17' both staff project '3', the BASKET engagement, DELIBERATELY
+  // with two different resource kinds: a real person (S5, whose hours must
+  // stop counting as billable value) and a placeholder (S8, whose hours must
+  // KEEP counting as hiring demand — needing to hire for AMS is still needing
+  // to hire). One entity, two opposite verdicts; a fixture with only one of
+  // them lets an implementation satisfy both by accident.
+  { id: '15', name: 'BASKET Engineering - AMS presidio', requiredRole: 'Developer', requiredEffort: 176, staffedEffort: 176, staffedEffortPlanned: 176, status: 'Fulfilled', skills: ['Java'], description: 'Application-management duty on the Engineering basket: real cost, no customer revenue', startDate: '2026-04-01', endDate: '2026-04-30', requesterId: '1', projectId: '3' },
+  // The BILLABLE half of Sofia's year. Without it she would carry only
+  // non-billable hours and `resourceBillability` could be "corrected" to zero
+  // for her without anyone noticing the over-correction (spec F-8/U18 asks for
+  // a fixture with BOTH kinds of hours on ONE person).
+  { id: '16', name: 'Project Alpha - Sofia full allocation', requiredRole: 'Developer', requiredEffort: 872, staffedEffort: 872, staffedEffortPlanned: 872, status: 'Fulfilled', skills: ['Java'], description: 'Full-time booking on the billable delivery engagement, May through September', startDate: '2026-05-01', endDate: '2026-09-30', requesterId: '1', projectId: '1' },
+  { id: '17', name: 'BASKET Engineering - AMS backfill', requiredRole: 'Developer', requiredEffort: 88, staffedEffort: 88, staffedEffortPlanned: 88, status: 'Fulfilled', skills: [], description: 'Placeholder half-head on the Engineering basket, pending a real hire', startDate: '2026-04-01', endDate: '2026-04-30', requesterId: '1', projectId: '3' },
+  // THE CONTROL FOR THE INVARIANT, not a basket: project '4' is
+  // `billable: false` with `type: 'Delivery'`. Without a row here, every
+  // finance exclusion could be keyed on `type === 'Basket'` instead of on
+  // `billable`, and every test would still pass — the reading of the invariant
+  // that is exactly backwards (spec §3.2: Basket implies non-billable, the
+  // converse stays free).
+  { id: '18', name: 'Internal Platform - Delivery Control build', requiredRole: 'Consultant', requiredEffort: 80, staffedEffort: 80, staffedEffortPlanned: 80, status: 'Fulfilled', skills: ['Project Management'], description: 'Internal platform work: not billable, and not a basket either', startDate: '2026-05-01', endDate: '2026-05-14', requesterId: '1', projectId: '4' },
 ];
 
 // Resource Schedule (Approach B): every assignment carries an explicit booking
@@ -311,6 +370,36 @@ const assignmentsBase: readonly Omit<Assignment, 'status'>[] = [
   // hand-verifiable against cost_baselines 'CB1' below (600 -> delta +120 /
   // +20.00%).
   { id: '12', requestId: '12', resourceId: '2', assignedHours: 8, startDate: '2026-10-05', endDate: '2026-10-05', allocationPct: 20 },
+  // BLOCK H fixtures (design spec §8.3). Every hour figure below is
+  // working-days x 8h with no remainder, so distributeHoursOverWindow spreads
+  // them back to a flat daily rate and the arithmetic in the comments is
+  // checkable by hand:
+  //   April 2026            = 22 working days (no seeded holiday)
+  //   May-Sep 2026          = 21+22+23+21+22 = 109 working days
+  //   2026-05-01..05-14     = 10 working days
+  //
+  // S5 — Sofia on the BASKET engagement for April: 22 x 8 = 176h. Priced at
+  // her resolved 80 EUR/h this is 14,080.00 EUR of planned cost on a project
+  // that can never earn a euro of customer revenue.
+  { id: '15', requestId: '15', resourceId: '14', assignedHours: 176, startDate: '2026-04-01', endDate: '2026-04-30', allocationPct: 100 },
+  // The billable half: 109 x 8 = 872h, May through September. April is
+  // deliberately NOT part of it — Sofia's year splits cleanly into 176
+  // non-billable hours and 872 billable ones, so `resourceBillability` for her
+  // must fall from 1,048 x 150 = 157,200.00 EUR to 872 x 150 = 130,800.00 EUR
+  // and to nothing else. Two wrong answers (0, or unchanged) are both excluded
+  // by one number.
+  { id: '16', requestId: '16', resourceId: '14', assignedHours: 872, startDate: '2026-05-01', endDate: '2026-09-30', allocationPct: 100 },
+  // S8 — the DUMMY on the same basket engagement, at half a head: 22 x 4 = 88h.
+  // Half rather than whole on purpose: resource '4' already carries 8h/day from
+  // assignment '9', so April reads 12h/day — 1.5 FTE of placeholder demand,
+  // well inside `dailyCapFor('dummy', 8)` (multi-FTE, C1) and unmistakably NOT
+  // a person double-booked. Pins B7: hiring demand counts basket hours too.
+  { id: '17', requestId: '17', resourceId: '4', assignedHours: 88, startDate: '2026-04-01', endDate: '2026-04-30', allocationPct: 50 },
+  // The non-billable NON-basket control (project '4'): John Miller, 10 x 8 =
+  // 80h, ending the day before his existing booking '3' starts (2026-05-15),
+  // so no new over-allocation is invented and the seeded 130% demo stays the
+  // only one. At his 90 EUR/h override that is 7,200.00 EUR of planned May cost.
+  { id: '18', requestId: '18', resourceId: '2', assignedHours: 80, startDate: '2026-05-01', endDate: '2026-05-14', allocationPct: 100 },
 ];
 
 // --- Time-phased allocation (B1) config --------------------------------------
@@ -442,6 +531,114 @@ export const timeEntries: TimeEntry[] = [
   // approvedBy is user '2' (John Miller), NOT Julie's own user — segregation of
   // duties, which TE1/TE2 predate and violate.
   { id: 'TE4', assignmentId: '6', requestId: '6', resourceId: '1', projectId: '2', date: '2026-06-01', hours: 8, status: 'Approved', notes: 'Beta backend — priced at the negotiated Developer rate', approvedBy: '2', approvedAt: '2026-06-02T09:00:00.000Z' },
+  // BLOCK H (design spec §8.3, S5) — THE ROWS WITHOUT WHICH THE NON-BILLABLE
+  // HALF OF THIS BLOCK PROVES NOTHING.
+  //
+  // `realizationMetrics`, `actualLaborCostForProject` and `customerProfitability`
+  // all read APPROVED hours and nothing else. A basket engagement with an
+  // assignment but no approved time entry has revenue 0, cost 0 and margin 0:
+  // it is excluded from every finance surface for lack of data, and a green
+  // "the non-billable project raises no margin alert" would mean nothing. That
+  // is trap (c) of §8, the same shape as the negotiated-rate impact report that
+  // printed zero because nothing exercised the code (see request '6' above).
+  //
+  // 24 approved hours on project '3', at Sofia's resolved 80/150 EUR per hour:
+  //   actual labour cost   = 24 x 80  = 1,920.00 EUR
+  //   standardBillValue    = 24 x 150 = 3,600.00 EUR
+  //   revenue              = 0        (no contract, no order line, no billing item)
+  // so TODAY this project reports margin -1,920.00 EUR, realization 0.00%, and
+  // a permanently loss-making 'unknown' customer row — the three numbers F-3,
+  // F-5 and F-7 exist to stop reporting.
+  //
+  // approvedBy is user '2' (John Miller), never Sofia's own — segregation of
+  // duties, the convention TE4 introduced and TE1/TE2 predate.
+  { id: 'TE5', assignmentId: '15', requestId: '15', resourceId: '14', projectId: '3', date: '2026-04-06', hours: 8, status: 'Approved', notes: 'AMS duty — incident triage', approvedBy: '2', approvedAt: '2026-04-07T09:00:00.000Z' },
+  { id: 'TE6', assignmentId: '15', requestId: '15', resourceId: '14', projectId: '3', date: '2026-04-07', hours: 8, status: 'Approved', notes: 'AMS duty — corrective maintenance', approvedBy: '2', approvedAt: '2026-04-08T09:00:00.000Z' },
+  { id: 'TE7', assignmentId: '15', requestId: '15', resourceId: '14', projectId: '3', date: '2026-04-08', hours: 8, status: 'Approved', notes: 'AMS duty — release support', approvedBy: '2', approvedAt: '2026-04-09T09:00:00.000Z' },
+  // The same shape on project '4', the non-billable engagement that is NOT a
+  // basket. Different resource and different rate on purpose (John's 90/180
+  // EUR-per-hour overrides): 16 x 90 = 1,440.00 EUR cost and 16 x 180 =
+  // 2,880.00 EUR of standard bill value are distinguishable at a glance from
+  // project '3''s 1,920.00 / 3,600.00, so a test can tell WHICH project an
+  // exclusion actually excluded.
+  { id: 'TE8', assignmentId: '18', requestId: '18', resourceId: '2', projectId: '4', date: '2026-05-04', hours: 8, status: 'Approved', notes: 'Internal platform build', approvedBy: '1', approvedAt: '2026-05-05T09:00:00.000Z' },
+  { id: 'TE9', assignmentId: '18', requestId: '18', resourceId: '2', projectId: '4', date: '2026-05-05', hours: 8, status: 'Approved', notes: 'Internal platform build', approvedBy: '1', approvedAt: '2026-05-06T09:00:00.000Z' },
+];
+
+// --- Block H: recorded absences (design spec §3.3, §8.3) ---------------------
+
+/**
+ * The rows that make the fourth bench state VISIBLE ON FIRST BOOT.
+ *
+ * WHY THIS EXPORT IS THE POINT OF TASK T2, stated rather than assumed: T1
+ * shipped the table, the migration, the types and the wiring, and NOTHING
+ * flowed through any of it. With this array empty the whole block is invisible
+ * in dev, unexercised by every derived surface, and green everywhere — the
+ * project's recurring defect. `src/db/repositories.ts` and `src/db/bootstrap.ts`
+ * must therefore point at THIS export, not at a literal `[]`.
+ *
+ * FOUR PROPERTIES EVERY ROW HERE SATISFIES, because each is a rule the write
+ * path will enforce (spec §6.1/§7.4) and a seed the API would refuse is a
+ * fixture that lies:
+ *   - `startDate <= endDate`, both INCLUSIVE;
+ *   - the whole interval falls inside the resource's employment window;
+ *   - no two rows for the same resource overlap (409 on the write path);
+ *   - `recordedBy` is user '2' (John Miller, resource-manager) and never the
+ *     subject's own user — the SoD rule that the recorder may not be the
+ *     person recorded. Note the operational consequence this bakes in: John
+ *     could not have recorded an absence of his own.
+ *
+ * `reasonCode` is special-category data (GDPR art. 9) and the arithmetic never
+ * branches on it — that is what lets the redacted projection stay numerically
+ * complete. Two of the four causes here are health-related precisely so the
+ * privacy split of §7.3 has something real to protect: a test that asserts
+ * "no reasonCode leaked" against rows that carry only 'Vacation' proves very
+ * little.
+ *
+ * `note` is populated on AB1 and ABSENT on the other three, deliberately. It is
+ * the block's only nullable column, so it is the only row-level exercise of the
+ * `nullsToUndefined()` seam on a live Postgres boot: one row must come back
+ * with the text, three must come back with NO key at all (never `null`).
+ */
+export const resourceAbsences: ResourceAbsence[] = [
+  // S4 — THE SUBCO CASE. Resource '6' is bench from May onward (block F), and
+  // this covers every one of August's 21 working days, so the month is FULLY
+  // absent and the subco tile on /dashboard (`subcoBenchCount`) has something
+  // to stop counting. DELIBERATELY A WHOLE MONTH rather than the "short"
+  // absence §8.3 suggests: a short absence inside an already-BENCH month leaves
+  // the state BENCH, moves no tile, and would be a fixture that exercises
+  // nothing while appearing to cover the subco case.
+  //
+  // August is also the month S1 covers for an INTERNAL resource, so the two
+  // tiles move together in August and only the internal one moves in June and
+  // July — which is what makes them distinguishable rather than a single
+  // pass/fail.
+  { id: 'AB1', resourceId: '6', startDate: '2026-08-01', endDate: '2026-08-31',
+    reasonCode: 'Sickness', recordedBy: '2', recordedAt: '2026-07-30T10:00:00.000Z' },
+  // S1 — THE HEADLINE CORRECTION. Resource '8' (Marco Belli) is the seed's pure
+  // bench case: hired on the anchor month, never booked, so today he reads
+  // BENCH/B-C-D-D-D-D straight across April-September and every one of those
+  // six months counts him as idle delivery capacity. Three months of parental
+  // leave cover every working day of June, July and August, so those three must
+  // leave the bench entirely — and MAY must not, which is the paired assertion
+  // that proves the change is scoped to the interval and not to the row.
+  { id: 'AB2', resourceId: '8', startDate: '2026-06-01', endDate: '2026-08-31',
+    reasonCode: 'ParentalLeave', note: 'Cover arranged with the Platform practice',
+    recordedBy: '2', recordedAt: '2026-05-20T09:00:00.000Z' },
+  // S3 — THE NO-EFFECT TWIN. Five working days in FEBRUARY: inside Sofia's
+  // employment window, inside the 9-month range /bench/monthly fetches, and
+  // outside all six DISPLAYED months. Nothing on screen may move. Paired with
+  // AB4 below — same resource, same length, one week's worth each — so the two
+  // differ only in WHERE they sit, and "the window is respected" is proved in
+  // both directions by one comparison.
+  { id: 'AB3', resourceId: '14', startDate: '2026-02-09', endDate: '2026-02-13',
+    reasonCode: 'Sickness', recordedBy: '2', recordedAt: '2026-02-09T07:45:00.000Z' },
+  // S2 — THE PRO-RATED TARGET. Five working days of May, on a month Sofia is
+  // booked 168h in. Her booked hours do not change; her AVAILABLE target drops
+  // from 21 x 8 = 168h to 16 x 8 = 128h, so /capacity must read 131.25% and
+  // band `over` where it reads 100.00% today. See her resource comment above.
+  { id: 'AB4', resourceId: '14', startDate: '2026-05-11', endDate: '2026-05-15',
+    reasonCode: 'Vacation', recordedBy: '2', recordedAt: '2026-04-27T08:30:00.000Z' },
 ];
 
 // --- Configuration ----------------------------------------------------------
@@ -647,9 +844,48 @@ export const settings: Setting[] = [
 
 // PHASE F2 — `location` is bound to the cities catalog (store = city name).
 // 'Berlin'/'Munich' are seeded cities (countryCode 'DE').
+//
+// BLOCK H — `billable` and `type` ARE SPELLED OUT ON EVERY ROW, including the
+// two that only ever take the default. This is NOT redundancy: both columns are
+// `NOT NULL DEFAULT ...`, so Postgres applies the default on insert and serves
+// the field back, while the in-memory adapter stores exactly the literal it was
+// given and serves NO key at all. Omitting them here is the C1 divergence
+// described at the top of this file — same seed, two different JSON shapes —
+// and it was measured on these very rows before this change:
+//   Postgres  {"id":"1",...,"billable":true,"type":"Delivery",...}
+//   in-memory {"id":"1",...}                       (both keys missing)
+// S9 of the design spec says "no change" to '1' and '2'; that instruction is
+// wrong on this one point, while its INTENT — that no number of theirs moves —
+// is exactly what spelling the defaults out preserves.
 export const projects: Project[] = [
-  { id: '1', name: 'Project Alpha', location: 'Berlin', startDate: '2026-04-01', endDate: '2026-12-31', status: 'In Planning', description: 'A major software development project.', ownerId: '1', contractId: 'CT1' },
-  { id: '2', name: 'Project Beta', location: 'Munich', startDate: '2026-05-01', endDate: '2027-05-01', status: 'In Execution', description: 'Infrastructure upgrade project.', ownerId: '1', contractId: 'CT2' },
+  { id: '1', name: 'Project Alpha', location: 'Berlin', startDate: '2026-04-01', endDate: '2026-12-31', status: 'In Planning', description: 'A major software development project.', ownerId: '1', contractId: 'CT1', billable: true, type: 'Delivery' },
+  { id: '2', name: 'Project Beta', location: 'Munich', startDate: '2026-05-01', endDate: '2027-05-01', status: 'In Execution', description: 'Infrastructure upgrade project.', ownerId: '1', contractId: 'CT2', billable: true, type: 'Delivery' },
+  // S5 — THE BASKET ENGAGEMENT. One per Practice, per the manual; this is
+  // Engineering's. NO `contractId`, deliberately and by absence: that is what
+  // drops it under the synthetic 'unknown' customer in `customerProfitability`
+  // today, which is the permanently loss-making customer row F-5 removes. It
+  // carries real staffed cost (requests '15'/'17', approved entries TE5-TE7)
+  // and a frozen cost baseline (CB3), because the manual's annual historical
+  // plans for AMS/SW Factory/GCC are exactly `costBaselines` on a basket — the
+  // one place where "exclude the non-billable from finance" is the tempting
+  // OVER-correction (F-4).
+  //
+  // S7, RECORDED AS A NON-FIXTURE SO ITS ABSENCE IS NOT MISTAKEN FOR A TEST:
+  // there is deliberately NO `billingPlanItems` row for project '3'. The
+  // assertion that belongs to that absence is a POSITIVE one on the write path
+  // (`POST /billing-plan-items` on '3' -> 400, on '1' -> 200), and it lives in
+  // the smoke suite, not here. Zero rows in an array prove nothing on their own.
+  { id: '3', name: 'BASKET — Engineering Practice', location: 'Milano', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution', description: 'Dedicated non-billable engagement for the Engineering practice: AMS duty, technical groups and internal presidio. Consumes cost, earns no customer revenue.', ownerId: '1', billable: false, type: 'Basket' },
+  // THE OTHER SIDE OF THE INVARIANT. `type === 'Basket'` implies
+  // `billable === false`; the converse is FREE, and this row is the free case:
+  // a non-billable internal engagement that is not a basket. It exists so that
+  // "excluded because non-billable" and "excluded because Basket" cannot be
+  // confused — with only project '3' in the seed, keying every finance
+  // exclusion on `type === 'Basket'` (the exactly-backwards reading) passes
+  // every test. It carries its own cost (request '18', TE8/TE9) for the same
+  // reason project '3' does: an engagement with no approved hours is excluded
+  // from the finance surfaces for lack of data, not by the rule under test.
+  { id: '4', name: 'Internal — Delivery Control Platform', location: 'Roma', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution', description: 'Internal product work. Not billable, and not a basket — the converse of the Basket invariant.', ownerId: '1', billable: false, type: 'Delivery' },
 ];
 
 // --- Project sub-resources (seeded on REAL ids 1/2) -------------------------
@@ -793,6 +1029,19 @@ export const negotiatedRates: NegotiatedRate[] = [
 export const costBaselines: CostBaseline[] = [
   { id: 'CB1', projectId: '1', period: '2026-10', amount: 600, frozenAt: '2026-09-15T09:00:00.000Z', frozenBy: '4' },
   { id: 'CB2', projectId: '1', period: '2026-11', amount: 500, frozenAt: '2026-09-15T09:00:00.000Z', frozenBy: '4' },
+  // BLOCK H / S6 — the same mechanism ON A NON-BILLABLE BASKET, which is the
+  // manual's "annual plan on a historical basis" for AMS / SW Factory / GCC
+  // (design spec §2.5). This row is the assertion against the OVER-correction:
+  // F-4 says `plannedCostSchedule` and `costBaselineComparison` must keep
+  // working on a basket engagement, and only a baseline that actually sits on
+  // one can catch a blanket "exclude the non-billable from finance".
+  //
+  // April 2026 on project '3' is staffed by BOTH its assignments — Sofia 176h
+  // and the placeholder 88h — and both resolve to 80 EUR/h:
+  //   live plan = (176 + 88) x 80 = 21,120.00 EUR
+  //   baseline  =                   20,000.00 EUR
+  //   delta     =                   +1,120.00 EUR  /  +5.60%
+  { id: 'CB3', projectId: '3', period: '2026-04', amount: 20000, frozenAt: '2026-03-20T09:00:00.000Z', frozenBy: '4' },
 ];
 
 export const orders: Order[] = [
