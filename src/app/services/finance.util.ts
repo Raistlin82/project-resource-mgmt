@@ -19,7 +19,21 @@ export interface FinanceData {
   milestones?: Milestone[];
   /** Committed (Approved/Implemented) change requests adjust the effective project budget (see effectiveBudgetForProject). */
   changeRequests?: ChangeRequest[];
-  /** Optional project master data; used only to label portfolio-level alert rows. */
+  /**
+   * Optional project master data. NO LONGER just labelling: since block H this
+   * is where BILLABILITY is resolved from (`Project.billable`), so it is
+   * load-bearing for computeProjectFinancials, projectAlerts,
+   * marginCompressionAlerts, customerProfitability, realizationMetrics,
+   * resourceBillability and portfolioMarginFullyLoaded. It still labels
+   * portfolio-level alert rows as well.
+   *
+   * OMITTING IT IS A DECLARED TRAP, not an accident (spec §8.2): with no
+   * `projects` every id reads `billable ?? true`, which reproduces the pre-H
+   * numbers EXACTLY — so every caller and every pre-H test that leaves it out
+   * stays green while exercising none of the new branches. That is the shape of
+   * a blind green gate, and it is why the two differential tests (same fixture
+   * with and without `projects`) are mandatory rather than nice to have.
+   */
   projects?: Project[];
   /**
    * Optional per-day booked hours and per-month lifecycle state (design spec,
@@ -83,10 +97,62 @@ export interface ProjectFinancials {
   etc: number;           // estimated cost to complete
   eac: number;           // estimate at completion (actualLaborCost + externalCost + ETC; CR-independent)
   varianceAtCompletion: number; // effective budget − EAC
+  /**
+   * H (spec §5, F-2) — does this engagement earn customer revenue?
+   * `d.projects[id].billable ?? true`, so a caller with no project master data
+   * gets `true` and the pre-H behaviour.
+   *
+   * The ARITHMETIC ABOVE IS UNCHANGED by it, deliberately (spec §11): a
+   * non-billable engagement still reports `margin = revenue − actualCost`,
+   * i.e. minus its real cost, because that cost is real and must stay visible.
+   * What this flag changes is WHO CONSUMES that margin — the alert, customer
+   * and realization rollups below all read it.
+   */
+  billable: boolean;
 }
 
 const finite = (v: number) => Number.isFinite(v) ? v : 0;
 const sum = (xs: number[]) => xs.reduce((a, b) => a + finite(b), 0);
+
+// --- Billability: the ONE place the arithmetic asks "does this earn revenue?" -
+//
+// Block H (design spec §5). `Project.billable` is the SINGLE SOURCE OF TRUTH.
+// `Project.type` is a LABEL and is deliberately never read below: two fields
+// that can contradict each other would force every consumer to pick which one
+// to believe, and the one it picked would be invisible at the call site.
+//
+// The read is `?? true` (spec §5, F-1), and the default is load-bearing in
+// three directions at once:
+//   • a row that predates the column                     -> billable
+//   • a project id that resolves to no Project row        -> billable
+//   • a caller that passes no `projects` at all           -> everything billable
+// "Billable" is the safe direction in all three: it keeps margin alerts ON and
+// keeps hours counted as billable value, rather than silently switching either
+// off for the whole portfolio the first time a caller forgets a field.
+//
+// Every function below funnels through `billableFlagOf`, so there is exactly
+// one place to break when fault-injecting the exclusion — and exactly one place
+// a future reader has to read to know what "non-billable" means here.
+
+/** The single `billable` read. Never reads `type`. */
+function billableFlagOf(p: Project | undefined): boolean {
+  return p?.billable ?? true;
+}
+
+/** Does this project earn customer revenue? An unknown id is billable (above). */
+export function isProjectBillable(projectId: string, d: FinanceData): boolean {
+  return billableFlagOf((d.projects ?? []).find(p => p.id === projectId));
+}
+
+/**
+ * The ids EXPLICITLY flagged non-billable. Built once by the rollups that walk
+ * every project so they stay linear; note it is the complement of
+ * `isProjectBillable` only for ids present in `d.projects` — which is the point,
+ * since an absent project is billable and therefore must NOT be in this set.
+ */
+function nonBillableProjectIds(d: FinanceData): ReadonlySet<string> {
+  return new Set((d.projects ?? []).filter(p => !billableFlagOf(p)).map(p => p.id));
+}
 
 // --- Currency conversion (multi-currency rollups) ----------------------------
 //
@@ -170,6 +236,13 @@ export interface PlannedCostPeriod {
  * the CALLER is responsible for resolution. See `finance.util.spec.ts`'s
  * "is fed resolved... rates" test for the exact failure mode of getting this
  * wrong.
+ *
+ * H (spec §5, F-4) — NOT filtered by `billable`, deliberately. This and
+ * `costBaselineComparison` are the one place a non-billable engagement MUST
+ * keep working: they are the manual's annual plan on a historical basis for
+ * SW Factory / AMS / GCC (spec §2.5). "Exclude the non-billable from all of
+ * finance" is the tempting over-correction, and this is the line it would have
+ * broken.
  */
 export function plannedCostSchedule(
   data: FinanceData,
@@ -400,6 +473,7 @@ export function computeProjectFinancials(projectId: string, d: FinanceData): Pro
     etc,
     eac,
     varianceAtCompletion: budget - eac,
+    billable: isProjectBillable(projectId, d),
   };
 }
 
@@ -412,14 +486,44 @@ export function computeProjectFinancials(projectId: string, d: FinanceData): Pro
  * worth", not "what do we invoice a customer" — the negotiated price is a
  * property of a (contract-or-project, role) pair, not of the person. Do not
  * "fix" this to use sellRateFor; that would be conflating two different
- * questions, not correcting an inconsistency.
+ * questions, not correcting an inconsistency. That comment stays valid: which
+ * RATE to price with is a different question from which HOURS to price.
+ *
+ * H (spec §5, F-8) — hours booked on a NON-BILLABLE engagement are no longer
+ * counted as billable value. Before this, every hour a person spent on AMS or
+ * an internal technical group was priced at her rate card and reported as value
+ * we could invoice; the figure on the resource form was therefore an overstated
+ * "what is our time worth". The join is assignment -> request -> project, both
+ * already on FinanceData.
+ *
+ * `hours` and `cost` are UNCHANGED and stay the totals over every assignment:
+ * the person really did work those hours and really did cost that money. Only
+ * `billable` — the one term that claims revenue potential — is narrowed. So the
+ * cost/billable pair now reads as "this is what she cost us, this is what of it
+ * we could charge", which is the question the screen is actually asking.
+ *
+ * A booking whose request or project cannot be resolved counts as BILLABLE:
+ * same `?? true` direction as everywhere else, and it is what keeps a caller
+ * that passes no `requests`/`projects` (resources.component.ts does exactly
+ * that today) on its pre-H number instead of collapsing every figure to zero.
  */
 export function resourceBillability(resourceId: string, d: FinanceData): { cost: number; billable: number; hours: number } {
   const res = d.resources.find(r => r.id === resourceId);
   const costRate = res?.costRate ?? 0;
   const billRate = res?.billRate ?? 0;
-  const hours = sum(d.assignments.filter(a => a.resourceId === resourceId).map(a => a.assignedHours));
-  return { hours, cost: hours * costRate, billable: hours * billRate };
+  const nonBillable = nonBillableProjectIds(d);
+  const requestProject = new Map(d.requests.map(r => [r.id, r.projectId]));
+  const mine = d.assignments.filter(a => a.resourceId === resourceId);
+  const hours = sum(mine.map(a => a.assignedHours));
+  const billableHours = sum(
+    mine
+      .filter(a => {
+        const projectId = requestProject.get(a.requestId);
+        return !(projectId && nonBillable.has(projectId));
+      })
+      .map(a => a.assignedHours),
+  );
+  return { hours, cost: hours * costRate, billable: billableHours * billRate };
 }
 
 // --- Billing-plan rollups (revenue recognition, A/R hygiene) -----------------
@@ -1084,6 +1188,19 @@ export function hasAnyAlert(a: ProjectAlerts): boolean {
  *     (equivalently varianceAtCompletion < 0)
  * Projects with no revenue never trip the margin flag, and projects with no
  * budget never trip the burn / EAC flags — there is nothing to measure against.
+ *
+ * H (spec §5, F-3): a NON-BILLABLE engagement never trips the margin flag
+ * either — it never had a margin target to miss. Burn and EAC still fire: a
+ * basket engagement has a budget and can blow through it, and that is the alert
+ * that matters for it.
+ *
+ * Note honestly what this guard does and does not do. On the ordinary basket
+ * engagement it is INERT, because `revenue > 0` already blocks the flag for a
+ * project with no customer order lines. It bites in exactly one case, and that
+ * case is real: a project that carried customer order lines and was later
+ * flipped to non-billable. The §6.3 write gates cover BILLING PLAN ITEMS, not
+ * order lines, so nothing stops that flip — and without this line the
+ * engagement would keep raising a margin breach nobody can act on.
  */
 export function projectAlerts(
   projectId: string,
@@ -1091,7 +1208,7 @@ export function projectAlerts(
   thresholds: AlertThresholds = DEFAULT_ALERT_THRESHOLDS,
 ): ProjectAlerts {
   const f = computeProjectFinancials(projectId, d);
-  const marginBelowTarget = f.revenue > 0 && f.marginPct <= thresholds.marginTargetPct;
+  const marginBelowTarget = f.billable && f.revenue > 0 && f.marginPct <= thresholds.marginTargetPct;
   const burnOver = f.budget > 0 && f.burnPct >= thresholds.burnWarnPct;
   const eacOverBudget = f.budget > 0 && f.eac > f.budget;
 
@@ -1426,6 +1543,16 @@ export interface RealizationMetrics {
   revenuePerHead: number;
   /** revenue / fte (falls back to revenue/headcount when no hours basis given). */
   revenuePerFte: number;
+  /**
+   * H (spec §5, F-7) — is this a billable engagement? The per-project figures
+   * above are all CORRECT for a non-billable one (revenue really is 0, the
+   * hours and the rate-card value really were incurred); what is wrong is
+   * averaging them. A 0% realization with a positive denominator drags every
+   * portfolio mean it enters. So the per-project function reports the flag and
+   * `portfolioRealization` below does the excluding — the roll-up is where the
+   * defect lives, so the roll-up is where the fix belongs.
+   */
+  billable: boolean;
 }
 
 /**
@@ -1464,7 +1591,105 @@ export function realizationMetrics(
     fte: finite(fte),
     revenuePerHead: finite(revenuePerHead),
     revenuePerFte: finite(revenuePerFte),
+    billable: isProjectBillable(projectId, d),
   };
+}
+
+export interface PortfolioRealization {
+  /** Σ recognised revenue over the BILLABLE engagements. */
+  revenue: number;
+  /** Σ approved hours over the billable engagements. */
+  hours: number;
+  /** Σ approved hours × billRate over the billable engagements. */
+  standardBillValue: number;
+  /** revenue / standardBillValue × 100 (0 when there is no standard value). */
+  realizationPct: number;
+  /** Distinct resources with approved time on a billable engagement — DE-DUPED
+   *  across projects, so somebody on three of them counts once. */
+  headcount: number;
+  /** Σ per-project FTE (0 unless `hoursPerFte` is supplied). */
+  fte: number;
+  /** revenue / headcount (0 when no headcount). */
+  revenuePerHead: number;
+  /** revenue / fte, falling back to revenue-per-head when no hours basis. */
+  revenuePerFte: number;
+  /**
+   * The engagements left out for being non-billable, sorted. Present so the
+   * caption can say WHICH and HOW MANY rather than leaving the reader to
+   * wonder why the portfolio realization moved — the number is only defensible
+   * next to the list of what it omits.
+   */
+  excludedProjectIds: string[];
+}
+
+/**
+ * Portfolio realization & productivity — the roll-up of realizationMetrics,
+ * with the NON-BILLABLE engagements excluded (spec §5, F-7).
+ *
+ * Why this lives in the pure layer at all: the roll-up used to be open-coded in
+ * reporting.ts, which meant the exclusion would have had to be re-implemented
+ * (and re-tested, and eventually forgotten) in a component. Realization is
+ * arithmetic, so it belongs where the arithmetic is tested.
+ *
+ * The additive parts are summed and the ratios re-derived on the totals —
+ * averaging per-project percentages would weight a 3-hour project the same as a
+ * 3000-hour one. `headcount` is de-duplicated across projects; `fte` is a plain
+ * sum because it is already an hours quotient.
+ */
+export function portfolioRealization(
+  d: FinanceData,
+  opts: { hoursPerFte?: number } = {},
+): PortfolioRealization {
+  const nonBillable = nonBillableProjectIds(d);
+  const heads = new Set<string>();
+  const excludedProjectIds: string[] = [];
+  let revenue = 0, hours = 0, standardBillValue = 0, fte = 0;
+
+  for (const projectId of attributableProjectIds(d)) {
+    if (nonBillable.has(projectId)) { excludedProjectIds.push(projectId); continue; }
+    const m = realizationMetrics(projectId, d, { hoursPerFte: opts.hoursPerFte });
+    revenue += m.revenue;
+    hours += m.hours;
+    standardBillValue += m.standardBillValue;
+    fte += m.fte;
+    for (const t of d.timeEntries ?? []) {
+      if (t.projectId === projectId && t.status === 'Approved') heads.add(t.resourceId);
+    }
+  }
+
+  const headcount = heads.size;
+  const revenuePerHead = headcount > 0 ? revenue / headcount : 0;
+  return {
+    revenue: finite(revenue),
+    hours: finite(hours),
+    standardBillValue: finite(standardBillValue),
+    realizationPct: standardBillValue > 0 ? finite((revenue / standardBillValue) * 100) : 0,
+    headcount,
+    fte: finite(fte),
+    revenuePerHead: finite(revenuePerHead),
+    revenuePerFte: finite(fte > 0 ? revenue / fte : revenuePerHead),
+    excludedProjectIds: excludedProjectIds.sort(),
+  };
+}
+
+/**
+ * Every project the finance data can attribute money to: the standard universe
+ * plus any id that appears ONLY on time entries or ONLY in the project master
+ * data. `allProjectIds` is deliberately left alone — widening it there would add
+ * rows to customerProfitability for every project with no money attached at all,
+ * which is a different change with its own regressions.
+ *
+ * Used by the two block-H rollups (portfolioRealization,
+ * portfolioMarginFullyLoaded) because for both of them a MISSED project is the
+ * failure mode: an internal engagement staffed with time entries but no request
+ * row would otherwise drop its cost out of a total whose whole purpose is to
+ * carry it.
+ */
+function attributableProjectIds(d: FinanceData): string[] {
+  const ids = new Set(allProjectIds(d));
+  for (const t of d.timeEntries ?? []) ids.add(t.projectId);
+  for (const p of d.projects ?? []) ids.add(p.id);
+  return [...ids].sort();
 }
 
 // --- Customer profitability & concentration ----------------------------------
@@ -1501,14 +1726,24 @@ function allProjectIds(d: FinanceData): string[] {
  * customer. Revenue and cost reuse computeProjectFinancials (so FX, POC, planned
  * vs actual labor all behave identically). Projects with no resolvable customer
  * land under 'unknown'. Rows are sorted by descending revenue.
+ *
+ * H (spec §5, F-5): NON-BILLABLE engagements are EXCLUDED entirely. They have no
+ * contract, so they used to fall under the synthetic 'unknown' customer and show
+ * up as a customer permanently in the red — a "customer" that is in fact our own
+ * AMS team. Excluding them here is not hiding the cost: it stays in
+ * plannedCostSchedule, in the project's own margin, and in
+ * portfolioMarginFullyLoaded. It is only removed from a question it cannot
+ * answer, namely "how profitable is this customer".
  */
 export function customerProfitability(d: FinanceData): CustomerProfitabilityRow[] {
   const projectToContract = new Map((d.projects ?? []).map(p => [p.id, p.contractId]));
   const contractToCustomer = new Map((d.contracts ?? []).map(c => [c.id, c.customerId]));
   const customerName = new Map((d.customers ?? []).map(c => [c.id, c.name]));
+  const nonBillable = nonBillableProjectIds(d);
 
   const acc = new Map<string, { revenue: number; cost: number; projectIds: string[] }>();
   for (const projectId of allProjectIds(d)) {
+    if (nonBillable.has(projectId)) continue;
     const contractId = projectToContract.get(projectId);
     const customerId = (contractId && contractToCustomer.get(contractId)) || 'unknown';
     const f = computeProjectFinancials(projectId, d);
@@ -1560,6 +1795,12 @@ export interface CustomerConcentration {
  * customer revenue only (a customer net-negative from credit notes contributes 0
  * to concentration rather than a nonsensical negative share). With a single
  * paying customer the top share and HHI are both maxed (100% / 10000).
+ *
+ * H (spec §5, F-6): NO CODE CHANGE, and that is a verdict rather than an
+ * oversight. It reads customerProfitability, so dropping the non-billable
+ * engagements (F-5) propagates here for free — but `totalRevenue` is the
+ * denominator of every share, so the shares themselves move. The spec asserts
+ * that movement instead of trusting the inheritance.
  */
 export function customerConcentration(d: FinanceData): CustomerConcentration {
   const rows = customerProfitability(d)
@@ -1584,6 +1825,96 @@ export function customerConcentration(d: FinanceData): CustomerConcentration {
     topCustomerSharePct: finite(shares[0]),
     top3SharePct: finite(top3SharePct),
     hhi: finite(hhi),
+  };
+}
+
+// --- Portfolio margin, FULLY LOADED (block H, Q2) ----------------------------
+//
+// Product decision Q2, taken 2026-08-07 (spec §10): the cost of NON-BILLABLE
+// work is IN the portfolio margin. AMS, technical groups and internal presidia
+// are real money the company spends, and a portfolio margin that omits them
+// makes the portfolio look more profitable than the company is.
+//
+// The consequence of that decision is a naming problem, and it is handled here
+// rather than left to be discovered: the resulting number is NOT comparable
+// with the margin of an individual delivery project, and somebody will compare
+// them anyway. So the value is NAMED for what it is — `fullyLoadedMargin` — and
+// there is deliberately no field called `margin` on this type whose meaning a
+// reader could assume. `nonBillableCost` is returned alongside precisely so the
+// comparison can be made correctly when it is made at all:
+//
+//     delivery margin (comparable per project) = fullyLoadedMargin + nonBillableCost
+//
+// Currency: every term arrives already normalised to BASE_CURRENCY —
+// computeProjectFinancials converts order lines through their order's currency
+// (convertToBase), and labor cost is hours × the resource's costRate, which is
+// held in base. Nothing here adds a path that could sum two currencies.
+
+export interface PortfolioMargin {
+  /** Reporting currency these figures are expressed in (BASE_CURRENCY). */
+  baseCurrency: string;
+  /** Σ customer revenue across every attributable project, in base. A
+   *  non-billable engagement contributes 0 to this by construction. */
+  revenue: number;
+  /** Σ actualCost (labor + external) of the BILLABLE engagements, in base. */
+  deliveryCost: number;
+  /** Σ actualCost of the NON-BILLABLE engagements, in base. This is the term
+   *  Q2 decided to keep in: real cost with no customer revenue against it. */
+  nonBillableCost: number;
+  /** revenue − deliveryCost − nonBillableCost. THE headline portfolio margin.
+   *  The tile must say "fully loaded" in the LABEL, not only the caption. */
+  fullyLoadedMargin: number;
+  /** fullyLoadedMargin / revenue × 100; 0 when there is no revenue (never NaN).
+   *  Raw, unrounded, like every other percentage in this file — display
+   *  rounding to 2 decimals belongs to the view. */
+  fullyLoadedMarginPct: number;
+  /** The engagements whose cost sits in `nonBillableCost`, sorted. Without this
+   *  the drop in the headline number is unexplainable at the point of reading. */
+  nonBillableProjectIds: string[];
+}
+
+/**
+ * Company-wide margin with the cost of non-billable work included (Q2).
+ *
+ * Reuses computeProjectFinancials per project, so FX, POC, planned-vs-actual
+ * labor and CR-adjusted budgets all behave exactly as they do on a project page
+ * — this is a different QUESTION over the same arithmetic, not a second
+ * arithmetic. Nothing about a project's own `margin` changes (spec §11).
+ *
+ * Distinct from portfolioTotalsInBase, which is left untouched on purpose:
+ * that one is a single pass over orders and billing items and states that
+ * "project attribution is irrelevant here". Fully-loaded margin cannot be
+ * computed without project attribution — knowing which engagements are
+ * non-billable IS the computation — so bolting it on would have broken that
+ * function's stated invariant and quietly changed what its existing tests mean.
+ */
+export function portfolioMarginFullyLoaded(d: FinanceData): PortfolioMargin {
+  const nonBillable = nonBillableProjectIds(d);
+  const nonBillableSeen: string[] = [];
+  let revenue = 0;
+  let deliveryCost = 0;
+  let nonBillableCost = 0;
+
+  for (const projectId of attributableProjectIds(d)) {
+    const f = computeProjectFinancials(projectId, d);
+    revenue += finite(f.revenue);
+    if (nonBillable.has(projectId)) {
+      nonBillableCost += finite(f.actualCost);
+      nonBillableSeen.push(projectId);
+    } else {
+      deliveryCost += finite(f.actualCost);
+    }
+  }
+
+  const fullyLoadedMargin = revenue - deliveryCost - nonBillableCost;
+  return {
+    baseCurrency: BASE_CURRENCY,
+    revenue: finite(revenue),
+    deliveryCost: finite(deliveryCost),
+    nonBillableCost: finite(nonBillableCost),
+    fullyLoadedMargin: finite(fullyLoadedMargin),
+    fullyLoadedMarginPct: revenue > 0 ? finite((fullyLoadedMargin / revenue) * 100) : 0,
+    nonBillableProjectIds: nonBillableSeen.sort(),
   };
 }
 
@@ -1681,6 +2012,13 @@ function evaluateCompression(
  * are evaluated; pass `scopes` to restrict. Project rows are labelled from
  * d.projects, customer rows from d.customers. Results are sorted most-severe
  * first (high→low), then by largest margin gap, so the worst offenders surface.
+ *
+ * H (spec §5, F-3): NON-BILLABLE engagements are skipped in the project scope —
+ * same argument as projectAlerts, a margin that was never targeted cannot be
+ * compressed. The CUSTOMER scope needs no line of its own: it reads
+ * customerProfitability, which already drops them (F-5), so the customer rows
+ * follow by construction. "By construction" is still asserted in the spec
+ * rather than assumed — that assumption is how a surface gets forgotten.
  */
 export function marginCompressionAlerts(
   d: FinanceData,
@@ -1689,10 +2027,12 @@ export function marginCompressionAlerts(
 ): MarginCompressionAlert[] {
   const cfg: MarginCompressionConfig = { ...DEFAULT_MARGIN_COMPRESSION_CONFIG, ...config };
   const projectName = new Map((d.projects ?? []).map(p => [p.id, p.name]));
+  const nonBillable = nonBillableProjectIds(d);
   const out: MarginCompressionAlert[] = [];
 
   if (scopes.includes('project')) {
     for (const projectId of allProjectIds(d).sort()) {
+      if (nonBillable.has(projectId)) continue;
       const f = computeProjectFinancials(projectId, d);
       const alert = evaluateCompression('project', projectId, projectName.get(projectId), f.revenue, f.actualCost, f.marginPct, cfg);
       if (alert) out.push(alert);
