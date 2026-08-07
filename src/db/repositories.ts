@@ -459,16 +459,13 @@ function buildInMemoryRepositories(): Repositories {
 
   return {
     resources: mem<Resource>(seed.resources),
-    // H/T1 — WIRING ONLY, NO FIXTURE YET. The seed rows are task T2's (design
-    // spec §9); `src/db/seed.ts` therefore carries no `resourceAbsences` export
-    // and this adapter starts EMPTY.
-    //
-    // T2 MUST replace `[]` with `seed.resourceAbsences` in the same change that
-    // adds the export — and the matching `seedIfEmpty` argument in
-    // `bootstrap.ts`. Left as `[]`, every typed gate stays green while the
-    // whole feature is invisible in dev and unexercised by any test: the exact
-    // blind-green-gate shape this project has already paid for repeatedly.
-    resourceAbsences: mem<ResourceAbsence>([]),
+    // H/T2 — the fixture T1 left a placeholder for is now wired. A literal `[]`
+    // here (and in the matching `seedIfEmpty` call in `bootstrap.ts`) keeps
+    // every typed gate green while the whole feature is invisible in dev and
+    // unexercised by any test — the blind-green-gate shape this project has
+    // paid for repeatedly. `src/db/seed.spec.ts` asserts both call sites read
+    // the seed export, so putting `[]` back fails a test rather than a review.
+    resourceAbsences: mem<ResourceAbsence>(seed.resourceAbsences),
     users: mem<User>(seed.users),
     requests: mem<ResourceRequest>(seed.requests),
     assignments: mem<Assignment>(seed.assignments),
