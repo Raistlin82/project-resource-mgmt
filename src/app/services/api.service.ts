@@ -1623,7 +1623,22 @@ export class ApiService {
     return this.http.put<ApprovalRequest>(`${this.baseUrl}/approval-requests/${id}/decision`, { decision, ...(note ? { note } : {}) });
   }
 
-  getAuditLogs(): Observable<AuditLog[]> { return this.http.get<AuditLog[]>(`${this.baseUrl}/audit-logs`); }
+  /**
+   * The append-only audit trail, newest first.
+   *
+   * `limit`/`offset` are the ONLY query params this endpoint accepts (no `q`),
+   * which is why the option type is narrowed rather than reusing `SearchOpts`
+   * wholesale — advertising a `q` the server ignores would invite a caller to
+   * filter server-side and get an unfiltered page back.
+   *
+   * PASS `limit` EXPLICITLY. Omitting it is not "no paging": the server falls
+   * back to `AUDIT_LOG_DEFAULT_LIMIT` (200) and answers with a bare array and no
+   * total, so a caller that sends nothing cannot tell a complete answer from a
+   * truncated one.
+   */
+  getAuditLogs(opts?: Pick<SearchOpts, 'limit' | 'offset'>): Observable<AuditLog[]> {
+    return this.http.get<AuditLog[]>(`${this.baseUrl}/audit-logs`, { params: this.searchParams(opts) });
+  }
 
   // --- Multi-currency foundation ---
 
