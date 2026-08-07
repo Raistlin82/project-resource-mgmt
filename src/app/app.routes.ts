@@ -1,4 +1,4 @@
-import { Routes } from '@angular/router';
+import { CanMatchFn, Routes } from '@angular/router';
 import {
   absenceRegisterGuard,
   allocationApprovalsGuard,
@@ -8,6 +8,33 @@ import {
   projectClassificationGuard,
   roleGuard,
 } from './guards/role.guard';
+import type { UserRole } from './services/api.service';
+
+/**
+ * Roles the server admits to `GET /audit-logs` — mirrors the FIRST entry of
+ * `READ_RULES` in `src/server.ts`:
+ *
+ *   { test: p => p.startsWith('/audit-logs'), roles: ['admin', 'delivery-executive'] }
+ *
+ * Declared here, next to the route, rather than in `role.guard.ts` where the
+ * other shared role sets live: the guard has to be importable WITHOUT pulling in
+ * the history screen's own chunk (that is the whole point of `CanMatch` — an
+ * unauthorized chunk never loads), and this module is already in the main bundle
+ * as the route table. `app.ts` imports the same constant for the nav entry, so a
+ * link can never outlive the gate behind it.
+ *
+ * A guard that DIVERGES from the server is the defect the pairing exists to
+ * catch, and it fails in two directions that look nothing alike: too strict and a
+ * delivery executive is bounced home from a register they may read; too loose and
+ * a nav link leads to a page that answers 403 on its first read — the twin of the
+ * "no screen reads the trail" gap this route closes. `audit-trail.spec.ts` parses
+ * the rule out of `src/server.ts` and replays roleGate's own resolution over it,
+ * role by role, so the mirror is checked rather than hoped for.
+ */
+export const AUDIT_TRAIL_READ_ROLES: readonly UserRole[] = ['admin', 'delivery-executive'];
+
+/** Allows matching only for {@link AUDIT_TRAIL_READ_ROLES}. */
+export const auditTrailGuard: CanMatchFn = roleGuard(a => a.hasAnyRole([...AUDIT_TRAIL_READ_ROLES]));
 
 export const routes: Routes = [
   // Resource Management
@@ -77,6 +104,13 @@ export const routes: Routes = [
   { path: 'capacity', title: 'Capacity', canMatch: [capacityGuard], loadComponent: () => import('./capacity/capacity.component').then(m => m.CapacityComponent) },
   { path: 'bench', title: 'Bench', canMatch: [capacityGuard], loadComponent: () => import('./bench/bench.component').then(m => m.BenchComponent) },
   { path: 'allocation-approvals', title: 'Allocation Approvals', canMatch: [allocationApprovalsGuard], loadComponent: () => import('./allocation-approvals/allocation-approvals.component').then(m => m.AllocationApprovalsComponent) },
+  // The reader for the append-only audit trail (RPT parity row 22). The data has
+  // always been there and richer than RPT's; what was missing was a route. Gated
+  // to AUDIT_TRAIL_READ_ROLES, the server's own '/audit-logs' READ_RULE audience —
+  // narrower than any other Analytics screen because the trail is cross-cutting
+  // and can carry special-category data by ricochet (an absence diff carries its
+  // reason, product decision Q5).
+  { path: 'audit-trail', title: 'History', canMatch: [auditTrailGuard], loadComponent: () => import('./audit-trail/audit-trail').then(m => m.AuditTrail) },
 
   // Configuration
   { path: 'config/language', title: 'Default Language', canMatch: [roleGuard(a => a.canManageConfiguration())], loadComponent: () => import('./configuration/set-default-language.component').then(m => m.SetDefaultLanguageComponent) },

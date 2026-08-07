@@ -35,6 +35,10 @@ import {
   CAPACITY_ROLES,
   PROJECT_CLASSIFICATION_ROLES,
 } from './guards/role.guard';
+// The history register's role set lives beside its route (app.routes.ts) so the
+// guard stays importable without dragging in the screen's lazy chunk; the nav
+// entry reads that SAME constant, never a second hand-typed list.
+import { AUDIT_TRAIL_READ_ROLES } from './app.routes';
 import { countsTowardDeliveryCapacity, kindOf } from './services/resource-kind.util';
 
 type NavBadge = 'requests' | 'risks' | 'changes' | 'overbooked';
@@ -529,6 +533,7 @@ export class App {
         { label: 'Bench', icon: 'event_busy', route: '/bench' },
         { label: 'Allocation Approvals', icon: 'fact_check', route: '/allocation-approvals' },
         { label: 'Reporting', icon: 'insights', route: '/reporting', badge: 'risks' },
+        { label: 'History', icon: 'history', route: '/audit-trail' },
       ],
     },
     {
@@ -581,6 +586,12 @@ export class App {
     // them their OWN rows, so the link leads somewhere real for them.
     const canViewAbsences = this.auth.hasAnyRole([...ABSENCE_REASON_READ_ROLES]);
     const canClassifyEngagements = this.auth.hasAnyRole([...PROJECT_CLASSIFICATION_ROLES]);
+    // The history register is the NARROWEST entry in Analytics: the audit trail is
+    // cross-cutting and carries special-category data by ricochet, so its nav gate
+    // is the server's own '/audit-logs' audience and NOT the group's canReadStaffing
+    // default — which would advertise the register to pm/resource-manager/finance
+    // and land them on a 403.
+    const canViewAuditTrail = this.auth.hasAnyRole([...AUDIT_TRAIL_READ_ROLES]);
     // Resources (people lifecycle) mirrors its roleGuard — visible only to the
     // roles that own resource master data (resource-manager/delivery-executive/admin).
     return this.allNavGroups
@@ -617,6 +628,7 @@ export class App {
             if (item.route === '/bench') return canViewCapacity;
             if (item.route === '/allocation-approvals') return canViewAllocationApprovals;
             if (item.route === '/reporting') return canViewPortfolio;
+            if (item.route === '/audit-trail') return canViewAuditTrail;
             return canReadStaffing;
           });
           return { label: group.label, items };
