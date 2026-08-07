@@ -7,9 +7,15 @@ import {
   utilizationChangeTone,
   ForecastData,
 } from './forecast.util';
-import { Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth } from './api.service';
+import { Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, RedactedAbsence } from './api.service';
 import { MonthStatus, monthRowId } from './allocation-month.util';
 import { ResourceKind } from './resource-kind.util';
+// Imported to CROSS-CHECK, never to re-test: `notFullyAllocatedAt` is /what-if's
+// bench KPI, and the last H suite in this file asserts that it and
+// `capacityForecast`'s supply now agree about the same absent person. Neither that
+// file nor bench.util.ts is touched here, so the only way to show the two tiles
+// stopped contradicting each other is to put both answers in one assertion.
+import { notFullyAllocatedAt } from './bench.util';
 
 /**
  * The month `skillGap` measures coverage "as of" throughout this suite. Coverage
@@ -134,6 +140,17 @@ function assign(
   status: Assignment['status'] = 'Allocated',
 ): Assignment {
   return { id, requestId, resourceId, assignedHours: hours, status };
+}
+
+/**
+ * One REDACTED absence interval, both bounds inclusive.
+ *
+ * `RedactedAbsence` and not `ResourceAbsence`: `reasonCode` is typed `never` on it,
+ * so a fixture that tried to make the arithmetic branch on WHY somebody is away
+ * would not compile — which is the point of the redacted projection (spec §3.4).
+ */
+function absence(resourceId: string, startDate: string, endDate: string): RedactedAbsence {
+  return { id: `abs:${resourceId}:${startDate}`, resourceId, startDate, endDate };
 }
 
 describe('forecast.util — capacityForecast', () => {
@@ -657,6 +674,363 @@ describe('forecast.util — employment is measured per DAY, and supply is pro-ra
     // ...and September, her first real working month, must flip both back.
     expect(skillGap(data, '2026-09')[0].supplyCount).toBe(1);
     expect(skillGap(data, '2026-09')[0].shortage).toBe(false);
+  });
+});
+
+/**
+ * H — ABSENCES ARE NOT SUPPLY (spec §11's declared residue, register P1-17/P1-18).
+ *
+ * EVERY TEST IN HERE IS DIFFERENTIAL, AND THAT IS NOT A STYLE CHOICE.
+ * `ForecastData.absences` is optional with an empty default, so `absences: []`
+ * reproduces the pre-H arithmetic to the digit: all ~60 cases above this block stay
+ * green while exercising not one new line. A value assertion alone therefore proves
+ * nothing about whether the field is read — only the SAME fixture run twice, with
+ * and without rows, asserted to DISAGREE, can. That is the twelfth instance of this
+ * project's blind-green-gate defect being designed out rather than discovered.
+ *
+ * And a differential can lie too, which is the second trap: if the absence covers
+ * days that were never workable — a weekend, a public holiday, a day outside the
+ * person's employment — the supply does not move and the differential measures
+ * zero while looking like a pass. So every mover below is paired with a TWIN whose
+ * absence lands on non-working days and must move NOTHING. Without both halves you
+ * cannot tell "reads the absence calendar" from "subtracts arbitrary days".
+ */
+describe('forecast.util — H: an absent day is not supply, and demand does not move', () => {
+  /** Mon 2026-08-17. The week is Mon 17 – Sun 23, five working days: 17-21. */
+  const WEEK_START = '2026-08-17';
+  const WORKING_DAYS_PER_WEEK = 5;
+
+  /** One full-time internal, employed long before and long after the horizon. */
+  const alice = res('alice', 40, 0, [], 'internal', { hireDate: '2020-01-01' });
+  const bob = res('bob', 32, 0, [], 'internal', { hireDate: '2020-01-01' });
+
+  function forecastOf(absences: RedactedAbsence[], resources: Resource[] = [alice], periods = 1) {
+    return capacityForecast(
+      { resources, requests: [], assignments: [], ...NO_ALLOCATION_ROWS, absences },
+      WEEK_START,
+      periods,
+    );
+  }
+
+  it('subtracts the absent WORKING days from a week’s supply', () => {
+    // Tue-Thu off: three of the week's five working days gone, so two remain.
+    // 40 × 2/5 = 16. This is the whole defect §11 left standing — the week
+    // advertised 40h for somebody the API would refuse a booking for on three of
+    // the five days (§6.4's write gate).
+    const PRESENT_DAYS = 2;
+    const without = forecastOf([]);
+    const withRows = forecastOf([absence('alice', '2026-08-18', '2026-08-20')]);
+
+    expect(without[0].supply).toBe(40);
+    expect(withRows[0].supply).toBeCloseTo(40 * (PRESENT_DAYS / WORKING_DAYS_PER_WEEK), 10);
+    // THE DIFFERENTIAL. Delete the `availableWorkingDays` call and this is the line
+    // that goes red; the two value assertions above would not.
+    expect(withRows[0].supply).not.toBeCloseTo(without[0].supply, 6);
+  });
+
+  it('subtracts NOTHING for an absence that only covers a weekend', () => {
+    // THE TWIN. Sat + Sun off is not a day of capacity lost, because neither was
+    // capacity to begin with. A fix that subtracted calendar days rather than
+    // working days would report 40 × 3/5 = 24 here and still pass the case above.
+    const without = forecastOf([]);
+    const weekendOnly = forecastOf([absence('alice', '2026-08-22', '2026-08-23')]);
+    expect(weekendOnly[0].supply).toBe(40);
+    expect(weekendOnly.map(r => r.supply)).toStrictEqual(without.map(r => r.supply));
+  });
+
+  it('subtracts NOTHING for an absence that only covers a public holiday', () => {
+    // The same twin against the OTHER non-working day, and it doubles as the
+    // holiday-threading pin: with Thursday closed the week has four working days
+    // (17, 18, 19, 21) and an absence on Thursday takes none of them, so the ratio
+    // is 4/4 and supply is whole. Drop `holidaySet` from either `windowDays` call
+    // and the answer becomes 40 × 4/5 = 32 instead.
+    const base = { resources: [alice], requests: [], assignments: [] };
+    const thursdayOff = [absence('alice', '2026-08-20', '2026-08-20')];
+    const closed = capacityForecast({ ...base, ...withHolidays('2026-08-20'), absences: thursdayOff }, WEEK_START, 1);
+    const open = capacityForecast({ ...base, ...NO_ALLOCATION_ROWS, absences: thursdayOff }, WEEK_START, 1);
+
+    expect(closed[0].supply).toBe(40);
+    // ...and on an ordinary week the very same absence DOES cost a fifth of it, so
+    // "nothing moved" above is a statement about the calendar, not a dead branch.
+    expect(open[0].supply).toBeCloseTo(40 * (4 / WORKING_DAYS_PER_WEEK), 10);
+    expect(closed[0].supply).not.toBeCloseTo(open[0].supply, 6);
+  });
+
+  it('reports NO utilization (null, never 0%) for a week nobody is available for', () => {
+    // A fully-absent week with a single resource has no supply at all, and the
+    // established rule is that no supply means no answer — a 0 there would paint
+    // the week as spare capacity in `forecastUtilizationBand` and drag the /what-if
+    // horizon average down with a measurement that does not exist.
+    const withRows = forecastOf([absence('alice', '2026-08-17', '2026-08-21')]);
+    expect(withRows[0].supply).toBe(0);
+    expect(withRows[0].utilizationPct).toBeNull();
+    // Absence twin: the following week, which the interval does not reach, is whole.
+    const twoWeeks = forecastOf([absence('alice', '2026-08-17', '2026-08-21')], [alice], 2);
+    expect(twoWeeks[1].supply).toBe(40);
+    expect(twoWeeks[1].utilizationPct).not.toBeNull();
+  });
+
+  it('leaves COMMITTED demand exactly where it was, so a booking clashing with leave stays visible', () => {
+    // THE OPPOSITE DEFECT, and the worse one. The server deliberately ACCEPTS an
+    // absence recorded over already-booked days and returns `bookedDayConflicts`
+    // (spec §6.4) so the clash can be seen and resolved. If the absent days came
+    // off the demand side too, the 40 booked hours would vanish from the horizon
+    // that exists to surface them and `gap` would read a comfortable 0 for a week
+    // in which nobody can work.
+    const booked = {
+      resources: [alice],
+      requests: [req('r1', 40, 'Open', { staffedEffort: 40, startDate: WEEK_START, endDate: '2026-08-21' })],
+      assignments: [assign('a1', 'r1', 'alice', 40, 'Allocated')],
+      ...tail(monthRows('a1', [{ month: '2026-08', status: 'Allocated', hours: 40 }])),
+    };
+    const without = capacityForecast({ ...booked, absences: [] }, WEEK_START, 1);
+    const withRows = capacityForecast(
+      { ...booked, absences: [absence('alice', '2026-08-17', '2026-08-21')] },
+      WEEK_START,
+      1,
+    );
+
+    // Demand is IDENTICAL on both sides — the booked hours are a fact about the
+    // world, not a function of who is available to honour them.
+    expect(without[0].committed).toStrictEqual(40);
+    expect(withRows[0].committed).toStrictEqual(40);
+    expect(withRows[0].pipeline).toStrictEqual(without[0].pipeline);
+    expect(withRows[0].demand).toStrictEqual(without[0].demand);
+
+    // The supply is what moved, and the gap therefore goes as negative as the
+    // bookings — the conflict, stated in the currency of the screen.
+    expect(without[0].gap).toStrictEqual(0);
+    expect(withRows[0].gap).toStrictEqual(-40);
+    expect(withRows[0].utilizationPct).toBeNull();
+    expect(without[0].utilizationPct).toBeCloseTo(100, 10);
+  });
+
+  it('takes only the absent person’s capacity, and nothing from an unrelated resourceId', () => {
+    const both = [alice, bob];
+    const without = forecastOf([], both);
+    expect(without[0].supply).toBe(72);
+
+    // Bob out all week: his 32 go, Alice's 40 stay whole. A fix that filtered the
+    // whole interval list without matching on `resourceId` would report 0 here.
+    const bobOut = forecastOf([absence('bob', '2026-08-17', '2026-08-21')], both);
+    expect(bobOut[0].supply).toBe(40);
+
+    // TWIN: an interval for somebody who is not in this forecast at all is inert.
+    const stranger = forecastOf([absence('carol', '2026-08-17', '2026-08-21')], both);
+    expect(stranger.map(r => r.supply)).toStrictEqual(without.map(r => r.supply));
+  });
+
+  it('pro-rates a MONTHLY period on the window’s own working days too', () => {
+    // The 30-day rolling window 2026-08-03..2026-09-01 holds 22 working days (the
+    // figure the day-granular suite above already pins). One week of leave inside
+    // it removes five, leaving 17 — so the monthly horizon is not a second code
+    // path that quietly kept the old answer.
+    const WINDOW_WORKING_DAYS = 22;
+    const base = { resources: [alice], requests: [], assignments: [], ...NO_ALLOCATION_ROWS };
+    const without = capacityForecast({ ...base, absences: [] }, '2026-08-03', 1, 'monthly');
+    const withRows = capacityForecast(
+      { ...base, absences: [absence('alice', '2026-08-17', '2026-08-21')] },
+      '2026-08-03',
+      1,
+      'monthly',
+    );
+    expect(without[0].supply).toBeCloseTo(40 * (52 / 12), 6);
+    expect(withRows[0].supply).toBeCloseTo(40 * (52 / 12) * (17 / WINDOW_WORKING_DAYS), 10);
+    expect(withRows[0].supply).not.toBeCloseTo(without[0].supply, 6);
+  });
+
+  it('never gives an absence the chance to add capacity a leaver no longer has', () => {
+    // Composition, not competition: `availableWorkingDays` is handed the EMPLOYED
+    // day list, so the two gates narrow in sequence. A leaver who went on Wed the
+    // 19th has three employed days (17, 18, 19); an absence over the days AFTER she
+    // left can only subtract days she never had, i.e. nothing.
+    const leaver = res('leaver', 40, 0, [], 'internal', { terminationDate: '2026-08-19' });
+    const EMPLOYED_DAYS = 3;
+    const without = forecastOf([], [leaver]);
+    const afterLeaving = forecastOf([absence('leaver', '2026-08-20', '2026-08-21')], [leaver]);
+    const beforeLeaving = forecastOf([absence('leaver', '2026-08-18', '2026-08-18')], [leaver]);
+
+    expect(without[0].supply).toBeCloseTo(40 * (EMPLOYED_DAYS / WORKING_DAYS_PER_WEEK), 10);
+    expect(afterLeaving[0].supply).toBeCloseTo(without[0].supply, 10);
+    // ...while an absence on a day she WAS employed for still costs that day, so
+    // the composition is a narrowing and not an ignored argument.
+    expect(beforeLeaving[0].supply).toBeCloseTo(40 * ((EMPLOYED_DAYS - 1) / WORKING_DAYS_PER_WEEK), 10);
+  });
+
+  it('does not let an absence move overAllocated — booked hours are booked (U16)', () => {
+    // An EXPLICIT non-verdict, in the form the project's own lesson demands: for
+    // every assertion of presence, the one of absence. Somebody 200h over capacity
+    // who then takes a week off is still 200h over; shrinking her capacity here
+    // would inflate the overrun into hours nobody booked, and the `capacity` scalar
+    // is a whole-of-time profile value that H deliberately leaves alone (spec §11).
+    const hot = res('hot', 100, 200, [], 'internal', { hireDate: '2020-01-01' });
+    const data = {
+      resources: [hot],
+      requests: [req('r1', 300, 'Staffed', { staffedEffort: 300, startDate: WEEK_START, endDate: '2026-08-21' })],
+      assignments: [assign('a1', 'r1', 'hot', 300, 'Allocated')],
+      ...tail(monthRows('a1', [{ month: '2026-08', status: 'Allocated', hours: 300 }])),
+    };
+    const without = overAllocated({ ...data, absences: [] });
+    const withRows = overAllocated({ ...data, absences: [absence('hot', '2026-08-17', '2026-08-21')] });
+    expect(withRows).toStrictEqual(without);
+    expect(withRows[0].overByHours).toStrictEqual(200);
+  });
+});
+
+/**
+ * H — the two /what-if tiles that disagreed about one person.
+ *
+ * `/what-if` puts "Bench" and "Avg Utilization" in the same row of tiles. Block H
+ * fixed the first (a fully-absent month is `ABSENT`, and `notFullyAllocatedAt`
+ * excludes it) and declared the second out of scope, so a person on leave was
+ * simultaneously NOT on the bench and still counted as available capacity in the
+ * utilisation denominator — two numbers, one row, one person, opposite claims.
+ *
+ * `what-if.ts` cannot be touched from here, so the disagreement is pinned where
+ * both answers can be put in one assertion: this file calls `notFullyAllocatedAt`
+ * (bench.util.ts, unmodified) and `capacityForecast` over ONE fixture and asserts
+ * they now agree in BOTH directions — the absent person is out of both, and with no
+ * absence rows she is in both. Agreement in one direction only would be satisfied by
+ * a function that always returns 0.
+ */
+describe('forecast.util — H: the /what-if bench tile and the utilization tile agree', () => {
+  const MONTH = '2026-08';
+  const TODAY = '2026-08-17';
+  const alice = res('alice', 40, 0, [], 'internal', { hireDate: '2020-01-01' });
+  const bob = res('bob', 40, 0, [], 'internal', { hireDate: '2020-01-01' });
+
+  /** The shape `what-if.ts`'s `toRollupInput` builds, from the same `ForecastData`. */
+  function benchIds(data: ForecastData): string[] {
+    return notFullyAllocatedAt(
+      {
+        resources: data.resources,
+        assignments: data.assignments,
+        assignmentDays: data.assignmentDays,
+        assignmentMonths: data.assignmentMonths,
+        hoursPerDay: data.hoursPerDay,
+        holidays: new Set(data.holidays.map(h => h.id)),
+        absences: data.absences ?? [],
+      },
+      MONTH,
+      TODAY,
+    ).map(r => r.resourceId);
+  }
+
+  function fixture(absences: RedactedAbsence[]): ForecastData {
+    return { resources: [alice, bob], requests: [], assignments: [], ...NO_ALLOCATION_ROWS, absences };
+  }
+
+  it('excludes an absent person from the bench count AND from the utilization denominator', () => {
+    const data = fixture([absence('alice', '2026-08-01', '2026-08-31')]);
+    // The bench tile: Alice is ABSENT for the whole month, so she is not bench.
+    expect(benchIds(data)).toStrictEqual(['bob']);
+    // The utilization tile's denominator: only Bob's 40h. RED BEFORE THIS CHANGE —
+    // it read 80, Alice's capacity included, which is the contradiction itself.
+    expect(capacityForecast(data, TODAY, 1)[0].supply).toBe(40);
+    expect(capacityForecast(data, TODAY, 1)[0].supply).not.toBe(80);
+  });
+
+  it('includes her in BOTH when there is no absence to exclude her for', () => {
+    // The other direction, and the reason the pair is needed: a supply of 0 for
+    // everybody would satisfy the assertion above and fail this one.
+    const data = fixture([]);
+    expect(benchIds(data)).toStrictEqual(['alice', 'bob']);
+    expect(capacityForecast(data, TODAY, 1)[0].supply).toBe(80);
+  });
+
+  it('keeps a PARTLY absent person in both — one week off is not a month off', () => {
+    // The threshold twin. `ABSENT` is assigned only for a FULLY absent month
+    // (spec §4.3), so three days' leave leaves Alice on the bench list; the supply
+    // side, which measures days rather than states, drops exactly her three days.
+    const data = fixture([absence('alice', '2026-08-18', '2026-08-20')]);
+    expect(benchIds(data)).toStrictEqual(['alice', 'bob']);
+    expect(capacityForecast(data, TODAY, 1)[0].supply).toBeCloseTo(40 + 40 * (2 / 5), 10);
+  });
+});
+
+/**
+ * H — `skillGap` coverage, and the DIRECTION of the risk (spec §11).
+ *
+ * Two defects face each other and are not symmetric: declaring a shortage that does
+ * not exist costs a hiring conversation, hiding a real one costs the signal this
+ * table exists to raise and nothing else re-raises it. Narrowing `covering` can only
+ * ever flip `shortage` false → true, never the reverse, so the rule cannot suppress
+ * a shortage that exists today. The threshold — FULLY absent, never "any absent
+ * day" — is what stops it overshooting in the other direction, and it is the same
+ * threshold `BenchState = 'ABSENT'` already uses rather than a second one.
+ */
+describe('forecast.util — H: skillGap coverage counts only staffable holders', () => {
+  const goDev = (id: string) =>
+    res(id, 40, 0, [{ name: 'Go', level: 3 }], 'internal', { hireDate: '2020-01-01' });
+
+  function gapFor(resources: Resource[], absences: RedactedAbsence[], month = '2026-08') {
+    return skillGap(
+      {
+        resources,
+        requests: [req('r1', 80, 'Open', { skills: ['Go'] })],
+        assignments: [],
+        ...NO_ALLOCATION_ROWS,
+        absences,
+      },
+      month,
+    )[0];
+  }
+
+  it('stops counting the ONLY holder of a skill when she is absent all month', () => {
+    const without = gapFor([goDev('go1')], []);
+    const withRows = gapFor([goDev('go1')], [absence('go1', '2026-08-01', '2026-08-31')]);
+
+    expect(without.supplyCount).toStrictEqual(1);
+    expect(without.shortage).toStrictEqual(false);
+    // THE DIFFERENTIAL: the shortage appears, which is the signal a month with no
+    // Go developer in it should raise.
+    expect(withRows.supplyCount).toStrictEqual(0);
+    expect(withRows.shortage).toStrictEqual(true);
+  });
+
+  it('still counts a holder who is away for three days of a month', () => {
+    // THE DIRECTION-OF-RISK ASSERTION, written as an assertion because a
+    // requirement left in prose never goes red. Excluding anyone with ANY absent
+    // day would report a shortage here — a hire requisition raised because the Go
+    // developer took Tuesday to Thursday off, when she can still be booked on the
+    // month's other nineteen working days.
+    const withRows = gapFor([goDev('go1')], [absence('go1', '2026-08-18', '2026-08-20')]);
+    expect(withRows.supplyCount).toStrictEqual(1);
+    expect(withRows.shortage).toStrictEqual(false);
+  });
+
+  it('measures the absence against WORKING days, not calendar days', () => {
+    // The fixture in which the two wrong answers would otherwise coincide, made
+    // sharp: hired Friday the 28th, so her only August working days are Fri 28 and
+    // Mon 31 (29-30 are the weekend).
+    const lateHire = res('go1', 40, 0, [{ name: 'Go', level: 3 }], 'internal', { hireDate: '2026-08-28' });
+    // Both of her two days covered ⇒ fully absent ⇒ no coverage.
+    expect(gapFor([lateHire], [absence('go1', '2026-08-28', '2026-08-31')]).supplyCount).toStrictEqual(0);
+    // TWIN: an interval over the weekend in between covers neither of them, so she
+    // is still coverage. A calendar-day implementation would call this "absent".
+    expect(gapFor([lateHire], [absence('go1', '2026-08-29', '2026-08-30')]).supplyCount).toStrictEqual(1);
+  });
+
+  it('never turns an existing shortage into coverage, and never overshoots past one holder', () => {
+    // Monotonicity, asserted rather than argued: `supplyCount` can only fall, so
+    // `shortage` can only flip false → true. With two holders and one of them out
+    // the count drops to 1 and the shortage badge stays quiet — the table must not
+    // shout for a hire the org already has present.
+    const two = [goDev('go1'), goDev('go2')];
+    expect(gapFor(two, []).supplyCount).toStrictEqual(2);
+    const oneOut = gapFor(two, [absence('go1', '2026-08-01', '2026-08-31')]);
+    expect(oneOut.supplyCount).toStrictEqual(1);
+    expect(oneOut.shortage).toStrictEqual(false);
+    // ...and an interval belonging to nobody in the fixture changes nothing.
+    expect(gapFor(two, [absence('nobody', '2026-08-01', '2026-08-31')])).toStrictEqual(gapFor(two, []));
+  });
+
+  it('does not carry an absence into a month it does not cover', () => {
+    // The month-scoping twin: August off is not September off, and `asOfMonth` is
+    // still the only thing that decides which days are looked at.
+    const august = [absence('go1', '2026-08-01', '2026-08-31')];
+    expect(gapFor([goDev('go1')], august, '2026-08').shortage).toStrictEqual(true);
+    expect(gapFor([goDev('go1')], august, '2026-09').shortage).toStrictEqual(false);
   });
 });
 

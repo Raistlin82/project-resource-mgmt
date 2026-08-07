@@ -2,6 +2,7 @@ import { Resource, ResourceRequest, Assignment, AssignmentDay, AssignmentMonth, 
 import { countsTowardDeliveryCapacity, kindOf } from './resource-kind.util';
 import { DayHours, MonthStatus, monthRowId, monthlyAggregateHours } from './allocation-month.util';
 import { employedWorkingDays, monthsInRange, semaphoreBand } from './capacity.util';
+import { availableWorkingDays } from './absence.util';
 import { workingDaysInMonth } from './calendar.util';
 
 /**
@@ -15,10 +16,12 @@ import { workingDaysInMonth } from './calendar.util';
  *    — a dummy is a placeholder for a hole to be filled, not capacity the
  *    organisation can staff work with today; a subco IS deliverable capacity,
  *    just not internal — see `countsTowardDeliveryCapacity`), each **pro-rated to
- *    the working days of that period they were actually employed for**
- *    (`employedWorkingDays`, the same helper `rollupMonthly`/`benchRollup` use).
+ *    the working days of that period they were both employed for AND staffable
+ *    on** (`employedWorkingDays` narrowed by `availableWorkingDays` — the same two
+ *    helpers, in the same order, that `rollupMonthly`/`benchRollup` use).
  *    Supply is therefore PER-PERIOD, not a constant: a leaver stops contributing
- *    the day they go and a future hire starts contributing the day she arrives.
+ *    the day they go, a future hire starts contributing the day she arrives, and
+ *    a week somebody is on leave for contributes none of her hours.
  *    For a monthly horizon the weekly capacity is scaled up by WEEKS_PER_MONTH so
  *    supply and demand share the same per-period unit.
  *  - COMMITTED DEMAND = each assignment's CONFIRMED hours — aggregated from its
@@ -34,6 +37,16 @@ import { workingDaysInMonth } from './calendar.util';
  *  - DEMAND = committed + pipeline; UTILIZATION% = demand / supply × 100, or
  *    **null when the period has no supply at all** — see `utilizationPct`.
  *  - GAP = supply − demand (positive ⇒ spare capacity, negative ⇒ shortfall).
+ *
+ * ABSENCES MOVE THE SUPPLY AND NOTHING ELSE (H, spec §11 / P1-17-P1-18). Booked
+ * hours do not stop existing because somebody goes on leave — the server ACCEPTS
+ * an absence recorded over already-booked days and hands back `bookedDayConflicts`
+ * precisely so the clash stays visible — so `committed`, `pipeline` and `demand`
+ * are untouched here, and `overAllocated` with them. Netting the absent days out
+ * of demand as well would make the conflict disappear from the one horizon that
+ * exists to surface it, and would leave `gap` reading "fine" for a week nobody
+ * can work. The intended, deliberate consequence is the opposite: a fully-absent
+ * week's `gap` goes as negative as its bookings.
  *
  * Every public function tolerates malformed numbers (NaN / Infinity / missing)
  * via Number.isFinite guards and never throws on bad input.
@@ -362,6 +375,10 @@ export function capacityForecast(
   // The same calendar `rollupMonthly`/`benchRollup` use, and the reason
   // `ForecastData.holidays` exists: it used to be fetched and then never read here.
   const holidaySet: ReadonlySet<string> = new Set(data.holidays.map(h => h.id));
+  // H: absent days are not supply. Empty default ⇒ the pre-H numbers, to the digit
+  // (see `ForecastData.absences`) — which is why only a differential test can see
+  // this read at all.
+  const absences = data.absences ?? [];
 
   const requestById = new Map<string, ResourceRequest>();
   for (const r of data.requests) requestById.set(r.id, r);
@@ -409,6 +426,17 @@ export function capacityForecast(
     //    still advertised 40h/week for the weeks after they left.
     // Pro-rating answers both with one rule, and it is the rule `rollupMonthly`
     // already settled on (capacity.util.ts:178-183) — not a second convention.
+    //
+    // H closes the third end of the same defect, the one this file's own §11 note
+    // left standing: an ABSENT day is not supply either. The argument is verbatim
+    // the leaver's — the server refuses a NEW booking on a day covered by an
+    // absence (§6.4's write gate), so advertising it is "advertised free capacity
+    // that the API refuses to book" (capacity.util.ts:111), the exact phrase that
+    // condemned crediting a leaver's whole month. `availableWorkingDays` is a
+    // SIBLING of `employedWorkingDays`, never an override (absence.util.ts, spec
+    // §4.1): "was she employed" is a different question, still answered here by
+    // the same helper `bench.util.ts` and the server's own write gate share, so
+    // narrowing it in place would redefine employment in four places at once.
     const pFirstIso = toIsoDate(pStart);
     const pLastIso = toIsoDate(pEnd - MS_PER_DAY);
     const periodWorkingDays = windowDays(pFirstIso, pLastIso, m => workingDaysInMonth(m, holidaySet));
@@ -417,13 +445,20 @@ export function capacityForecast(
         const employed = windowDays(pFirstIso, pLastIso, m => employedWorkingDays(r, m, holidaySet));
         // `employed` is a subset of `periodWorkingDays` (same months, same window
         // filter, and employedWorkingDays filters workingDaysInMonth), so a
-        // non-empty `employed` guarantees a non-zero denominator here. A person
-        // employed for every working day of the period keeps EXACTLY her capacity:
-        // the ratio is 1, integer over identical integer, so a full-time team's
-        // supply is untouched to the last bit — and holidays cancel out of both
-        // sides, as they do in `rollupMonthly`'s FTE.
+        // non-empty `employed` guarantees a non-zero denominator here — and
+        // `available`, a subset of `employed`, cannot resurrect a zero one. A
+        // person employed and present for every working day of the period keeps
+        // EXACTLY her capacity: the ratio is 1, integer over identical integer, so
+        // a full-time team's supply is untouched to the last bit — and holidays
+        // cancel out of both sides, as they do in `rollupMonthly`'s FTE.
         if (employed.length === 0) return 0;
-        return finite(r.capacity) * supplyScale * (employed.length / periodWorkingDays.length);
+        // NUMERATOR ONLY, denominator left on the period's whole working-day count
+        // — the shape `rollupMonthly` uses for `capacityFte` (capacity.util.ts:237),
+        // where the numerator narrows from employed to available and the divisor
+        // stays the standard month. Deducting the absent days from BOTH sides would
+        // cancel them out and change nothing at all.
+        const available = availableWorkingDays(r.id, absences, employed);
+        return finite(r.capacity) * supplyScale * (available.length / periodWorkingDays.length);
       }),
     );
 
@@ -480,6 +515,14 @@ function bookedHoursByResource(data: ForecastData): Map<string, number> {
  * C1: a dummy never appears here — a placeholder has no real allocation to be
  * "over" on — while a subco does, since it IS deliverable capacity that can be
  * over-booked just like an internal resource (`countsTowardDeliveryCapacity`).
+ *
+ * H: ABSENCES DO NOT REACH THIS FUNCTION, and that is a verdict rather than an
+ * oversight (spec §5.4 U16). Booked hours are what they are; someone 200h over
+ * capacity who then takes a week off is still 200h over, and shrinking her
+ * capacity by the absent days would inflate the overrun into a number nobody
+ * booked. `absences` narrows the SUPPLY side of `capacityForecast` only — the
+ * `capacity` scalar this threshold reads is a whole-of-time profile value and
+ * stays one (spec §11, last bullet).
  */
 export function overAllocated(data: ForecastData, thresholdPct = 110): OverAllocationEntry[] {
   const threshold = finite(thresholdPct);
@@ -515,21 +558,58 @@ export function overAllocated(data: ForecastData, thresholdPct = 110): OverAlloc
  * of a skill `shortage` flipped from true to false, suppressing exactly the
  * hire/subcontract signal this table exists to raise. Making the parameter
  * mandatory is the point: an omitted month would silently restore that hole.
+ *
+ * H — ABSENCE IS SUBTRACTED AT THE **FULLY-ABSENT** THRESHOLD, AND THE DIRECTION
+ * OF THE RISK IS WHY (spec §11, P1-17/P1-18).
+ *
+ * Two defects face each other here and they are NOT symmetric. Declaring a
+ * shortage that does not exist wastes a hiring conversation; HIDING a real one is
+ * worse, because this table's only job is to raise the hire/subcontract signal and
+ * a suppressed signal is never re-raised by anything else. So the rule has to be
+ * one that can only ever ADD shortages relative to the pre-H answer, never remove
+ * one — and narrowing `covering` does exactly that: `supplyCount` is monotonically
+ * non-increasing, so `shortage` (`supplyCount === 0`) can only flip false → true.
+ * No absence row can ever silence a shortage that exists today.
+ *
+ * Given that floor, the threshold is chosen NOT to overshoot. Excluding anyone
+ * with ANY absent day would report a shortage because the one Go developer took
+ * three days off in a twenty-two-day month — she can still be booked on the other
+ * nineteen, and a hire requisition is not the answer to a holiday. So a person
+ * counts as coverage unless she is absent for the WHOLE month:
+ * `availableWorkingDays(...).length === 0`.
+ *
+ * That is the SAME threshold Block H already picked for `BenchState = 'ABSENT'`
+ * (spec §4.3: "`ABSENT` è assegnato solo quando `monthAvailability` ===
+ * 'fully-absent'"), reused rather than re-derived — a second threshold for the
+ * same word is how two screens come to disagree about one person. It is also the
+ * SAME argument the employment gate below already makes, extended by one step:
+ * this is a COUNT OF PEOPLE, not a sum of hours, so there is nothing to pro-rate
+ * and the only question is whether she can work AT ALL in the month. "Employed for
+ * zero working days" and "available for zero working days" are the two ways the
+ * answer is no.
  */
 export function skillGap(data: ForecastData, asOfMonth: string): SkillGapEntry[] {
   const openRequests = data.requests.filter(isOpenRequest);
 
-  // Supply: employed resources possessing each skill (case-insensitive match).
-  // Employment is measured in DAYS here too (`employedWorkingDays`), so somebody
-  // hired on the 17th covers her skill in her hire month — she can be booked on
-  // every one of those days. The month-granular test used to answer "no", which
-  // reported a shortage the org had just hired against. This is a COUNT of people,
-  // not a sum of hours, so there is nothing to pro-rate: the question is only
-  // whether the person can work at all in the month.
+  // Supply: employed, staffable resources possessing each skill (case-insensitive
+  // match). Employment is measured in DAYS here too (`employedWorkingDays`), so
+  // somebody hired on the 17th covers her skill in her hire month — she can be
+  // booked on every one of those days. The month-granular test used to answer "no",
+  // which reported a shortage the org had just hired against. This is a COUNT of
+  // people, not a sum of hours, so there is nothing to pro-rate: the question is
+  // only whether the person can work at all in the month.
   const holidaySet: ReadonlySet<string> = new Set(data.holidays.map(h => h.id));
-  const covering = data.resources.filter(
-    r => countsTowardDeliveryCapacity(kindOf(r)) && employedWorkingDays(r, asOfMonth, holidaySet).length > 0,
-  );
+  const absences = data.absences ?? [];
+  const covering = data.resources.filter(r => {
+    if (!countsTowardDeliveryCapacity(kindOf(r))) return false;
+    const employed = employedWorkingDays(r, asOfMonth, holidaySet);
+    if (employed.length === 0) return false;
+    // H, fully-absent only — see this function's header for why the threshold is
+    // here and not at "any absent day". Passing `employed` (not the raw month)
+    // keeps the two gates composed rather than competing: a leaver's remaining days
+    // are the only ones an absence can still take away from her.
+    return availableWorkingDays(r.id, absences, employed).length > 0;
+  });
   const supplyBySkill = new Map<string, number>();
   for (const res of covering) {
     for (const s of res.skills ?? []) {
