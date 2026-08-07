@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
-  benchStateFor, monthsIdleAt, bucketForMonthsIdle, freeingUpNextMonth, availabilityDateFor,
+  benchStateFor, bucketForIdleWorkingDays, freeingUpNextMonth, availabilityDateFor,
   unallocatedShare,
   type BenchState,
 } from './bench.util';
+import { IDLE_WORKING_DAYS_B_MAX, IDLE_WORKING_DAYS_C_MAX, idleWorkingDaysAt, type IdleMonth } from './absence.util';
 
 describe('unallocatedShare (RPT comparison row 50 — the complement of allocation, on the resource’s OWN target)', () => {
   // 20 employed working days × 8h = a 160h own target throughout, so every
@@ -84,34 +85,81 @@ describe('benchStateFor (design spec §3 — decided on RAW hours, never the rou
     expect(benchStateFor(0.4, 176)).toBe('PARTIAL'));
   it('just below target -> PARTIAL', () => expect(benchStateFor(159.99, 160)).toBe('PARTIAL'));
   it('exactly at target -> ALLOCATED', () => expect(benchStateFor(160, 160)).toBe('ALLOCATED'));
-  it('above target (over-allocated) -> ALLOCATED, no fourth state', () => expect(benchStateFor(200, 160)).toBe('ALLOCATED'));
+  it('above target (over-allocated) -> ALLOCATED, never a state above it', () => expect(benchStateFor(200, 160)).toBe('ALLOCATED'));
+
+  /**
+   * H: this function is UNCHANGED and, crucially, cannot produce the fourth state
+   * — `'ABSENT'` is decided from availability by the caller. The case below is the
+   * one false answer it can still give, which is why `benchRollup` must branch on
+   * availability BEFORE reaching it (spec §4.4). Pinned here so the guard has a
+   * reason a reader can see, not only a comment.
+   */
+  it('a 0/0 month answers BENCH — the false answer the CALLER must not let it be asked (spec §4.4)', () => {
+    expect(benchStateFor(0, 0)).toBe('BENCH');
+    expect(benchStateFor(0, 0)).not.toBe('ABSENT');
+  });
+  it('never returns ABSENT for any hour/target combination — availability is not an hours question', () => {
+    for (const [planned, target] of [[0, 0], [0, 168], [40, 168], [168, 168], [200, 168], [40, 0]]) {
+      expect(benchStateFor(planned, target)).not.toBe('ABSENT');
+    }
+  });
 });
 
-describe('monthsIdleAt (walks backward from index while benchFlags holds, capped at 3)', () => {
-  it('not bench at index -> 0', () => expect(monthsIdleAt([false], 0)).toBe(0));
-  it('bench for 1 consecutive month -> 1', () => expect(monthsIdleAt([false, true], 1)).toBe(1));
-  it('bench for 2 consecutive months -> 2', () => expect(monthsIdleAt([false, true, true], 2)).toBe(2));
-  it('bench for 3 consecutive months -> capped at 3', () => expect(monthsIdleAt([false, true, true, true], 3)).toBe(3));
-  it('bench for 4 consecutive months -> STILL capped at 3, not 4', () =>
-    expect(monthsIdleAt([true, true, true, true], 3)).toBe(3));
-  // The five tests above never force index 0 of `benchFlags` to actually be
-  // inspected: the "capped" cases hit n>=3 and break one iteration before i
-  // reaches 0, and the short cases never have enough true flags to get there
-  // either. Mutating the loop's lower bound from `i >= 0` to `i > 0` leaves
-  // all five green. This case is the minimal one where reaching the cap of 3
-  // REQUIRES the loop body to run at i === 0 (idle since the earliest
-  // fetched month, index 0 of the 9-month window's look-back — see spec §8):
-  // only 3 flags exist (indices 0, 1, 2), all true, walking back from index 2.
-  it('bench for 3 consecutive months counting all the way back to index 0 -> 3 '
-    + '(the earliest-fetched-month case; requires the loop to actually inspect benchFlags[0], not stop at index 1 — '
-    + 'an `i > 0` boundary bug would report 2, a one-month-off aging misclassification)', () =>
-    expect(monthsIdleAt([true, true, true], 2)).toBe(3));
-});
+/**
+ * H replaced the month count with a WORKING-DAY count (product decision Q1). The
+ * walk itself is `idleWorkingDaysAt` and is unit-tested in `absence.util.spec.ts`;
+ * what belongs here is the LABELLING — and the boundaries, because B/C/D are what
+ * a user reads.
+ */
+describe('bucketForIdleWorkingDays (B/C/D from consecutive idle WORKING DAYS, spec §10 Q1)', () => {
+  it('the thresholds this suite asserts against are the derived ones, not 21/42 retyped', () => {
+    // A guard on the FIXTURE: if the derivation in absence.util ever moves, the
+    // boundary cases below move with it instead of silently asserting the wrong side.
+    expect(IDLE_WORKING_DAYS_B_MAX).toBe(21);
+    expect(IDLE_WORKING_DAYS_C_MAX).toBe(42);
+  });
 
-describe('bucketForMonthsIdle', () => {
-  it('1 -> B', () => expect(bucketForMonthsIdle(1)).toBe('B'));
-  it('2 -> C', () => expect(bucketForMonthsIdle(2)).toBe('C'));
-  it('3 (capped) -> D', () => expect(bucketForMonthsIdle(3)).toBe('D'));
+  it('1 day -> B (one day idle is the shallowest real bucket, never C)', () => {
+    expect(bucketForIdleWorkingDays(1)).toBe('B');
+    expect(bucketForIdleWorkingDays(1)).not.toBe('C');
+  });
+  // The three boundary PAIRS. Each asserts the day ON the boundary and the day
+  // AFTER it, so an off-by-one in either comparison is red — a `<` instead of
+  // `<=` moves 21 to C and 42 to D, which is a whole bucket of people
+  // reclassified.
+  it('B is INCLUSIVE at 21, and 22 is already C', () => {
+    expect(bucketForIdleWorkingDays(IDLE_WORKING_DAYS_B_MAX)).toBe('B');
+    expect(bucketForIdleWorkingDays(IDLE_WORKING_DAYS_B_MAX + 1)).toBe('C');
+  });
+  it('C is INCLUSIVE at 42, and 43 is already D', () => {
+    expect(bucketForIdleWorkingDays(IDLE_WORKING_DAYS_C_MAX)).toBe('C');
+    expect(bucketForIdleWorkingDays(IDLE_WORKING_DAYS_C_MAX + 1)).toBe('D');
+  });
+  it('far past the top boundary -> still D (there is no fifth bucket)', () =>
+    expect(bucketForIdleWorkingDays(500)).toBe('D'));
+  it('0 days degrades to B rather than throwing (unreachable from a BENCH cell, which always contributes >= 1 day)', () =>
+    expect(bucketForIdleWorkingDays(0)).toBe('B'));
+
+  /**
+   * THE UNIT CHANGE, stated as a test rather than left in a comment: a single
+   * 22-working-day month of idleness used to read B (one BENCH month) and now
+   * reads C. The two functions are composed here because the composition is what
+   * `benchRollup` does, and it is where a mismatched unit — days handed to a
+   * month classifier, or the reverse — would show up.
+   */
+  it('composes with idleWorkingDaysAt: ONE idle 22-day month is C, where the month count said B', () => {
+    const months: IdleMonth[] = [{ employed: true, staffed: false, availableDays: 22 }];
+    expect(idleWorkingDaysAt(months, 0)).toBe(22);
+    expect(bucketForIdleWorkingDays(idleWorkingDaysAt(months, 0))).toBe('C');
+    // ABSENCE TWIN: 'B' is what a month-counting classifier returns for the same
+    // month (1 month idle -> B), so this pins the unit and not just the number.
+    expect(bucketForIdleWorkingDays(idleWorkingDaysAt(months, 0))).not.toBe('B');
+  });
+  it('composes the other way too: a SHORT idle stretch inside one month stays B (so the unit change is not "everything is C")', () => {
+    // A joiner employed for 9 working days, idle on all of them.
+    const months: IdleMonth[] = [{ employed: true, staffed: false, availableDays: 9 }];
+    expect(bucketForIdleWorkingDays(idleWorkingDaysAt(months, 0))).toBe('B');
+  });
 });
 
 describe('freeingUpNextMonth (mutually exclusive with a BENCH state this month, by construction)', () => {
@@ -150,6 +198,23 @@ describe('freeingUpNextMonth (mutually exclusive with a BENCH state this month, 
     expect(freeingUpNextMonth(true, 'ALLOCATED', true, 'PARTIAL')).toBe(false));
   it('activeNext true but stateNext ALLOCATED (not BENCH) -> false (same isolation, the other non-BENCH state)', () =>
     expect(freeingUpNextMonth(true, 'ALLOCATED', true, 'ALLOCATED')).toBe(false));
+
+  // H (spec §5.1 B5): BOTH directions of the fourth state, asserted rather than
+  // deduced from the `=== 'BENCH'` / `!== 'BENCH'` tests. They point opposite ways
+  // and both are wanted, so a future "simplification" that treats ABSENT like
+  // BENCH on either side has to break one of them.
+  it('going ON leave next month is NOT "freeing up" — a person who cannot be booked is not capacity coming free', () => {
+    expect(freeingUpNextMonth(true, 'ALLOCATED', true, 'ABSENT')).toBe(false);
+    // ABSENCE TWIN: with a BENCH next month the very same call reads true, so this
+    // false is the ABSENT state and not some other guard firing.
+    expect(freeingUpNextMonth(true, 'ALLOCATED', true, 'BENCH')).toBe(true);
+  });
+  it('RETURNING from leave into a bench month IS "freeing up" — wanted, not tolerated', () => {
+    expect(freeingUpNextMonth(true, 'ABSENT', true, 'BENCH')).toBe(true);
+    // ...and returning into an ALLOCATED month is not, so the signal is about the
+    // month AFTER, not about having been away.
+    expect(freeingUpNextMonth(true, 'ABSENT', true, 'ALLOCATED')).toBe(false);
+  });
 });
 
 describe('availabilityDateFor (design spec §7 — three branches, in order)', () => {
@@ -173,10 +238,52 @@ describe('availabilityDateFor (design spec §7 — three branches, in order)', (
     ];
     expect(availabilityDateFor(cells, '2026-04-17')).toEqual({ kind: 'beyond-horizon', horizonEndMonth: '2026-05' });
   });
+
+  /**
+   * H (spec §5.1 B6) — "the most user-visible falsehood: a table declaring
+   * somebody on maternity leave available today". Both branches already test
+   * `=== 'BENCH'`, so no line changed; these cases are what turn that from a
+   * coincidence into a guarantee. The hazard they guard is the INVERSION: rewriting
+   * either predicate to `!== 'ALLOCATED'` — the shape `notFullyAllocatedAt` uses —
+   * starts answering "available today" for everyone on leave, and would leave every
+   * other case in this describe green.
+   */
+  it('ABSENT in the first shown month -> NOT today; the date is the first genuinely bench month after it', () => {
+    const cells = [
+      { month: '2026-04', state: state('ABSENT') },
+      { month: '2026-05', state: state('BENCH') },
+    ];
+    expect(availabilityDateFor(cells, '2026-04-17')).toEqual({ kind: 'date', date: '2026-05-01' });
+    // ABSENCE TWIN, and the exact figure a `!== 'ALLOCATED'` predicate returns:
+    // "free from 17 April" about a person who is away for all of April.
+    expect(availabilityDateFor(cells, '2026-04-17')).not.toEqual({ kind: 'date', date: '2026-04-17' });
+    // PAIRED PRESENCE: flip that first cell to BENCH and today IS the answer, so
+    // the skip above is the ABSENT state and not this function refusing month one.
+    expect(availabilityDateFor([{ month: '2026-04', state: state('BENCH') }], '2026-04-17'))
+      .toEqual({ kind: 'date', date: '2026-04-17' });
+  });
+  it('a LATER ABSENT month is skipped too, in favour of the next bench one', () => {
+    const cells = [
+      { month: '2026-04', state: state('ALLOCATED') },
+      { month: '2026-05', state: state('ABSENT') },
+      { month: '2026-06', state: state('BENCH') },
+    ];
+    expect(availabilityDateFor(cells, '2026-04-17')).toEqual({ kind: 'date', date: '2026-06-01' });
+    expect(availabilityDateFor(cells, '2026-04-17')).not.toEqual({ kind: 'date', date: '2026-05-01' });
+  });
+  it('ABSENT for the WHOLE window still yields an answer (beyond-horizon), never an empty field — block F rule §7', () => {
+    const cells = [
+      { month: '2026-04', state: state('ABSENT') },
+      { month: '2026-05', state: state('ABSENT') },
+      { month: '2026-06', state: state('ABSENT') },
+    ];
+    expect(availabilityDateFor(cells, '2026-04-17')).toEqual({ kind: 'beyond-horizon', horizonEndMonth: '2026-06' });
+  });
 });
 
-import { resources, assignments, assignmentDays, assignmentMonths, holidays } from '../../db/seed';
+import { resources, assignments, assignmentDays, assignmentMonths, holidays, resourceAbsences } from '../../db/seed';
 import { benchRollup, hiringDemandByMonth, EMPTY_BENCH_ROLLUP, notFullyAllocatedAt, unallocatedHistoryFor, type BenchRollupInput } from './bench.util';
+import type { AbsenceInterval } from './absence.util';
 import { hoursByResourceMonth, rollupMonthly, standardMonthlyHours } from './capacity.util';
 
 const HOURS_PER_DAY = 8;
@@ -192,11 +299,22 @@ const FETCH_MONTHS = ['2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '20
 const DISPLAY_MONTHS = ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09'];
 const TODAY = '2026-04-17';
 
-function rollup() {
+/**
+ * The seed's absence rows, REDACTED to what the arithmetic is allowed to see
+ * (spec §3.4: `AbsenceInterval` cannot carry `reasonCode`, so the projection is
+ * numerically complete by construction). Threading these is what `/bench/monthly`
+ * does once T6 lands; every describe below states WHICH set it runs with, because
+ * `[]` reproduces the pre-H numbers exactly and a suite that never says which one
+ * it used is a suite that cannot show the field is read.
+ */
+const SEED_ABSENCES: readonly AbsenceInterval[] =
+  resourceAbsences.map(a => ({ resourceId: a.resourceId, startDate: a.startDate, endDate: a.endDate }));
+
+function rollup(absences: readonly AbsenceInterval[]) {
   const input: BenchRollupInput = {
     resources, assignments, assignmentDays, assignmentMonths,
     months: FETCH_MONTHS, displayMonths: DISPLAY_MONTHS,
-    hoursPerDay: HOURS_PER_DAY, holidays: HOLIDAY_SET,
+    hoursPerDay: HOURS_PER_DAY, holidays: HOLIDAY_SET, absences,
   };
   return benchRollup(input, TODAY);
 }
@@ -266,10 +384,10 @@ describe('hiringDemandByMonth (design spec §6 — dummy-only, raw hours summed 
   });
 });
 
-describe('benchRollup — seed integration (design spec §11 fixture table)', () => {
-  const out = rollup();
+describe('benchRollup — seed integration (design spec §11 fixture table, WITH the seed’s absence rows)', () => {
+  const out = rollup(SEED_ABSENCES);
 
-  it('resource 6 (subco): PARTIAL in April, then B/C/D/D/D May-Sep', () => {
+  it('resource 6 (subco): PARTIAL in April, then bench May-Jul, ABSENT in August, bench again in September', () => {
     const row = out.subcoRows.find(r => r.resourceId === '6')!;
     expect(row).toBeDefined();
     expect(row.monthly['2026-04'].state).toBe('PARTIAL');
@@ -281,11 +399,27 @@ describe('benchRollup — seed integration (design spec §11 fixture table)', ()
     // §5.1/§5.2) — without this, a hard-coded `true` at the call site would
     // leave every assertion in this test green.
     expect(row.monthly['2026-05'].upcomingUnallocated).toBe(false);
+    // THE MOVED BUCKETS (H, product decision Q1): the ladder is counted in idle
+    // WORKING DAYS now, not in whole BENCH months, so May (21 days, its own first
+    // idle month) is still B and June (21+22=43) has already crossed the C ceiling
+    // of 42 into D, where the month count read C.
     expect(row.monthly['2026-05']).toMatchObject({ state: 'BENCH', agingBucket: 'B' });
-    expect(row.monthly['2026-06']).toMatchObject({ state: 'BENCH', agingBucket: 'C' });
+    expect(row.monthly['2026-06']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
     expect(row.monthly['2026-07']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
-    expect(row.monthly['2026-08']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
+    // S4 — THE SUBCO CASE. August is covered end to end by absence AB1, so the
+    // fourth state applies to subcontractors too: without this, /dashboard's
+    // `subcoBenchCount` tile would stay false and green.
+    expect(row.monthly['2026-08'].state).toBe('ABSENT');
+    // ...and an ABSENT cell carries NO aging bucket and NO share (spec §5.1 B8):
+    // being away is not a delivery idleness to age.
+    expect(row.monthly['2026-08'].agingBucket).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(row.monthly['2026-08'], 'unallocatedPct')).toBe(false);
+    // B5, in the seed rather than only in the unit tests: she RETURNS from leave
+    // into a bench September, which genuinely is capacity to plan for.
+    expect(row.monthly['2026-08'].upcomingUnallocated).toBe(true);
     expect(row.monthly['2026-09']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
+    // PAIRED ABSENCE-OF-CHANGE: the absence moved ONE month, not the row. Her
+    // availability date is still the first bench month, untouched by August.
     expect(row.availabilityDate).toEqual({ kind: 'date', date: '2026-05-01' });
   });
   it('resource 6 is in subcoRows ONLY — the case that matters most (spec §11, commit 2cb462b regression class)', () => {
@@ -348,12 +482,36 @@ describe('benchRollup — seed integration (design spec §11 fixture table)', ()
     expect(row.monthly['2026-08'].upcomingUnallocated).toBe(false);
   });
 
-  it('resource 8 (hired exactly on the anchor month): April is bucket B, not D — the look-back truncation', () => {
+  /**
+   * S1 — THE HEADLINE CORRECTION (spec §8.3). Marco is the seed's pure bench case
+   * (hired on the anchor month, never booked), so before H every one of April-
+   * September counted him as idle delivery capacity. Parental leave AB2 covers
+   * every working day of June, July and August.
+   */
+  it('resource 8 (the pure bench case, on parental leave Jun-Aug): three months LEAVE the bench, and May does not', () => {
     const row = out.internalRows.find(r => r.resourceId === '8')!;
-    expect(row.monthly['2026-04']).toMatchObject({ state: 'BENCH', agingBucket: 'B' });
-    expect(row.monthly['2026-05']).toMatchObject({ state: 'BENCH', agingBucket: 'C' });
-    expect(row.monthly['2026-06']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
+    // THE MOVED BUCKETS: April is 22 idle working days — one calendar month, but
+    // already past the 21-day B ceiling, so C. The look-back truncation still
+    // holds and is the reason it is not D: February and March are before his hire.
+    expect(row.monthly['2026-04']).toMatchObject({ state: 'BENCH', agingBucket: 'C' });
+    expect(row.monthly['2026-04'].agingBucket).not.toBe('D');
+    expect(row.monthly['2026-05']).toMatchObject({ state: 'BENCH', agingBucket: 'D' }); // 21 + 22 = 43
+    expect(row.monthly['2026-06'].state).toBe('ABSENT');
+    expect(row.monthly['2026-07'].state).toBe('ABSENT');
+    expect(row.monthly['2026-08'].state).toBe('ABSENT');
+    // PAIRED ABSENCE (spec §8.1, first row): MAY is still BENCH. The absence
+    // changed THREE months, not the row — a fix that emptied the whole row would
+    // satisfy every ABSENT assertion above and fail here.
+    expect(row.monthly['2026-05'].state).toBe('BENCH');
+    // Q1's decision, visible on the seed: September resumes the ladder at D
+    // because the three absent months contributed ZERO idle days without breaking
+    // the run (22 + 0 + 0 + 0 + 21 + 22 = 65). A policy that BROKE the streak
+    // would read C here off September's own 22 days — a different label, not a
+    // different shade of the same one.
     expect(row.monthly['2026-09']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
+    expect(row.monthly['2026-09'].agingBucket).not.toBe('C');
+    // B5 again: he returns from leave into a bench September.
+    expect(row.monthly['2026-08'].upcomingUnallocated).toBe(true);
   });
 
   it('resource 9 (terminated 2026-03-15) is absent from internalRows for ALL 6 shown months, despite real booked hours in the look-back', () => {
@@ -762,8 +920,10 @@ describe('unallocatedHistoryFor', () => {
     // cell carries NO `agingBucket` key, and pins that `upcomingUnallocated` is
     // not carried at all — even though the underlying BenchCell has it set (June
     // is bench for her, so May's forward flag is genuinely true upstream).
+    // THE MOVED BUCKET (H, Q1): April's 22 idle WORKING DAYS are one day past the
+    // B ceiling of 21, so C where the month count said B.
     expect(unallocatedHistoryFor(input, 'h1', '2026-05-10')).toStrictEqual([
-      { month: '2026-04', state: 'BENCH', agingBucket: 'B', unallocatedPct: 100, unallocatedDays: 22 },
+      { month: '2026-04', state: 'BENCH', agingBucket: 'C', unallocatedPct: 100, unallocatedDays: 22 },
       { month: '2026-05', state: 'PARTIAL', unallocatedPct: 75, unallocatedDays: 15.75 },
     ]);
   });
@@ -799,20 +959,517 @@ describe('unallocatedHistoryFor', () => {
 });
 
 describe('notFullyAllocatedAt (the /forecast + /what-if single-month wrapper around benchRollup)', () => {
+  const BASE = {
+    resources: [
+      { id: 'full', name: 'Full', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
+      { id: 'idle', name: 'Idle', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
+      { id: 'away', name: 'Away', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
+    ],
+    assignments: [{ id: 'a1', resourceId: 'full' }],
+    assignmentDays: [{ assignmentId: 'a1', date: '2026-05-04', hours: 168 }],
+    assignmentMonths: [{ assignmentId: 'a1', month: '2026-05', status: 'Allocated' }],
+    hoursPerDay: 8,
+    holidays: new Set<string>(),
+  };
+
   it('excludes an ALLOCATED resource and includes a BENCH one, at the given month', () => {
-    const input = {
-      resources: [
-        { id: 'full', name: 'Full', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
-        { id: 'idle', name: 'Idle', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
-      ],
-      assignments: [{ id: 'a1', resourceId: 'full' }],
-      assignmentDays: [{ assignmentId: 'a1', date: '2026-05-04', hours: 168 }],
-      assignmentMonths: [{ assignmentId: 'a1', month: '2026-05', status: 'Allocated' }],
-      hoursPerDay: 8,
-      holidays: new Set<string>(),
-    };
-    const out = notFullyAllocatedAt(input, '2026-05', '2026-05-10');
+    const out = notFullyAllocatedAt(BASE, '2026-05', '2026-05-10');
     expect(out.some(r => r.resourceId === 'full')).toBe(false);
     expect(out.some(r => r.resourceId === 'idle')).toBe(true);
+  });
+
+  /**
+   * H (spec §5.1 B12) — THE ONE FILTER A FOURTH STATE MAKES WORSE. The predicate
+   * is `!== 'ALLOCATED'`, so `'ABSENT'` joins it for free and this panel, headed
+   * "available for reallocation", would list people on parental leave. The
+   * exclusion is asserted TOGETHER with its presence twin on the SAME fixture,
+   * because a function that returned `[]` for everything would satisfy the
+   * exclusion alone.
+   */
+  it('excludes an ABSENT resource while still including a BENCH one — same fixture, one call', () => {
+    const away: readonly AbsenceInterval[] = [{ resourceId: 'away', startDate: '2026-05-01', endDate: '2026-05-31' }];
+    const out = notFullyAllocatedAt({ ...BASE, absences: away }, '2026-05', '2026-05-10');
+    const ids = out.map(r => r.resourceId).sort();
+    // ABSENCE and PRESENCE in one assertion: 'away' gone, 'idle' still there,
+    // 'full' still excluded for the reason it always was.
+    expect(ids).toStrictEqual(['idle']);
+  });
+  it('DIFFERENTIAL: the same person is listed with `absences: []` and gone with the absence row', () => {
+    const away: readonly AbsenceInterval[] = [{ resourceId: 'away', startDate: '2026-05-01', endDate: '2026-05-31' }];
+    const without = notFullyAllocatedAt({ ...BASE, absences: [] }, '2026-05', '2026-05-10').map(r => r.resourceId).sort();
+    const with_ = notFullyAllocatedAt({ ...BASE, absences: away }, '2026-05', '2026-05-10').map(r => r.resourceId).sort();
+    expect(without).toStrictEqual(['away', 'idle']);
+    expect(with_).toStrictEqual(['idle']);
+    expect(with_).not.toStrictEqual(without);
+  });
+  it('a PARTLY-absent person stays listed — she is genuinely reallocatable for the days she is there', () => {
+    // Five working days of May off; still 16 available and nothing booked.
+    const partly: readonly AbsenceInterval[] = [{ resourceId: 'away', startDate: '2026-05-11', endDate: '2026-05-15' }];
+    const out = notFullyAllocatedAt({ ...BASE, absences: partly }, '2026-05', '2026-05-10');
+    expect(out.map(r => r.resourceId).sort()).toStrictEqual(['away', 'idle']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BLOCK H / T4 — the fourth state, end to end.
+//
+// `absences` is OPTIONAL with an empty default, so every fixture above is still
+// green while exercising not one new line: the ONLY thing that can show the field
+// is read is a DIFFERENTIAL — the same input twice, asserted to disagree. The
+// four differentials the design names are all here, on the shipped seed:
+// the STATE, the AGING BUCKET, `availabilityDate`, and `notFullyAllocatedAt`.
+// ---------------------------------------------------------------------------
+
+describe('benchRollup — H differential on the SHIPPED SEED (`absences: []` vs the seed’s rows)', () => {
+  const before = rollup([]);            // the pre-H arithmetic, exactly
+  const after = rollup(SEED_ABSENCES);  // what /bench renders once T6 threads them
+
+  const rowOf = (roll: ReturnType<typeof rollup>, id: string) =>
+    [...roll.internalRows, ...roll.subcoRows].find(r => r.resourceId === id)!;
+
+  /**
+   * S10 (spec §8.3) — THE SEED-LEVEL ASSERTION. Every other case in this file
+   * builds its own inline fixture, so deleting `seed.resourceAbsences` would leave
+   * them all green and the feature invisible on first boot. This is the one case
+   * that goes red for that.
+   */
+  it('the seed really ships absence rows, and at least one produces an ABSENT cell in the DEFAULT /bench window', () => {
+    expect(SEED_ABSENCES.length).toBeGreaterThan(0);
+    const absentCells = [...after.internalRows, ...after.subcoRows]
+      .flatMap(r => DISPLAY_MONTHS.map(m => ({ id: r.resourceId, month: m, state: r.monthly[m]?.state })))
+      .filter(c => c.state === 'ABSENT');
+    expect(absentCells.length).toBeGreaterThan(0);
+    // ...on BOTH sides of the internal/subco split, because the two feed different
+    // tiles (`internalBenchCount` and `subcoBenchCount`) and one of them staying
+    // false would be invisible.
+    expect(after.internalRows.some(r => DISPLAY_MONTHS.some(m => r.monthly[m]?.state === 'ABSENT'))).toBe(true);
+    expect(after.subcoRows.some(r => DISPLAY_MONTHS.some(m => r.monthly[m]?.state === 'ABSENT'))).toBe(true);
+    // PAIRED ABSENCE: with no rows threaded there is not one ABSENT cell anywhere,
+    // so the cells above come from the DATA and not from the code inventing them.
+    expect([...before.internalRows, ...before.subcoRows]
+      .some(r => DISPLAY_MONTHS.some(m => r.monthly[m]?.state === 'ABSENT'))).toBe(false);
+  });
+
+  it('DIFFERENTIAL 1 — the STATE: Marco’s Jun/Jul/Aug go BENCH -> ABSENT, and his May stays BENCH in both', () => {
+    const b = rowOf(before, '8');
+    const a = rowOf(after, '8');
+    expect(['2026-06', '2026-07', '2026-08'].map(m => b.monthly[m].state)).toStrictEqual(['BENCH', 'BENCH', 'BENCH']);
+    expect(['2026-06', '2026-07', '2026-08'].map(m => a.monthly[m].state)).toStrictEqual(['ABSENT', 'ABSENT', 'ABSENT']);
+    // The absence-of-change twin, on the same two rollups: the months outside the
+    // interval are byte-identical.
+    for (const m of ['2026-04', '2026-05', '2026-09']) {
+      expect(a.monthly[m]).toStrictEqual(b.monthly[m]);
+    }
+  });
+
+  it('DIFFERENTIAL 2 — the AGING BUCKET: an ABSENT month loses its bucket AND its unallocated share', () => {
+    const b = rowOf(before, '8').monthly['2026-07'];
+    const a = rowOf(after, '8').monthly['2026-07'];
+    // Before: a full month of "idle" with 23 disallocated days billed to nobody.
+    expect(b).toMatchObject({ state: 'BENCH', agingBucket: 'D', unallocatedPct: 100, unallocatedDays: 23 });
+    // After: no bucket, and no share at all — "how much of her staffable month is
+    // unfilled" has no answer when none of it was staffable. Keys ABSENT, not 0.
+    expect(a).toStrictEqual({ state: 'ABSENT', upcomingUnallocated: false });
+    expect(Object.prototype.hasOwnProperty.call(a, 'unallocatedDays')).toBe(false);
+  });
+
+  it('DIFFERENTIAL 3 — the subco side moves too, and ONLY in the month its own absence covers', () => {
+    const b = rowOf(before, '6');
+    const a = rowOf(after, '6');
+    expect(b.monthly['2026-08']).toMatchObject({ state: 'BENCH', agingBucket: 'D' });
+    expect(a.monthly['2026-08'].state).toBe('ABSENT');
+    // June and July are the internal-only months (AB2 vs AB1 sit in different
+    // months on purpose), so the two tiles are distinguishable rather than one
+    // pass/fail: resource 6 is unchanged there.
+    for (const m of ['2026-06', '2026-07']) expect(a.monthly[m]).toStrictEqual(b.monthly[m]);
+  });
+
+  it('DIFFERENTIAL 4 — notFullyAllocatedAt: the reallocatable list shrinks by exactly the people on leave', () => {
+    const base = {
+      resources, assignments, assignmentDays, assignmentMonths,
+      hoursPerDay: HOURS_PER_DAY, holidays: HOLIDAY_SET,
+    };
+    const ids = (absences: readonly AbsenceInterval[], month: string) =>
+      notFullyAllocatedAt({ ...base, absences }, month, TODAY).map(r => r.resourceId).sort();
+
+    // JUNE: Marco (internal, on leave) drops out; the subco is still BENCH and
+    // stays — the presence twin that stops "returns nothing" from passing.
+    expect(ids([], '2026-06')).toStrictEqual(['1', '13', '2', '3', '6', '8']);
+    expect(ids(SEED_ABSENCES, '2026-06')).toStrictEqual(['1', '13', '2', '3', '6']);
+    // AUGUST: both absences bite, so BOTH drop out — and four people remain.
+    expect(ids([], '2026-08')).toStrictEqual(['1', '13', '2', '3', '6', '8']);
+    expect(ids(SEED_ABSENCES, '2026-08')).toStrictEqual(['1', '13', '2', '3']);
+    // SEPTEMBER: no absence covers it, so the list is identical in both runs —
+    // the correction is scoped to the intervals, not to the people.
+    expect(ids(SEED_ABSENCES, '2026-09')).toStrictEqual(ids([], '2026-09'));
+  });
+
+  it('the rows and the people who have no absence row are untouched, to the digit', () => {
+    // Julie/John/Alice/Priya/Nora/Sofia have no interval inside the shown window
+    // (Sofia's May absence is partial and she is over-booked, so even her cell
+    // cannot move) — the regression control without which "we corrected the
+    // metric" proves nothing.
+    for (const id of ['1', '2', '3', '7', '13', '14']) {
+      expect(rowOf(after, id)).toStrictEqual(rowOf(before, id));
+    }
+    // And nobody appears or disappears: same row sets, same order.
+    expect(after.internalRows.map(r => r.resourceId)).toStrictEqual(before.internalRows.map(r => r.resourceId));
+    expect(after.subcoRows.map(r => r.resourceId)).toStrictEqual(before.subcoRows.map(r => r.resourceId));
+    expect(after.hiringDemand).toStrictEqual(before.hiringDemand); // B7: a dummy has no absences
+  });
+});
+
+/**
+ * THE PRO-RATED TARGET (spec §4.4), on a fixture built so each of the three
+ * plausible answers is a DIFFERENT number. May 2026 has 21 working days = 168h at
+ * 8h/day; the absence covers 2026-05-11..15, five real working days (the 11th is a
+ * Monday), leaving 16 available and a 128h target.
+ *
+ * The seed cannot carry this case: Sofia is the seed's partly-absent person and she
+ * is over-booked, so her state and her share are the same with and without the
+ * absence. That is worth knowing — and it is asserted in the differential suite
+ * above — but it exercises none of the arithmetic below, which is exactly the shape
+ * of a blind gate.
+ */
+describe('benchRollup — the pro-rated target on a PARTLY-absent month', () => {
+  const MONTH = '2026-05';
+  const NO_HOL = new Set<string>();
+  const WORKDAY = `${MONTH}-05`; // a Tuesday, outside the absence interval
+  const FIVE_DAYS_OFF = (id: string): AbsenceInterval =>
+    ({ resourceId: id, startDate: `${MONTH}-11`, endDate: `${MONTH}-15` });
+
+  const input: BenchRollupInput = {
+    resources: [
+      // 130h booked: below the whole month (168h), at or above the staffable slice (128h).
+      { id: 'flip', name: 'Flips To Allocated', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
+      // 100h booked: below BOTH targets, so only the SHARE can move.
+      { id: 'stays', name: 'Stays Partial', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
+      // Part-timer booked to her own available month: 16 days x 4h = 64h.
+      { id: 'halftime', name: 'Half Time', role: 'Developer', kind: 'internal', contractHoursPerDay: 4 },
+      // Nothing booked: BENCH either way, so only the DAY COUNT can move.
+      { id: 'idlepart', name: 'Idle And Partly Away', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
+    ],
+    assignments: [
+      { id: 'aFlip', resourceId: 'flip' }, { id: 'aStays', resourceId: 'stays' }, { id: 'aHalf', resourceId: 'halftime' },
+    ],
+    assignmentMonths: [
+      { assignmentId: 'aFlip', month: MONTH, status: 'Allocated' },
+      { assignmentId: 'aStays', month: MONTH, status: 'Allocated' },
+      { assignmentId: 'aHalf', month: MONTH, status: 'Allocated' },
+    ],
+    assignmentDays: [
+      { assignmentId: 'aFlip', date: WORKDAY, hours: 130 },
+      { assignmentId: 'aStays', date: WORKDAY, hours: 100 },
+      { assignmentId: 'aHalf', date: WORKDAY, hours: 64 },
+    ],
+    months: [MONTH], displayMonths: [MONTH], hoursPerDay: 8, holidays: NO_HOL,
+  };
+  const ABSENT_FIVE: readonly AbsenceInterval[] =
+    ['flip', 'stays', 'halftime', 'idlepart'].map(FIVE_DAYS_OFF);
+
+  const cellsOf = (absences: readonly AbsenceInterval[]) =>
+    new Map(benchRollup({ ...input, absences }, `${MONTH}-06`).internalRows.map(r => [r.resourceId, r.monthly[MONTH]]));
+  const before = cellsOf([]);
+  const after = cellsOf(ABSENT_FIVE);
+
+  it('the fixture’s own arithmetic: 21 working days, 168h, and the five absent days really are working days', () => {
+    // Guards on the FIXTURE, not the implementation, so no assertion below can pass
+    // for lack of days to remove.
+    expect(standardMonthlyHours(MONTH, 8, NO_HOL)).toBe(168);
+    expect([...before.keys()].sort()).toStrictEqual(['flip', 'halftime', 'idlepart', 'stays']);
+    // 21 available days become 16: proved through the day count this rollup reports
+    // for the resource with nothing booked (100% of her target is idle either way).
+    expect(before.get('idlepart')!.unallocatedDays).toBe(21);
+    expect(after.get('idlepart')!.unallocatedDays).toBe(16);
+  });
+
+  it('THE HEADLINE: booked solid for the days she is there reads ALLOCATED, not PARTIAL (§1.2)', () => {
+    expect(before.get('flip')!.state).toBe('PARTIAL');
+    expect(after.get('flip')!.state).toBe('ALLOCATED');
+    // ...and the share follows: 22.62% of a whole month unfilled becomes 0%.
+    expect(before.get('flip')!.unallocatedPct).toBeCloseTo((38 / 168) * 100, 10);
+    expect(after.get('flip')!.unallocatedPct).toBe(0);
+    expect(after.get('flip')!.unallocatedDays).toBe(0);
+  });
+
+  it('a genuinely under-booked person stays PARTIAL, but her IDLE DAYS drop to the ones she was actually there for', () => {
+    expect(before.get('stays')!.state).toBe('PARTIAL');
+    expect(after.get('stays')!.state).toBe('PARTIAL');   // the state must NOT move here
+    expect(before.get('stays')!.unallocatedPct).toBeCloseTo((68 / 168) * 100, 10); // 40.48%
+    expect(after.get('stays')!.unallocatedPct).toBe(21.875);                        // 28h of 128h
+    expect(before.get('stays')!.unallocatedDays).toBe(8.5);
+    expect(after.get('stays')!.unallocatedDays).toBe(3.5);
+    // ABSENCE TWIN: 8.5 is what counting EMPLOYED days gives, i.e. five days a
+    // planner is told to fill on somebody who is on holiday.
+    expect(after.get('stays')!.unallocatedDays).not.toBe(8.5);
+  });
+
+  it('a BENCH month stays BENCH and keeps 100%, but over FEWER days — absent days are not idle days', () => {
+    expect(after.get('idlepart')!.state).toBe('BENCH');
+    expect(after.get('idlepart')!.unallocatedPct).toBe(100);
+    expect(after.get('idlepart')!.unallocatedDays).toBe(16);
+    expect(after.get('idlepart')!.unallocatedDays).not.toBe(21);
+  });
+
+  /**
+   * The part-timer divergence, now UNDER AN ABSENCE. The state's target deducts
+   * absent days at the COMPANY rate (T3's convention, shared with
+   * `rollupMonthly`), the share's at HER OWN — so a part-timer booked to her exact
+   * available month is 0% unallocated while still reading PARTIAL against the
+   * standard month. Whoever changes either denominator has to come here and decide.
+   */
+  it('a fully-booked PART-TIMER with an absence: 0% unallocated, state still PARTIAL', () => {
+    expect(before.get('halftime')!.state).toBe('PARTIAL');
+    expect(before.get('halftime')!.unallocatedPct).toBeCloseTo((20 / 84) * 100, 10); // 23.81%
+    expect(after.get('halftime')!.state).toBe('PARTIAL');
+    expect(after.get('halftime')!.unallocatedPct).toBe(0);
+    expect(after.get('halftime')!.unallocatedDays).toBe(0);
+  });
+
+  /**
+   * The state's denominator is the SAME number `rollupMonthly` gives its own cell,
+   * which is why the two screens cannot disagree about one person-month. Pinned by
+   * reading /capacity's `targetHours` directly rather than by restating 128.
+   */
+  it('/bench’s pro-rated target IS /capacity’s cell target — one number, two screens', () => {
+    const cap = rollupMonthly({
+      resources: input.resources, assignments: input.assignments,
+      assignmentDays: input.assignmentDays, assignmentMonths: input.assignmentMonths,
+      months: [MONTH], hoursPerDay: 8, holidays: NO_HOL, absences: ABSENT_FIVE,
+    });
+    const capCell = cap.rows.find(r => r.resourceId === 'flip')!.monthly[MONTH];
+    expect(capCell.targetHours).toBe(128);
+    // /bench says ALLOCATED for 130h; /capacity says past 100% of the SAME target.
+    expect(after.get('flip')!.state).toBe('ALLOCATED');
+    expect(capCell.ftePlanned).toBeCloseTo(130 / 128, 10);
+    expect(capCell.ftePlanned).toBeGreaterThan(1);
+    // 101.56% is inside the `healthy` band (its ceiling is 105), so this is NOT the
+    // `over` case — stated because "the state flipped to ALLOCATED" and "the
+    // semaphore turned red" are different claims and only the first is true here.
+    expect(capCell.band).toBe('healthy');
+    // ABSENCE TWIN: without the rows both screens fall back to the whole month, and
+    // both read under-allocated — the pre-H pair, still consistent with each other.
+    const capNoAbs = rollupMonthly({
+      resources: input.resources, assignments: input.assignments,
+      assignmentDays: input.assignmentDays, assignmentMonths: input.assignmentMonths,
+      months: [MONTH], hoursPerDay: 8, holidays: NO_HOL,
+    });
+    const capCellNoAbs = capNoAbs.rows.find(r => r.resourceId === 'flip')!.monthly[MONTH];
+    expect(capCellNoAbs.targetHours).toBe(168);
+    expect(capCellNoAbs.band).toBe('under');   // 77.38%
+    expect(before.get('flip')!.state).toBe('PARTIAL');
+  });
+
+  /**
+   * `'ABSENT'` is assigned ONLY on `fully-absent` (spec §4.3). Somebody there five
+   * days of twenty-two with nothing booked IS bench for those five days, and hiding
+   * her is the opposite of the correction this block ships.
+   */
+  it('a partly-absent month is NEVER ABSENT — all four cells keep the three original states', () => {
+    for (const id of ['flip', 'stays', 'halftime', 'idlepart']) {
+      expect(after.get(id)!.state).not.toBe('ABSENT');
+    }
+    expect([...after.values()].map(c => c.state).sort())
+      .toStrictEqual(['ALLOCATED', 'BENCH', 'PARTIAL', 'PARTIAL']);
+  });
+});
+
+/**
+ * THE FULLY-ABSENT GUARDS. Cases the seed cannot produce, each of them the exact
+ * input that makes some OTHER plausible ordering wrong.
+ */
+describe('benchRollup — fully-absent months (the guard `benchStateFor` cannot provide)', () => {
+  const NO_HOL = new Set<string>();
+  const MONTHS = ['2026-04', '2026-05', '2026-06'];
+
+  /**
+   * A MID-MONTH JOINER absent for every day she was employed. This is the case that
+   * makes "the pro-rated target is 0, so `benchStateFor(0,0)` is unreachable" FALSE:
+   * her five absent days deduct 40h from a 168h month, so the target is a confident
+   * 128h and `benchStateFor(0, 128)` answers `'BENCH'`. Only branching on
+   * availability FIRST gets this right.
+   */
+  it('a joiner employed for 5 days and absent on all 5 is ABSENT, not BENCH — the pro-rated target is POSITIVE here', () => {
+    const input: BenchRollupInput = {
+      resources: [{ id: 'j', name: 'Late Joiner Away', role: 'Developer', kind: 'internal', contractHoursPerDay: 8, hireDate: '2026-05-25' }],
+      assignments: [], assignmentMonths: [], assignmentDays: [],
+      months: ['2026-05'], displayMonths: ['2026-05'], hoursPerDay: 8, holidays: NO_HOL,
+      absences: [{ resourceId: 'j', startDate: '2026-05-25', endDate: '2026-05-31' }],
+    };
+    const row = benchRollup(input, '2026-05-26').internalRows.find(r => r.resourceId === 'j')!;
+    // B11: the ROW SURVIVES. Employment, not availability, is the row gate — a
+    // person who silently vanished from the grid is worse than one miscounted.
+    expect(row).toBeDefined();
+    expect(row.monthly['2026-05'].state).toBe('ABSENT');
+    // ABSENCE TWIN, with the number that makes it bite: the whole-month target is
+    // 168h and her five employed days deduct 40, so a state computed from hours
+    // would face `benchStateFor(0, 128)` and answer BENCH with full confidence.
+    expect(standardMonthlyHours('2026-05', 8, NO_HOL) - 5 * 8).toBe(128);
+    expect(row.monthly['2026-05'].state).not.toBe('BENCH');
+    // PAIRED PRESENCE: drop the absence and she is BENCH for those five days, so
+    // the ABSENT above is the absence row and not the late hire.
+    const present = benchRollup({ ...input, absences: [] }, '2026-05-26').internalRows[0];
+    expect(present.monthly['2026-05']).toMatchObject({ state: 'BENCH', unallocatedDays: 5 });
+  });
+
+  it('a person absent for EVERY shown month keeps her row, six ABSENT cells and an answerable availability date (B11)', () => {
+    const input: BenchRollupInput = {
+      resources: [{ id: 'gone', name: 'Away All Window', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 }],
+      assignments: [], assignmentMonths: [], assignmentDays: [],
+      months: MONTHS, displayMonths: MONTHS, hoursPerDay: 8, holidays: NO_HOL,
+      absences: [{ resourceId: 'gone', startDate: '2026-04-01', endDate: '2026-06-30' }],
+    };
+    const roll = benchRollup(input, '2026-04-17');
+    const row = roll.internalRows.find(r => r.resourceId === 'gone');
+    expect(row).toBeDefined();
+    expect(MONTHS.map(m => row!.monthly[m].state)).toStrictEqual(['ABSENT', 'ABSENT', 'ABSENT']);
+    expect(row!.availabilityDate).toStrictEqual({ kind: 'beyond-horizon', horizonEndMonth: '2026-06' });
+    // ABSENCE TWIN: without the row she is bench from today, so "beyond horizon" is
+    // the leave and not an empty rollup.
+    expect(benchRollup({ ...input, absences: [] }, '2026-04-17').internalRows[0].availabilityDate)
+      .toStrictEqual({ kind: 'date', date: '2026-04-17' });
+  });
+
+  /**
+   * STALE BOOKINGS ON A FULLY-ABSENT MONTH. §6.4 accepts an absence recorded over
+   * days that are already booked (and reports the conflict), so these rows exist in
+   * production. Two things must hold: the month is ABSENT despite the hours, and it
+   * still contributes nothing to the idle run WITHOUT breaking it — which is why
+   * `idleWorkingDaysAt` tests "zero available days" BEFORE "staffed".
+   */
+  it('40h still booked on a fully-absent month: the cell is ABSENT, and the idle run walks straight through it', () => {
+    const FETCH = ['2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07'];
+    const input: BenchRollupInput = {
+      resources: [{ id: 's', name: 'Stale Booking', role: 'Developer', kind: 'internal', contractHoursPerDay: 8, hireDate: '2026-04-01' }],
+      assignments: [{ id: 'a1', resourceId: 's' }],
+      assignmentMonths: [{ assignmentId: 'a1', month: '2026-05', status: 'Allocated' }],
+      assignmentDays: [{ assignmentId: 'a1', date: '2026-05-12', hours: 40 }],
+      months: FETCH, displayMonths: ['2026-04', '2026-05', '2026-06'], hoursPerDay: 8, holidays: NO_HOL,
+      absences: [{ resourceId: 's', startDate: '2026-05-01', endDate: '2026-05-31' }],
+    };
+    const row = benchRollup(input, '2026-06-10').internalRows.find(r => r.resourceId === 's')!;
+    expect(row.monthly['2026-05'].state).toBe('ABSENT');
+    // ABSENCE TWIN: 40h of a 168h month is PARTIAL, which is what an hours-first
+    // classifier returns — a person on leave presented as half-booked.
+    expect(row.monthly['2026-05'].state).not.toBe('PARTIAL');
+    // Q1 THROUGH A STALE-BOOKED MONTH: June is April's 22 idle days plus its own 22
+    // = 44, past the 42-day C ceiling. If the booking broke the run, June would
+    // count only its own 22 days and read C — a different label, not a rounding.
+    expect(row.monthly['2026-04']).toMatchObject({ state: 'BENCH', agingBucket: 'C' }); // 22
+    expect(row.monthly['2026-06']).toMatchObject({ state: 'BENCH', agingBucket: 'D' }); // 22 + 0 + 22
+    expect(row.monthly['2026-06'].agingBucket).not.toBe('C');
+  });
+
+  /**
+   * Q1 at the finest grain the decision has: ONE absent working day removes ONE idle
+   * day, which is enough to move a bucket boundary. April 2026 has 22 working days —
+   * one past the B ceiling of 21 — so the absence pulls the label DOWN from C to B.
+   * Nothing else in this file crosses a boundary on the strength of a single day.
+   */
+  it('a ONE-DAY absence moves the aging bucket C -> B, because an absent day contributes zero idle days', () => {
+    const input: BenchRollupInput = {
+      resources: [{ id: 'one', name: 'One Day Off', role: 'Developer', kind: 'internal', contractHoursPerDay: 8, hireDate: '2026-04-01' }],
+      assignments: [], assignmentMonths: [], assignmentDays: [],
+      months: ['2026-04'], displayMonths: ['2026-04'], hoursPerDay: 8, holidays: NO_HOL,
+    };
+    const cellOf = (absences: readonly AbsenceInterval[]) =>
+      benchRollup({ ...input, absences }, '2026-04-17').internalRows[0].monthly['2026-04'];
+    // 2026-04-07 is a Tuesday, so it really is a working day to remove.
+    const oneDay: readonly AbsenceInterval[] = [{ resourceId: 'one', startDate: '2026-04-07', endDate: '2026-04-07' }];
+    expect(cellOf([])).toMatchObject({ state: 'BENCH', agingBucket: 'C', unallocatedDays: 22 });
+    expect(cellOf(oneDay)).toMatchObject({ state: 'BENCH', agingBucket: 'B', unallocatedDays: 21 });
+    // Still BENCH, and still 100% — only the DAYS moved, which is the point.
+    expect(cellOf(oneDay).unallocatedPct).toBe(100);
+  });
+
+  it('a WEEKEND-only absence moves nothing: those days were never available to begin with', () => {
+    const input: BenchRollupInput = {
+      resources: [{ id: 'w', name: 'Weekend Off', role: 'Developer', kind: 'internal', contractHoursPerDay: 8, hireDate: '2026-04-01' }],
+      assignments: [], assignmentMonths: [], assignmentDays: [],
+      months: ['2026-04'], displayMonths: ['2026-04'], hoursPerDay: 8, holidays: NO_HOL,
+    };
+    // 2026-04-04 and 04-05 are a Saturday and a Sunday.
+    const weekend: readonly AbsenceInterval[] = [{ resourceId: 'w', startDate: '2026-04-04', endDate: '2026-04-05' }];
+    const with_ = benchRollup({ ...input, absences: weekend }, '2026-04-17').internalRows[0].monthly['2026-04'];
+    const without = benchRollup({ ...input, absences: [] }, '2026-04-17').internalRows[0].monthly['2026-04'];
+    expect(with_).toStrictEqual(without);
+    // ...and this fixture CAN move: the same two-day absence on working days does.
+    const weekdays: readonly AbsenceInterval[] = [{ resourceId: 'w', startDate: '2026-04-06', endDate: '2026-04-07' }];
+    expect(benchRollup({ ...input, absences: weekdays }, '2026-04-17').internalRows[0].monthly['2026-04'].unallocatedDays)
+      .toBe(20);
+  });
+
+  it('an absence belonging to ANOTHER resource never touches this one (the id filter, through the rollup)', () => {
+    const input: BenchRollupInput = {
+      resources: [
+        { id: 'mine', name: 'Mine', role: 'Developer', kind: 'internal', contractHoursPerDay: 8, hireDate: '2026-04-01' },
+        { id: 'theirs', name: 'Theirs', role: 'Developer', kind: 'internal', contractHoursPerDay: 8, hireDate: '2026-04-01' },
+      ],
+      assignments: [], assignmentMonths: [], assignmentDays: [],
+      months: ['2026-04'], displayMonths: ['2026-04'], hoursPerDay: 8, holidays: NO_HOL,
+      absences: [{ resourceId: 'theirs', startDate: '2026-04-01', endDate: '2026-04-30' }],
+    };
+    const rows = new Map(benchRollup(input, '2026-04-17').internalRows.map(r => [r.resourceId, r]));
+    expect(rows.get('theirs')!.monthly['2026-04'].state).toBe('ABSENT');
+    // The presence twin: the untouched resource keeps her full 22 idle days.
+    expect(rows.get('mine')!.monthly['2026-04']).toMatchObject({ state: 'BENCH', unallocatedDays: 22 });
+  });
+});
+
+/**
+ * `availabilityDate` end to end (spec §5.1 B6). The unit tests above feed
+ * `availabilityDateFor` a cell list directly; these go through `benchRollup`, which
+ * is where the ABSENT cells are produced in the first place — the two hops a defect
+ * can hide between.
+ */
+describe('benchRollup — availabilityDate DIFFERENTIAL over an absence', () => {
+  const NO_HOL = new Set<string>();
+  const MONTHS = ['2026-04', '2026-05', '2026-06'];
+  const TODAY_ = '2026-04-17';
+
+  const input: BenchRollupInput = {
+    resources: [
+      // Bench all three months, away for all of April.
+      { id: 'nowaway', name: 'Away Right Now', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
+      // Allocated in April (176h = 22 x 8), bench in May and June, away for all of May.
+      { id: 'lateaway', name: 'Away Next Month', role: 'Developer', kind: 'internal', contractHoursPerDay: 8 },
+    ],
+    assignments: [{ id: 'aL', resourceId: 'lateaway' }],
+    assignmentMonths: [{ assignmentId: 'aL', month: '2026-04', status: 'Allocated' }],
+    assignmentDays: [{ assignmentId: 'aL', date: '2026-04-07', hours: 176 }],
+    months: MONTHS, displayMonths: MONTHS, hoursPerDay: 8, holidays: NO_HOL,
+  };
+  const ABSENCES: readonly AbsenceInterval[] = [
+    { resourceId: 'nowaway', startDate: '2026-04-01', endDate: '2026-04-30' },
+    { resourceId: 'lateaway', startDate: '2026-05-01', endDate: '2026-05-31' },
+  ];
+  const dateOf = (absences: readonly AbsenceInterval[], id: string) =>
+    benchRollup({ ...input, absences }, TODAY_).internalRows.find(r => r.resourceId === id)!.availabilityDate;
+
+  it('THE MOST VISIBLE FALSEHOOD: "available today" for someone away all month becomes the month she is back', () => {
+    expect(dateOf([], 'nowaway')).toStrictEqual({ kind: 'date', date: '2026-04-17' });
+    expect(dateOf(ABSENCES, 'nowaway')).toStrictEqual({ kind: 'date', date: '2026-05-01' });
+  });
+
+  it('a LATER absent month is skipped as well: the date moves from May to June', () => {
+    expect(dateOf([], 'lateaway')).toStrictEqual({ kind: 'date', date: '2026-05-01' });
+    expect(dateOf(ABSENCES, 'lateaway')).toStrictEqual({ kind: 'date', date: '2026-06-01' });
+  });
+
+  /**
+   * The April cell of the person going on leave in May moves in exactly ONE field,
+   * and it is B5 doing its job through the rollup rather than through the unit test:
+   * `upcomingUnallocated` was true because May read BENCH, and must go false because
+   * May now reads ABSENT. Somebody about to go on parental leave is not capacity
+   * freeing up next month — that flag is what /forecast plans staffing off.
+   */
+  it('the April cell of the person leaving in May loses `upcomingUnallocated`, and moves in NOTHING else', () => {
+    const withAbs = benchRollup({ ...input, absences: ABSENCES }, TODAY_).internalRows;
+    const noAbs = benchRollup({ ...input, absences: [] }, TODAY_).internalRows;
+    const cell = (rows: typeof withAbs, id: string, m: string) => rows.find(r => r.resourceId === id)!.monthly[m];
+    expect(cell(noAbs, 'lateaway', '2026-04')).toStrictEqual(
+      { state: 'ALLOCATED', upcomingUnallocated: true, unallocatedPct: 0, unallocatedDays: 0 });
+    expect(cell(withAbs, 'lateaway', '2026-04')).toStrictEqual(
+      { state: 'ALLOCATED', upcomingUnallocated: false, unallocatedPct: 0, unallocatedDays: 0 });
   });
 });
