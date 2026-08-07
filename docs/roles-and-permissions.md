@@ -149,12 +149,43 @@ and **403** otherwise. Path tests use `startsWith`.
 | `/rate-cards` (role/organization default cost-bill rates, resolved onto every `/resources` read — the ancestor-walk resolution, rate-card inheritance block, design spec §2) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/assignments`, `/requests` (`/requests` also accepts optional `q`/`limit`/`offset` for Block G's cross-entity search — same roles, same 403/401 behavior, no new rule; `/assignments` itself is untouched by Block G) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/capacity`, `/bench` (ONE predicate — `p.startsWith('/capacity') \|\| p.startsWith('/bench')`, not two rules — read-only computed rollups, e.g. `GET /capacity/monthly` (B2) and `GET /bench/monthly` (Block F, design spec §8); the latter extends this rule rather than duplicating the role array) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/absences/calendar` — **must be listed BEFORE `/absences` below, and the order is load-bearing.** The redacted availability feed (`GET /absences/calendar?from&to` → `{id, resourceId, startDate, endDate}` only). Both rules ship as one exported, order-sensitive array (`ABSENCE_READ_RULES` in `src/server/absence-policy.util.ts`), because `READ_RULES.find` returns the FIRST match: reversed, the redacted feed inherits the reason audience and the redaction protects nothing while still reading like it does. Same audience as `/capacity`/`/bench` — one shared `AVAILABILITY_READ_ROLES` constant, not a third copy of the list | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+| `/absences` (block H — the **reason**: `reasonCode`, `note`, `recordedBy`). GDPR art. 9 special-category data. **`employee` is admitted by the rule and narrowed to its OWN rows inside the handler** (`absenceReadScope`) — a `READ_RULE` is per-path, never per-row, so admitting the role and filtering the rows is the only way to express "may see their own leave, nobody else's". An `employee` whose principal maps to no resource sees an empty list, never everybody's | `employee` (own rows only), `resource-manager`, `delivery-executive`, `admin` |
 | `/assignment-days`, `/assignment-months` (raw per-day/per-month assignment rows, e.g. `GET /assignment-days` — shared plumbing for Block F's client-side What-If bench composition and block E's own spec; same need-to-know as `/capacity` and `/assignments` above, just unaggregated) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/cost-baselines` (block E: the frozen monthly PCP/budget snapshot and its live-plan comparison — read is deliberately **disjoint** from freeze, spec §5: the PM/People Manager can see the variance to act on it early even though they cannot move the target that measures them) | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/time-entries` | `employee`, `pm`, `resource-manager`, `delivery-executive`, `finance`, `sales`, `admin` |
 | `/approval-requests` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/allocation-approvals` (B3 People Manager feed, e.g. `GET /allocation-approvals?from&to&status`) | `resource-manager`, `delivery-executive`, `admin` |
 | `/integrations` | `finance`, `delivery-executive`, `admin` |
+
+> ### `delivery-executive` reads the absence reason — a DECISION, not an oversight
+>
+> **Decided 2026-08-07 by the product owner** (block H design spec §10, question
+> Q5). `delivery-executive` is in the audience of `GET /absences`, which serves
+> `reasonCode` — maternity, parental leave, sickness: **GDPR art. 9
+> special-category data**. Access to it is therefore **deliberately widened**
+> from `admin` to `admin` + `delivery-executive`. This paragraph exists so that a
+> later review finds the reason rather than a hole and "tightens" it by accident.
+>
+> **Why.** The append-only audit middleware diffs the whole entity on PUT/DELETE,
+> and `/absences` is registered in the audit registry — deliberately, because a
+> special-category field must not be editable with no trace. `GET /audit-logs` is
+> read by `admin` **and** `delivery-executive`, so an absence diff necessarily
+> reaches `delivery-executive` through that route. The two coherent options were
+> (A) admit the role to the reason directly, or (B) invent **per-field
+> redaction** inside the audit middleware — a mechanism that does not exist
+> today. B was considered and rejected as a larger, separate piece of work; a
+> third option (keep absences out of the audit entirely) was rejected because it
+> makes sensitive data editable without a trail, which `auditRegistryGaps` would
+> correctly report as a gap.
+>
+> **What this does NOT change.** The write set stays `resource-manager` + `admin`
+> (Q5 was about reading the reason, not about owning the fact). `pm`, `finance`
+> and `sales` remain outside the reason audience entirely. The **redacted**
+> availability feed (`/absences/calendar`) and the aggregate rollups
+> (`/bench/monthly`, `/capacity/monthly`) never carry the reason at all: the
+> arithmetic never branches on it (spec §3.4), so the redacted projection is
+> numerically complete and the two audiences are genuinely separable.
 
 **Open reads (no rule):** all other GETs — catalogs (`/skill-catalogs`,
 `/proficiency-sets`, `/skills`, `/project-roles`), config (`/languages`,
@@ -180,7 +211,9 @@ A role not in the matched rule's list gets **403**. Path tests use `startsWith`
 | `/rate-cards` | `admin`, `delivery-executive`, `finance` — deliberately **not** `resource-manager`: that role edits a resource's own override (the `/resources` row above), never the catalog cards themselves |
 | `/time-entries` | `employee`, `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/assignments`, `/requests` (incl. the B3 per-month endpoints `POST /assignments/:id/months/:month/submit` and `PUT /assignments/:id/months/:month/note`, matched by the same `/assignments` prefix test — no separate rule) | `pm`, `resource-manager`, `delivery-executive`, `admin` |
+| `/projects/:id/classification` — **must be listed BEFORE the coarse `/projects` rule below, and the order is load-bearing.** Block H: `PUT /projects/:id/classification` sets `billable`/`type`, which switches a revenue expectation and its margin alerts on or off. Both rules ship as one exported, order-sensitive array (`PROJECT_MUTATION_RULES` in `src/server/absence-policy.util.ts`) for the same reason as `COMMERCIAL_MUTATION_RULES`: `rules.find` returns the FIRST match, so reversed, the coarse rule (which admits `pm`) intercepts it and the narrow rule becomes dead code that still reads as a guard. **`pm` is excluded deliberately** — whoever is measured on an engagement's margin must not be able to declare that the engagement has no margin (the same argument, verbatim, as `/cost-baselines`) | `delivery-executive`, `finance`, `admin` |
 | `/projects`, `/project-partners`, `/project-documents`, `/work-packages`, `/milestones`, `/project-tasks`, `/project-issues`, `/change-requests` | `pm`, `delivery-executive`, `admin` |
+| `/absences` (block H — recording an absence). **`pm` excluded deliberately:** declaring a colleague absent removes them from the bench and from staffing availability, i.e. moves a metric the PM is measured on, and it is an HR fact the PM does not own. **`employee` excluded:** there is no leave-*request* workflow, so a self-service create would let anyone take themselves off the bench (if one is ever needed it will be an approval workflow, not a direct write). **`delivery-executive` excluded from the WRITE although it is in the read audience** (see the Q5 note below): Q5 was about who may learn the reason, not about who owns the fact | `resource-manager`, `admin` |
 | `/skill-catalogs`, `/proficiency-sets`, `/skills`, `/project-roles`, `/resource-organizations`, `/languages` | `admin`, `delivery-executive` |
 | `/holidays` | `admin`, `delivery-executive` |
 | `/planning-periods` | `admin` only |
@@ -561,6 +594,68 @@ snapshots for PUT/DELETE), and the give-back — which runs inside the decision
 hook rather than as its own request — records none of its own beyond the month's
 status transition. Neither side records *which day rows moved*. Known gap, open
 for both sides together.
+
+### H — recording an absence, and the two engagement gates
+
+**SoD: the actor who records an absence may not be its subject.** `recordedBy`
+and `recordedAt` are **server-pinned** from the verified actor — deliberately
+absent from the `pick()` allow-list (`['resourceId','startDate','endDate','reasonCode','note']`),
+which is what makes them unforgeable on create *and* unchangeable by the PUT that
+shares the list. A `POST`/`PUT /absences` whose `resourceId` resolves to the same
+resource as the actor's principal is **403**. Same shape as approver ≠ requester.
+
+> **Declared consequence, not one to be discovered later:** a `resource-manager`
+> **cannot record their own absence** — it takes another `resource-manager` or an
+> `admin`. That is the same trade-off the approval SoD already accepts.
+
+**The asymmetry between the two write directions is deliberate. Do not
+"harmonise" it** (block H design spec §6.4):
+
+| Direction | Outcome |
+| --- | --- |
+| A **new booking** on a day already covered by an absence | **400.** The message names the date and the resource and **never** the reason — the refusal reaches `pm`, who is outside the reason audience, so a message like "on maternity leave" would hand the whole privacy design back through an error string. Applied at the **day-level** write paths only (`PUT /assignments/:id/allocation` and its in-transaction re-check, an assignment **retarget**, and a dummy **substitution**) — never at the window-level `POST`/`PUT /assignments`, because an assignment window is not a booking and refusing a six-month window over one vacation day would be a different, wrong rule |
+| A **new absence** over days that are already booked | **200, accepted**, with `bookedDayConflicts: [{date, hours}, …]` naming exactly what to un-book. Not refused: an absence is a fact that has **already happened**, and refusing it would leave the system asserting that somebody is present who is not. Always present, empty array included, so "no conflicts" and "not computed" cannot be confused |
+
+Other absence write rules: `endDate >= startDate` (**400**); the interval inside
+the resource's **employment window**, both bounds inclusive (**400**); no
+**overlap** with another absence of the same resource (**409**, and the message
+names the blocking row's *dates*, never its reason). The overlap test is a
+read-modify-write over one resource's absence set, so it runs under
+`withLock('res:<id>')`; a re-targeting PUT takes **both** resources' locks in
+lexicographic order.
+
+**Engagement classification, and the two gates against a zero-euro invoice.**
+`billable` and `type` are **not** in `PROJECT_FIELDS`: were they, `pick()` — the
+mass-assignment guard — would admit them like any other field and a `pm`'s
+ordinary project edit could switch off the margin alerts they are measured by.
+They stay server-pinned at the schema default (`billable: true`,
+`type: 'Delivery'`) on create and move only through
+`PUT /projects/:id/classification`.
+
+- `POST /projects` and `PUT /projects/:id` **refuse with 403** a raw body
+  carrying `billable` or `type`, rather than letting `pick()` drop them in
+  silence. `pick()` is silent by design and that is right for a stray field; it
+  is wrong here, because a wizard that "works" while quietly producing a
+  **billable** project surfaces months later as a margin alert nobody can trace.
+- The invariant `type === 'Basket'` ⇒ `billable === false` is enforced (**400**).
+  The converse stays free: a non-billable `Delivery` engagement is a legitimate
+  internal project that is not a practice basket.
+- **Gate 1 — `POST`/`PUT /billing-plan-items` → 400** when `projectId` (or a
+  milestone's project) resolves to `billable === false`. Checked **before** the
+  contract-membership test, and that order is the gate: a basket engagement
+  carries no `contractId`, so a gate placed after it would answer 400 for the
+  *wrong* reason on every real fixture and read as verified while never running.
+- **Gate 2 — `PUT /projects/:id/classification` → 409** when flipping to
+  `billable: false` a project that **already** has billing plan items; the
+  message names how many. **Both gates are required.** With gate 1 alone the
+  sequence *create billable → create billing item → flip to non-billable* walks
+  straight around it and produces exactly the zero-euro invoice the requirement
+  forbids. The flip **back** to billable is never blocked.
+
+Because the gates are on the **write**, `recognitionSchedule`,
+`recognitionJournal`, `arAging` and the billing rollups have nothing to filter:
+the rows cannot exist. A filter in the derivation instead would leave them in the
+database, visible in `/commercial/billing`, and invisible only in the recognition.
 
 ---
 
