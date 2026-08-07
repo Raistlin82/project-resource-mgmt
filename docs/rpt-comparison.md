@@ -1,7 +1,7 @@
 # Lutech RPT vs Delivery Control — comparativa side by side
 
 _Fonte lato RPT: **Manuale Utente Resource Planning Tool (RPT), v04 del 07/07/2026**, 49 pagine, letto integralmente._
-_Fonte lato nostro: **il codice su `main`**, verificato riga per riga il 2026-08-06 e riverificato dopo la prima wave di chiusura il 2026-08-07 — **2378 test unitari** su 114 file, 790 check smoke API (792 e un solo skip su Postgres). 46 tabelle, 20 migrazioni, 50 rotte. Non la roadmap, non la memoria di sessione (che su due punti si è rivelata già superata)._
+_Fonte lato nostro: **il codice su `main`**, verificato riga per riga il 2026-08-06 e riverificato dopo la prima wave di chiusura il 2026-08-07 — **2407 test unitari** su 114 file, 790 check smoke API (792 e un solo skip su Postgres). 46 tabelle, 20 migrazioni, 50 rotte. Non la roadmap, non la memoria di sessione (che su due punti si è rivelata già superata)._
 
 ---
 
@@ -99,7 +99,7 @@ Quindi la domanda "chi è meglio" ha **tre risposte diverse** a seconda di cosa 
 
 | # | RPT | Delivery Control | Stato |
 |---|---|---|---|
-| 45 | **4 categorie**: A disallocato dal mese successivo, B da meno di 1 mese, C tra 1 e 2 mesi, D da oltre 2 mesi | `freeingUpNextMonth` (= A) + `bucketForMonthsIdle` B(≤1) / C(2) / D(≥3), mutuamente esclusive **per costruzione** | PARI — coincidono esattamente |
+| 45 | **4 categorie**: A disallocato dal mese successivo, B da meno di 1 mese, C tra 1 e 2 mesi, D da oltre 2 mesi | `freeingUpNextMonth` (= A) + `bucketForIdleWorkingDays` in **giorni lavorativi** (decisione Q1), B `[1, IDLE_WORKING_DAYS_B_MAX]` / C fino a `_C_MAX` / D oltre — soglie **derivate** da come `workingDaysInMonth` conta davvero un mese, non letterali. **A e i bucket stanno su due campi diversi di `BenchCell`** (`upcomingUnallocated` e `agingBucket`) e sono mutuamente esclusivi **per costruzione**: A richiede che il mese NON sia bench, i bucket che lo sia. Nessun `'ABSENT'` prende un bucket | PARI — le quattro categorie coincidono; l'unità sotto è il giorno lavorativo invece del mese, e la differenza è dichiarata (un mese da 22 giorni lavorativi legge C dove il conteggio a mesi leggeva B) |
 | 46 | Riepilogo Unchargeable: costo totale, costo mensile, numero risorse; per mese di riferimento costo totale, costo mensile medio, conteggio | rollup costi bench in `/bench` e `/reporting` | PARI |
 | 47 | filtri Capability / Practice / Competence / People Manager; torta cliccabile che filtra la tabella | filtri e stato per mese in `/bench` | PARI |
 | 48 | colonna Skill con hover sulle **3 skill a proficiency più alta, estratte da MIO CV in People Portal** | `resources.skills` con livelli + catalogo skill + proficiency set — dato interno, non da People Portal | PARZIALE |
@@ -107,7 +107,7 @@ Quindi la domanda "chi è meglio" ha **tre risposte diverse** a seconda di cosa 
 | 50 | **Percentuale Disallocazione mese corrente**: 25% / 50% / 75% / 100% | `unallocatedPct` e `unallocatedDays` per risorsa-mese, sul target **proprio** della risorsa (giorni lavorabili festività-aware × ore di contratto), non su un mese standard | **AVANTI** — RPT quantizza a quattro scalini; noi diamo la percentuale reale e, quando il target del mese è 0, i due campi sono **assenti** invece di valere 0: una quota di nessuna capacità non è 0% di inattività, è una domanda senza risposta, e riportare 0 direbbe che la persona è pienamente allocata |
 | 51 | storico disallocazione per mese, per risorsa (`2025-03 · disallocato 21 gg · 100%`) | `GET /bench/history/:resourceId?months=N` (default 12, rifiutato oltre 24) espandibile dalla riga, con giorni e percentuale per mese | PARI — letto a parte e non allargando la finestra di `/bench/monthly`: quella è fissata a 6 per spec, e `/staffing` disegna **un pallino per mese** di quella finestra, quindi allargarla trasformerebbe in silenzio un semaforo a 6 in uno a N |
 | 52 | costo giornaliero standard e tariffa in tabella | `cost_rate` / `bill_rate` + rate card + **tariffe di vendita negoziate per progetto** + FX multi-valuta | **AVANTI** |
-| 53 | Report Unchargeable → **.xlsx a 4 fogli, uno per categoria**, con struttura organizzativa, responsabili, codice risorsa, nominativo, job role, 3 technical skill con proficiency, standard cost rate, tariffa, disponibilità | il writer multi-foglio esiste e regge già 4 fogli; **manca il builder** `unchargeableSheets(...)` e il pulsante su `/bench` | PARZIALE |
+| 53 | Report Unchargeable → **.xlsx a 4 fogli, uno per categoria**, con struttura organizzativa, responsabili, codice risorsa, nominativo, job role, 3 technical skill con proficiency, standard cost rate, tariffa, disponibilità | `unchargeableSheets(...)` (`src/app/services/rpt-xlsx.util.ts`) + il pulsante su `/bench`: quattro fogli sempre tutti e quattro (una categoria vuota è un foglio di sole intestazioni, non un foglio mancante), tutte le colonne del manuale, sul **mese di riferimento che la schermata sta mostrando** — così file e schermo non possono dissentire su chi è unchargeable | PARI |
 
 ### 3.6 Commesse BASKET — il non fatturabile (manuale §1.3, §8.5)
 
@@ -157,16 +157,18 @@ Su **56 capacità di RPT** valutate una per una contro il codice:
 
 | Stato | Righe | Quota | vs. prima wave |
 |---:|---:|---|---|
-| **PARI** | 24 | 43% | +4 |
+| **PARI** | 25 | 45% | +5 |
 | **AVANTI** | 15 | 27% | +4 |
-| **PARZIALE** | 11 | 20% | −1 |
+| **PARZIALE** | 10 | 18% | −2 |
 | **MANCA** | 6 | 11% | **−7** |
 
-**39 su 56 (70%) coperte o superate. 11 parziali. 6 mancanti.** Più 14 aree che RPT non ha affatto.
+**40 su 56 (71%) coperte o superate. 10 parziali. 6 mancanti.** Più 14 aree che RPT non ha affatto.
 
 _Aggiornato il 2026-08-07, dopo la prima wave di chiusura: XLSX Pianificazione e Allocazione (righe 24 e 44) da MANCA a PARI, Unchargeable (53) da MANCA a PARZIALE, strip disponibilità sulla card (13) e auto-avanzamento dell'approvazione multipla (40) da PARZIALE ad AVANTI, percentuale di disallocazione (50) da MANCA ad AVANTI e storico mensile per risorsa (51) da MANCA a PARI. Le faccette (11) restano PARZIALE con due esclusioni motivate._
 
 _Aggiornato di nuovo il 2026-08-07 a **blocco H completo** (BASKET/non fatturabile + assenze, T1-T8): righe 54 e 55 da MANCA ad AVANTI e a PARI. È il gap che rendeva falsi numeri già a schermo, e la sua conseguenza è ora misurata come chiusa nel riquadro sotto._
+
+_Aggiornato una terza volta il 2026-08-07: **riga 53 da PARZIALE a PARI** — il report Unchargeable a 4 fogli e il suo pulsante su `/bench`. La cosa da sapere, perché la matrice stessa invita all'errore: la riga 45 elenca A/B/C/D di fila, ma **A non è un bucket di aging**. `UNALLOCATED_AGING_BUCKETS` ha tre membri, e A è il segnale prospettico `upcomingUnallocated` su un ALTRO campo di `BenchCell`, mutuamente esclusivo con i bucket per costruzione. Un builder che leggesse un solo campo per quattro fogli ne lascerebbe uno vuoto per sempre. Sul seed, a 2026-08, la ripartizione è **A=3, B=0, C=0, D=1**: leggendo solo `agingBucket` il file avrebbe 1 riga invece di 4, e due delle tre righe in A sono persone che RIENTRANO da un congedo — il caso che `freeingUpNextMonth` conta di proposito. Nessuna causale di assenza raggiunge il file (asserito sui byte decompressi, non sullo zip: un xlsx è un archivio DEFLATE e cercare 'Maternity' nei byte compressi non troverebbe nulla in ogni caso)._
 
 I 6 gap residui, in chiaro:
 
