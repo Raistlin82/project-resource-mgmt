@@ -1,6 +1,6 @@
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { Reporting } from './reporting';
 import { ApiService, BillingPlanItem, Contract, NegotiatedRate, Project, Resource, TimeEntry } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
@@ -389,6 +389,118 @@ describe('Reporting — the multi-endpoint load window announces itself', () => 
 });
 
 /**
+ * THE ERROR PATH. This screen documents an access notice and ten ListState Retry
+ * panels for exactly this case, and not one of them could render: `value()`
+ * THROWS on an errored rxResource, ~40 computeds dereferenced
+ * `dataRes.value()`/`fxRes.value()` unguarded, and the first binding to reach one
+ * aborted the whole change-detection pass. A finance user whose bearer expired
+ * got the header and then nothing at all.
+ */
+describe('Reporting — a failed gated read still renders its own error surfaces', () => {
+  /** One failing leg is enough — the gated read is a fail-fast forkJoin. */
+  const failing = { getProjects: () => throwError(() => new Error('403')) } as unknown as Partial<ApiService>;
+
+  it('renders the access notice and a Retry affordance instead of aborting the render', async () => {
+    const fixture = await setup(RESOURCES, failing);
+    await flush(fixture);
+    const page = host(fixture);
+
+    // The notice the component's own comment promises for a 401/403.
+    expect(page.textContent ?? '').toContain('Your role does not have access to the financial reporting data');
+
+    // …and the way back. Scoped to the ListState error panels (role="alert"), not
+    // any button on the page, so this cannot be satisfied by unrelated markup.
+    const retries = Array.from(page.querySelectorAll('[role="alert"] button'))
+      .filter(b => (b.textContent ?? '').includes('Retry'));
+    expect(retries.length, 'the ListState error panels must offer Retry').toBeGreaterThan(0);
+  });
+
+  it('renders no figure derived from the empty envelope it falls back to', async () => {
+    // ASSERTION OF ABSENCE, and the whole reason the envelope is not the
+    // forbidden "a failed read means no data" accessor: every region fed by it
+    // must be OFF SCREEN while the error surfaces are the things on screen.
+    // "Top Customer Share" belongs to the Concentration KPI cards — the block
+    // that was missed when the money regions were gated — and "Portfolio
+    // Financials" to the strip above it.
+    const fixture = await setup(RESOURCES, failing);
+    await flush(fixture);
+    const text = host(fixture).textContent ?? '';
+
+    expect(text).not.toContain('Top Customer Share');
+    expect(text).not.toContain('Portfolio Financials');
+
+    // The catch-all: every money figure on this page is written by a CurrencyPipe
+    // in 'symbol' form, so a single € anywhere is a figure that came out of the
+    // empty envelope. (Static "EUR (base)" unit labels sit next to card headings
+    // and legitimately survive — they name a currency, they do not state an
+    // amount.) This is the assertion that would catch the NEXT ungated reader,
+    // not just the one this fix closes.
+    expect(text).not.toContain('€');
+  });
+
+  /**
+   * WHAT THE TEMPLATE GATE CANNOT COVER, and the reason the guard lives at the
+   * dereference rather than in the markup. Verified by neutralising the envelope
+   * short-circuit: with only the ListState gate in place the two tests above stay
+   * GREEN (nothing errored is instantiated, so nothing throws) and only this one
+   * turns red. Every accessor here is reached WITHOUT the view — a direct signal
+   * read, and a workbook builder the spec above calls the same way — which is
+   * exactly the shape of the next reader someone adds outside a gate.
+   */
+  it('answers from the empty envelope, never throwing, when read outside the view', async () => {
+    const fixture = await setup(RESOURCES, failing);
+    await flush(fixture);
+    const c = fixture.componentInstance;
+
+    // dataRes side: the RPT builders read the plan straight off the envelope.
+    expect(() => c['buildPlanningSheet']()).not.toThrow();
+    expect(c['buildPlanningSheet']().rows).toEqual([]);
+    expect(c['buildAllocationSheets']().every(s => s.rows.length === 0)).toBe(true);
+
+    // …and the figures, which must be a declared zero rather than an exception.
+    expect(c.marginRows()).toEqual([]);
+    expect(c.totalRevenue()).toBe(0);
+  });
+
+  it('answers from the empty FX table, never throwing, when only FX fails', async () => {
+    // The fxRes twin of the test above: arDso()/arTotalOutstanding() reach
+    // fxEnvelope() through arResult(), so a guard on dataRes alone leaves this
+    // throwing. Neutralise `fxEnvelope`'s short-circuit and only this goes red.
+    const fixture = await setup(RESOURCES, { getFxRates: () => throwError(() => new Error('403')) } as unknown as Partial<ApiService>);
+    await flush(fixture);
+    const c = fixture.componentInstance;
+
+    expect(() => c.arDso()).not.toThrow();
+    expect(c.arTotalOutstanding()).toBe(0);
+    expect(c.arByCustomer()).toEqual([]);
+  });
+
+  it('brings the Concentration cards back once the read succeeds', async () => {
+    // THE PAIR with the absence assertions above, and what stops them being a
+    // tautology: this fix moved that block behind a ListState, and a wrapper that
+    // never renders its content would satisfy every "not.toContain" above while
+    // deleting a panel from the page. The two states must DIFFER on this element.
+    const fixture = await setup();
+    await flush(fixture);
+    expect(host(fixture).textContent ?? '').toContain('Top Customer Share');
+  });
+
+  it('keeps rendering all of it when only the FX table fails', async () => {
+    // fxRes is the second gated resource and is dereferenced from the same
+    // financeData() computed, so it carries the identical exposure. Pinning it
+    // separately stops a fix that guards only dataRes from reading as complete.
+    const fixture = await setup(RESOURCES, { getFxRates: () => throwError(() => new Error('403')) } as unknown as Partial<ApiService>);
+    await flush(fixture);
+    const page = host(fixture);
+
+    const retries = Array.from(page.querySelectorAll('[role="alert"] button'))
+      .filter(b => (b.textContent ?? '').includes('Retry'));
+    expect(retries.length, 'an FX failure must reach the same Retry panels').toBeGreaterThan(0);
+    expect(page.textContent ?? '').not.toContain('Top Customer Share');
+  });
+});
+
+/**
  * RPT .xlsx reports (docs/rpt-comparison.md rows 24 + 44). The sheet-shaping rules are
  * pinned in `src/app/services/rpt-xlsx.util.spec.ts`; what is pinned HERE is the
  * WIRING — that this screen hands the builders its own loaded plan, so the workbook
@@ -486,16 +598,27 @@ describe('Reporting — RPT xlsx exports', () => {
   });
 
   /**
-   * NOT COVERED, and deliberately not faked: both buttons carry
-   * `[disabled]="dataError()"` and both handlers return early on it, because a workbook
-   * built from an errored envelope is a file of confident zeros — worse than no file,
-   * since it looks authoritative once it is off the screen. That guard cannot be
-   * exercised from a spec today: this component's `financeData()`/`concentration()`
-   * dereference `dataRes.value()` unguarded, and `value()` THROWS in the error state,
-   * so the render aborts before any assertion (the Concentration KPI `@defer` block
-   * around reporting.ts:617 is the unguarded reader — it sits outside every
-   * `dataError()` gate and every ListState). Verified against the unmodified component:
-   * the throw predates the xlsx work. The fix is `capacity.component.ts`'s `envelope()`
-   * short-circuit applied here, which is a change of its own.
+   * Both buttons carry `[disabled]="dataError()"` and both handlers return early on
+   * it, because a workbook built from an errored envelope is a file of confident
+   * zeros — worse than no file, since it looks authoritative once it is off the
+   * screen. The guard was unassertable until the envelope guard landed (the render
+   * aborted before the first expectation); it is asserted on BOTH surfaces here,
+   * since either one alone leaves a way to export the zeros — the attribute stops
+   * the click, the handler stops a caller that never went through the DOM.
    */
+  it('disables both workbook buttons, and writes no workbook, on a failed read', async () => {
+    const fixture = await setup(PLANNED_RESOURCES, { ...planned, getProjects: () => throwError(() => new Error('403')) } as unknown as Partial<ApiService>);
+    await flush(fixture);
+    const page = host(fixture);
+
+    expect(page.querySelector<HTMLButtonElement>('[data-test="export-planning-xlsx"]')?.disabled).toBe(true);
+    expect(page.querySelector<HTMLButtonElement>('[data-test="export-allocation-xlsx"]')?.disabled).toBe(true);
+
+    // The handlers' own early return: a resolved export announces itself through
+    // NotificationService, so an empty call log is the proof nothing was written.
+    const notify = TestBed.inject(NotificationService);
+    await fixture.componentInstance.exportPlanningXlsx();
+    await fixture.componentInstance.exportAllocationXlsx();
+    expect(notify.show).not.toHaveBeenCalled();
+  });
 });

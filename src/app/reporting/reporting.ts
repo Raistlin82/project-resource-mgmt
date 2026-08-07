@@ -61,6 +61,19 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
   bucket: ArAgingBucket;
 }
 
+/**
+ * Empty envelope used until auth settles, as the resource default, and as what
+ * the error-state guard below falls back to — one literal rather than three, so
+ * a collection added to `ReportingData` cannot be added to some of them and not
+ * the others (the same shape `capacity.component.ts`'s `EMPTY` established).
+ */
+const EMPTY_DATA: ReportingData = {
+  resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [],
+  timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [],
+  customers: [], negotiatedRates: [], hoursPerDay: DEFAULT_HOURS_PER_DAY, assignmentDays: [],
+  assignmentMonths: [], costBaselines: [],
+};
+
 @Component({
   selector: 'app-reporting',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -613,8 +626,18 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
       <!-- Customer Profitability & Concentration ------------------------------- -->
       <div class="command-section-label">Customer Profitability &amp; Concentration</div>
 
-      <!-- Concentration KPI cards (single-customer dependency risk) + HHI gauge -->
+      <!-- Concentration KPI cards (single-customer dependency risk) + HHI gauge.
+           ListState-wrapped like every other data-backed panel on this page. This
+           block was the ONE reader left outside a gate when the money regions were
+           moved inside the dataError() branch above: concentration() reaches the
+           gated envelope, so on a failed read it painted a confident 0% top-customer
+           share and an HHI of 0 — and, before the envelope guard, threw out of the
+           whole render. Content is an ng-template for the reason ListState
+           documents: an ordinary projected binding is evaluated even when the
+           branch hiding it is not taken. -->
       @defer (hydrate on viewport) {
+      <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="block" [rows]="1" label="customer concentration" (retry)="reloadData()">
+      <ng-template>
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
         <div class="command-card p-6 sm:p-8 lg:col-span-2 grid grid-cols-2 gap-4 sm:gap-6 content-start">
           <div class="command-kpi">
@@ -650,6 +673,8 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
           <p class="command-note text-center">Single-customer dependency risk &middot; higher is more concentrated</p>
         </div>
       </div>
+      </ng-template>
+      </app-list-state>
       } @placeholder {
         <div class="command-skeleton h-48"></div>
       }
@@ -956,8 +981,8 @@ export class Reporting {
             assignmentMonths: this.api.getAssignmentMonths(),
             costBaselines: this.api.getCostBaselines(),
           })
-        : of<ReportingData>({ resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [], negotiatedRates: [], hoursPerDay: DEFAULT_HOURS_PER_DAY, assignmentDays: [], assignmentMonths: [], costBaselines: [] }),
-    defaultValue: { resources: [], assignments: [], requests: [], projects: [], orders: [], orderLines: [], financials: [], timeEntries: [], issues: [], changeRequests: [], milestones: [], billingItems: [], contracts: [], customers: [], negotiatedRates: [], hoursPerDay: DEFAULT_HOURS_PER_DAY, assignmentDays: [], assignmentMonths: [], costBaselines: [] },
+        : of<ReportingData>(EMPTY_DATA),
+    defaultValue: EMPTY_DATA,
   });
 
   /**
@@ -1015,14 +1040,55 @@ export class Reporting {
     this.fxRes.reload();
   }
 
+  /**
+   * The ONE place `dataRes.value()` is dereferenced (`fxEnvelope` below is its
+   * twin for the FX table). Same guard, same reasoning, as
+   * `capacity.component.ts`'s `envelope` — read that comment for the full account.
+   *
+   * `rxResource.value()` THROWS while the resource is in its error state, and the
+   * ~40 accessors below used to read it unconditionally. The money regions were
+   * gated behind `@if (dataError())` and ListState wrappers, but one reader was
+   * missed: the Concentration KPI `@defer` block, which sat outside every gate.
+   * `concentration()` -> `financeData()` -> `value()` threw from there and aborted
+   * the whole change-detection pass, taking the access notice above it and all ten
+   * Retry panels below it with it — the surfaces written for exactly this failure.
+   * A finance user whose bearer expired got the header and then nothing.
+   *
+   * Reordering the template does not fix that: the abort simply moves to whichever
+   * binding is now first. The guard has to live at the dereference.
+   *
+   * Short-circuiting to EMPTY_DATA is NOT the forbidden "a failed read means no
+   * data" accessor: nothing derived from these envelopes is ever rendered during
+   * the error state. `dataError()` gates the KPI/financials/realization strips,
+   * and every remaining panel — the Concentration cards included, as of this fix —
+   * is inside a ListState that replaces its content with the error panel. The
+   * empty envelope exists only so the signal graph can settle without throwing
+   * while the error surfaces are the things on screen, and the spec asserts that
+   * absence by name ("Top Customer Share", "Portfolio Financials").
+   */
+  private envelope = computed<ReportingData>(() =>
+    this.dataRes.status() === 'error' ? EMPTY_DATA : this.dataRes.value(),
+  );
+
+  /**
+   * The FX table's own guard. Separate from `envelope` because the two resources
+   * fail independently — an FX-only failure leaves `dataRes` perfectly readable
+   * and would still throw out of the same `financeData()` below. Empty rates mean
+   * the rollups fall back to unconverted figures, which is why `dataError()`
+   * covers BOTH resources and keeps those figures off screen either way.
+   */
+  private fxEnvelope = computed<FxRate[]>(() =>
+    this.fxRes.status() === 'error' ? [] : this.fxRes.value(),
+  );
+
   private financeData = computed<FinanceData>(() => {
-    const d = this.dataRes.value();
-    return { requests: d.requests, assignments: d.assignments, resources: d.resources, orders: d.orders, orderLines: d.orderLines, financials: d.financials, timeEntries: d.timeEntries, changeRequests: d.changeRequests, projects: d.projects, billingItems: d.billingItems, contracts: d.contracts, customers: d.customers, milestones: d.milestones, fxRates: this.fxRes.value(), negotiatedRates: d.negotiatedRates, hoursPerDay: d.hoursPerDay, assignmentDays: d.assignmentDays, assignmentMonths: d.assignmentMonths, costBaselines: d.costBaselines };
+    const d = this.envelope();
+    return { requests: d.requests, assignments: d.assignments, resources: d.resources, orders: d.orders, orderLines: d.orderLines, financials: d.financials, timeEntries: d.timeEntries, changeRequests: d.changeRequests, projects: d.projects, billingItems: d.billingItems, contracts: d.contracts, customers: d.customers, milestones: d.milestones, fxRates: this.fxEnvelope(), negotiatedRates: d.negotiatedRates, hoursPerDay: d.hoursPerDay, assignmentDays: d.assignmentDays, assignmentMonths: d.assignmentMonths, costBaselines: d.costBaselines };
   });
 
   /** Real per-project profitability (revenue/margin) from the commercial + finance data. */
   projectMargins = computed(() =>
-    this.dataRes.value().projects
+    this.envelope().projects
       .map(p => {
         const f = computeProjectFinancials(p.id, this.financeData());
         return { name: p.name, revenue: f.revenue, margin: f.margin, marginPct: f.marginPct };
@@ -1034,21 +1100,21 @@ export class Reporting {
   totalMargin = computed(() => this.projectMargins().reduce((s, p) => s + p.margin, 0));
   portfolioMarginPct = computed(() => this.totalRevenue() > 0 ? (this.totalMargin() / this.totalRevenue()) * 100 : 0);
   totalBacklog = computed(() =>
-    this.dataRes.value().projects.reduce((s, p) => s + computeProjectFinancials(p.id, this.financeData()).backlog, 0),
+    this.envelope().projects.reduce((s, p) => s + computeProjectFinancials(p.id, this.financeData()).backlog, 0),
   );
   totalEac = computed(() =>
-    this.dataRes.value().projects.reduce((s, p) => s + computeProjectFinancials(p.id, this.financeData()).eac, 0),
+    this.envelope().projects.reduce((s, p) => s + computeProjectFinancials(p.id, this.financeData()).eac, 0),
   );
   totalVac = computed(() =>
-    this.dataRes.value().projects.reduce((s, p) => s + computeProjectFinancials(p.id, this.financeData()).varianceAtCompletion, 0),
+    this.envelope().projects.reduce((s, p) => s + computeProjectFinancials(p.id, this.financeData()).varianceAtCompletion, 0),
   );
   openChanges = computed(() =>
-    this.dataRes.value().changeRequests.filter(c => c.status === 'Draft' || c.status === 'Submitted').length,
+    this.envelope().changeRequests.filter(c => c.status === 'Draft' || c.status === 'Submitted').length,
   );
   highRiskIssues = computed(() =>
-    this.dataRes.value().issues.filter(i => i.status !== 'Closed' && (i.severity === 'High' || i.severity === 'Critical' || i.escalated)).length,
+    this.envelope().issues.filter(i => i.status !== 'Closed' && (i.severity === 'High' || i.severity === 'Critical' || i.escalated)).length,
   );
-  pendingMilestones = computed(() => this.dataRes.value().milestones.filter(m => m.status === 'Pending').length);
+  pendingMilestones = computed(() => this.envelope().milestones.filter(m => m.status === 'Pending').length);
   private maxMargin = computed(() => Math.max(1, ...this.projectMargins().map(p => Math.abs(p.margin))));
   marginBars = computed(() => this.projectMargins().map(p => ({ ...p, width: (Math.abs(p.margin) / this.maxMargin()) * 100 })));
 
@@ -1063,7 +1129,7 @@ export class Reporting {
    */
   marginRows = computed(() => {
     const d = this.financeData();
-    return this.dataRes.value().projects
+    return this.envelope().projects
       .map(p => {
         const md = marginDrivers(p.id, d);
         const f = computeProjectFinancials(p.id, d);
@@ -1151,10 +1217,10 @@ export class Reporting {
   /** As-of date for aging; resolved once per construction (YYYY-MM-DD). */
   private readonly today = todayLocalIso();
 
-  private arResult = computed(() => arAging(this.dataRes.value().billingItems, this.today, this.fxRes.value()));
+  private arResult = computed(() => arAging(this.envelope().billingItems, this.today, this.fxEnvelope()));
   arTotalOutstanding = computed(() => this.arResult().totalOutstanding);
   arOverdue = computed(() => this.arResult().overdue);
-  arDso = computed(() => dsoOutstanding(this.dataRes.value().billingItems, this.today, this.fxRes.value()));
+  arDso = computed(() => dsoOutstanding(this.envelope().billingItems, this.today, this.fxEnvelope()));
 
   /** Aging buckets in fixed oldest-last order, each carrying amount + count. */
   arBuckets = computed<ArAgingBarRow[]>(() => {
@@ -1167,8 +1233,8 @@ export class Reporting {
 
   /** Per-customer A/R rows (outstanding desc), each with its oldest non-empty bucket label. */
   arByCustomer = computed(() => {
-    const d = this.dataRes.value();
-    return arAgingByCustomer(d.billingItems, d.contracts, d.customers, this.today, this.fxRes.value())
+    const d = this.envelope();
+    return arAgingByCustomer(d.billingItems, d.contracts, d.customers, this.today, this.fxEnvelope())
       .map(row => ({ ...row, oldestBucket: this.oldestBucketFor(row) }));
   });
 
@@ -1182,11 +1248,11 @@ export class Reporting {
   }
 
   private activeProjectsCount = computed(() =>
-    this.dataRes.value().projects.filter(p => ['in execution', 'in planning', 'active'].includes((p.status ?? '').toLowerCase())).length
+    this.envelope().projects.filter(p => ['in execution', 'in planning', 'active'].includes((p.status ?? '').toLowerCase())).length
   );
 
   private openRequestsCount = computed(() =>
-    this.dataRes.value().requests.filter(r => ['open', 'published'].includes((r.status ?? '').toLowerCase())).length
+    this.envelope().requests.filter(r => ['open', 'published'].includes((r.status ?? '').toLowerCase())).length
   );
 
   /**
@@ -1203,7 +1269,7 @@ export class Reporting {
    * placeholder. Both read as an internal-capacity problem that isn't one.
    */
   private internalResources = computed(() =>
-    this.dataRes.value().resources.filter(r => countsTowardInternalCapacity(kindOf(r))),
+    this.envelope().resources.filter(r => countsTowardInternalCapacity(kindOf(r))),
   );
 
   private avgUtilization = computed(() => {
@@ -1225,7 +1291,7 @@ export class Reporting {
     const d = this.financeData();
     const heads = new Set<string>();
     let revenue = 0, hours = 0, standardBillValue = 0, fte = 0;
-    for (const p of this.dataRes.value().projects) {
+    for (const p of this.envelope().projects) {
       const m = realizationMetrics(p.id, d, { hoursPerFte: this.hoursPerFte });
       revenue += m.revenue;
       hours += m.hours;
@@ -1539,7 +1605,7 @@ export class Reporting {
    * ONE authReady-gated forkJoin.
    */
   private rptPlanData = computed<RptPlanData>(() => {
-    const d = this.dataRes.value();
+    const d = this.envelope();
     return {
       projects: d.projects,
       requests: d.requests,
@@ -1551,7 +1617,7 @@ export class Reporting {
   });
 
   /** Units/labels for the workbooks: base currency, and the configured hours-per-day divisor. */
-  private rptOpts = computed<RptOpts>(() => ({ currency: this.baseCurrency, hoursPerDay: this.dataRes.value().hoursPerDay }));
+  private rptOpts = computed<RptOpts>(() => ({ currency: this.baseCurrency, hoursPerDay: this.envelope().hoursPerDay }));
 
   /**
    * Report 1 — Pianificazione (PM): the ONE sheet, split out from the click handler so
