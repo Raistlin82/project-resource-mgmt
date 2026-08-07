@@ -6997,10 +6997,33 @@ async function checkBlockHAbsencesAndClassification() {
 
 async function checkFkViolationMapping() {
   const NAME = 'DELETE /api/customers/C1 (referenced by contract CT1) -> clean 409, not a raw 500';
-  if (!process.env.DATABASE_URL) {
+
+  // Gate on the SERVER's adapter, asked over the wire, not on this process's
+  // environment. It used to read `process.env.DATABASE_URL` — which is the SMOKE
+  // runner's env, not the server's. The two are unrelated: the documented way to
+  // exercise Postgres is to start the server with DATABASE_URL set and point
+  // SMOKE_BASE at it, and in that arrangement this check SKIPPED anyway. So the
+  // one check written specifically for the Postgres-only path had never run,
+  // while every run reported it as a legitimately-unexercisable skip.
+  //
+  // `GET /storage-status` is the endpoint that answers "which adapter is live",
+  // and it is the only source that can answer it about the process under test.
+  let provider = 'unknown';
+  try {
+    const res = await req('GET', '/storage-status');
+    provider = res.status === 200 && res.body && typeof res.body.provider === 'string' ? res.body.provider : 'unknown';
+  } catch {
+    provider = 'unreachable';
+  }
+
+  // 'postgresql' is the literal `persistence-config.util.ts` emits — NOT 'postgres'.
+  // My first attempt at this gate guessed the shorter string and would have gone on
+  // skipping against a Postgres server, reproducing the very defect it replaced.
+  // Read from the type, not from memory.
+  if (provider !== 'postgresql') {
     skip(
       NAME,
-      'DATABASE_URL is not set in this process — the InMemory adapter cannot raise a real Postgres FK violation, so this check has nothing to exercise. Re-run with DATABASE_URL set against a Postgres-backed server to exercise it (see docs/architecture/03-backend-and-data.md and CLAUDE.md\'s dev<->prod parity switch).',
+      `the server under test reports provider="${provider}" — only the Postgres adapter can raise a real FK violation (SQLSTATE 23503), so this check has nothing to exercise. Start the server with DATABASE_URL set and point SMOKE_BASE at it (see docs/architecture/03-backend-and-data.md and CLAUDE.md's dev<->prod parity switch). Setting DATABASE_URL on THIS process does nothing.`,
     );
     return;
   }
