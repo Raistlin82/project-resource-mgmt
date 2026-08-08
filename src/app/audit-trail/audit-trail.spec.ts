@@ -56,11 +56,27 @@ function serverAuditLogRoles(): UserRole[] {
   return [...rule[1].matchAll(/'([a-z-]+)'/g)].map(match => match[1] as UserRole);
 }
 
-/** Evaluate a CanMatchFn in the browser for one role, after authReady settles. */
-async function decide(guard: CanMatchFn, role: UserRole): Promise<GuardResult> {
+/**
+ * Evaluate a CanMatchFn in the browser for one role, after authReady settles.
+ *
+ * `authenticated` defaults to TRUE because every case below is about ROLE
+ * gating, and an unauthenticated stub would make all of them pass for the wrong
+ * reason. It is a parameter rather than a constant because `roleGuard` now
+ * requires an identity as well as a capability, and that conjunct needs a case
+ * of its own — see "refuses an ANONYMOUS session" below.
+ */
+async function decide(guard: CanMatchFn, role: UserRole, authenticated = true): Promise<GuardResult> {
   TestBed.resetTestingModule();
   const ready = signal(false);
-  const auth = { authReady: ready.asReadonly(), hasAnyRole: (roles: UserRole[]) => roles.includes(role) };
+  const auth = {
+    authReady: ready.asReadonly(),
+    hasAnyRole: (roles: UserRole[]) => roles.includes(role),
+    // Required by `roleGuard`'s identity conjunct. Omitting it made the guard
+    // read `undefined()` and redirect EVERY role, including the two it admits —
+    // which is how a defence-in-depth change to the guard turned this
+    // role-agreement spec red without either file being wrong on its own.
+    isAuthenticated: () => authenticated,
+  };
   TestBed.configureTestingModule({
     providers: [
       provideRouter([]),
@@ -112,6 +128,21 @@ describe('auditTrailGuard agrees with the server, in BOTH directions', () => {
     // well against a guard that allows everyone.
     for (const role of ['employee', 'pm', 'resource-manager', 'finance', 'sales'] as UserRole[]) {
       expect(await decide(auditTrailGuard, role), `${role} must not match`).toBeInstanceOf(UrlTree);
+    }
+  });
+
+  it('refuses an ANONYMOUS session even for a role that is otherwise admitted', async () => {
+    // The dimension the two cases above cannot see: they both hold a real
+    // identity, so a guard that checked ONLY the capability would satisfy them
+    // completely. `roleGuard` requires both, and this is the case that says so —
+    // without it, dropping the identity conjunct is a silent, green change.
+    for (const role of ['admin', 'delivery-executive'] as UserRole[]) {
+      expect(
+        await decide(auditTrailGuard, role, false),
+        `${role} with no authenticated identity must not match`,
+      ).toBeInstanceOf(UrlTree);
+      // And the pair, so this is not satisfied by a guard that refuses always.
+      expect(await decide(auditTrailGuard, role, true), `${role} authenticated must match`).toBe(true);
     }
   });
 
