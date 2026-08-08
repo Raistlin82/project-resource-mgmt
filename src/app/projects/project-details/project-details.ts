@@ -1,8 +1,8 @@
-import { ChangeDetectionStrategy, Component, inject, signal, input, computed } from '@angular/core';
-import { rxResource } from '@angular/core/rxjs-interop';
+import { ChangeDetectionStrategy, Component, inject, signal, input, computed, effect, untracked } from '@angular/core';
+import { rxResource, toSignal } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { CurrencyPipe, DatePipe, DecimalPipe } from '@angular/common';
-import { RouterLink } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { of } from 'rxjs';
 import { ApiService, Project, Order, OrderLine, ResourceRequest, Assignment, Resource, FinancialItem, TimeEntry, Issue, ChangeRequest, CostBaseline, AssignmentDay, AssignmentMonth, FxRate } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
@@ -42,6 +42,20 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
   ],
   template: `
     <div class="command-page space-y-6">
+      <nav aria-label="Breadcrumb" class="text-sm text-[var(--cc-muted)]">
+        <ol class="flex flex-wrap items-center gap-1.5">
+          <li>
+            <a routerLink="/projects" class="font-semibold text-[var(--cc-primary)] hover:underline">Projects</a>
+          </li>
+          <li aria-hidden="true" class="flex items-center">
+            <mat-icon class="text-[18px] w-[18px] h-[18px]">chevron_right</mat-icon>
+          </li>
+          <li aria-current="page" class="min-w-0 break-words text-[var(--cc-ink)]">
+            {{ projectBreadcrumbLabel() }}
+          </li>
+        </ol>
+      </nav>
+
       @if (projectLoading() || projectReadFailed()) {
         <div class="flex flex-col sm:flex-row sm:items-start gap-4">
           <a routerLink="/projects" class="command-button secondary w-12 h-12 p-0 shrink-0" aria-label="Back to projects">
@@ -175,22 +189,47 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
       </div>
 
       <!-- Tabs Navigation -->
-      <div class="command-card flex overflow-x-auto hide-scrollbar px-2 sm:px-4">
-        @for (tab of tabs(); track tab.id) {
-          <button (click)="activeTab.set(tab.id)"
-                  class="px-4 py-4 text-sm font-semibold whitespace-nowrap border-b-2 transition-colors"
-                  [class.project-tab-active]="activeTab() === tab.id"
-                  [class.border-transparent]="activeTab() !== tab.id"
-                  [class.text-ink-muted]="activeTab() !== tab.id"
-                  [class.hover:text-ink-secondary]="activeTab() !== tab.id"
-                  [class.hover:border-line-strong]="activeTab() !== tab.id">
-            {{ tab.label }}
-          </button>
-        }
+      <div class="relative">
+        <div class="command-card overflow-hidden">
+          <div role="tablist"
+               aria-orientation="horizontal"
+               [attr.aria-label]="projectTabsLabel()"
+               aria-describedby="projectTabsOverflowHint"
+               class="flex overflow-x-auto scroll-smooth px-2 sm:px-4">
+            @for (tab of tabs(); track tab.id; let tabIndex = $index) {
+              <button type="button"
+                      role="tab"
+                      [id]="'project-tab-' + tab.id"
+                      [attr.aria-controls]="'project-tabpanel-' + tab.id"
+                      [attr.aria-selected]="activeTab() === tab.id"
+                      [attr.tabindex]="activeTab() === tab.id ? 0 : -1"
+                      (click)="activateTab(tab.id)"
+                      (keydown)="onTabKeydown($event, tabIndex)"
+                      class="px-4 py-4 text-sm font-semibold whitespace-nowrap border-b-2 transition-colors"
+                      [class.project-tab-active]="activeTab() === tab.id"
+                      [class.border-transparent]="activeTab() !== tab.id"
+                      [class.text-ink-muted]="activeTab() !== tab.id"
+                      [class.hover:text-ink-secondary]="activeTab() !== tab.id"
+                      [class.hover:border-line-strong]="activeTab() !== tab.id">
+                {{ tab.label }}
+              </button>
+            }
+          </div>
+        </div>
+        <div aria-hidden="true"
+             class="pointer-events-none absolute right-0 top-0 h-[52px] w-10 bg-gradient-to-l from-[var(--cc-panel)] to-transparent sm:hidden"></div>
+        <p id="projectTabsOverflowHint" class="mt-2 flex items-center gap-1.5 text-xs text-[var(--cc-muted)] sm:hidden">
+          <mat-icon aria-hidden="true" class="text-[16px] w-[16px] h-[16px]">swipe</mat-icon>
+          More project sections are available horizontally. Swipe or use the arrow keys.
+        </p>
       </div>
 
       <!-- Tab Content -->
-      <div class="mt-6">
+      <div class="mt-6"
+           role="tabpanel"
+           [id]="'project-tabpanel-' + activeTab()"
+           [attr.aria-labelledby]="'project-tab-' + activeTab()"
+           tabindex="0">
         @if (activeTab() === 'overview') {
           <div class="space-y-6">
             <h2 class="sr-only">Project overview</h2>
@@ -546,17 +585,23 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
           <app-change-requests [projectId]="project()?.id" [headingLevel]="2" />
         }
       </div>
+      <!-- Keep every aria-controls reference resolvable without mounting the
+           data-heavy inactive panels. The selected panel above owns the real
+           content; these placeholders are removed from the accessibility tree
+           by the native hidden attribute. -->
+      @for (tab of tabs(); track tab.id) {
+        @if (activeTab() !== tab.id) {
+          <div role="tabpanel"
+               [id]="'project-tabpanel-' + tab.id"
+               [attr.aria-labelledby]="'project-tab-' + tab.id"
+               tabindex="-1"
+               hidden></div>
+        }
+      }
       }
     </div>
   `,
   styles: `
-    .hide-scrollbar::-webkit-scrollbar {
-      display: none;
-    }
-    .hide-scrollbar {
-      -ms-overflow-style: none;
-      scrollbar-width: none;
-    }
     .project-tab-active {
       border-color: var(--cc-primary);
       color: var(--cc-primary);
@@ -567,6 +612,11 @@ export class ProjectDetailsComponent {
   private api = inject(ApiService);
   protected auth = inject(AuthService);
   private notificationService = inject(NotificationService);
+  private route = inject(ActivatedRoute);
+  private router = inject(Router);
+  private tabQueryParams = toSignal(this.route.queryParamMap, {
+    initialValue: this.route.snapshot.queryParamMap,
+  });
 
   // Route param ':id' bound via withComponentInputBinding()
   id = input.required<string>();
@@ -580,6 +630,8 @@ export class ProjectDetailsComponent {
     ? null
     : this.projectsRes.value().find(p => p.id === this.id()) ?? null,
   );
+  protected projectBreadcrumbLabel = computed(() => this.project()?.name ?? this.id());
+  protected projectTabsLabel = computed(() => `Project sections for ${this.project()?.name ?? this.id()}`);
 
   protected reloadProject(): void {
     this.projectsRes.reload();
@@ -889,6 +941,68 @@ export class ProjectDetailsComponent {
     { id: 'issues', label: 'Issues' },
     { id: 'changes', label: 'Changes' },
   ]);
+
+  constructor() {
+    effect(() => {
+      const requestedTab = this.tabQueryParams().get('tab')?.trim() || 'overview';
+      const nextTab = this.tabs().some(tab => tab.id === requestedTab) ? requestedTab : 'overview';
+
+      untracked(() => {
+        this.activeTab.set(nextTab);
+
+        // An obsolete or role-inaccessible deep link falls back safely and is
+        // canonicalised without adding a misleading entry to browser history.
+        if (requestedTab !== nextTab) {
+          void this.router.navigate([], {
+            relativeTo: this.route,
+            queryParams: { tab: null },
+            queryParamsHandling: 'merge',
+            replaceUrl: true,
+          });
+        }
+      });
+    });
+  }
+
+  protected activateTab(tabId: string): void {
+    if (!this.tabs().some(tab => tab.id === tabId)) return;
+
+    this.activeTab.set(tabId);
+    void this.router.navigate([], {
+      relativeTo: this.route,
+      queryParams: { tab: tabId === 'overview' ? null : tabId },
+      queryParamsHandling: 'merge',
+    });
+  }
+
+  protected onTabKeydown(event: KeyboardEvent, currentIndex: number): void {
+    const availableTabs = this.tabs();
+    if (availableTabs.length === 0) return;
+
+    let nextIndex: number;
+    switch (event.key) {
+      case 'ArrowRight':
+        nextIndex = (currentIndex + 1) % availableTabs.length;
+        break;
+      case 'ArrowLeft':
+        nextIndex = (currentIndex - 1 + availableTabs.length) % availableTabs.length;
+        break;
+      case 'Home':
+        nextIndex = 0;
+        break;
+      case 'End':
+        nextIndex = availableTabs.length - 1;
+        break;
+      default:
+        return;
+    }
+
+    event.preventDefault();
+    const tablist = (event.currentTarget as HTMLElement | null)?.closest('[role="tablist"]');
+    const renderedTabs = Array.from(tablist?.querySelectorAll<HTMLElement>('[role="tab"]') ?? []);
+    renderedTabs[nextIndex]?.focus();
+    this.activateTab(availableTabs[nextIndex].id);
+  }
 
   deliveryHealthLabel(): string {
     const health = this.deliveryHealth();

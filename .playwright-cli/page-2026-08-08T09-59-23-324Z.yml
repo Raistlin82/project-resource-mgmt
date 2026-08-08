@@ -1,0 +1,239 @@
+- generic [ref=e3]:
+  - link "Skip to main content" [ref=e4] [cursor=pointer]:
+    - /url: "#main-content"
+  - complementary "Primary navigation" [ref=e6]:
+    - generic [ref=e7]:
+      - generic [ref=e8]:
+        - img [ref=e10]: hub
+        - generic [ref=e11]:
+          - generic [ref=e12]: Delivery Control
+          - generic [ref=e14]: Professional Services Automation
+      - generic [ref=e15]:
+        - generic [ref=e16]:
+          - generic [ref=e17]: "0"
+          - generic [ref=e18]: REQ
+        - generic [ref=e19]:
+          - generic [ref=e20]: "1"
+          - generic [ref=e21]: RISK
+        - generic [ref=e22]:
+          - generic [ref=e23]: "1"
+          - generic [ref=e24]: CR
+        - generic [ref=e25]:
+          - generic [ref=e26]: "0"
+          - generic [ref=e27]: LOAD
+    - navigation [ref=e28]:
+      - generic [ref=e29]:
+        - img: search
+        - textbox "Filter navigation" [ref=e30]:
+          - /placeholder: Find a section…
+        - generic: ⌘K
+      - generic [ref=e31]:
+        - button "Toggle Resource Control navigation group" [expanded] [ref=e32] [cursor=pointer]:
+          - generic [ref=e33]: Resource Control
+          - img [ref=e34]: chevron_right
+        - generic [ref=e36]:
+          - link "Dashboard" [ref=e37] [cursor=pointer]:
+            - /url: /
+            - img [ref=e38]: dashboard
+          - link "Search" [ref=e40] [cursor=pointer]:
+            - /url: /search
+            - img [ref=e41]: search
+          - link "My Profile" [ref=e43] [cursor=pointer]:
+            - /url: /profile
+            - img [ref=e44]: person
+          - link "My Assignments" [ref=e46] [cursor=pointer]:
+            - /url: /assignments
+            - img [ref=e47]: event_note
+          - link "Resource Requests" [ref=e49] [cursor=pointer]:
+            - /url: /requests
+            - img [ref=e50]: assignment
+          - link "Resources" [ref=e52] [cursor=pointer]:
+            - /url: /resources
+            - img [ref=e53]: badge
+          - link "Staffing" [ref=e55] [cursor=pointer]:
+            - /url: /staffing
+            - img [ref=e56]: group_add
+          - link "Schedule" [ref=e58] [cursor=pointer]:
+            - /url: /schedule
+            - img [ref=e59]: calendar_view_week
+          - link "Approvals" [ref=e61] [cursor=pointer]:
+            - /url: /approvals
+            - img [ref=e62]: fact_check
+          - link "Absences" [ref=e64] [cursor=pointer]:
+            - /url: /absences
+            - img [ref=e65]: person_off
+      - generic [ref=e67]:
+        - button "Toggle Project Control navigation group" [ref=e68] [cursor=pointer]:
+          - generic [ref=e69]: Project Control
+          - img [ref=e70]: chevron_right
+        - generic [ref=e72]:
+          - link "Projects" [ref=e73] [cursor=pointer]:
+            - /url: /projects
+            - img [ref=e74]: folder
+          - link "Project Plans" [ref=e76] [cursor=pointer]:
+            - /url: /project-plans
+            - img [ref=e77]: account_tree
+          - link "Tasks" [ref=e79] [cursor=pointer]:
+            - /url: /project-tasks
+            - img [ref=e80]: task
+          - link "Issues 1" [ref=e82] [cursor=pointer]:
+            - /url: /project-issues
+            - img [ref=e83]: bug_report
+            - generic [ref=e84]: Issues
+            - generic [ref=e85]: "1"
+          - link "Change Control 1" [ref=e86] [cursor=pointer]:
+            - /url: /change-requests
+            - img [ref=e87]: published_with_changes
+            - generic [ref=e88]: Change Control
+            - generic [ref=e89]: "1"
+          - link "Documents" [ref=e90] [cursor=pointer]:
+            - /url: /project-documents
+            - img [ref=e91]: description
+          - link "Project Partners" [ref=e93] [cursor=pointer]:
+            - /url: /project-partners
+            - img [ref=e94]: handshake
+          - link "Financial Plans" [ref=e96] [cursor=pointer]:
+            - /url: /financial-plans
+            - img [ref=e97]: payments
+          - link "Project Cost Centers" [ref=e99] [cursor=pointer]:
+            - /url: /project-cost-centers
+            - img [ref=e100]: account_balance
+          - link "Engagement Classification" [ref=e102] [cursor=pointer]:
+            - /url: /project-classification
+            - img [ref=e103]: label
+      - generic [ref=e105]:
+        - button "Toggle Commercial navigation group" [ref=e106] [cursor=pointer]:
+          - generic [ref=e107]: Commercial
+          - img [ref=e108]: chevron_right
+        - generic [ref=e110]:
+          - link "Customers" [ref=e111] [cursor=pointer]:
+            - /url: /customers
+            - img [ref=e112]: groups
+          - link "Contracts" [ref=e114] [cursor=pointer]:
+            - /url: /contracts
+            - img [ref=e115]: gavel
+          - link "Orders" [ref=e117] [cursor=pointer]:
+            - /url: /orders
+            - img [ref=e118]: receipt_long
+          - link "Billing" [ref=e120] [cursor=pointer]:
+            - /url: /billing
+            - img [ref=e121]: request_quote
+      - generic [ref=e123]:
+        - button "Toggle Analytics navigation group" [ref=e124] [cursor=pointer]:
+          - generic [ref=e125]: Analytics
+          - img [ref=e126]: chevron_right
+        - generic [ref=e128]:
+          - link "Forecast" [ref=e129] [cursor=pointer]:
+            - /url: /forecast
+            - img [ref=e130]: query_stats
+          - link "What-if" [ref=e132] [cursor=pointer]:
+            - /url: /what-if
+            - img [ref=e133]: tune
+          - link "Utilization" [ref=e135] [cursor=pointer]:
+            - /url: /utilization
+            - img [ref=e136]: bar_chart
+          - link "Capacity" [ref=e138] [cursor=pointer]:
+            - /url: /capacity
+            - img [ref=e139]: calendar_view_month
+          - link "Bench" [ref=e141] [cursor=pointer]:
+            - /url: /bench
+            - img [ref=e142]: event_busy
+          - link "Allocation Approvals" [ref=e144] [cursor=pointer]:
+            - /url: /allocation-approvals
+            - img [ref=e145]: fact_check
+          - link "Reporting 1" [ref=e147] [cursor=pointer]:
+            - /url: /reporting
+            - img [ref=e148]: insights
+            - generic [ref=e149]: Reporting
+            - generic [ref=e150]: "1"
+          - link "History" [ref=e151] [cursor=pointer]:
+            - /url: /audit-trail
+            - img [ref=e152]: history
+      - generic [ref=e154]:
+        - button "Toggle Configuration navigation group" [ref=e155] [cursor=pointer]:
+          - generic [ref=e156]: Configuration
+          - img [ref=e157]: chevron_right
+        - generic [ref=e159]:
+          - link "Default Language" [ref=e160] [cursor=pointer]:
+            - /url: /config/language
+            - img [ref=e161]: language
+          - link "Skill Catalogs" [ref=e163] [cursor=pointer]:
+            - /url: /config/skill-catalogs
+            - img [ref=e164]: category
+          - link "Proficiency Sets" [ref=e166] [cursor=pointer]:
+            - /url: /config/proficiency-sets
+            - img [ref=e167]: military_tech
+          - link "Manage Skills" [ref=e169] [cursor=pointer]:
+            - /url: /config/skills
+            - img [ref=e170]: psychology
+          - link "Project Roles" [ref=e172] [cursor=pointer]:
+            - /url: /config/project-roles
+            - img [ref=e173]: badge
+          - link "Organization Cost Centers" [ref=e175] [cursor=pointer]:
+            - /url: /config/cost-centers
+            - img [ref=e176]: account_balance
+          - link "Service Orgs" [ref=e178] [cursor=pointer]:
+            - /url: /config/service-orgs
+            - img [ref=e179]: business
+          - link "Resource Orgs" [ref=e181] [cursor=pointer]:
+            - /url: /config/resource-orgs
+            - img [ref=e182]: domain
+          - link "Locations" [ref=e184] [cursor=pointer]:
+            - /url: /config/locations
+            - img [ref=e185]: public
+          - link "Industries" [ref=e187] [cursor=pointer]:
+            - /url: /config/industries
+            - img [ref=e188]: factory
+          - link "Cost Categories" [ref=e190] [cursor=pointer]:
+            - /url: /config/cost-categories
+            - img [ref=e191]: sell
+          - link "Partner Roles" [ref=e193] [cursor=pointer]:
+            - /url: /config/partner-roles
+            - img [ref=e194]: diversity_3
+          - link "Vendors" [ref=e196] [cursor=pointer]:
+            - /url: /config/vendors
+            - img [ref=e197]: storefront
+          - link "Rate Cards" [ref=e199] [cursor=pointer]:
+            - /url: /config/rate-cards
+            - img [ref=e200]: request_quote
+          - link "Availability Data" [ref=e202] [cursor=pointer]:
+            - /url: /config/availability
+            - img [ref=e203]: event_available
+          - link "Integrations" [ref=e205] [cursor=pointer]:
+            - /url: /config/integrations
+            - img [ref=e206]: cable
+    - generic [ref=e209]:
+      - img [ref=e211]: account_circle
+      - generic [ref=e212]:
+        - generic [ref=e213]: Demo Admin
+        - generic [ref=e214]: admin
+      - button "Switch to dark theme" [ref=e215]:
+        - img [ref=e216]: dark_mode
+      - button "Sign out" [ref=e217]:
+        - img [ref=e218]: logout
+  - main [ref=e220]:
+    - button "Collapse navigation" [expanded] [ref=e222]:
+      - img [ref=e223]: menu_open
+    - generic [ref=e226]:
+      - generic [ref=e228]:
+        - generic [ref=e229]: Portfolio Delivery Control
+        - heading "Delivery Command Center" [level=1] [ref=e230]
+        - paragraph [ref=e231]: A single view to govern margin, EAC, risks, change control, resource demand and team utilization.
+      - region [ref=e232]:
+        - generic [ref=e233]: Role-aware home
+        - heading "My workspace" [level=2] [ref=e234]
+        - paragraph [ref=e235]: Open the areas available to your role. Portfolio financials are shown only to authorized finance readers.
+        - generic [ref=e236]:
+          - link "My Profile Maintain your skills, roles and experience." [ref=e237] [cursor=pointer]:
+            - /url: /profile
+            - img [ref=e238]: person
+            - generic [ref=e239]: My Profile
+            - paragraph [ref=e240]: Maintain your skills, roles and experience.
+          - link "My Assignments Review your schedule and submit actual time." [ref=e241] [cursor=pointer]:
+            - /url: /assignments
+            - img [ref=e242]: event_note
+            - generic [ref=e243]: My Assignments
+            - paragraph [ref=e244]: Review your schedule and submit actual time.
+  - generic:
+    - alert
+    - status

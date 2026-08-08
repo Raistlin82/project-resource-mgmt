@@ -187,6 +187,40 @@ describe('MyProfile page read state (loading / not-linked / failed are three dif
   });
 });
 
+describe('MyProfile touch actions', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('keeps picture, skill and experience actions visible with 44px-square targets', async () => {
+    const touchProfile = {
+      ...profile,
+      skills: [{ name: 'TypeScript', level: 3 }],
+      externalExperience: [{
+        projectName: 'Atlas', company: 'Deloitte', role: 'Tech Lead',
+        startDate: '2022-01-01', endDate: '2023-01-01',
+      }],
+    } as Resource;
+    const { fixture } = await render({
+      api: { getMyProfile: vi.fn(() => of(touchProfile)) },
+    });
+    const h = fixture.nativeElement as HTMLElement;
+    const controls = [
+      h.querySelector<HTMLElement>('label[aria-label="Upload profile picture"]'),
+      h.querySelector<HTMLElement>('button[aria-label="Remove TypeScript"]'),
+      h.querySelector<HTMLElement>('button[aria-label="Remove Atlas at Deloitte"]'),
+    ];
+
+    expect(controls.every(Boolean)).toBe(true);
+    for (const control of controls) {
+      const tokens = control!.className.split(/\s+/);
+      expect(tokens).toEqual(expect.arrayContaining(['min-h-11', 'min-w-11']));
+      expect(tokens.some(token => token.includes('opacity-0') || token.includes('group-hover'))).toBe(false);
+    }
+
+    const experienceCard = controls[2]!.parentElement!;
+    expect(experienceCard.className.split(/\s+/)).toContain('pr-16');
+  });
+});
+
 describe('MyProfile whole-array write serialization', () => {
   afterEach(() => TestBed.resetTestingModule());
 

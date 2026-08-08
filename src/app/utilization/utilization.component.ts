@@ -316,24 +316,16 @@ interface BenchBadgeVm {
                           </div>
                         </div>
                         @if (canManageStaffing()) {
-                          <!-- focus-within:opacity-100 is load-bearing, not cosmetic.
-                               From the sm breakpoint up this cluster is opacity-0
-                               until hover, so a keyboard user Tabbing into it moved
-                               the caret onto three consecutive INVISIBLE stops —
-                               including Delete, whose focus ring rendered as nothing
-                               — and Enter fired on a control they could not see. The
-                               mouse path is unaffected, which is why click-through
-                               testing never surfaced it. Revealing the cluster
-                               whenever focus is anywhere inside it is the same
-                               one-word fix projects.ts:99 already carries. -->
-                          <div class="flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
-                            <button (click)="copyAssignment(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Copy assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Copy assignment for ' + getRequestName(assignment.requestId)">
+                          <!-- These controls remain visible on touch as well as mouse and
+                               keyboard; every target is at least 44 by 44 CSS pixels. -->
+                          <div class="flex flex-wrap items-center gap-2 sm:justify-end">
+                            <button (click)="copyAssignment(assignment)" class="size-11 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Copy assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Copy assignment for ' + getRequestName(assignment.requestId)">
                               <mat-icon class="text-[20px] w-[20px] h-[20px]">content_copy</mat-icon>
                             </button>
-                            <button (click)="openEditForm(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Edit assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Edit assignment for ' + getRequestName(assignment.requestId)">
+                            <button (click)="openEditForm(assignment)" class="size-11 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-[var(--cc-primary-text)] hover:border-accent hover:bg-accent-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Edit assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Edit assignment for ' + getRequestName(assignment.requestId)">
                               <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                             </button>
-                            <button (click)="askDeleteAssignment(assignment)" class="w-10 h-10 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Delete assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Delete assignment for ' + getRequestName(assignment.requestId)">
+                            <button (click)="askDeleteAssignment(assignment)" class="size-11 rounded-full bg-[var(--cc-panel-muted)] border border-[var(--cc-line)] text-ink-muted hover:text-critical-text hover:border-critical hover:bg-critical-tint transition-all flex items-center justify-center shadow-sm" [attr.aria-label]="'Delete assignment for ' + getRequestName(assignment.requestId)" [attr.title]="'Delete assignment for ' + getRequestName(assignment.requestId)">
                               <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                             </button>
                           </div>

@@ -1,7 +1,7 @@
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { Observable, of, throwError } from 'rxjs';
-import { AllocationCalendarComponent } from './allocation-calendar.component';
+import { AllocationCalendarComponent, calendarFocusScrollBehavior } from './allocation-calendar.component';
 import {
   ApiService,
   AssignmentAllocation,
@@ -259,5 +259,10 @@ describe('AllocationCalendarComponent', () => {
 
     expect(closed).not.toHaveBeenCalled();
     expect((fixture.nativeElement as HTMLElement).textContent).toContain('Unsaved changes');
+  });
+
+  it('uses instant focus scrolling when reduced motion is requested', () => {
+    expect(calendarFocusScrollBehavior(true)).toBe('auto');
+    expect(calendarFocusScrollBehavior(false)).toBe('smooth');
   });
 });

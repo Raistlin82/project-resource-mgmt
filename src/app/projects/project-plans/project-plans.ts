@@ -89,12 +89,12 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
                     <th class="py-3 px-4">Timeline</th>
                     <th class="py-3 px-4">Assignee</th>
                     <th class="py-3 px-4">Progress</th>
-                    <th class="py-3 px-4 text-right">Actions</th>
+                    <th class="sticky right-0 z-20 w-[4.5rem] border-l border-line bg-[var(--cc-panel)] py-3 px-4 text-right">Actions</th>
                   </tr>
               </thead>
               <tbody class="divide-y divide-[var(--cc-line)]">
                 @for (wp of filteredWorkPackages(); track wp.id) {
-                  <tr class="group">
+                  <tr>
                     <td class="py-4 px-4">
                       <div class="font-medium text-[var(--cc-ink)]">{{ wp.name }}</div>
                       <div class="text-xs text-accent-text font-mono mt-0.5">{{ wp.id }}</div>
@@ -127,8 +127,8 @@ import { endNotBeforeStart } from '../../services/date-range.validator';
                         <span class="text-xs font-mono tabular-nums font-medium w-8 text-right">{{ wp.progress | number:'1.0-0' }}%</span>
                       </div>
                     </td>
-                    <td class="py-4 px-4 text-right">
-                      <button type="button" (click)="openEditWpForm(wp)" [attr.aria-label]="'Edit ' + wp.name" [attr.title]="'Edit ' + wp.name" class="text-ink-muted hover:text-accent-text transition-colors opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100">
+                    <td class="sticky right-0 z-10 w-[4.5rem] border-l border-line bg-[var(--cc-panel)] py-2 px-3 text-right">
+                      <button type="button" (click)="openEditWpForm(wp)" [attr.aria-label]="'Edit ' + wp.name" [attr.title]="'Edit ' + wp.name" data-test="edit-work-package" class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-accent-tint hover:text-accent-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
                         <mat-icon class="text-sm">edit</mat-icon>
                       </button>
                     </td>

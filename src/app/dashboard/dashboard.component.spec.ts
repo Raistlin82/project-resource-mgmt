@@ -125,7 +125,8 @@ describe('Dashboard capability-aware loading', () => {
     for (const method of DASHBOARD_METHODS) {
       expect(api[method], method).not.toHaveBeenCalled();
     }
-    expect(fixture.nativeElement.textContent).toContain('My workspace');
+    expect(fixture.nativeElement.textContent).toContain('My Workspace');
+    expect(fixture.nativeElement.textContent).not.toContain('Delivery Command Center');
     expect(fixture.nativeElement.textContent).not.toContain('Portfolio Financials');
   });
 
@@ -137,10 +138,12 @@ describe('Dashboard capability-aware loading', () => {
   });
 
   it('loads the complete portfolio dataset only for a portfolio reader', async () => {
-    const { api } = await render('finance');
+    const { fixture, api } = await render('finance');
     for (const method of DASHBOARD_METHODS) {
       expect(api[method], method).toHaveBeenCalledOnce();
     }
+    expect(fixture.nativeElement.textContent).toContain('Delivery Command Center');
+    expect(fixture.nativeElement.textContent).not.toContain('My Workspace');
   });
 });
 
@@ -796,6 +799,14 @@ describe('Dashboard — the 11-endpoint load window announces itself', () => {
 
 const GLOBAL_CSS = readFileSync(resolve(process.cwd(), 'src/styles.css'), 'utf8');
 const DASHBOARD_SRC = readFileSync(resolve(process.cwd(), 'src/app/dashboard/dashboard.component.ts'), 'utf8');
+
+describe('Dashboard KPI responsive density', () => {
+  it('keeps the financial KPI grid at four columns until a 2xl viewport', () => {
+    const responsiveGrid = 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7';
+    expect(DASHBOARD_SRC.split(responsiveGrid)).toHaveLength(3);
+    expect(DASHBOARD_SRC).not.toContain('sm:grid-cols-2 xl:grid-cols-7');
+  });
+});
 
 /** The declarations of one flat CSS rule (this stylesheet has no nested braces). */
 function cssBlock(css: string, selector: string): string {

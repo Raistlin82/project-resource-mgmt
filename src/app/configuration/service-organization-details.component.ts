@@ -3,17 +3,21 @@ import { isPlatformBrowser } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, ServiceOrganization } from '../services/api.service';
 import { authGatedResource } from '../services/auth-gated-resource.util';
+import { ConfigurationPageShellComponent } from './configuration-page-shell.component';
 
 @Component({
   selector: 'app-service-organization-details',
-  imports: [MatIconModule],
+  imports: [MatIconModule, ConfigurationPageShellComponent],
   template: `
+    <app-configuration-page-shell
+      title="Service Organization Details"
+      subtitle="Review service organizations replicated from SAP S/4HANA Cloud.">
+      <button configuration-actions type="button" (click)="exportToSpreadsheet()" class="command-button secondary">
+        <mat-icon class="text-[18px] w-[18px] h-[18px]">file_download</mat-icon> Export CSV
+      </button>
     <div class="bg-surface rounded-xl shadow-sm ring-1 ring-line border border-line overflow-hidden hover:shadow-md transition-shadow">
       <div class="p-6 border-b border-line flex justify-between items-center bg-surface-muted">
-        <h2 class="text-lg font-semibold text-ink">Service Organization Details</h2>
-        <button (click)="exportToSpreadsheet()" class="bg-surface text-ink-secondary border border-line-strong px-4 py-2 rounded-lg text-sm font-medium hover:bg-surface-muted transition-colors flex items-center gap-2">
-          <mat-icon class="text-sm">file_download</mat-icon> Export to Spreadsheet
-        </button>
+        <h2 class="text-lg font-semibold text-ink">Replicated organizations</h2>
       </div>
 
       <div class="p-6">
@@ -56,6 +60,7 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
         </div>
       </div>
     </div>
+    </app-configuration-page-shell>
   `
 })
 export class ServiceOrganizationDetailsComponent {

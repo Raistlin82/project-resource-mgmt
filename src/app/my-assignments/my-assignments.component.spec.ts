@@ -11,6 +11,13 @@ import {
 } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
+import { todayLocalIso } from '../services/local-date.util';
+
+const TODAY = todayLocalIso();
+function shiftDay(iso: string, days: number): string {
+  return new Date(Date.parse(`${iso}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+}
+const PREVIOUS_DAY = shiftDay(TODAY, -1);
 
 const ASSIGNMENT: Assignment = {
   id: 'A1',
@@ -40,6 +47,7 @@ const PROFILE: Resource = {
   externalExperience: [],
   utilization: 100,
   capacity: 40,
+  contractHoursPerDay: 8,
 };
 
 const SUBMITTED_ENTRY: TimeEntry = {
@@ -48,7 +56,7 @@ const SUBMITTED_ENTRY: TimeEntry = {
   requestId: 'REQ1',
   resourceId: 'R1',
   projectId: 'P1',
-  date: '2026-09-01',
+  date: TODAY,
   hours: 8,
   status: 'Submitted',
 };
@@ -57,8 +65,10 @@ function setup(overrides: {
   createMyTimeEntry?: ReturnType<typeof vi.fn>;
   assignments?: Assignment[];
   requests?: ResourceRequest[];
+  timeEntries?: TimeEntry[];
+  hoursPerDay?: number;
   canSubmitOwnTime?: boolean;
-  /** Leave the four-leg forkJoin in flight (no leg ever emits). */
+  /** Leave the five-leg forkJoin in flight (no leg ever emits). */
   pending?: boolean;
   /** Fail the /self/profile leg, as an expired bearer does. */
   failing?: boolean;
@@ -81,7 +91,8 @@ function setup(overrides: {
     getMyProfile: vi.fn(() => overrides.failing
       ? throwError(() => new Error('401 Unauthorized'))
       : leg(overrides.profile ?? PROFILE)),
-    getMyTimeEntries: vi.fn(() => leg<TimeEntry[]>([])),
+    getMyTimeEntries: vi.fn(() => leg(overrides.timeEntries ?? [])),
+    getHoursPerDay: vi.fn(() => leg({ value: overrides.hoursPerDay ?? 8 })),
     createMyTimeEntry,
   } as unknown as ApiService;
   const auth = {
@@ -121,7 +132,7 @@ describe('MyAssignmentsComponent time entry submission', () => {
     await flush(fixture);
 
     fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
-    fixture.componentInstance.timeEntryDate.set('2026-09-01');
+    fixture.componentInstance.timeEntryDate.set(TODAY);
     fixture.componentInstance.timeEntryHours.set(8);
     fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
 
@@ -130,7 +141,7 @@ describe('MyAssignmentsComponent time entry submission', () => {
     // lost response returns the same entry instead of logging the hours twice.
     expect(createMyTimeEntry).toHaveBeenCalledWith({
       assignmentId: 'A1',
-      date: '2026-09-01',
+      date: TODAY,
       hours: 8,
       notes: '',
       idempotencyKey: expect.stringMatching(
@@ -163,7 +174,7 @@ describe('MyAssignmentsComponent time entry submission', () => {
     await flush(fixture);
 
     fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
-    fixture.componentInstance.timeEntryDate.set('2026-09-01');
+    fixture.componentInstance.timeEntryDate.set(TODAY);
     fixture.componentInstance.timeEntryHours.set(8);
     fixture.componentInstance.timeEntryNotes.set('Backend wrok');
     fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
@@ -176,7 +187,7 @@ describe('MyAssignmentsComponent time entry submission', () => {
     const second = createMyTimeEntry.mock.calls[1][0];
     expect(second.notes).toBe('Backend work');
     expect(second.hours).toBe(8);
-    expect(second.date).toBe('2026-09-01');
+    expect(second.date).toBe(TODAY);
     // SAME key: the server replays the row it already has instead of logging the
     // 8 hours twice. The notes edit is dropped, which is the trade.
     expect(second.idempotencyKey).toBe(first.idempotencyKey);
@@ -193,7 +204,7 @@ describe('MyAssignmentsComponent time entry submission', () => {
     await flush(fixture);
 
     fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
-    fixture.componentInstance.timeEntryDate.set('2026-09-01');
+    fixture.componentInstance.timeEntryDate.set(TODAY);
     fixture.componentInstance.timeEntryHours.set(8);
     fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
 
@@ -218,7 +229,7 @@ describe('MyAssignmentsComponent time entry submission', () => {
     const before = (api.getMyTimeEntries as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
 
     fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
-    fixture.componentInstance.timeEntryDate.set('2026-09-01');
+    fixture.componentInstance.timeEntryDate.set(TODAY);
     fixture.componentInstance.timeEntryHours.set(8);
     fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
     await flush(fixture);
@@ -239,7 +250,7 @@ describe('MyAssignmentsComponent time entry submission', () => {
     await flush(fixture);
 
     fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
-    fixture.componentInstance.timeEntryDate.set('2026-09-01');
+    fixture.componentInstance.timeEntryDate.set(TODAY);
     fixture.componentInstance.timeEntryHours.set(8);
     fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
     fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);   // the user retries
@@ -252,7 +263,7 @@ describe('MyAssignmentsComponent time entry submission', () => {
     // Form closed: the next submission is a different entry.
     fixture.componentInstance['cancelTimeEntry']();
     fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
-    fixture.componentInstance.timeEntryDate.set('2026-09-02');
+    fixture.componentInstance.timeEntryDate.set(PREVIOUS_DAY);
     fixture.componentInstance.timeEntryHours.set(4);
     fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
 
@@ -268,8 +279,16 @@ describe('MyAssignmentsComponent time entry submission', () => {
     fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
     fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
     fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
+    await flush(fixture);
 
     expect(createMyTimeEntry).toHaveBeenCalledTimes(1);
+    const host = fixture.nativeElement as HTMLElement;
+    const form = host.querySelector('form') as HTMLFormElement;
+    expect(form.getAttribute('aria-busy')).toBe('true');
+    expect((host.querySelector('#timeEntryDate') as HTMLInputElement).disabled).toBe(true);
+    expect((host.querySelector('#timeEntryHours') as HTMLInputElement).disabled).toBe(true);
+    expect((host.querySelector('[data-test="submit-time-entry"]') as HTMLButtonElement).disabled).toBe(true);
+    expect(host.querySelector('[data-test="submit-time-entry"]')!.textContent).toContain('Submitting');
   });
 
   it('disables submission and explains invalid date or hours', async () => {
@@ -283,8 +302,68 @@ describe('MyAssignmentsComponent time entry submission', () => {
     const host = fixture.nativeElement as HTMLElement;
     const submit = host.querySelector('[data-test="submit-time-entry"]') as HTMLButtonElement;
     expect(submit.disabled).toBe(true);
-    expect(host.textContent).toContain('Enter a valid date and hours greater than zero.');
+    expect(host.textContent).toContain('Enter a valid calendar date.');
     expect(createMyTimeEntry).not.toHaveBeenCalled();
+  });
+
+  it('exposes the assignment/request intersection as date min/max and rejects a future day', async () => {
+    const assignment = {
+      ...ASSIGNMENT,
+      startDate: shiftDay(TODAY, -10),
+      endDate: shiftDay(TODAY, 10),
+    };
+    const request = {
+      ...REQUEST,
+      startDate: shiftDay(TODAY, -5),
+      endDate: shiftDay(TODAY, 5),
+    };
+    const { fixture, createMyTimeEntry } = setup({ assignments: [assignment], requests: [request] });
+    await flush(fixture);
+    fixture.componentInstance['startTimeEntry'](assignment);
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    const date = host.querySelector('#timeEntryDate') as HTMLInputElement;
+    expect(date.min).toBe(shiftDay(TODAY, -5));
+    // The request/assignment both extend into the future, but today is the hard cap.
+    expect(date.max).toBe(TODAY);
+    expect(host.querySelector('[data-test="time-entry-constraints"]')!.textContent)
+      .toContain(`${shiftDay(TODAY, -5)} to ${TODAY}`);
+
+    fixture.componentInstance.timeEntryDate.set(shiftDay(TODAY, 1));
+    fixture.detectChanges();
+    expect(date.getAttribute('aria-invalid')).toBe('true');
+    expect(host.querySelector('[data-test="time-entry-message"]')!.textContent).toContain('later than today');
+    fixture.componentInstance['saveTimeEntry'](assignment);
+    expect(createMyTimeEntry).not.toHaveBeenCalled();
+  });
+
+  it('caps hours against all non-rejected time already logged for the selected day', async () => {
+    const prior = { ...SUBMITTED_ENTRY, id: 'TE-prior', date: TODAY, hours: 6 };
+    // Global config is deliberately 12: the resource's 8h contract override is
+    // the effective cap and must win, exactly like resolveBaseCap on the server.
+    const { fixture, createMyTimeEntry } = setup({ timeEntries: [prior], hoursPerDay: 12 });
+    await flush(fixture);
+    fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
+    fixture.componentInstance.timeEntryHours.set(3);
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    const hours = host.querySelector('#timeEntryHours') as HTMLInputElement;
+    const submit = host.querySelector('[data-test="submit-time-entry"]') as HTMLButtonElement;
+    expect(hours.max).toBe('2');
+    expect(hours.getAttribute('aria-invalid')).toBe('true');
+    expect(submit.disabled).toBe(true);
+    expect(host.querySelector('[data-test="time-entry-message"]')!.textContent).toContain('enter at most 2h');
+    fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
+    expect(createMyTimeEntry).not.toHaveBeenCalled();
+
+    fixture.componentInstance.timeEntryHours.set(2);
+    fixture.detectChanges();
+    expect(hours.getAttribute('aria-invalid')).toBeNull();
+    expect(submit.disabled).toBe(false);
+    fixture.componentInstance['saveTimeEntry'](ASSIGNMENT);
+    expect(createMyTimeEntry).toHaveBeenCalledOnce();
   });
 
   /**
@@ -353,7 +432,7 @@ const FIVE_ASSIGNMENTS: Assignment[] = [1, 2, 3, 4, 5].map(n => ({
 }));
 
 describe('MyAssignmentsComponent read-state boundary', () => {
-  it('renders no KPI tiles while the four-leg read is in flight, and the real figures once it resolves', async () => {
+  it('renders no KPI tiles while the five-leg read is in flight, and the real figures once it resolves', async () => {
     // The tiles used to sit ABOVE the ListState wrapper, so a person with five
     // live bookings was told "Active Assignments 0", "0h" and a 0% utilization
     // tile for the whole multi-round-trip window. Absence first...
@@ -530,14 +609,14 @@ describe('MyAssignmentsComponent time-entry validation announcement', () => {
     // is never announced, so node identity — not the text — is the contract, and
     // it is what the previous @if shape could not satisfy at any text value.
     expect(host.querySelector('[data-test="time-entry-message"]')).toBe(region);
-    expect(region!.textContent).toContain('Enter a valid date and hours greater than zero.');
+    expect(region!.textContent).toContain('Enter a valid calendar date.');
   });
 
   it('marks only the offending control invalid, points it at the message, and clears the mark when valid', async () => {
     const { fixture } = setup();
     await flush(fixture);
     fixture.componentInstance['startTimeEntry'](ASSIGNMENT);
-    fixture.componentInstance.timeEntryDate.set('2026-09-01');
+    fixture.componentInstance.timeEntryDate.set(TODAY);
     fixture.componentInstance.timeEntryHours.set(8);
     fixture.detectChanges();
     const host = fixture.nativeElement as HTMLElement;
@@ -546,19 +625,19 @@ describe('MyAssignmentsComponent time-entry validation announcement', () => {
 
     // The case that must still be ALLOWED — without it a rule that always
     // reports "invalid" would pass every assertion below.
-    expect(date().getAttribute('aria-invalid')).toBe('false');
-    expect(hours().getAttribute('aria-invalid')).toBe('false');
+    expect(date().getAttribute('aria-invalid')).toBeNull();
+    expect(hours().getAttribute('aria-invalid')).toBeNull();
     expect((host.querySelector('[data-test="submit-time-entry"]') as HTMLButtonElement).disabled).toBe(false);
 
     fixture.componentInstance.timeEntryHours.set(0);
     fixture.detectChanges();
 
     expect(hours().getAttribute('aria-invalid')).toBe('true');
-    expect(hours().getAttribute('aria-describedby')).toBe('timeEntryMessage');
+    expect(hours().getAttribute('aria-describedby')).toBe('timeEntryConstraints timeEntryMessage');
 
     expect(host.querySelector('#timeEntryMessage')).not.toBeNull();
     // The date is still valid and must not be blamed for the hours.
-    expect(date().getAttribute('aria-invalid')).toBe('false');
+    expect(date().getAttribute('aria-invalid')).toBeNull();
   });
 });
 

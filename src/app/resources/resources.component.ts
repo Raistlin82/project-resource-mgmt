@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   Component,
   DestroyRef,
+  ElementRef,
   computed,
   inject,
   signal,
@@ -98,24 +99,28 @@ const REMOTE_LOCATION = 'Remote';
                with no scrollbar, no touch pan and no wheel pan. Same shape as
                approvals.ts and bench.component.ts; min-w keeps the port
                engaging deterministically instead of relying on min-content. -->
-          <div class="overflow-x-auto">
+          <p id="resourcesTablePanHint" class="border-b border-line bg-surface-muted px-4 py-2 text-xs font-semibold text-ink-muted lg:hidden">
+            Swipe horizontally for all columns. Name and Actions stay visible.
+          </p>
+          <div class="overflow-x-auto" role="region" tabindex="0"
+               aria-label="Resources table" aria-describedby="resourcesTablePanHint">
           <table class="command-data-table min-w-[900px]">
             <thead>
               <tr>
-                <th>Name</th>
+                <th class="sticky left-0 z-10 bg-surface">Name</th>
                 <th>Role</th>
                 <th>Organization</th>
                 <th>Location</th>
                 <th class="text-right">Capacity (h/wk)</th>
                 <th>Hire date</th>
                 <th>Status</th>
-                <th class="text-right">Actions</th>
+                <th class="sticky right-0 z-10 bg-surface text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
               @for (r of filteredResources(); track r.id) {
                 <tr>
-                  <td class="font-bold">
+                  <td class="sticky left-0 z-[1] bg-surface font-bold">
                     <span class="inline-flex items-center gap-2">
                       <span data-test="resource-name">{{ r.name }}</span>
                       <app-resource-kind-badge [kind]="r.kind" />
@@ -156,16 +161,16 @@ const REMOTE_LOCATION = 'Remote';
                       <span class="command-chip is-positive">Active</span>
                     }
                   </td>
-                  <td class="text-right whitespace-nowrap">
-                    <button type="button" (click)="openForm(r)" [attr.aria-label]="'Edit ' + r.name" [attr.title]="'Edit ' + r.name" class="text-ink-muted hover:text-accent-text transition-colors p-1">
+                  <td class="sticky right-0 z-[1] bg-surface text-right whitespace-nowrap">
+                    <button type="button" (click)="openForm(r)" [attr.aria-label]="'Edit ' + r.name" [attr.title]="'Edit ' + r.name" class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md text-ink-muted hover:text-accent-text transition-colors">
                       <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                     </button>
                     @if (isTerminated(r)) {
-                      <button type="button" (click)="reactivate(r)" [attr.aria-label]="'Reactivate ' + r.name" [attr.title]="'Reactivate ' + r.name" class="text-ink-muted hover:text-positive-text transition-colors p-1 ml-2">
+                      <button type="button" (click)="reactivate(r)" [attr.aria-label]="'Reactivate ' + r.name" [attr.title]="'Reactivate ' + r.name" class="ml-1 inline-flex min-h-11 min-w-11 items-center justify-center rounded-md text-ink-muted hover:text-positive-text transition-colors">
                         <mat-icon class="text-[20px] w-[20px] h-[20px]">restart_alt</mat-icon>
                       </button>
                     } @else {
-                      <button type="button" (click)="askTerminate(r)" [attr.aria-label]="'Terminate ' + r.name" [attr.title]="'Terminate contract for ' + r.name" class="text-ink-muted hover:text-critical-text transition-colors p-1 ml-2">
+                      <button type="button" (click)="askTerminate(r)" [attr.aria-label]="'Terminate ' + r.name" [attr.title]="'Terminate contract for ' + r.name" class="ml-1 inline-flex min-h-11 min-w-11 items-center justify-center rounded-md text-ink-muted hover:text-critical-text transition-colors">
                         <mat-icon class="text-[20px] w-[20px] h-[20px]">person_off</mat-icon>
                       </button>
                     }
@@ -188,28 +193,32 @@ const REMOTE_LOCATION = 'Remote';
       @if (showForm()) {
         <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
              appModal ariaLabelledby="resourceModalTitle" (dismiss)="closeForm()">
-          <div class="command-card shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+          <div class="command-card shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]"
+               [attr.aria-busy]="saving() ? 'true' : null">
             <div class="command-card-header">
               <h2 id="resourceModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit employee' : 'New employee' }}</h2>
-              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary transition-colors">
+              <button type="button" (click)="closeForm()" [disabled]="saving()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary transition-colors disabled:opacity-50">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
 
             <form [formGroup]="form" (ngSubmit)="save()" class="p-6 space-y-4 overflow-y-auto">
+              <fieldset [disabled]="saving()" class="contents">
               <div>
                 <label for="res-name" class="block text-sm font-medium text-ink-secondary mb-1">Name *</label>
                 <input id="res-name" type="text" formControlName="name" class="command-input" placeholder="e.g. Maria Rossi"
-                       [attr.aria-invalid]="invalid('name')">
+                       required aria-required="true" [attr.aria-invalid]="invalid('name')"
+                       [attr.aria-describedby]="invalid('name') ? 'res-name-error' : null">
                 @if (invalid('name')) {
-                  <p role="alert" class="mt-1 text-xs text-critical-text">Name is required.</p>
+                  <p id="res-name-error" role="alert" class="mt-1 text-xs text-critical-text">Name is required.</p>
                 }
               </div>
 
               <div>
                 <label for="res-role" class="block text-sm font-medium text-ink-secondary mb-1">Role *</label>
                 <select id="res-role" formControlName="role" class="command-select"
-                        [attr.aria-invalid]="invalid('role')">
+                        required aria-required="true" [attr.aria-invalid]="invalid('role')"
+                        [attr.aria-describedby]="invalid('role') ? 'res-role-error' : null">
                   <option value="" disabled>Select a role...</option>
                   @for (role of roleOptions(); track role.id) {
                     <option [value]="role.name">{{ role.name }}</option>
@@ -221,7 +230,7 @@ const REMOTE_LOCATION = 'Remote';
                   }
                 </select>
                 @if (invalid('role')) {
-                  <p role="alert" class="mt-1 text-xs text-critical-text">Role is required.</p>
+                  <p id="res-role-error" role="alert" class="mt-1 text-xs text-critical-text">Role is required.</p>
                 }
               </div>
 
@@ -244,7 +253,8 @@ const REMOTE_LOCATION = 'Remote';
                        exactly when kind is 'subco' (validator toggled dynamically —
                        see the constructor). -->
                   <select id="res-vendor" data-test="res-vendor" formControlName="vendorId" class="command-select"
-                          [attr.aria-invalid]="invalid('vendorId')">
+                          required aria-required="true" [attr.aria-invalid]="invalid('vendorId')"
+                          [attr.aria-describedby]="invalid('vendorId') ? 'res-vendor-error' : null">
                     <option value="">Select a vendor...</option>
                     @for (v of vendorOptions(); track v.id) {
                       <option [value]="v.id">{{ v.name }}</option>
@@ -254,7 +264,7 @@ const REMOTE_LOCATION = 'Remote';
                     }
                   </select>
                   @if (invalid('vendorId')) {
-                    <p role="alert" class="mt-1 text-xs text-critical-text">A vendor is required for a subcontractor.</p>
+                    <p id="res-vendor-error" role="alert" class="mt-1 text-xs text-critical-text">A vendor is required for a subcontractor.</p>
                   }
                 </div>
               }
@@ -323,17 +333,19 @@ const REMOTE_LOCATION = 'Remote';
                 <div>
                   <label for="res-capacity" class="block text-sm font-medium text-ink-secondary mb-1">Capacity (h/wk) *</label>
                   <input id="res-capacity" type="number" min="1" step="1" formControlName="capacity" class="command-input" placeholder="e.g. 40"
-                         [attr.aria-invalid]="invalid('capacity')">
+                         required aria-required="true" [attr.aria-invalid]="invalid('capacity')"
+                         [attr.aria-describedby]="invalid('capacity') ? 'res-capacity-error' : null">
                   @if (invalid('capacity')) {
-                    <p role="alert" class="mt-1 text-xs text-critical-text">Capacity must be a positive number.</p>
+                    <p id="res-capacity-error" role="alert" class="mt-1 text-xs text-critical-text">Capacity must be a positive number.</p>
                   }
                 </div>
                 <div>
                   <label for="res-hire" class="block text-sm font-medium text-ink-secondary mb-1">Hire date *</label>
                   <input id="res-hire" type="date" formControlName="hireDate" class="command-input"
-                         [attr.aria-invalid]="invalid('hireDate')">
+                         required aria-required="true" [attr.aria-invalid]="invalid('hireDate')"
+                         [attr.aria-describedby]="invalid('hireDate') ? 'res-hire-error' : null">
                   @if (invalid('hireDate')) {
-                    <p role="alert" class="mt-1 text-xs text-critical-text">Hire date is required.</p>
+                    <p id="res-hire-error" role="alert" class="mt-1 text-xs text-critical-text">Hire date is required.</p>
                   }
                 </div>
               </div>
@@ -400,12 +412,32 @@ const REMOTE_LOCATION = 'Remote';
               </app-list-state>
 
               <div class="pt-4 flex justify-end gap-3">
-                <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
-                <button type="submit" [disabled]="form.invalid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
-                  {{ editingId() ? 'Save changes' : 'Create employee' }}
+                <button type="button" (click)="closeForm()" [disabled]="saving()" class="command-button secondary disabled:opacity-50">Cancel</button>
+                <button type="submit" [disabled]="saving()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                  {{ saving() ? 'Saving…' : (editingId() ? 'Save changes' : 'Create employee') }}
                 </button>
               </div>
+              </fieldset>
+              @if (saveError()) {
+                <p class="command-field-error" role="alert" data-test="resource-save-error">{{ saveError() }}</p>
+              }
             </form>
+          </div>
+        </div>
+      }
+
+      @if (discardConfirmation()) {
+        <div class="fixed inset-0 z-[60] flex items-center justify-center bg-scrim/40 p-4 backdrop-blur-sm"
+             appModal ariaLabelledby="resourceDiscardTitle" (dismiss)="cancelDiscard()">
+          <div class="command-card w-full max-w-md overflow-hidden shadow-2xl" data-test="resource-discard-confirm">
+            <div class="p-6 text-center">
+              <h2 id="resourceDiscardTitle" class="font-display text-xl font-bold text-ink">Discard employee changes?</h2>
+              <p class="mt-3 text-sm text-ink-muted">Your unsaved employee changes will be lost.</p>
+            </div>
+            <div class="flex justify-end gap-3 border-t border-line bg-surface-muted p-4">
+              <button type="button" (click)="cancelDiscard()" class="command-button secondary">Keep editing</button>
+              <button type="button" (click)="confirmDiscard()" class="command-button">Discard changes</button>
+            </div>
           </div>
         </div>
       }
@@ -450,6 +482,7 @@ export class ResourcesComponent {
   private auth = inject(AuthService);
   private notifications = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
+  private host = inject<ElementRef<HTMLElement>>(ElementRef);
 
   // resources is a principal-gated read: key on authReady so it fires only after
   // the OAuth bootstrap settles and the bearer is attached (firing earlier 401s
@@ -895,6 +928,9 @@ export class ResourcesComponent {
 
   showForm = signal(false);
   editingId = signal<string | null>(null);
+  protected saving = signal(false);
+  protected saveError = signal<string | null>(null);
+  protected discardConfirmation = signal(false);
 
   // Terminate (cessazione) confirm flow: the resource being terminated + a date.
   terminating = signal<Resource | null>(null);
@@ -1058,20 +1094,42 @@ export class ResourcesComponent {
       this.form.reset({ name: '', role: '', managerId: '', organization: '', location: '', capacity: 40, costRateOverride: null, billRateOverride: null, hireDate: '', kind: 'internal', vendorId: '' });
       this.syncVendorRequirement('internal');
     }
+    this.form.markAsPristine();
+    this.saveError.set(null);
+    this.discardConfirmation.set(false);
     this.showForm.set(true);
   }
 
-  closeForm() {
+  closeForm(force = false) {
+    if (this.saving()) return;
+    if (!force && this.form.dirty) {
+      this.discardConfirmation.set(true);
+      return;
+    }
     this.showForm.set(false);
     this.editingId.set(null);
+    this.discardConfirmation.set(false);
+    this.saveError.set(null);
     this.form.reset();
   }
 
   save() {
+    if (this.saving()) return;
+    this.saveError.set(null);
     if (this.form.invalid) {
       this.form.markAllAsTouched();
+      const order = [
+        ['name', 'res-name'],
+        ['role', 'res-role'],
+        ['vendorId', 'res-vendor'],
+        ['capacity', 'res-capacity'],
+        ['hireDate', 'res-hire'],
+      ] as const;
+      const first = order.find(([control]) => this.form.controls[control].invalid);
+      if (first) queueMicrotask(() => this.host.nativeElement.querySelector<HTMLElement>(`#${first[1]}`)?.focus());
       return;
     }
+    this.saving.set(true);
     const raw = this.form.getRawValue();
     // utilization is NOT sent — it is derived server-side from assignments.
     const payload: Partial<Resource> = {
@@ -1097,12 +1155,28 @@ export class ResourcesComponent {
     const op = id ? this.api.updateResource(id, payload) : this.api.createResource(payload);
     op.pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: () => {
+        this.saving.set(false);
         this.notifications.show(id ? 'Resource updated' : 'Employee onboarded', 'success');
         this.resourcesRes.reload();
-        this.closeForm();
+        this.closeForm(true);
       },
-      error: () => this.notifications.show('Could not save the resource', 'error'),
+      error: error => {
+        this.saving.set(false);
+        const candidate = error as { error?: { error?: unknown }; message?: unknown };
+        const detail = candidate?.error?.error ?? candidate?.message;
+        this.saveError.set(typeof detail === 'string' && detail.trim()
+          ? `Could not save the employee: ${detail}`
+          : 'Could not save the employee. Review the fields and try again.');
+      },
     });
+  }
+
+  protected cancelDiscard(): void {
+    this.discardConfirmation.set(false);
+  }
+
+  protected confirmDiscard(): void {
+    this.closeForm(true);
   }
 
   askTerminate(r: Resource) {

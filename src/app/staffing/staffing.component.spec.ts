@@ -208,7 +208,7 @@ describe('StaffingComponent', () => {
   it('creates an empty assignment shell without sending derived assignedHours', async () => {
     const request: ResourceRequest = {
       id: 'REQ1', name: 'Apollo', requiredRole: 'Consultant', requiredEffort: 80,
-      staffedEffort: 0, skills: [], status: 'Open', startDate: '2026-09-01', endDate: '2026-09-30',
+      staffedEffort: 0, skills: [], status: 'Open', startDate: '2099-09-01', endDate: '2099-09-30',
     };
     const { fixture, createAssignment } = setup({ requests: [request] });
     await flush(fixture);
@@ -221,11 +221,92 @@ describe('StaffingComponent', () => {
     expect(createAssignment).toHaveBeenCalledWith({
       requestId: 'REQ1',
       resourceId: '1',
-      startDate: '2026-09-01',
-      endDate: '2026-09-30',
+      startDate: '2099-09-01',
+      endDate: '2099-09-30',
       allocationPct: 100,
     });
     expect(createAssignment).toHaveBeenCalledWith(expect.not.objectContaining({ assignedHours: expect.anything() }));
+  });
+
+  it('blocks incoherent proposal percentages and date ranges with inline errors', async () => {
+    const request: ResourceRequest = {
+      id: 'REQ1', name: 'Apollo', requiredRole: 'Consultant', requiredEffort: 80,
+      staffedEffort: 0, skills: [], status: 'Open', startDate: '2099-09-01', endDate: '2099-09-30',
+    };
+    const { fixture, createAssignment } = setup({ requests: [request] });
+    await flush(fixture);
+
+    fixture.componentInstance.selectRequest(request);
+    fixture.componentInstance.startAssign('1');
+    fixture.componentInstance.assignAllocationPct.set(150);
+    fixture.componentInstance.assignStartDate.set('2099-09-20');
+    fixture.componentInstance.assignEndDate.set('2099-09-10');
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    expect(host.textContent).toContain('Enter an allocation greater than 0% and no more than 100%.');
+    expect(host.textContent).toContain('End date must be on or after the start date.');
+    expect(host.querySelector<HTMLInputElement>('#assignAllocationPct')?.getAttribute('aria-invalid')).toBe('true');
+    expect(host.querySelector<HTMLButtonElement>('[data-test="assign-panel"] .command-button')?.disabled).toBe(true);
+
+    fixture.componentInstance.confirmAssign('1');
+    expect(createAssignment).not.toHaveBeenCalled();
+  });
+
+  it('blocks a proposal whose entire booking window is already past', async () => {
+    const request: ResourceRequest = {
+      id: 'REQ-old', name: 'Historical work', requiredRole: 'Consultant', requiredEffort: 80,
+      staffedEffort: 0, skills: [], status: 'Open', startDate: '2000-01-01', endDate: '2000-01-31',
+    };
+    const { fixture, createAssignment } = setup({ requests: [request] });
+    await flush(fixture);
+
+    fixture.componentInstance.selectRequest(request);
+    fixture.componentInstance.startAssign('1');
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    expect(host.textContent).toContain('Start date cannot be after the request ends');
+    expect(host.textContent).toContain('End date cannot be in the past');
+    fixture.componentInstance.confirmAssign('1');
+    expect(createAssignment).not.toHaveBeenCalled();
+  });
+
+  it('uses the page scroll owner instead of nested fixed-height list scrollers', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(host.querySelectorAll('.overflow-y-auto')).toHaveLength(0);
+    for (const card of host.querySelectorAll<HTMLElement>('.command-card')) {
+      expect(card.className).not.toContain('h-[min(800px,80vh)]');
+    }
+  });
+
+  it('requires an explicit review before assigning a fully utilized candidate', async () => {
+    const request: ResourceRequest = {
+      id: 'REQ-risk', name: 'Risk review', requiredRole: 'Consultant', requiredEffort: 80,
+      staffedEffort: 0, skills: [], status: 'Open', startDate: '2099-09-01', endDate: '2099-09-30',
+    };
+    const full: Resource = {
+      ...RESOURCES[0], id: 'full', name: 'Fully Booked', utilization: 100,
+    };
+    const { fixture, createAssignment } = setup({ requests: [request], resources: [full] });
+    await flush(fixture);
+
+    fixture.componentInstance.selectRequest(request);
+    fixture.componentInstance.startAssign(full.id);
+    fixture.detectChanges();
+    const warning = (fixture.nativeElement as HTMLElement)
+      .querySelector<HTMLElement>('[data-test="assignment-risk-warning"]');
+    expect(warning?.textContent).toContain('no uncommitted capacity is visible');
+
+    fixture.componentInstance.confirmAssign(full.id);
+    expect(createAssignment).not.toHaveBeenCalled();
+
+    fixture.componentInstance.assignmentRiskAcknowledged.set(true);
+    fixture.componentInstance.confirmAssign(full.id);
+    expect(createAssignment).toHaveBeenCalledOnce();
   });
 
   describe('org-dimension and people-manager filters (D, Task 8)', () => {

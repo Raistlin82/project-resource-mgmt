@@ -126,11 +126,19 @@ interface ProjectCommandRow {
     <div class="command-page space-y-6">
       <header class="command-header">
         <div>
-          <div class="command-eyebrow">Portfolio Delivery Control</div>
-          <h1 class="command-title">Delivery Command Center</h1>
-          <p class="command-subtitle">
-            A single view to govern margin, EAC, risks, change control, resource demand and team utilization.
-          </p>
+          @if (canViewPortfolioDashboard()) {
+            <div class="command-eyebrow">Portfolio Delivery Control</div>
+            <h1 class="command-title">Delivery Command Center</h1>
+            <p class="command-subtitle">
+              Govern margin, EAC, risks, change control, resource demand and team utilization.
+            </p>
+          } @else {
+            <div class="command-eyebrow">Personal workspace</div>
+            <h1 class="command-title">My Workspace</h1>
+            <p class="command-subtitle">
+              Continue your work from the areas available to your role.
+            </p>
+          }
         </div>
         <div class="flex flex-wrap items-center gap-2 pt-1">
           @if (canViewPortfolioDashboard()) {
@@ -151,7 +159,7 @@ interface ProjectCommandRow {
       @if (!canViewPortfolioDashboard()) {
         <section class="command-card p-6 sm:p-8" aria-labelledby="workspace-title">
           <div class="command-eyebrow">Role-aware home</div>
-          <h2 id="workspace-title" class="mt-2 font-display text-2xl font-bold text-ink">My workspace</h2>
+          <h2 id="workspace-title" class="mt-2 font-display text-2xl font-bold text-ink">Start here</h2>
           <p class="mt-2 max-w-2xl text-sm text-ink-muted">
             Open the areas available to your role. Portfolio financials are shown only to authorized finance readers.
           </p>
@@ -199,7 +207,7 @@ interface ProjectCommandRow {
         <div class="space-y-6" role="status" aria-live="polite" aria-busy="true">
           <span class="sr-only">Loading delivery command center</span>
           <div class="command-eyebrow">Portfolio Financials</div>
-          <section class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-7 gap-4">
+          <section class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7 gap-4">
             <div class="command-skeleton h-28 xl:col-span-2"></div>
             @for (tile of [1, 2, 3, 4, 5]; track tile) {
               <div class="command-skeleton h-28"></div>
@@ -225,7 +233,7 @@ interface ProjectCommandRow {
         </span>
       </div>
 
-      <section class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-7 gap-4">
+      <section class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7 gap-4">
         <!--
           Q2 (spec §10, decided 2026-08-07): FULLY LOADED is in the LABEL, not
           only in a caption. The arithmetic behind this tile did not change — it

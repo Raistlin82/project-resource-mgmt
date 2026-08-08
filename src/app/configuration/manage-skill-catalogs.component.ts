@@ -1,40 +1,25 @@
-import { Component, inject, signal, computed } from '@angular/core';
+import { Component, DestroyRef, ElementRef, inject, signal, computed } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { ReactiveFormsModule, FormBuilder, FormGroup, Validators } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, SkillCatalog } from '../services/api.service';
 import { NotificationService } from '../services/notification.service';
 import { authGatedResource } from '../services/auth-gated-resource.util';
+import { ConfigurationPageShellComponent } from './configuration-page-shell.component';
+import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 
 @Component({
   selector: 'app-manage-skill-catalogs',
-  imports: [ReactiveFormsModule, MatIconModule],
+  imports: [ReactiveFormsModule, MatIconModule, ConfigurationPageShellComponent, ModalDialogDirective],
   template: `
+    <app-configuration-page-shell title="Manage Skill Catalogs" subtitle="Organize governed skills into reusable catalogs.">
+      <button configuration-actions (click)="openCreateForm()" class="command-button">
+        <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create Catalog
+      </button>
     <div class="command-card overflow-hidden">
       <div class="command-card-header">
-        <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Manage Skill Catalogs</h2>
-        <button (click)="openCreateForm()" class="command-button">
-          <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create Catalog
-        </button>
+        <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Skill catalogs</h2>
       </div>
-
-      @if (showForm()) {
-        <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)]">
-          <form [formGroup]="catalogForm" (ngSubmit)="onSubmit()" class="space-y-6 max-w-md">
-            <div>
-              <label for="catalogName" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Name</label>
-              <input id="catalogName" type="text" formControlName="name" class="command-input">
-            </div>
-            <div>
-              <label for="catalogDescription" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Description</label>
-              <textarea id="catalogDescription" formControlName="description" rows="3" class="command-textarea"></textarea>
-            </div>
-            <div class="flex justify-end gap-3 pt-2">
-              <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
-              <button type="submit" [disabled]="catalogForm.invalid" class="command-button disabled:opacity-50">Save</button>
-            </div>
-          </form>
-        </div>
-      }
 
       <div class="overflow-x-auto">
         <table class="command-data-table">
@@ -78,21 +63,77 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
                 </td>
               </tr>
             }
+            @if (skillCatalogs().length === 0) {
+              <tr>
+                <td colspan="4" class="text-center text-[var(--cc-muted)]">No skill catalogs defined yet.</td>
+              </tr>
+            }
           </tbody>
         </table>
       </div>
     </div>
+
+    @if (showForm()) {
+      <div data-test="skill-catalog-form-overlay"
+           class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
+           appModal ariaLabelledby="skillCatalogModalTitle" (dismiss)="closeForm()" (click)="onFormBackdrop($event)">
+        <div class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
+          <div class="command-card-header">
+            <h2 id="skillCatalogModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Create Skill Catalog</h2>
+            <button type="button" (click)="closeForm()" [disabled]="saving()" aria-label="Close dialog" title="Close"
+                    class="text-ink-muted hover:text-ink-secondary transition-colors disabled:opacity-50">
+              <mat-icon>close</mat-icon>
+            </button>
+          </div>
+          <form [formGroup]="catalogForm" (ngSubmit)="onSubmit()" [attr.aria-busy]="saving()" class="flex flex-col flex-1 min-h-0 overflow-hidden">
+            <div class="p-6 space-y-6 overflow-y-auto flex-1 min-h-0">
+              <div>
+                <label for="catalogName" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">
+                  Name <span aria-hidden="true">*</span><span class="sr-only"> required</span>
+                </label>
+                <input id="catalogName" type="text" formControlName="name" class="command-input"
+                       required aria-required="true" [attr.aria-invalid]="invalid('name') ? 'true' : null"
+                       [attr.aria-describedby]="invalid('name') ? 'catalogNameError' : null">
+                @if (invalid('name')) {
+                  <p id="catalogNameError" role="alert" class="mt-1 text-xs text-critical-text">Name is required.</p>
+                }
+              </div>
+              <div>
+                <label for="catalogDescription" class="block text-xs font-bold text-[var(--cc-muted)] uppercase tracking-wider mb-2">Description</label>
+                <textarea id="catalogDescription" formControlName="description" rows="3" class="command-textarea"></textarea>
+              </div>
+              @if (saveError()) {
+                <p id="skillCatalogSaveError" role="alert" class="rounded-lg border border-critical bg-critical-tint px-3 py-2 text-sm text-critical-text">
+                  {{ saveError() }} You can retry without re-entering the form.
+                </p>
+              }
+            </div>
+            <div class="px-6 py-4 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
+              <button type="button" (click)="closeForm()" [disabled]="saving()" class="command-button secondary disabled:opacity-50">Cancel</button>
+              <button type="submit" [disabled]="saving()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                {{ saving() ? 'Saving…' : 'Save' }}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    }
+    </app-configuration-page-shell>
   `
 })
 export class ManageSkillCatalogsComponent {
   private api = inject(ApiService);
   private fb = inject(FormBuilder);
+  private destroyRef = inject(DestroyRef);
+  private host = inject<ElementRef<HTMLElement>>(ElementRef);
   private notificationService = inject(NotificationService);
 
   private catalogsRes = authGatedResource(() => this.api.getSkillCatalogs(), [] as SkillCatalog[]);
   skillCatalogs = computed(() => this.catalogsRes.value());
 
   showForm = signal(false);
+  saving = signal(false);
+  saveError = signal<string | null>(null);
   /** Read by the template: the armed row renders its own Confirm/Cancel pair. */
   protected pendingDeleteId = signal<string | null>(null);
 
@@ -102,21 +143,64 @@ export class ManageSkillCatalogsComponent {
   });
 
   openCreateForm() {
-    this.catalogForm.reset();
+    this.saving.set(false);
+    this.saveError.set(null);
+    this.catalogForm.reset({ name: '', description: '' });
     this.showForm.set(true);
   }
 
-  closeForm() {
+  closeForm(force = false) {
+    if (this.saving()) return;
+    if (!force && this.catalogForm.dirty && typeof window !== 'undefined'
+        && !window.confirm('Discard your unsaved skill catalog changes?')) return;
     this.showForm.set(false);
+    this.saveError.set(null);
+    this.catalogForm.reset({ name: '', description: '' });
+  }
+
+  onFormBackdrop(event: MouseEvent) {
+    if (event.target === event.currentTarget) this.closeForm();
+  }
+
+  invalid(controlName: 'name' | 'description'): boolean {
+    const control = this.catalogForm.controls[controlName];
+    return control.invalid && (control.touched || control.dirty);
+  }
+
+  private focusFirstInvalidControl() {
+    if (this.catalogForm.controls['name'].invalid) {
+      queueMicrotask(() => this.host.nativeElement.querySelector<HTMLElement>('#catalogName')?.focus());
+    }
+  }
+
+  private apiErrorMessage(error: unknown): string {
+    const response = error as { error?: { error?: unknown }; message?: unknown } | null;
+    const detail = response?.error?.error ?? response?.message;
+    return typeof detail === 'string' && detail.trim() ? detail : 'Unable to save the skill catalog.';
   }
 
   onSubmit() {
-    if (this.catalogForm.valid) {
-      this.api.createSkillCatalog(this.catalogForm.value).subscribe(() => {
-        this.catalogsRes.reload();
-        this.closeForm();
-      });
+    if (this.saving()) return;
+    this.saveError.set(null);
+    if (this.catalogForm.invalid) {
+      this.catalogForm.markAllAsTouched();
+      this.focusFirstInvalidControl();
+      return;
     }
+    this.saving.set(true);
+    this.api.createSkillCatalog(this.catalogForm.getRawValue())
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: () => {
+          this.saving.set(false);
+          this.catalogsRes.reload();
+          this.closeForm(true);
+        },
+        error: error => {
+          this.saving.set(false);
+          this.saveError.set(this.apiErrorMessage(error));
+        },
+      });
   }
 
   /**

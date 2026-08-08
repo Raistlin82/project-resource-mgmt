@@ -958,6 +958,20 @@ describe('UtilizationComponent — assignment write affordances follow canManage
     expect(writeControls(host)).toStrictEqual({ delete: 1, edit: 1, create: 1 });
   });
 
+  it('keeps assignment actions visible, wrapped and 44px square for touch', async () => {
+    const { host } = await withSelection('resource-manager');
+    const actions = [
+      host.querySelector<HTMLButtonElement>('button[aria-label^="Copy assignment for"]')!,
+      host.querySelector<HTMLButtonElement>('button[aria-label^="Edit assignment for"]')!,
+      host.querySelector<HTMLButtonElement>('button[aria-label^="Delete assignment for"]')!,
+    ];
+    const actionGroup = actions[0].parentElement!;
+
+    expect(actionGroup.className.split(/\s+/)).toEqual(expect.arrayContaining(['flex', 'flex-wrap']));
+    expect(actionGroup.className.split(/\s+/).some(token => token.includes('opacity-0') || token.includes('group-hover'))).toBe(false);
+    for (const action of actions) expect(action.className.split(/\s+/)).toContain('size-11');
+  });
+
   it('refuses the write handlers for finance when called directly, not only through the template', async () => {
     // The template gate is one refactor away from being the only gate. These
     // are the four entry points that reach /assignments.
@@ -1067,14 +1081,13 @@ describe('UtilizationComponent — deleting an assignment is confirmed and names
 });
 
 // -----------------------------------------------------------------------------
-// Static scan — a hover-only reveal must also reveal on FOCUS.
+// Static scan — essential actions must never depend on hover to be painted.
 //
 // jsdom performs NO layout: nothing below proves what a 1280px browser paints,
 // and it deliberately does not claim to. What it proves is the STRUCTURAL
-// PRECONDITION — every class attribute in src/app that hides a control behind
-// hover from the `sm` breakpoint up also un-hides it when focus enters, which is
-// the difference between a keyboard user seeing the caret and Tabbing blind
-// across three invisible stops (one of them a delete).
+// PRECONDITION — no class attribute in src/app hides an action cluster from the
+// `sm` breakpoint up. Focus-reveal is not enough: touch devices can satisfy the
+// breakpoint while having no hover state at all.
 // -----------------------------------------------------------------------------
 
 const APP_DIR = resolve(process.cwd(), 'src/app');
@@ -1089,13 +1102,17 @@ function componentSources(dir: string): string[] {
 
 interface ClassAttr { where: string; classes: string }
 
-/** Every `class="…"` attribute in src/app whose value hides behind `sm` hover. */
-function hoverOnlyRevealSites(): ClassAttr[] {
+function hidesAtSm(classes: string): boolean {
+  return classes.split(/\s+/).includes('sm:opacity-0');
+}
+
+/** Every `class="…"` attribute in src/app whose value hides at `sm` and above. */
+function smHiddenSites(): ClassAttr[] {
   const sites: ClassAttr[] = [];
   for (const file of componentSources(APP_DIR)) {
     const src = readFileSync(file, 'utf8');
     for (const m of src.matchAll(/\bclass="([^"]*)"/g)) {
-      if (!m[1].includes('sm:opacity-0')) continue;
+      if (!hidesAtSm(m[1])) continue;
       const line = src.slice(0, m.index).split('\n').length;
       sites.push({ where: `${relative(process.cwd(), file)}:${line}`, classes: m[1] });
     }
@@ -1103,45 +1120,15 @@ function hoverOnlyRevealSites(): ClassAttr[] {
   return sites;
 }
 
-/**
- * True when some class token reveals the element at opacity-100 on focus.
- * Token-wise rather than by substring, and it accepts the `group-focus[-within]`
- * variants explicitly — `sm:group-focus-within:opacity-100` (my-profile) is a
- * correct reveal, and a naive substring test for 'focus-within:opacity-100'
- * would pass it only by accident.
- */
-function revealsOnFocus(classes: string): boolean {
-  const FOCUS_VARIANTS = new Set(['focus', 'focus-within', 'group-focus', 'group-focus-within']);
-  return classes.split(/\s+/).some(token => {
-    if (!token.endsWith(':opacity-100')) return false;
-    return token.slice(0, -':opacity-100'.length).split(':').some(v => FOCUS_VARIANTS.has(v));
-  });
-}
+describe('essential action clusters stay painted without hover (structural precondition — jsdom does not lay out)', () => {
+  const sites = smHiddenSites();
 
-describe('hover-only action clusters reveal on focus too (structural precondition — jsdom does not lay out)', () => {
-  const sites = hoverOnlyRevealSites();
-
-  it('discriminates a hover-only cluster from a focus-revealing one, so the predicate is no tautology', () => {
-    // THE NEGATIVE CONTROL, and the reason the scan below means anything. Left
-    // string is the EXACT class attribute utilization.component.ts carried
-    // before this fix; right string is the same attribute after it.
-    expect(revealsOnFocus('flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity')).toBe(false);
-    expect(revealsOnFocus('flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 transition-opacity')).toBe(true);
-    // A plain, unconditional opacity-100 is not a focus reveal either.
-    expect(revealsOnFocus('opacity-100 sm:opacity-0 sm:group-hover:opacity-100')).toBe(false);
-    // …and the group- variants must be accepted rather than tolerated by luck.
-    expect(revealsOnFocus('sm:opacity-0 sm:group-focus-within:opacity-100')).toBe(true);
-    expect(revealsOnFocus('sm:opacity-0 focus:opacity-100')).toBe(true);
+  it('distinguishes an sm-hidden cluster from a permanently visible one', () => {
+    expect(hidesAtSm('flex opacity-100 sm:opacity-0 sm:group-hover:opacity-100')).toBe(true);
+    expect(hidesAtSm('flex opacity-100 transition-opacity')).toBe(false);
   });
 
-  it('finds the sm:opacity-0 sites at all — the guard against a regex typo passing on an empty set', () => {
-    // 8 today. A scan that silently collected nothing would otherwise report
-    // "no offenders" forever, which is how a check of this shape goes blind.
-    expect(sites.length).toBeGreaterThanOrEqual(7);
-  });
-
-  it('every one of them also reveals on focus', () => {
-    const offenders = sites.filter(s => !revealsOnFocus(s.classes)).map(s => s.where);
-    expect(offenders).toStrictEqual([]);
+  it('finds no sm-hidden class in the application source', () => {
+    expect(sites.map(site => site.where)).toStrictEqual([]);
   });
 });

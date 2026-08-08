@@ -191,11 +191,102 @@ describe('Projects list states and contextual actions', () => {
     expect(dialog?.querySelector(`[aria-label="Confirm delete project ${longName} (${contextualProject.id})"]`)).not.toBeNull();
   });
 
+  it('keeps project edit/delete actions visible, wrapped and at least 44px square', async () => {
+    const { fixture } = await render('pm');
+    const h = fixture.nativeElement as HTMLElement;
+    const edit = h.querySelector<HTMLButtonElement>('[aria-label="Edit project Read-only project (P1)"]')!;
+    const remove = h.querySelector<HTMLButtonElement>('[aria-label="Delete project Read-only project (P1)"]')!;
+    const actionGroup = edit.parentElement!;
+
+    expect(actionGroup.className.split(/\s+/)).toEqual(expect.arrayContaining(['flex', 'flex-wrap']));
+    expect(actionGroup.className.split(/\s+/).some(token => token.includes('opacity-0') || token.includes('group-hover'))).toBe(false);
+    for (const button of [edit, remove]) {
+      expect(button.className.split(/\s+/)).toEqual(expect.arrayContaining(['min-h-11', 'min-w-11']));
+    }
+  });
+
   it('uses an h2 list section before h3 card titles', async () => {
     const { fixture } = await render('pm');
     const outline = Array.from((fixture.nativeElement as HTMLElement).querySelectorAll('h1, h2, h3'))
       .map(heading => Number(heading.tagName.slice(1)));
     expect(outline.slice(0, 3)).toEqual([1, 2, 3]);
+  });
+});
+
+describe('Projects form lifecycle', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  function validProject(component: ProjectsComponent): void {
+    component.projectForm.setValue({
+      name: 'New project',
+      location: 'Remote',
+      startDate: '2099-01-01',
+      endDate: '2099-12-31',
+      status: 'In Planning',
+      ownerId: '1',
+      contractId: '',
+      description: '',
+    });
+  }
+
+  it('keeps invalid submit operable, exposes inline errors and focuses the first invalid field', async () => {
+    const { fixture, component, api } = await render('pm');
+    component.openCreateForm();
+    await tick(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+    const submit = [...host.querySelectorAll<HTMLButtonElement>('button')]
+      .find(button => button.textContent?.includes('Create Project') && button.closest('[role="dialog"]'))!;
+
+    expect(submit.disabled).toBe(false);
+    submit.click();
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    expect(api.createProject).not.toHaveBeenCalled();
+    expect(host.querySelector('#projectNameError')?.textContent).toContain('required');
+    expect(document.activeElement).toBe(host.querySelector('#projectName'));
+  });
+
+  it('asks before discarding a dirty form and preserves it when the operator keeps editing', async () => {
+    const { fixture, component } = await render('pm');
+    component.openCreateForm();
+    await tick(fixture);
+    component.projectForm.controls.name.setValue('Draft name');
+    component.projectForm.controls.name.markAsDirty();
+    component.closeForm();
+    fixture.detectChanges();
+
+    expect(component.showForm()).toBe(true);
+    expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="project-discard-confirm"]')).not.toBeNull();
+
+    (component as unknown as { cancelDiscard: () => void }).cancelDiscard();
+    fixture.detectChanges();
+    expect(component.showForm()).toBe(true);
+    expect(component.projectForm.controls.name.value).toBe('Draft name');
+  });
+
+  it('blocks duplicate saves while pending and keeps API failures in the form', async () => {
+    const pending = new Subject<Project>();
+    const { fixture, component, api } = await render('pm', {
+      createProject: vi.fn(() => pending.asObservable()),
+    });
+    component.openCreateForm();
+    await tick(fixture);
+    validProject(component);
+    component.saveProject();
+    component.saveProject();
+    fixture.detectChanges();
+
+    expect(api.createProject).toHaveBeenCalledOnce();
+    const save = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('button')]
+      .find(button => button.textContent?.includes('Saving'))!;
+    expect(save.disabled).toBe(true);
+
+    pending.error({ error: { error: 'Owner is unavailable' } });
+    fixture.detectChanges();
+    expect(component.showForm()).toBe(true);
+    expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="project-save-error"]')?.textContent)
+      .toContain('Owner is unavailable');
   });
 });
 

@@ -1,0 +1,56 @@
+- generic [ref=f4e3]:
+  - link "Skip to main content" [ref=f4e4] [cursor=pointer]:
+    - /url: "#main-content"
+  - banner [ref=f4e5]:
+    - generic [ref=f4e6]:
+      - img [ref=f4e8]: hub
+      - generic [ref=f4e9]:
+        - generic [ref=f4e10]: Delivery Control
+        - generic [ref=f4e12]: Portfolio command center
+    - button "Toggle navigation" [ref=f4e13]:
+      - img [ref=f4e14]: menu
+  - main [ref=f4e17]:
+    - generic [ref=f4e20]:
+      - generic [ref=f4e21]:
+        - generic [ref=f4e22]:
+          - generic [ref=f4e23]: Configuration
+          - heading "Rate Cards" [level=1] [ref=f4e24]
+          - paragraph [ref=f4e25]:
+            - text: Default cost & bill rates per role, in
+            - strong [ref=f4e26]: € / day
+            - text: . A resource inherits the matching card unless it sets a per-resource override; an organization-specific card overrides the generic one.
+        - button "Add Rate Card" [ref=f4e27]:
+          - img [ref=f4e28]: add
+          - text: Add Rate Card
+      - generic [ref=f4e29]:
+        - img [ref=f4e30]: schedule
+        - generic [ref=f4e31]:
+          - text: Rates are
+          - strong [ref=f4e32]: daily
+          - text: . 1 working day =
+        - spinbutton "Working hours per day" [disabled] [ref=f4e33]
+        - generic [ref=f4e34]: hours (used to convert €/day → €/hour in the margin calculations).
+        - button "Save" [disabled] [ref=f4e35]
+        - status [ref=f4e36]: Loading the configured value…
+      - generic [ref=f4e37]:
+        - generic [ref=f4e39]:
+          - img [ref=f4e40]: search
+          - textbox "Search rate cards" [ref=f4e41]:
+            - /placeholder: Search rate cards...
+        - paragraph [ref=f4e42]: Scroll horizontally to view rates and actions.
+        - region "Rate cards table" [ref=f4e43]:
+          - table [ref=f4e44]:
+            - rowgroup [ref=f4e45]:
+              - row [ref=f4e46]:
+                - columnheader "Role" [ref=f4e47]
+                - columnheader "Organization" [ref=f4e48]
+                - columnheader "Currency" [ref=f4e49]
+                - columnheader "Cost rate (€/day)" [ref=f4e50]
+                - columnheader "Bill rate (€/day)" [ref=f4e51]
+                - columnheader "Actions" [ref=f4e52]
+            - rowgroup [ref=f4e53]:
+              - row [ref=f4e54]:
+                - cell "No rate cards defined yet." [ref=f4e55]
+  - generic:
+    - alert
+    - status

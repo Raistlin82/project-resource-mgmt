@@ -7,26 +7,28 @@ import { ApiService, Skill, SkillCatalog, ProficiencySet } from '../services/api
 import { NotificationService } from '../services/notification.service';
 import { authGatedResource } from '../services/auth-gated-resource.util';
 import { MultiSelectChipsComponent, type MultiSelectOption } from '../shared/multi-select-chips.component';
+import { ConfigurationPageShellComponent } from './configuration-page-shell.component';
 
 @Component({
   selector: 'app-manage-skills',
-  imports: [ReactiveFormsModule, MatIconModule, MultiSelectChipsComponent],
+  imports: [ReactiveFormsModule, MatIconModule, MultiSelectChipsComponent, ConfigurationPageShellComponent],
   template: `
+    <app-configuration-page-shell title="Manage Skills" subtitle="Maintain the governed skill catalog used by profiles and requests.">
+      <div configuration-actions class="flex flex-wrap gap-3">
+        <button type="button" disabled aria-describedby="skillsImportStatus"
+                class="command-button secondary disabled:cursor-not-allowed disabled:opacity-60">
+          <mat-icon class="text-[18px] w-[18px] h-[18px]">hourglass_top</mat-icon> CSV import coming soon
+        </button>
+        <button (click)="downloadCsv()" class="command-button secondary">
+          <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> Download CSV
+        </button>
+        <button (click)="openCreateForm()" class="command-button">
+          <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create Skill
+        </button>
+      </div>
     <div class="command-card overflow-hidden">
       <div class="command-card-header flex-wrap">
-        <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Manage Skills</h2>
-        <div class="flex flex-wrap gap-3">
-          <button type="button" disabled aria-describedby="skillsImportStatus"
-                  class="command-button secondary disabled:cursor-not-allowed disabled:opacity-60">
-            <mat-icon class="text-[18px] w-[18px] h-[18px]">hourglass_top</mat-icon> CSV import coming soon
-          </button>
-          <button (click)="downloadCsv()" class="command-button secondary">
-            <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> Download CSV
-          </button>
-          <button (click)="openCreateForm()" class="command-button">
-            <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create Skill
-          </button>
-        </div>
+        <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Skills catalog</h2>
       </div>
 
       <p id="skillsImportStatus" class="border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)] px-5 py-3 text-sm text-[var(--cc-muted)]">
@@ -162,6 +164,7 @@ import { MultiSelectChipsComponent, type MultiSelectOption } from '../shared/mul
         </table>
       </div>
     </div>
+    </app-configuration-page-shell>
   `
 })
 export class ManageSkillsComponent {

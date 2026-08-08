@@ -94,6 +94,12 @@ interface BillingRow {
   readonly capExceeded: boolean;
 }
 
+interface BillingActionReview {
+  readonly kind: 'issue' | 'mark-paid';
+  readonly rows: readonly BillingRow[];
+  readonly batch: boolean;
+}
+
 /**
  * Issuer (supplier) identity printed on the invoice artifact. Static client-side
  * stand-in for company master data — no new service dependency.
@@ -112,7 +118,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CurrencyPipe, DatePipe, DecimalPipe, PercentPipe, MatIconModule, ReactiveFormsModule, ModalDialogDirective, ListStateComponent],
   template: `
-    <div class="command-page space-y-6 p-4 sm:p-6 lg:p-8">
+    <div class="command-page space-y-6">
       <!-- HEADER -->
       <header class="command-header">
         <div>
@@ -123,14 +129,14 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
             caps, advances, progress, expenses and credit notes — with live tax, retention and net-payable rollups.
           </p>
         </div>
-        <div class="flex items-center gap-3">
-          <button type="button" class="command-button secondary" (click)="exportCsv()"
+        <div class="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:flex-wrap" data-test="billing-header-actions">
+          <button type="button" class="command-button secondary w-full sm:w-auto" (click)="exportCsv()"
                   [disabled]="!rows().length"
                   [attr.aria-label]="'Export ' + rows().length + ' filtered billing conditions to CSV'">
             <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon>
             Export CSV
           </button>
-          <button type="button" class="command-button" (click)="openCreate()">
+          <button type="button" class="command-button w-full sm:w-auto" (click)="openCreate()">
             <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon>
             New Billing Condition
           </button>
@@ -259,22 +265,22 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                       (retry)="reloadFinancialData()">
         <ng-template>
       <section class="command-card rounded-lg overflow-hidden">
-        <div class="command-card-header">
+        <div class="command-card-header flex-col items-stretch gap-3 sm:flex-row sm:items-center">
           <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">All Billing Conditions</h2>
-          <div class="flex items-center gap-3">
+          <div class="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center" data-test="billing-table-actions">
             @if (selectedReadyCount() > 0) {
-              <button type="button" class="command-button"
+              <button type="button" class="command-button w-full sm:w-auto"
                       (click)="generateSelectedInvoices()" [disabled]="batchRunning() || busyId() !== null"
-                      [attr.aria-label]="'Generate ' + selectedReadyCount() + ' invoices for selected ready conditions'">
+                      [attr.aria-label]="'Review and issue ' + selectedReadyCount() + ' invoices for selected ready conditions'">
                 <mat-icon class="text-[18px] w-[18px] h-[18px]">receipt_long</mat-icon>
-                Generate {{ selectedReadyCount() }} {{ selectedReadyCount() === 1 ? 'invoice' : 'invoices' }}
+                Review &amp; issue {{ selectedReadyCount() }} {{ selectedReadyCount() === 1 ? 'invoice' : 'invoices' }}
               </button>
             }
             <span class="command-status">{{ rows().length }} shown</span>
           </div>
         </div>
         <div class="overflow-x-auto">
-          <table class="command-data-table">
+          <table class="command-data-table min-w-[76rem]">
             <thead>
               <tr>
                 <th scope="col" class="w-10">
@@ -299,7 +305,7 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                 <th scope="col">Status</th>
                 <th scope="col">Invoice #</th>
                 <th scope="col">Due</th>
-                <th scope="col" class="text-right">Actions</th>
+                <th scope="col" class="sticky right-0 bg-surface text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -383,30 +389,30 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
                       <span class="text-ink-muted">&mdash;</span>
                     }
                   </td>
-                  <td class="text-right">
-                    <div class="inline-flex items-center gap-1">
-                      <button type="button" class="p-1.5 rounded-lg text-ink-muted hover:text-accent-text hover:bg-accent-tint transition-colors"
+                  <td class="sticky right-0 bg-surface text-right">
+                    <div class="inline-flex flex-wrap items-center justify-end gap-1" data-test="billing-row-actions">
+                      <button type="button" class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted hover:text-accent-text hover:bg-accent-tint transition-colors"
                               (click)="openEdit(row.item)" [attr.aria-label]="'Edit ' + row.item.label" title="Edit">
                         <mat-icon class="text-[18px] w-[18px] h-[18px]">edit</mat-icon>
                       </button>
                       @if (row.invoiceNumber) {
-                        <button type="button" class="p-1.5 rounded-lg text-ink-muted hover:text-accent-text hover:bg-accent-tint transition-colors"
+                        <button type="button" class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted hover:text-accent-text hover:bg-accent-tint transition-colors"
                                 (click)="openInvoice(row)"
                                 [attr.aria-label]="'View invoice ' + row.invoiceNumber + ' for ' + row.item.label" title="View invoice">
                           <mat-icon class="text-[18px] w-[18px] h-[18px]">description</mat-icon>
                         </button>
                       }
                       @if (row.item.status === 'Ready') {
-                        <button type="button" class="p-1.5 rounded-lg text-ink-muted hover:text-positive-text hover:bg-positive-tint transition-colors"
+                        <button type="button" class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted hover:text-positive-text hover:bg-positive-tint transition-colors"
                                 (click)="generateInvoice(row.item)" [disabled]="busyId() === row.item.id"
-                                [attr.aria-label]="'Generate invoice for ' + row.item.label" title="Generate invoice">
+                                [attr.aria-label]="'Review issue invoice for ' + row.item.label" title="Review issue invoice">
                           <mat-icon class="text-[18px] w-[18px] h-[18px]">receipt_long</mat-icon>
                         </button>
                       }
                       @if (row.item.status === 'Invoiced') {
-                        <button type="button" class="p-1.5 rounded-lg text-ink-muted hover:text-accent-text hover:bg-accent-tint transition-colors"
+                        <button type="button" class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted hover:text-accent-text hover:bg-accent-tint transition-colors"
                                 (click)="markPaid(row.item)" [disabled]="busyId() === row.item.id"
-                                [attr.aria-label]="'Mark ' + row.item.label + ' as paid'" title="Mark paid">
+                                [attr.aria-label]="'Review mark ' + row.item.label + ' as paid'" title="Review mark paid">
                           <mat-icon class="text-[18px] w-[18px] h-[18px]">paid</mat-icon>
                         </button>
                       }
@@ -597,6 +603,115 @@ const CAP_EXCEEDED_FLAG = '[CAP-EXCEEDED]';
             </button>
           </div>
         </div>
+      </div>
+    }
+
+    <!-- REVIEW / CONFIRM FINANCIAL STATE TRANSITION -->
+    @if (actionReview(); as review) {
+      <div class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-scrim/40 p-4 backdrop-blur-sm sm:items-center sm:p-6"
+           appModal ariaLabelledby="billingActionReviewTitle" (dismiss)="closeActionReview()"
+           data-test="billing-action-review">
+        <section class="command-card flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden"
+                 [attr.aria-busy]="actionPending()">
+          <div class="command-card-header">
+            <div class="min-w-0">
+              <p class="command-eyebrow">Review financial action</p>
+              <h2 id="billingActionReviewTitle" class="font-display text-xl font-bold text-ink">
+                @if (review.kind === 'mark-paid') {
+                  Mark paid — {{ review.rows[0].invoiceNumber || review.rows[0].item.label }}
+                } @else if (!review.batch) {
+                  Issue invoice — {{ review.rows[0].item.label }}
+                } @else {
+                  Issue {{ review.rows.length }} selected invoices
+                }
+              </h2>
+            </div>
+            <button type="button" (click)="closeActionReview()" [disabled]="actionPending()"
+                    class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-full text-ink-muted hover:bg-surface-muted hover:text-ink-secondary disabled:opacity-40"
+                    aria-label="Close financial action review">
+              <mat-icon>close</mat-icon>
+            </button>
+          </div>
+
+          <div class="flex-1 space-y-5 overflow-y-auto p-6 sm:p-8">
+            <p class="text-sm text-ink-secondary">
+              Review the exact document, amount and effective date before this irreversible state transition is sent.
+            </p>
+
+            <div class="space-y-3">
+              @for (row of review.rows; track row.item.id) {
+                <article class="rounded-lg border border-line bg-surface-muted p-4" data-test="billing-action-record">
+                  <h3 class="font-semibold text-ink">{{ row.item.label }}</h3>
+                  <dl class="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-sm sm:grid-cols-2">
+                    <div>
+                      <dt class="text-ink-muted">Order</dt>
+                      <dd class="break-words font-mono text-ink">{{ row.item.orderId || (review.kind === 'issue' ? 'Created after confirmation' : 'Not available') }}</dd>
+                    </div>
+                    <div>
+                      <dt class="text-ink-muted">Invoice</dt>
+                      <dd class="break-words font-mono text-ink">{{ row.invoiceNumber || (review.kind === 'issue' ? 'Assigned by the server' : 'Not available') }}</dd>
+                    </div>
+                    <div>
+                      <dt class="text-ink-muted">Contract</dt>
+                      <dd class="text-ink">{{ row.contractName }}</dd>
+                    </div>
+                    <div>
+                      <dt class="text-ink-muted">Total due</dt>
+                      <dd class="font-mono font-semibold tabular-nums text-ink">{{ row.netPayable | currency: row.item.currency : 'symbol' : '1.2-2' }}</dd>
+                    </div>
+                  </dl>
+                </article>
+              }
+            </div>
+
+            <div>
+              <label for="billingActionEffectiveDate" class="mb-1.5 block text-sm font-semibold text-ink-secondary">
+                {{ review.kind === 'mark-paid' ? 'Payment effective date' : 'Invoice issue date' }} *
+              </label>
+              <input id="billingActionEffectiveDate" type="date" [formControl]="actionEffectiveDate"
+                     [attr.min]="actionMinimumDate(review)" class="command-input" required>
+              <p class="mt-1.5 text-xs text-ink-muted">
+                This exact civil date will be stored as {{ review.kind === 'mark-paid' ? 'paidDate' : 'issuedDate' }}.
+              </p>
+              @if (actionEffectiveDate.touched && actionEffectiveDate.hasError('required')) {
+                <p class="mt-1.5 text-sm text-critical-text">Choose an effective date.</p>
+              } @else if (actionEffectiveDate.touched && actionEffectiveDate.hasError('pattern')) {
+                <p class="mt-1.5 text-sm text-critical-text">Use a valid date in YYYY-MM-DD format.</p>
+              } @else if (actionEffectiveDate.value && !actionDateCoherent(review)) {
+                <p class="mt-1.5 text-sm text-critical-text">Payment date cannot be before the invoice issue date.</p>
+              }
+            </div>
+
+            <div class="rounded-lg border border-line bg-surface-muted p-3 text-sm text-ink-secondary" data-test="billing-reference-gap">
+              <strong class="text-ink">Reference handling:</strong>
+              @if (review.kind === 'issue') {
+                the invoice number and order ID are assigned by the server after confirmation; the current API has no client-supplied invoice-reference field.
+              } @else {
+                the current API stores only the payment date and has no payment-reference field, so no payment reference will be recorded.
+              }
+            </div>
+
+            @if (actionError(); as error) {
+              <div class="rounded-lg bg-critical-tint p-3 text-sm font-medium text-critical-text ring-1 ring-critical"
+                   role="alert" data-test="billing-action-error">{{ error }}</div>
+            }
+          </div>
+
+          <div class="flex flex-col-reverse gap-3 border-t border-line bg-surface-muted px-6 py-5 sm:flex-row sm:justify-end sm:px-8">
+            <button type="button" (click)="closeActionReview()" [disabled]="actionPending()"
+                    class="command-button secondary w-full sm:w-auto disabled:opacity-40">Cancel</button>
+            <button type="button" (click)="confirmActionReview()"
+                    [disabled]="actionPending() || actionEffectiveDate.invalid || !actionDateCoherent(review)"
+                    class="command-button w-full sm:w-auto disabled:cursor-not-allowed disabled:opacity-40"
+                    data-test="confirm-billing-action">
+              @if (actionPending()) {
+                Applying…
+              } @else {
+                {{ review.kind === 'mark-paid' ? 'Confirm payment' : (!review.batch ? 'Issue invoice' : 'Issue invoices') }}
+              }
+            </button>
+          </div>
+        </section>
       </div>
     }
 
@@ -1007,6 +1122,15 @@ export class Billing {
   readonly editingId = signal<string | null>(null);
   readonly saving = signal(false);
   readonly busyId = signal<string | null>(null);
+
+  // --- review gate for invoice/payment state transitions ---
+  readonly actionReview = signal<BillingActionReview | null>(null);
+  readonly actionPending = signal(false);
+  readonly actionError = signal<string | null>(null);
+  readonly actionEffectiveDate = new FormControl(this.today, {
+    nonNullable: true,
+    validators: [Validators.required, Validators.pattern(/^\d{4}-\d{2}-\d{2}$/)],
+  });
 
   // --- #5 invoice document (printable) ---
   readonly issuer = INVOICE_ISSUER;
@@ -1528,94 +1652,144 @@ export class Billing {
     this.selectedIds.set(next);
   }
 
-  // --- row actions ---
-  generateInvoice(item: BillingPlanItem): void {
-    if (item.status !== 'Ready' || this.busyId()) return;
-    this.busyId.set(item.id);
-    const issuedDate = new Date().toISOString();
+  // --- reviewed invoice/payment actions ---
+  private rowForAction(item: BillingPlanItem): BillingRow | null {
+    return this.rows().find(row => row.item.id === item.id) ?? null;
+  }
 
+  private openActionReview(kind: BillingActionReview['kind'], rows: readonly BillingRow[], batch = false): void {
+    if (!rows.length || this.actionReview() || this.actionPending() || this.busyId() || this.batchRunning()) return;
+    this.actionEffectiveDate.reset(this.today);
+    this.actionEffectiveDate.markAsUntouched();
+    this.actionError.set(null);
+    this.actionReview.set({ kind, rows: [...rows], batch });
+  }
+
+  actionMinimumDate(review: BillingActionReview): string | null {
+    if (review.kind !== 'mark-paid') return null;
+    const row = review.rows[0];
+    return (row.invoiceDate ?? row.item.issuedDate)?.slice(0, 10) ?? null;
+  }
+
+  actionDateCoherent(review: BillingActionReview): boolean {
+    if (review.kind !== 'mark-paid') return true;
+    const minimum = this.actionMinimumDate(review);
+    const selected = this.actionEffectiveDate.value;
+    return !minimum || !selected || selected >= minimum;
+  }
+
+  closeActionReview(): void {
+    if (this.actionPending()) return;
+    this.actionReview.set(null);
+    this.actionError.set(null);
+  }
+
+  generateInvoice(item: BillingPlanItem): void {
+    if (item.status !== 'Ready') return;
+    const row = this.rowForAction(item);
+    if (row) this.openActionReview('issue', [row]);
+  }
+
+  /** Review selected rows before the server batch operation is allowed to run. */
+  generateSelectedInvoices(): void {
+    const selected = new Set(this.selectedReadyIds());
+    const rows = this.readyRows().filter(row => selected.has(row.item.id));
+    this.openActionReview('issue', rows, true);
+  }
+
+  markPaid(item: BillingPlanItem): void {
+    if (item.status !== 'Invoiced') return;
+    const row = this.rowForAction(item);
+    if (row) this.openActionReview('mark-paid', [row]);
+  }
+
+  confirmActionReview(): void {
+    const review = this.actionReview();
+    this.actionEffectiveDate.markAsTouched();
+    if (!review || this.actionPending() || this.actionEffectiveDate.invalid || !this.actionDateCoherent(review)) return;
+
+    this.actionPending.set(true);
+    this.actionError.set(null);
+    const effectiveDate = this.actionEffectiveDate.value;
+
+    if (review.kind === 'mark-paid') this.applyReviewedPayment(review, effectiveDate);
+    else if (review.batch) this.applyReviewedInvoiceBatch(review, effectiveDate);
+    else this.applyReviewedInvoice(review, effectiveDate);
+  }
+
+  private applyReviewedInvoice(review: BillingActionReview, issuedDate: string): void {
+    const item = review.rows[0].item;
+    this.busyId.set(item.id);
     this.api.generateBillingInvoice(item.id, issuedDate)
       .pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
         next: () => {
           this.itemsRes.reload();
           this.ordersRes.reload();
-          this.notifications.show(`Invoice generated for "${item.label}".`, 'success');
-          this.busyId.set(null);
+          this.finishReviewedAction(`Invoice issued for "${item.label}".`);
         },
-        error: () => {
-          this.notifications.show('Failed to generate invoice. You can safely retry.', 'error');
-          this.busyId.set(null);
-        },
+        error: () => this.failReviewedAction('Failed to issue the invoice. Review the details and safely retry.'),
       });
   }
 
-  /**
-   * Generate selected invoices through the server batch operation. Each item is
-   * atomic and idempotent; partial failures remain selected for a safe retry.
-   */
-  generateSelectedInvoices(): void {
-    if (this.batchRunning() || this.busyId() !== null) return;
-
-    // Snapshot now: rows can change as the resource reloads underneath us.
-    const selected = new Set(this.selectedReadyIds());
-    const targets = this.items().filter(i => i.status === 'Ready' && selected.has(i.id));
-    if (!targets.length) return;
-
+  /** Each item is atomic/idempotent; partial failures remain in this dialog. */
+  private applyReviewedInvoiceBatch(review: BillingActionReview, issuedDate: string): void {
     this.batchRunning.set(true);
-    const issuedDate = new Date().toISOString();
-
-    this.api.generateBillingInvoices(targets.map(item => item.id), issuedDate)
+    const ids = review.rows.map(row => row.item.id);
+    this.api.generateBillingInvoices(ids, issuedDate)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: response => {
           this.itemsRes.reload();
           this.ordersRes.reload();
-          this.selectedIds.set(new Set(response.failures.map(failure => failure.id)));
-          this.batchRunning.set(false);
+          const failedIds = new Set(response.failures.map(failure => failure.id));
+          this.selectedIds.set(failedIds);
           const n = response.results.length;
           if (response.failures.length) {
-            this.notifications.show(
-              `Generated ${n} ${n === 1 ? 'invoice' : 'invoices'}; ${response.failures.length} failed and remain selected for retry.`,
-              'error',
+            this.actionReview.set({ ...review, rows: review.rows.filter(row => failedIds.has(row.item.id)) });
+            this.failReviewedAction(
+              `Issued ${n} ${n === 1 ? 'invoice' : 'invoices'}; ${response.failures.length} failed and remain here for retry.`,
             );
           } else {
-            this.notifications.show(`Generated ${n} ${n === 1 ? 'invoice' : 'invoices'}.`, 'success');
+            this.finishReviewedAction(`Issued ${n} ${n === 1 ? 'invoice' : 'invoices'}.`);
           }
         },
         error: () => {
-          // A response may be lost after the server commits; reload and keep the
-          // selection intact because retrying the same ids is idempotent.
           this.itemsRes.reload();
           this.ordersRes.reload();
-          this.batchRunning.set(false);
-          this.notifications.show('Invoice batch response failed. Review the refreshed conditions and safely retry.', 'error');
+          this.failReviewedAction('Invoice batch response failed. Review the refreshed conditions and safely retry.');
         },
       });
   }
 
-  /**
-   * PAYMENT IS TWO RECORDS. This used to PUT only the billing item, which left
-   * the linked customer order 'Invoiced' forever — Orders then showed a paid
-   * invoice as outstanding, with nothing to repair it. The server operation
-   * moves both in one transaction and is idempotent by state, so a lost response
-   * is safe to retry. `ordersRes` is reloaded too, because the order it changed
-   * is on this screen's own envelope.
-   */
-  markPaid(item: BillingPlanItem): void {
-    if (item.status !== 'Invoiced' || this.busyId()) return;
+  /** Payment moves the billing item and linked customer order atomically server-side. */
+  private applyReviewedPayment(review: BillingActionReview, paidDate: string): void {
+    const item = review.rows[0].item;
     this.busyId.set(item.id);
-    this.api.markBillingInvoicePaid(item.id, new Date().toISOString())
+    this.api.markBillingInvoicePaid(item.id, paidDate)
       .pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
         next: () => {
           this.itemsRes.reload();
           this.ordersRes.reload();
-          this.notifications.show(`"${item.label}" marked paid.`, 'success');
-          this.busyId.set(null);
+          this.finishReviewedAction(`"${item.label}" marked paid.`);
         },
-        error: () => {
-          this.notifications.show('Failed to mark condition as paid.', 'error');
-          this.busyId.set(null);
-        },
+        error: () => this.failReviewedAction('Failed to mark the invoice paid. Review the details and safely retry.'),
       });
+  }
+
+  private finishReviewedAction(message: string): void {
+    this.actionPending.set(false);
+    this.busyId.set(null);
+    this.batchRunning.set(false);
+    this.actionReview.set(null);
+    this.actionError.set(null);
+    this.notifications.show(message, 'success');
+  }
+
+  private failReviewedAction(message: string): void {
+    this.actionPending.set(false);
+    this.busyId.set(null);
+    this.batchRunning.set(false);
+    this.actionError.set(message);
+    this.notifications.show(message, 'error');
   }
 }

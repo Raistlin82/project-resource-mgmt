@@ -67,7 +67,9 @@ interface BillingControlRow {
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CurrencyPipe, DatePipe, DecimalPipe, MatIconModule, ReactiveFormsModule, RouterLink, ModalDialogDirective],
   template: `
-    <div class="command-page space-y-6">
+    <!-- The authenticated router shell owns page width and responsive padding.
+         Keeping another command-page wrapper here created a second page shell. -->
+    <div class="space-y-6">
       @if (contractState() === 'loading') {
         <section class="command-card p-8" role="status" aria-live="polite" aria-busy="true">
           <h1 class="sr-only">Loading contract</h1>
@@ -98,11 +100,19 @@ interface BillingControlRow {
         <div class="command-card p-6 sm:p-8">
           <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-6">
             <div class="min-w-0">
-              <div class="flex items-center gap-2 text-xs text-ink-muted mb-2">
-                <a routerLink="/contracts" class="text-accent-text hover:underline transition-colors flex items-center gap-1">
-                  <mat-icon class="text-[16px] w-[16px] h-[16px]">arrow_back</mat-icon> Contracts
-                </a>
-              </div>
+              <nav aria-label="Breadcrumb" class="mb-2 text-xs text-ink-muted">
+                <ol class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                  <li>
+                    <a routerLink="/contracts" class="inline-flex min-h-11 items-center text-accent-text transition-colors hover:underline">
+                      Contracts
+                    </a>
+                  </li>
+                  <li aria-current="page" class="flex min-w-0 items-center gap-2 font-medium text-ink-secondary">
+                    <span aria-hidden="true">/</span>
+                    <span data-test="contract-breadcrumb-current" class="break-words">{{ c.name }}</span>
+                  </li>
+                </ol>
+              </nav>
               <p class="command-eyebrow">Contract</p>
               <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight break-words">{{ c.name }}</h1>
               <div class="flex flex-wrap items-center gap-3 mt-3 text-sm text-[var(--cc-muted)]">
@@ -224,11 +234,15 @@ interface BillingControlRow {
               }
             </div>
           } @else {
-          <div class="overflow-x-auto">
-            <table class="command-data-table">
+          <p id="contractProjectsPanHint" data-test="contract-projects-pan-hint" class="border-b border-line bg-surface-muted px-4 py-2 text-xs font-semibold text-ink-muted lg:hidden">
+            Swipe horizontally for all project figures. Project stays visible.
+          </p>
+          <div data-test="contract-projects-pan" class="overflow-x-auto overscroll-x-contain outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent" role="region" tabindex="0"
+               aria-label="Projects under this contract table" aria-describedby="contractProjectsPanHint">
+            <table class="command-data-table min-w-[720px]">
               <thead>
                 <tr>
-                  <th>Project</th>
+                  <th class="sticky left-0 z-10 bg-surface-muted!">Project</th>
                   <th class="text-right">Revenue</th>
                   <th class="text-right">Actual Cost</th>
                   <th class="text-right">EAC</th>
@@ -239,8 +253,8 @@ interface BillingControlRow {
               <tbody>
                 @for (row of projectRows(); track row.project.id) {
                   <tr>
-                    <td class="font-medium">
-                      <a [routerLink]="['/projects', row.project.id]" class="text-accent-text hover:underline transition-colors">
+                    <td class="sticky left-0 z-[1] bg-surface! font-medium">
+                      <a [routerLink]="['/projects', row.project.id]" class="inline-flex min-h-11 items-center text-accent-text transition-colors hover:underline">
                         {{ row.project.name }}
                       </a>
                     </td>
@@ -289,20 +303,24 @@ interface BillingControlRow {
               Add Rate
             </button>
           </div>
-          <div class="overflow-x-auto">
-            <table class="command-data-table">
+          <p id="negotiatedRatesPanHint" data-test="negotiated-rates-pan-hint" class="border-b border-line bg-surface-muted px-4 py-2 text-xs font-semibold text-ink-muted lg:hidden">
+            Swipe horizontally for rate details. Role and Actions stay visible.
+          </p>
+          <div data-test="negotiated-rates-pan" class="overflow-x-auto overscroll-x-contain outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent" role="region" tabindex="0"
+               aria-label="Negotiated rates table" aria-describedby="negotiatedRatesPanHint">
+            <table class="command-data-table min-w-[640px]">
               <thead>
                 <tr>
-                  <th>Role</th>
+                  <th class="sticky left-0 z-10 bg-surface-muted!">Role</th>
                   <th>Currency</th>
                   <th class="text-right">Bill rate (€/day)</th>
-                  <th class="text-right">Actions</th>
+                  <th class="sticky right-0 z-10 bg-surface-muted! text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 @for (rate of contractNegotiatedRates(); track rate.id) {
                   <tr data-test="negotiated-rate-row">
-                    <td class="font-medium">
+                    <td class="sticky left-0 z-[1] bg-surface! font-medium">
                       {{ rate.role }}
                       @if (rate.currency !== BASE_CURRENCY) {
                         <span class="command-status amber ml-1.5" title="sellRateFor only reads EUR-denominated rates; this row is not yet applied to any invoice.">Not applied (EUR only)</span>
@@ -310,11 +328,11 @@ interface BillingControlRow {
                     </td>
                     <td class="font-mono text-ink-secondary">{{ rate.currency }}</td>
                     <td class="text-right font-mono tabular-nums">{{ rate.billRate | number:'1.0-2' }}</td>
-                    <td class="text-right">
-                      <button type="button" (click)="openRateForm(rate)" [attr.aria-label]="'Edit rate for ' + rate.role" class="text-ink-muted hover:text-accent-text p-1.5 rounded-lg transition-colors">
+                    <td class="sticky right-0 z-[1] whitespace-nowrap bg-surface! text-right">
+                      <button type="button" (click)="openRateForm(rate)" [attr.aria-label]="'Edit rate for ' + rate.role" class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-accent-tint hover:text-accent-text">
                         <mat-icon class="text-[18px] w-[18px] h-[18px]">edit</mat-icon>
                       </button>
-                      <button type="button" (click)="deleteRate(rate)" [attr.aria-label]="'Delete rate for ' + rate.role" class="text-ink-muted hover:text-critical-text p-1.5 rounded-lg transition-colors ml-1">
+                      <button type="button" (click)="deleteRate(rate)" [attr.aria-label]="'Delete rate for ' + rate.role" class="ml-1 inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-critical-tint hover:text-critical-text">
                         <mat-icon class="text-[18px] w-[18px] h-[18px]">delete</mat-icon>
                       </button>
                     </td>
@@ -442,12 +460,15 @@ interface BillingControlRow {
                share its gate: under a failed read this table printed
                Expected 0.00 / Variance = Actual for every period. -->
           @if (moneyFiguresState() === 'ready') {
-          <div class="overflow-x-auto">
-            <table class="command-data-table">
+          <p id="billingControlPanHint" data-test="billing-control-pan-hint" class="border-b border-line bg-surface-muted px-4 py-2 text-xs font-semibold text-ink-muted lg:hidden">
+            Swipe horizontally for expected, actual and trace details. Period and project stay visible.
+          </p>
+          <div data-test="billing-control-pan" class="overflow-x-auto overscroll-x-contain outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent" role="region" tabindex="0"
+               aria-label="Billing expected versus actual table" aria-describedby="billingControlPanHint">
+            <table class="command-data-table min-w-[820px]">
               <thead>
                 <tr>
-                  <th>Period</th>
-                  <th>Project</th>
+                  <th class="sticky left-0 z-10 bg-surface-muted!">Period / Project</th>
                   <th class="text-right">Expected</th>
                   <th class="text-right">Actual</th>
                   <th class="text-right">Variance</th>
@@ -458,8 +479,10 @@ interface BillingControlRow {
               <tbody>
                 @for (row of billingRows(); track row.period + row.projectId) {
                   <tr>
-                    <td class="font-mono font-semibold">{{ row.period }}</td>
-                    <td>{{ row.projectName }}</td>
+                    <td class="sticky left-0 z-[1] bg-surface!">
+                      <div class="font-mono font-semibold">{{ row.period }}</div>
+                      <div class="mt-0.5 text-xs text-ink-muted">{{ row.projectName }}</div>
+                    </td>
                     <td class="text-right font-mono">{{ row.expected | currency: BASE_CURRENCY }}</td>
                     <td class="text-right font-mono">{{ row.actual | currency: BASE_CURRENCY }}</td>
                     <td class="text-right font-mono font-semibold" [class.text-critical-text]="row.variance < 0" [class.text-positive-text]="row.variance >= 0">
@@ -481,7 +504,7 @@ interface BillingControlRow {
                 }
                 @if (!billingRows().length) {
                   <tr>
-                    <td colspan="7" class="px-6 sm:px-8 py-10 text-center text-ink-muted">
+                    <td colspan="6" class="px-6 sm:px-8 py-10 text-center text-ink-muted">
                       No billing plan or actual invoices for this contract.
                     </td>
                   </tr>
@@ -540,12 +563,16 @@ interface BillingControlRow {
           </div>
           }
 
-          <div class="overflow-x-auto">
-            <table class="command-data-table">
+          <p id="billingPlanPanHint" data-test="billing-plan-pan-hint" class="border-b border-line bg-surface-muted px-4 py-2 text-xs font-semibold text-ink-muted lg:hidden">
+            Swipe horizontally for all billing fields. Label stays visible.
+          </p>
+          <div data-test="billing-plan-pan" class="overflow-x-auto overscroll-x-contain outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent" role="region" tabindex="0"
+               aria-label="Billing plan table" aria-describedby="billingPlanPanHint">
+            <table class="command-data-table min-w-[760px]">
               <thead>
                 <tr>
+                  <th class="sticky left-0 z-10 bg-surface-muted!">Label</th>
                   <th>Type</th>
-                  <th>Label</th>
                   <th>Trigger</th>
                   <th class="text-right">Amount</th>
                   <th>Status</th>
@@ -555,12 +582,12 @@ interface BillingControlRow {
               <tbody>
                 @for (item of contractBillingPlan(); track item.id) {
                   <tr>
+                    <td class="sticky left-0 z-[1] bg-surface! text-ink-secondary">{{ item.label }}</td>
                     <td>
                       <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-surface-muted text-ink-secondary font-mono">
                         {{ item.type }}
                       </span>
                     </td>
-                    <td class="text-ink-secondary">{{ item.label }}</td>
                     <td class="text-[var(--cc-muted)]">{{ billingTrigger(item) }}</td>
                     <td class="text-right font-mono tabular-nums"
                         [class.text-critical-text]="item.amount < 0"
@@ -663,11 +690,15 @@ interface BillingControlRow {
               </div>
 
               <!-- Period detail table -->
-              <div class="overflow-x-auto">
-                <table class="command-data-table">
+              <p id="recognitionPeriodsPanHint" data-test="recognition-periods-pan-hint" class="border-y border-line bg-surface-muted px-4 py-2 text-xs font-semibold text-ink-muted lg:hidden">
+                Swipe horizontally for all recognition figures. Period stays visible.
+              </p>
+              <div data-test="recognition-periods-pan" class="overflow-x-auto overscroll-x-contain outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent" role="region" tabindex="0"
+                   aria-label="Revenue recognition periods table" aria-describedby="recognitionPeriodsPanHint">
+                <table class="command-data-table min-w-[600px]">
                   <thead>
                     <tr>
-                      <th>Period</th>
+                      <th class="sticky left-0 z-10 bg-surface-muted!">Period</th>
                       <th class="text-right">Recognized</th>
                       <th class="text-right">Cumulative</th>
                       <th class="text-right">Deferred</th>
@@ -676,7 +707,7 @@ interface BillingControlRow {
                   <tbody>
                     @for (row of recognitionPeriods(); track row.period) {
                       <tr>
-                        <td class="font-mono font-semibold">{{ row.period }}</td>
+                        <td class="sticky left-0 z-[1] bg-surface! font-mono font-semibold">{{ row.period }}</td>
                         <td class="text-right font-mono tabular-nums"
                             [class.text-critical-text]="row.recognized < 0"
                             [class.text-ink-secondary]="row.recognized >= 0">
@@ -693,7 +724,7 @@ interface BillingControlRow {
                   </tbody>
                   <tfoot>
                     <tr class="border-t-2 border-line">
-                      <td class="font-semibold text-ink-secondary">Total</td>
+                      <td class="sticky left-0 z-[1] bg-surface! font-semibold text-ink-secondary">Total</td>
                       <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().totalRecognized | currency: BASE_CURRENCY }}</td>
                       <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().cumulative | currency: BASE_CURRENCY }}</td>
                       <td class="text-right font-mono tabular-nums font-semibold text-ink">{{ recognitionSummary().deferred | currency: BASE_CURRENCY }}</td>
@@ -751,11 +782,15 @@ interface BillingControlRow {
                derived from the same partial-envelope-sensitive data(). -->
           @if (recognitionDataReady()) {
             @if (journalEntries().length) {
-              <div class="overflow-x-auto">
-                <table class="command-data-table">
+              <p id="journalPreviewPanHint" data-test="journal-preview-pan-hint" class="border-b border-line bg-surface-muted px-4 py-2 text-xs font-semibold text-ink-muted lg:hidden">
+                Swipe horizontally for memo and posting amounts. Date stays visible.
+              </p>
+              <div data-test="journal-preview-pan" class="overflow-x-auto overscroll-x-contain outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent" role="region" tabindex="0"
+                   aria-label="Journal preview table" aria-describedby="journalPreviewPanHint">
+                <table class="command-data-table min-w-[760px]">
                   <thead>
                     <tr>
-                      <th>Date</th>
+                      <th class="sticky left-0 z-10 bg-surface-muted!">Date</th>
                       <th>Memo</th>
                       <th>Account</th>
                       <th class="text-right">Debit</th>
@@ -766,7 +801,7 @@ interface BillingControlRow {
                     @for (entry of journalEntries(); track entry.date) {
                       @for (line of entry.lines; track $index; let first = $first) {
                         <tr [class.border-t-2]="first" [class.border-line]="first">
-                          <td class="font-mono font-semibold align-top">{{ first ? entry.date : '' }}</td>
+                          <td class="sticky left-0 z-[1] bg-surface! font-mono font-semibold align-top">{{ entry.date }}</td>
                           <td class="text-[var(--cc-muted)] align-top">{{ first ? entry.memo : '' }}</td>
                           <td class="text-ink-secondary">{{ line.account }}</td>
                           <td class="text-right font-mono tabular-nums"
@@ -823,10 +858,15 @@ interface BillingControlRow {
           <div class="command-card-header">
             <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Orders</h2>
           </div>
-          <div class="overflow-x-auto">
-            <table class="command-data-table">
+          <p id="contractOrdersPanHint" data-test="contract-orders-pan-hint" class="border-b border-line bg-surface-muted px-4 py-2 text-xs font-semibold text-ink-muted lg:hidden">
+            Swipe horizontally for all order fields. Order ID stays visible.
+          </p>
+          <div data-test="contract-orders-pan" class="overflow-x-auto overscroll-x-contain outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent" role="region" tabindex="0"
+               aria-label="Orders for this contract table" aria-describedby="contractOrdersPanHint">
+            <table class="command-data-table min-w-[560px]">
               <thead>
                 <tr>
+                  <th class="sticky left-0 z-10 bg-surface-muted!">Order</th>
                   <th>Type</th>
                   <th class="text-right">Amount</th>
                   <th>Status</th>
@@ -836,6 +876,7 @@ interface BillingControlRow {
               <tbody>
                 @for (o of contractOrders(); track o.id) {
                   <tr>
+                    <td class="sticky left-0 z-[1] bg-surface! font-mono font-semibold">{{ o.invoiceNumber || o.id }}</td>
                     <td class="font-medium">{{ o.type }}</td>
                     <td class="text-right text-ink-secondary font-mono tabular-nums">{{ o.amount | currency: o.currency }}</td>
                     <td>
@@ -860,7 +901,7 @@ interface BillingControlRow {
                 }
                 @if (!contractOrders().length) {
                   <tr>
-                    <td colspan="4" class="px-6 sm:px-8 py-10 text-center text-ink-muted">
+                    <td colspan="5" class="px-6 sm:px-8 py-10 text-center text-ink-muted">
                       @if (moneyFiguresState() === 'error') {
                         <!-- "None" is a FACT. Under a failed read it is not one, and
                              printing it under the Limited-data banner above states

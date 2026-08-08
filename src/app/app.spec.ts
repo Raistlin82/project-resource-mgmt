@@ -123,7 +123,7 @@ function makeAuthStub(initialRole: UserRole, options: AuthStubOptions = {}) {
 async function render(role: UserRole, routes: Routes = [], authOptions: AuthStubOptions = {}) {
   const api = makeApiStub();
   const auth = makeAuthStub(role, authOptions);
-  const notifications = { items: signal<AppNotification[]>([]), dismiss: vi.fn() };
+  const notifications = { items: signal<AppNotification[]>([]), dismiss: vi.fn(), pause: vi.fn(), resume: vi.fn() };
   const theme = { theme: signal<'light' | 'dark'>('light'), toggle: vi.fn() };
 
   TestBed.configureTestingModule({
@@ -161,23 +161,124 @@ describe('App capability-aware shell', () => {
     document.documentElement.classList.remove(DRAWER_OPEN_CLASS);
   });
 
-  it('does not call staffing badge endpoints for an employee', async () => {
-    const { api } = await render('employee');
+  it('does not call organizational summary endpoints for an employee', async () => {
+    const { fixture, api } = await render('employee');
     expect(api.getRequests).not.toHaveBeenCalled();
     expect(api.getResources).not.toHaveBeenCalled();
-    expect(api.getProjectIssues).toHaveBeenCalledOnce();
-    expect(api.getChangeRequests).toHaveBeenCalledOnce();
+    expect(api.getProjectIssues).not.toHaveBeenCalled();
+    expect(api.getChangeRequests).not.toHaveBeenCalled();
+    expect(fixture.nativeElement.querySelector('[data-testid="sidebar-summary"]')).toBeNull();
   });
 
-  it('does not call staffing badge endpoints for sales', async () => {
+  it('does not call organizational summary endpoints for sales', async () => {
     const { api } = await render('sales');
     expect(api.getRequests).not.toHaveBeenCalled();
     expect(api.getResources).not.toHaveBeenCalled();
+    expect(api.getProjectIssues).not.toHaveBeenCalled();
+    expect(api.getChangeRequests).not.toHaveBeenCalled();
   });
 
   it('loads staffing badges for a staffing reader', async () => {
     const { api } = await render('pm');
     expect(api.getRequests).toHaveBeenCalledOnce();
+    expect(api.getResources).toHaveBeenCalledOnce();
+    expect(api.getProjectIssues).not.toHaveBeenCalled();
+    expect(api.getChangeRequests).not.toHaveBeenCalled();
+  });
+
+  it('separates the personal workspace from organizational registers', async () => {
+    const { app } = await render('admin');
+    const workspace = app.navGroups().find(group => group.label === 'My workspace');
+    const operations = app.navGroups().find(group => group.label === 'Resource Operations');
+
+    expect(app.navGroups()[0].label).toBe('My workspace');
+    expect(workspace?.items.map(item => [item.label, item.route])).toEqual([
+      ['Dashboard', '/'],
+      ['My Profile', '/profile'],
+      ['My Assignments', '/assignments'],
+    ]);
+    expect(operations?.items.map(item => item.route)).toContain('/search');
+    expect(operations?.items.some(item => item.label.startsWith('My '))).toBe(false);
+    expect(operations?.items.some(item => item.route === '/profile' || item.route === '/assignments')).toBe(false);
+  });
+
+  it('names standalone project routes as cross-project registers, distinct from record tabs', async () => {
+    const { app } = await render('admin');
+    const control = app.navGroups().find(group => group.label === 'Project Control')!;
+    const labels = new Map(control.items.map(item => [item.route, item.label]));
+
+    expect(labels.get('/project-plans')).toBe('All Project Plans');
+    expect(labels.get('/project-tasks')).toBe('Task Register');
+    expect(labels.get('/project-issues')).toBe('Issue Register');
+    expect(labels.get('/project-documents')).toBe('Document Register');
+    expect(labels.get('/project-partners')).toBe('Partner Register');
+  });
+
+  it('places the inbox and monthly allocation review together with distinct names and icons', async () => {
+    const { app } = await render('resource-manager');
+    const operations = app.navGroups().find(group => group.label === 'Resource Operations')!;
+    const inboxIndex = operations.items.findIndex(item => item.route === '/approvals');
+    const monthlyIndex = operations.items.findIndex(item => item.route === '/allocation-approvals');
+
+    expect(inboxIndex).toBeGreaterThanOrEqual(0);
+    expect(monthlyIndex).toBe(inboxIndex + 1);
+    expect(operations.items[inboxIndex]).toMatchObject({ label: 'Approvals Inbox', icon: 'inbox' });
+    expect(operations.items[monthlyIndex]).toMatchObject({ label: 'Monthly Allocation Review', icon: 'calendar_month' });
+    expect(app.navGroups().find(group => group.label === 'Analytics')?.items
+      .some(item => item.route === '/allocation-approvals')).toBe(false);
+  });
+
+  it('keeps the approvals pair capability-aware for roles with different workflow scopes', async () => {
+    const { app } = await render('finance');
+    const routes = app.navGroups().flatMap(group => group.items.map(item => item.route));
+
+    expect(routes).toContain('/approvals');
+    expect(routes).not.toContain('/allocation-approvals');
+  });
+
+  it('groups Configuration into searchable domains without adding more accordion groups', async () => {
+    const { fixture, app } = await render('admin');
+    const configuration = app.navGroups().find(group => group.label === 'Configuration')!;
+    const domains = configuration.items
+      .map(item => item.domain)
+      .filter((domain, index, all) => domain !== all[index - 1]);
+
+    expect(domains).toEqual(['Catalogs', 'Organization', 'Finance', 'Integrations']);
+    expect(app.navGroups().filter(group => group.label.startsWith('Configuration'))).toHaveLength(1);
+
+    const renderedDomains = (Array.from(
+      fixture.nativeElement.querySelectorAll('[data-testid="nav-domain-label"]'),
+    ) as HTMLElement[]).map(label => label.textContent?.trim());
+    expect(renderedDomains).toEqual(['Catalogs', 'Organization', 'Finance', 'Integrations']);
+
+    app.navFilter.set('finance');
+    fixture.detectChanges();
+    expect(app.filteredGroups().map(group => group.label)).toEqual(['Configuration']);
+    expect(app.filteredGroups()[0].items.every(item => item.domain === 'Finance')).toBe(true);
+  });
+
+  it('removes unfiltered RISK/CR summaries and exposes only honest, named summary destinations', async () => {
+    const { fixture, api } = await render('admin');
+    const summary = fixture.nativeElement.querySelector('[data-testid="sidebar-summary"]') as HTMLElement;
+    const links = Array.from(summary.querySelectorAll<HTMLAnchorElement>('a'));
+
+    expect(summary.textContent).toContain('Open resource requests');
+    expect(summary.textContent).toContain('Overbooked resources');
+    expect(summary.textContent).not.toContain('RISK');
+    expect(summary.textContent).not.toMatch(/\bCR\b/);
+    expect(links.map(link => link.getAttribute('href'))).toEqual(['/requests', '/utilization']);
+    expect(api.getProjectIssues).not.toHaveBeenCalled();
+    expect(api.getChangeRequests).not.toHaveBeenCalled();
+  });
+
+  it('does not advertise the resource-request summary to finance, which cannot open that register', async () => {
+    const { fixture, api } = await render('finance');
+    const summaryLinks = Array.from(
+      fixture.nativeElement.querySelectorAll('[data-testid="sidebar-summary"] a'),
+    ) as HTMLAnchorElement[];
+
+    expect(summaryLinks.map(link => link.getAttribute('href'))).toEqual(['/utilization']);
+    expect(api.getRequests).not.toHaveBeenCalled();
     expect(api.getResources).toHaveBeenCalledOnce();
   });
 
@@ -190,6 +291,8 @@ describe('App capability-aware shell', () => {
     expect(routes).not.toContain('/staffing');
     expect(routes).not.toContain('/utilization');
     expect(routes).not.toContain('/reporting');
+    expect(routes).not.toContain('/approvals');
+    expect(routes).not.toContain('/allocation-approvals');
     expect(routes.some(route => route.startsWith('/config/'))).toBe(false);
   });
 
@@ -256,6 +359,23 @@ describe('App capability-aware shell', () => {
     expect(notifications.dismiss).toHaveBeenCalledWith(1);
   });
 
+  it('pauses and resumes transient notification timing for pointer and keyboard interaction', async () => {
+    const { fixture, notifications } = await render('employee');
+    notifications.items.set([{ id: 4, type: 'success', message: 'Saved' }]);
+    fixture.detectChanges();
+
+    const toast = fixture.nativeElement.querySelector('[role="status"] .pointer-events-auto') as HTMLElement;
+    toast.dispatchEvent(new MouseEvent('mouseenter'));
+    toast.dispatchEvent(new MouseEvent('mouseleave'));
+    toast.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    toast.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+
+    expect(notifications.pause).toHaveBeenCalledTimes(2);
+    expect(notifications.pause).toHaveBeenCalledWith(4);
+    expect(notifications.resume).toHaveBeenCalledTimes(2);
+    expect(notifications.resume).toHaveBeenCalledWith(4);
+  });
+
   it('moves focus to the new page heading after SPA navigation', async () => {
     const { fixture } = await render('employee', [{ path: 'next', component: StubPage }]);
     const router = TestBed.inject(Router);
@@ -305,6 +425,8 @@ describe('App capability-aware shell', () => {
     expect(revealKeyframes).not.toMatch(/transform\s*:/);
     expect(cssBlocks(css, '.command-card:hover')[0]).not.toMatch(/transform\s*:/);
     expect(cssBlocks(css, '.command-kpi:hover')[0]).not.toMatch(/transform\s*:/);
+    expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*outline:\s*3px solid Highlight/);
+    expect(css).toMatch(/@media \(forced-colors: active\)[\s\S]*border-color:\s*CanvasText/);
   });
 
   it('exposes the mobile navigation as a dismissible modal region', async () => {
@@ -476,7 +598,7 @@ describe('App capability-aware shell', () => {
     const { fixture, app } = await render('admin', [{ path: 'forecast', component: StubPage }]);
     const router = TestBed.inject(Router);
 
-    expect(app.isGroupOpen('Resource Control')).toBe(true);
+    expect(app.isGroupOpen('My workspace')).toBe(true);
     expect(app.isGroupOpen('Analytics')).toBe(false);
 
     // One manual toggle used to switch the accordion into "manual mode" for the

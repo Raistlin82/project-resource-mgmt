@@ -30,17 +30,15 @@ describe('NotificationService', () => {
     expect(service.items().length).toBe(0);
   });
 
-  it('auto-dismisses error toasts too, but only after a longer timeout', () => {
+  it('keeps error toasts until the user explicitly dismisses them', () => {
     service.error('Request failed');
     expect(service.items().length).toBe(1);
 
-    // Not gone at the non-error timeout — an error gets more time to be read.
-    vi.advanceTimersByTime(5000);
+    vi.advanceTimersByTime(60_000);
     expect(service.items().length).toBe(1);
     expect(service.items()[0].type).toBe('error');
 
-    // But it is still finite: gone by the error timeout.
-    vi.advanceTimersByTime(7000);
+    service.dismiss(service.items()[0].id);
     expect(service.items().length).toBe(0);
   });
 
@@ -53,13 +51,13 @@ describe('NotificationService', () => {
     expect(service.items().length).toBe(0);
   });
 
-  it('auto-clears repeated errors once each has had its full read time', () => {
+  it('keeps distinct errors available for action rather than clearing the stack on a timer', () => {
     service.error('fail 1');
     service.error('fail 2');
     service.error('fail 3');
 
-    vi.advanceTimersByTime(12000);
-    expect(service.items().length).toBe(0);
+    vi.advanceTimersByTime(60_000);
+    expect(service.items()).toHaveLength(3);
   });
 
   it('deduplicates an identical notification instead of stacking it again', () => {
@@ -95,5 +93,21 @@ describe('NotificationService', () => {
     // The remaining info toast still auto-dismisses on its own timer.
     vi.advanceTimersByTime(5000);
     expect(service.items().length).toBe(0);
+  });
+
+  it('pauses a transient toast on interaction and resumes with its remaining time', () => {
+    service.success('Saved');
+    const id = service.items()[0].id;
+
+    vi.advanceTimersByTime(3000);
+    service.pause(id);
+    vi.advanceTimersByTime(10_000);
+    expect(service.items()).toHaveLength(1);
+
+    service.resume(id);
+    vi.advanceTimersByTime(1999);
+    expect(service.items()).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(service.items()).toHaveLength(0);
   });
 });

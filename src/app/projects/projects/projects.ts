@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, inject, signal, computed, DestroyRef } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, signal, computed, DestroyRef, ElementRef } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { DatePipe } from '@angular/common';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
@@ -148,15 +148,15 @@ const REMOTE_LOCATION = 'Remote';
                   </div>
 
                   @if (canManageProjects()) {
-                    <div class="px-6 py-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-2 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 relative z-10">
+                    <div class="relative z-10 flex flex-wrap justify-end gap-2 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] px-4 py-3 sm:px-6 sm:py-4">
                       <button type="button" (click)="editProject(project); $event.stopPropagation()"
-                              class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-colors"
+                              class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-accent-tint hover:text-accent-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                               [attr.aria-label]="'Edit project ' + project.name + ' (' + project.id + ')'"
                               [attr.title]="'Edit project ' + project.name + ' (' + project.id + ')'">
                         <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                       </button>
                       <button type="button" (click)="deleteProject(project.id); $event.stopPropagation()"
-                              class="p-2 text-ink-muted hover:text-critical-text hover:bg-critical-tint rounded-lg transition-colors"
+                              class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-critical-tint hover:text-critical-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-critical"
                               [attr.aria-label]="'Delete project ' + project.name + ' (' + project.id + ')'"
                               [attr.title]="'Delete project ' + project.name + ' (' + project.id + ')'">
                         <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
@@ -177,20 +177,23 @@ const REMOTE_LOCATION = 'Remote';
     @if (showForm()) {
       <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
            appModal ariaLabelledby="projectModalTitle" (dismiss)="closeForm()">
-        <div class="command-card shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
+        <div class="command-card shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] transform transition-all"
+             [attr.aria-busy]="saving() ? 'true' : null">
           <div class="command-card-header">
             <h2 id="projectModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Project' : 'Create Collaborative Project' }}</h2>
-            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
+            <button type="button" (click)="closeForm()" [disabled]="saving()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors disabled:opacity-50">
               <mat-icon>close</mat-icon>
             </button>
           </div>
 
           <div class="p-6 sm:p-8 overflow-y-auto flex-1">
             <form [formGroup]="projectForm" (ngSubmit)="saveProject()" class="space-y-6">
+              <fieldset [disabled]="saving()" class="contents">
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div class="sm:col-span-2">
                   <label for="projectName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Project Name *</label>
                   <input id="projectName" type="text" formControlName="name" class="command-input" placeholder="e.g. Project Alpha"
+                         required aria-required="true"
                          [attr.aria-invalid]="projectForm.controls.name.invalid && (projectForm.controls.name.touched || projectForm.controls.name.dirty)"
                          [attr.aria-describedby]="projectForm.controls.name.invalid && (projectForm.controls.name.touched || projectForm.controls.name.dirty) ? 'projectNameError' : null">
                   @if (projectForm.controls.name.invalid && (projectForm.controls.name.touched || projectForm.controls.name.dirty)) {
@@ -202,7 +205,7 @@ const REMOTE_LOCATION = 'Remote';
                   <label for="projectCountry" class="block text-sm font-semibold text-ink-secondary mb-1.5">Country *</label>
                   <!-- Location = Country + City. Country filters the City list; the stored
                        value is the City NAME ('location'). 'Remote' is a sentinel location. -->
-                  <select id="projectCountry" [ngModel]="locationCountry()" (ngModelChange)="onCountryChange($event)" [ngModelOptions]="{ standalone: true }" class="command-select">
+                  <select id="projectCountry" [ngModel]="locationCountry()" (ngModelChange)="onCountryChange($event)" [ngModelOptions]="{ standalone: true }" class="command-select" required aria-required="true">
                     <option value="" disabled>Select a country...</option>
                     <option value="__REMOTE__">Remote</option>
                     @for (c of countryOptions(); track c.code) {
@@ -217,6 +220,7 @@ const REMOTE_LOCATION = 'Remote';
                     <input id="projectLocation" type="text" class="command-input" value="Remote (no city)" disabled>
                   } @else {
                     <select id="projectLocation" formControlName="location" class="command-select"
+                            required aria-required="true"
                             [attr.aria-invalid]="projectForm.controls.location.invalid && (projectForm.controls.location.touched || projectForm.controls.location.dirty)"
                             [attr.aria-describedby]="projectForm.controls.location.invalid && (projectForm.controls.location.touched || projectForm.controls.location.dirty) ? 'projectLocationError' : null">
                       <option value="" disabled>{{ locationCountry() ? 'Select a city...' : 'Select a country first' }}</option>
@@ -236,6 +240,7 @@ const REMOTE_LOCATION = 'Remote';
                 <div>
                   <label for="projectStartDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Start Date *</label>
                   <input id="projectStartDate" type="date" formControlName="startDate" class="command-input"
+                         required aria-required="true"
                          [attr.aria-invalid]="projectForm.controls.startDate.invalid && (projectForm.controls.startDate.touched || projectForm.controls.startDate.dirty)"
                          [attr.aria-describedby]="projectForm.controls.startDate.invalid && (projectForm.controls.startDate.touched || projectForm.controls.startDate.dirty) ? 'projectStartDateError' : null">
                   @if (projectForm.controls.startDate.invalid && (projectForm.controls.startDate.touched || projectForm.controls.startDate.dirty)) {
@@ -246,6 +251,7 @@ const REMOTE_LOCATION = 'Remote';
                 <div>
                   <label for="projectEndDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">End Date *</label>
                   <input id="projectEndDate" type="date" formControlName="endDate" class="command-input"
+                         required aria-required="true"
                          [attr.aria-invalid]="projectForm.controls.endDate.invalid && (projectForm.controls.endDate.touched || projectForm.controls.endDate.dirty)"
                          [attr.aria-describedby]="projectForm.controls.endDate.invalid && (projectForm.controls.endDate.touched || projectForm.controls.endDate.dirty) ? 'projectEndDateError' : null">
                   @if (projectForm.controls.endDate.invalid && (projectForm.controls.endDate.touched || projectForm.controls.endDate.dirty)) {
@@ -258,6 +264,7 @@ const REMOTE_LOCATION = 'Remote';
                 <div class="sm:col-span-2">
                   <label for="projectStatus" class="block text-sm font-semibold text-ink-secondary mb-1.5">Status *</label>
                   <select id="projectStatus" formControlName="status" class="command-select"
+                          required aria-required="true"
                           [attr.aria-invalid]="projectForm.controls.status.invalid && (projectForm.controls.status.touched || projectForm.controls.status.dirty)"
                           [attr.aria-describedby]="projectForm.controls.status.invalid && (projectForm.controls.status.touched || projectForm.controls.status.dirty) ? 'projectStatusError' : null">
                     <option value="In Planning">In Planning</option>
@@ -276,6 +283,7 @@ const REMOTE_LOCATION = 'Remote';
                        SELECT stores the resource id (label = resource name) bound to the
                        resources (people) catalog. -->
                   <select id="projectOwner" formControlName="ownerId" class="command-select"
+                          required aria-required="true"
                           [attr.aria-invalid]="projectForm.controls.ownerId.invalid && (projectForm.controls.ownerId.touched || projectForm.controls.ownerId.dirty)"
                           [attr.aria-describedby]="projectForm.controls.ownerId.invalid && (projectForm.controls.ownerId.touched || projectForm.controls.ownerId.dirty) ? 'projectOwnerError' : null">
                     <option value="" disabled>Select an owner...</option>
@@ -308,14 +316,34 @@ const REMOTE_LOCATION = 'Remote';
                   <textarea id="projectDescription" formControlName="description" rows="3" class="command-textarea" placeholder="Brief project description..."></textarea>
                 </div>
               </div>
+              </fieldset>
+              @if (saveError()) {
+                <p class="command-field-error" role="alert" data-test="project-save-error">{{ saveError() }}</p>
+              }
             </form>
           </div>
 
           <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
-            <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
-            <button type="button" (click)="saveProject()" [disabled]="!projectForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
-              {{ editingId() ? 'Update Project' : 'Create Project' }}
+            <button type="button" (click)="closeForm()" [disabled]="saving()" class="command-button secondary disabled:opacity-50">Cancel</button>
+            <button type="button" (click)="saveProject()" [disabled]="saving()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+              {{ saving() ? 'Saving…' : (editingId() ? 'Update Project' : 'Create Project') }}
             </button>
+          </div>
+        </div>
+      </div>
+    }
+
+    @if (discardConfirmation()) {
+      <div class="fixed inset-0 z-[60] flex items-center justify-center bg-scrim/40 p-4 backdrop-blur-sm"
+           appModal ariaLabelledby="projectDiscardTitle" (dismiss)="cancelDiscard()">
+        <div class="command-card w-full max-w-md overflow-hidden shadow-2xl" data-test="project-discard-confirm">
+          <div class="p-6 text-center">
+            <h2 id="projectDiscardTitle" class="font-display text-xl font-bold text-ink">Discard project changes?</h2>
+            <p class="mt-3 text-sm text-ink-muted">Your unsaved project changes will be lost.</p>
+          </div>
+          <div class="flex justify-end gap-3 border-t border-line bg-surface-muted p-4">
+            <button type="button" (click)="cancelDiscard()" class="command-button secondary">Keep editing</button>
+            <button type="button" (click)="confirmDiscard()" class="command-button">Discard changes</button>
           </div>
         </div>
       </div>
@@ -351,6 +379,7 @@ export class ProjectsComponent {
   private api = inject(ApiService);
   private auth = inject(AuthService);
   private destroyRef = inject(DestroyRef);
+  private host = inject<ElementRef<HTMLElement>>(ElementRef);
 
   private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   // /contracts is principal-gated in READ_RULES; wait for the restored bearer
@@ -373,6 +402,9 @@ export class ProjectsComponent {
   showForm = signal(false);
   editingId = signal<string | null>(null);
   deletingId = signal<string | null>(null);
+  protected saving = signal(false);
+  protected saveError = signal<string | null>(null);
+  protected discardConfirmation = signal(false);
   protected readonly deletingProject = computed(() => {
     if (!this.canManageProjects()) return null;
     const id = this.deletingId();
@@ -500,11 +532,30 @@ export class ProjectsComponent {
       contractId: project.contractId || '',
       description: project.description
     });
+    this.projectForm.markAsPristine();
+    this.saveError.set(null);
+    this.discardConfirmation.set(false);
     this.showForm.set(true);
   }
 
   saveProject() {
-    if (!this.canManageProjects() || this.projectForm.invalid) return;
+    if (!this.canManageProjects() || this.saving()) return;
+    this.saveError.set(null);
+    if (this.projectForm.invalid) {
+      this.projectForm.markAllAsTouched();
+      const order = [
+        ['name', 'projectName'],
+        ['location', 'projectLocation'],
+        ['startDate', 'projectStartDate'],
+        ['endDate', 'projectEndDate'],
+        ['status', 'projectStatus'],
+        ['ownerId', 'projectOwner'],
+      ] as const;
+      const first = order.find(([control]) => this.projectForm.controls[control].invalid);
+      if (first) queueMicrotask(() => this.host.nativeElement.querySelector<HTMLElement>(`#${first[1]}`)?.focus());
+      return;
+    }
+    this.saving.set(true);
 
     // ownerId is a real resource-id reference chosen in the Owner SELECT (no longer a
     // hardcoded mock id). The required validator guarantees it is set here.
@@ -513,16 +564,30 @@ export class ProjectsComponent {
     if (this.editingId()) {
       this.api.updateProject(this.editingId()!, projectData)
         .pipe(takeUntilDestroyed(this.destroyRef))
-        .subscribe(() => {
-          this.projectsRes.reload();
-          this.closeForm();
+        .subscribe({
+          next: () => {
+            this.saving.set(false);
+            this.projectsRes.reload();
+            this.closeForm(true);
+          },
+          error: error => {
+            this.saving.set(false);
+            this.saveError.set(this.projectSaveError(error));
+          },
         });
     } else {
       this.api.createProject(projectData)
         .pipe(takeUntilDestroyed(this.destroyRef))
-        .subscribe(() => {
-          this.projectsRes.reload();
-          this.closeForm();
+        .subscribe({
+          next: () => {
+            this.saving.set(false);
+            this.projectsRes.reload();
+            this.closeForm(true);
+          },
+          error: error => {
+            this.saving.set(false);
+            this.saveError.set(this.projectSaveError(error));
+          },
         });
     }
   }
@@ -555,13 +620,38 @@ export class ProjectsComponent {
     this.editingId.set(null);
     this.countryOverride.set('');
     this.projectForm.reset({ status: 'In Planning', ownerId: this.auth.userId(), contractId: '', location: '' });
+    this.saveError.set(null);
+    this.discardConfirmation.set(false);
     this.showForm.set(true);
   }
 
-  closeForm() {
+  closeForm(force = false) {
+    if (this.saving()) return;
+    if (!force && this.projectForm.dirty) {
+      this.discardConfirmation.set(true);
+      return;
+    }
     this.showForm.set(false);
     this.editingId.set(null);
+    this.discardConfirmation.set(false);
+    this.saveError.set(null);
     this.countryOverride.set('');
     this.projectForm.reset({ status: 'In Planning', ownerId: '', contractId: '', location: '' });
+  }
+
+  protected cancelDiscard(): void {
+    this.discardConfirmation.set(false);
+  }
+
+  protected confirmDiscard(): void {
+    this.closeForm(true);
+  }
+
+  private projectSaveError(error: unknown): string {
+    const candidate = error as { error?: { error?: unknown }; message?: unknown };
+    const detail = candidate?.error?.error ?? candidate?.message;
+    return typeof detail === 'string' && detail.trim()
+      ? `Project could not be saved: ${detail}`
+      : 'Project could not be saved. Review the fields and try again.';
   }
 }

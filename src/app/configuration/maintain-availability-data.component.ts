@@ -5,21 +5,22 @@ import { of } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, Resource } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
+import { ConfigurationPageShellComponent } from './configuration-page-shell.component';
 
 @Component({
   selector: 'app-maintain-availability-data',
-  imports: [MatIconModule],
+  imports: [MatIconModule, ConfigurationPageShellComponent],
   template: `
-    <div class="command-page space-y-6">
+    <app-configuration-page-shell
+      title="Maintain Availability Data"
+      subtitle="Download workforce availability templates and review the resources they apply to.">
+      <button configuration-actions type="button" disabled aria-describedby="availabilityImportStatus"
+              class="command-button secondary disabled:cursor-not-allowed disabled:opacity-60">
+        <mat-icon class="text-[18px] w-[18px] h-[18px]">hourglass_top</mat-icon> CSV import coming soon
+      </button>
     <div class="command-card overflow-hidden">
       <div class="command-card-header">
-        <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Maintain Availability Data</h2>
-        <div class="flex gap-3">
-          <button type="button" disabled aria-describedby="availabilityImportStatus"
-                  class="command-button secondary disabled:cursor-not-allowed disabled:opacity-60">
-            <mat-icon class="text-[18px] w-[18px] h-[18px]">hourglass_top</mat-icon> CSV import coming soon
-          </button>
-        </div>
+        <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Availability records</h2>
       </div>
 
       <div class="p-6 sm:p-8">
@@ -67,7 +68,7 @@ import { AuthService } from '../services/auth.service';
         </div>
       </div>
     </div>
-    </div>
+    </app-configuration-page-shell>
   `
 })
 export class MaintainAvailabilityDataComponent {

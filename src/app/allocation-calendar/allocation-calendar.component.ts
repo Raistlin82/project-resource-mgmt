@@ -57,6 +57,11 @@ interface DayCell {
 /** Fallback daily cap when the envelope reports a non-positive value (shouldn't happen). */
 const DEFAULT_CAP = 8;
 
+/** Deep-link focus may animate only when the user has not requested reduced motion. */
+export function calendarFocusScrollBehavior(prefersReducedMotion: boolean): ScrollBehavior {
+  return prefersReducedMotion ? 'auto' : 'smooth';
+}
+
 const EMPTY_DATA: CalendarData = {
   allocation: { assignmentId: '', contractHoursPerDay: DEFAULT_CAP, days: [] },
   periods: [],
@@ -333,7 +338,10 @@ export class AllocationCalendarComponent {
       const el = this.hostEl.nativeElement.querySelector(`[data-month="${month}"]`);
       if (!el) return;
       this.scrolledTo = month;
-      el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      const reduceMotion = typeof window !== 'undefined'
+        && typeof window.matchMedia === 'function'
+        && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      el.scrollIntoView({ block: 'start', behavior: calendarFocusScrollBehavior(reduceMotion) });
     });
   }
 

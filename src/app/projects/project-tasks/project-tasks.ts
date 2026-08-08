@@ -36,15 +36,15 @@ type CommercialCoverage =
   template: `
     <div [class]="projectId() ? '' : 'command-page space-y-6'">
       <div class="space-y-6">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-4">
+        <div data-test="tasks-header" class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div class="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
             @if (headingLevel() === 1) {
               <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Tasks</h1>
             } @else {
               <h2 class="font-display text-lg font-bold text-[var(--cc-ink)]">Tasks</h2>
             }
             @if (!projectId()) {
-              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
+              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block w-full min-w-0 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] px-4 py-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)] sm:w-auto">
                 <option value="" disabled>Select a project...</option>
                 @for (p of projects(); track p.id) {
                   <option [value]="p.id">{{ p.name }}</option>
@@ -57,11 +57,11 @@ type CommercialCoverage =
                readable BEFORE the click and reaches a screen reader through
                aria-describedby. The hint is the accessible description, so it is
                referenced only while the control is actually disabled. -->
-          <div class="flex flex-col items-start gap-1">
+          <div class="flex w-full flex-col items-start gap-1 sm:w-auto">
             <button (click)="openForm()" [disabled]="!activeProjectId()"
                     [attr.aria-describedby]="activeProjectId() ? null : 'createTaskHint'"
                     data-test="create-task"
-                    class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                    class="command-button w-full disabled:opacity-50 disabled:cursor-not-allowed sm:w-auto">
               <mat-icon class="text-sm">add</mat-icon> Create Task
             </button>
             @if (!activeProjectId()) {
@@ -78,15 +78,15 @@ type CommercialCoverage =
           </div>
         } @else {
         <div class="command-card overflow-hidden">
-          <p id="tasksTableHint" class="px-4 py-2 text-xs text-[var(--cc-muted)] border-b border-[var(--cc-line)] sm:hidden">
-            Scroll horizontally to view every task field.
+          <p id="tasksTableHint" class="border-b border-[var(--cc-line)] bg-surface-muted px-4 py-2 text-xs font-semibold text-[var(--cc-muted)] lg:hidden">
+            Swipe horizontally to view every task field. Task stays visible.
           </p>
-          <div data-test="tasks-table-scroll" class="overflow-x-auto overscroll-x-contain" role="region"
+          <div data-test="tasks-table-scroll" class="overflow-x-auto overscroll-x-contain outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent" role="region"
                aria-label="Project tasks table" aria-describedby="tasksTableHint" tabindex="0">
           <table class="command-data-table min-w-[60rem]">
             <thead>
               <tr>
-                <th class="px-6 py-4 font-medium">Task</th>
+                <th class="sticky left-0 z-10 w-48 max-w-48 bg-surface-muted! px-6 py-4 font-medium">Task</th>
                 <th class="px-6 py-4 font-medium">Assignment</th>
                 <th class="px-6 py-4 font-medium">Commercial Coverage</th>
                 <th class="px-6 py-4 font-medium">Due Date</th>
@@ -102,7 +102,7 @@ type CommercialCoverage =
                      a chance for the class list to disagree with the text. -->
                 @let coverage = commercialCoverage(task);
                 <tr data-test="task-row">
-                  <td data-test="task-name" class="px-6 py-4 font-medium text-[var(--cc-ink)]">{{ task.name }}</td>
+                  <td data-test="task-name" class="sticky left-0 z-[1] w-48 max-w-48 break-words bg-surface! px-6 py-4 font-medium text-[var(--cc-ink)]">{{ task.name }}</td>
                   <td class="px-6 py-4">
                     <div class="font-medium text-[var(--cc-ink)]">{{ assignmentLabel(task) }}</div>
                     <div class="mt-1 text-xs text-[var(--cc-muted)]">{{ task.assigneeType || 'Internal' }} · {{ task.assignee }}</div>
@@ -126,7 +126,7 @@ type CommercialCoverage =
                   <td class="px-6 py-4">
                     <select #statusSelect data-test="task-status" [ngModel]="task.status" (ngModelChange)="updateStatus(task, $event, statusSelect)"
                             [attr.aria-label]="'Update status for task ' + task.name"
-                            class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border-0 ring-1 focus:ring-2 focus:ring-accent/25 cursor-pointer"
+                            class="inline-flex min-h-11 items-center rounded-full border-0 px-2.5 py-0.5 text-xs font-medium ring-1 cursor-pointer focus:ring-2 focus:ring-accent/25"
                             [class.bg-positive-tint]="task.status === 'Done'" [class.text-positive-text]="task.status === 'Done'" [class.ring-positive]="task.status === 'Done'"
                             [class.bg-accent-tint]="task.status === 'In Progress'" [class.text-accent-text]="task.status === 'In Progress'" [class.ring-accent]="task.status === 'In Progress'"
                             [class.bg-surface-muted]="task.status === 'To Do'" [class.text-ink-secondary]="task.status === 'To Do'" [class.ring-line]="task.status === 'To Do'">
@@ -159,17 +159,17 @@ type CommercialCoverage =
 
     <!-- Create Task Modal -->
     @if (showForm()) {
-      <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+      <div data-test="task-form-overlay" class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-scrim/40 p-4 backdrop-blur-sm sm:items-center sm:p-6"
            appModal ariaLabelledby="taskModalTitle" (dismiss)="closeForm()">
-        <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+        <div data-test="task-form-panel" class="command-card flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden">
           <div class="command-card-header">
             <h2 id="taskModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Create Task</h2>
-            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
+            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" data-test="task-form-close" class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-surface-muted hover:text-ink-secondary">
               <mat-icon>close</mat-icon>
             </button>
           </div>
           
-          <div class="p-6 sm:p-8 overflow-y-auto flex-1">
+          <div data-test="task-form-body" class="min-h-0 flex-1 overflow-y-auto p-6 sm:p-8">
             <form [formGroup]="taskForm" (ngSubmit)="saveTask()" class="space-y-6">
               <!-- Rendered INLINE rather than left to the interceptor's toast, because
                    error toasts in this app auto-dismiss: a dialog that stays open with a
@@ -222,7 +222,7 @@ type CommercialCoverage =
                 }
               </div>
 
-              <div class="grid grid-cols-2 gap-4">
+              <div data-test="task-date-grid" class="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
                   <label for="taskDueDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Due Date *</label>
                   <input id="taskDueDate" type="date" formControlName="dueDate" class="command-input">
@@ -240,7 +240,7 @@ type CommercialCoverage =
             </form>
           </div>
           
-          <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
+          <div data-test="task-form-actions" class="flex flex-wrap justify-end gap-3 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] px-6 py-5 sm:px-8">
             <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
             <button type="button" (click)="saveTask()" [disabled]="!taskForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
               Create Task

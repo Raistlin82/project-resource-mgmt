@@ -4,17 +4,19 @@ import { MatIconModule } from '@angular/material/icon';
 import { ApiService } from '../services/api.service';
 import { NotificationService } from '../services/notification.service';
 import { authGatedResource } from '../services/auth-gated-resource.util';
+import { ConfigurationPageShellComponent } from './configuration-page-shell.component';
 
 @Component({
   selector: 'app-manage-proficiency-sets',
-  imports: [ReactiveFormsModule, MatIconModule],
+  imports: [ReactiveFormsModule, MatIconModule, ConfigurationPageShellComponent],
   template: `
+    <app-configuration-page-shell title="Manage Proficiency Sets" subtitle="Define the rating scales used to assess governed skills.">
+      <button configuration-actions (click)="openCreateForm()" class="command-button">
+        <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create Set
+      </button>
     <div class="command-card overflow-hidden">
       <div class="command-card-header">
-        <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Manage Proficiency Sets</h2>
-        <button (click)="openCreateForm()" class="command-button">
-          <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create Set
-        </button>
+        <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Proficiency sets</h2>
       </div>
 
       @if (showForm()) {
@@ -113,6 +115,7 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
         </table>
       </div>
     </div>
+    </app-configuration-page-shell>
   `
 })
 export class ManageProficiencySetsComponent {

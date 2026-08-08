@@ -201,6 +201,26 @@ async function setUpPlans(overrides: Record<string, unknown> = {}): Promise<Comp
   return fixture;
 }
 
+describe('ProjectPlans — work-package actions remain reachable in narrow tables', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('keeps the edit action visible, 44px-square and pinned to the right edge', async () => {
+    const fixture = await setUpPlans();
+    const h = host(fixture);
+    const edit = h.querySelector<HTMLButtonElement>('[data-test="edit-work-package"]');
+    expect(edit).toBeTruthy();
+
+    const buttonTokens = edit!.className.split(/\s+/);
+    expect(buttonTokens).toEqual(expect.arrayContaining(['min-h-11', 'min-w-11']));
+    expect(buttonTokens.some(token => token.includes('opacity-0') || token.includes('group-hover'))).toBe(false);
+
+    const actionCellTokens = edit!.closest('td')!.className.split(/\s+/);
+    expect(actionCellTokens).toEqual(expect.arrayContaining(['sticky', 'right-0']));
+    const actionHeading = [...h.querySelectorAll('th')].find(th => th.textContent?.trim() === 'Actions')!;
+    expect(actionHeading.className.split(/\s+/)).toEqual(expect.arrayContaining(['sticky', 'right-0']));
+  });
+});
+
 /**
  * jsdom performs NO layout: offsetHeight is 0, there is no viewport, and no
  * stylesheet is loaded. These cases therefore assert the STRUCTURAL PRECONDITION of

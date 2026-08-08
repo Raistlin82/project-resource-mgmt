@@ -1,6 +1,7 @@
 import { signal } from '@angular/core';
-import { TestBed } from '@angular/core/testing';
-import { of, throwError } from 'rxjs';
+import { ComponentFixture, DeferBlockState, TestBed } from '@angular/core/testing';
+import { ActivatedRoute, Router, convertToParamMap } from '@angular/router';
+import { BehaviorSubject, of, throwError } from 'rxjs';
 import { Reporting } from './reporting';
 import { ABSENCE_REASON_CODES, ApiService, BillingPlanItem, Contract, NegotiatedRate, Project, Resource, TimeEntry, type BenchCell, type BenchRollup, type ResourceRequest } from '../services/api.service';
 import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
@@ -36,7 +37,12 @@ const RESOURCES: Resource[] = [
 // principal); pass false to hold the gated multi-endpoint read in flight, which
 // is the first clause dataLoading() keys on (reporting.ts:985) and the real
 // deep-link state before the OIDC bootstrap settles.
-async function setup(resources: Resource[] = RESOURCES, overrides: Partial<ApiService> = {}, authReady = true) {
+async function setup(
+  resources: Resource[] = RESOURCES,
+  overrides: Partial<ApiService> = {},
+  authReady = true,
+  revenueTrendWindow?: string,
+) {
   const empty = () => of([]);
   const apiStub = {
     getResources: vi.fn(() => of(resources)),
@@ -71,6 +77,14 @@ async function setup(resources: Resource[] = RESOURCES, overrides: Partial<ApiSe
   } as unknown as ApiService;
   const authStub = { authReady: signal(authReady), isAuthenticated: signal(true) } as unknown as AuthService;
   const notifyStub = { show: vi.fn() } as unknown as NotificationService;
+  const queryParamMap = new BehaviorSubject(convertToParamMap(
+    revenueTrendWindow ? { revenueTrendWindow } : {},
+  ));
+  const routeStub = {
+    snapshot: { queryParamMap: queryParamMap.value },
+    queryParamMap: queryParamMap.asObservable(),
+  } as unknown as ActivatedRoute;
+  const routerStub = { navigate: vi.fn(() => Promise.resolve(true)) } as unknown as Router;
 
   TestBed.configureTestingModule({
     imports: [Reporting],
@@ -78,6 +92,8 @@ async function setup(resources: Resource[] = RESOURCES, overrides: Partial<ApiSe
       { provide: ApiService, useValue: apiStub },
       { provide: AuthService, useValue: authStub },
       { provide: NotificationService, useValue: notifyStub },
+      { provide: ActivatedRoute, useValue: routeStub },
+      { provide: Router, useValue: routerStub },
     ],
   });
 
@@ -92,6 +108,13 @@ async function flush(fixture: { detectChanges: () => void; whenStable: () => Pro
   fixture.detectChanges();
 }
 
+async function completeDeferred(fixture: ComponentFixture<Reporting>): Promise<void> {
+  for (const block of await fixture.getDeferBlocks()) {
+    await block.render(DeferBlockState.Complete);
+  }
+  await flush(fixture);
+}
+
 function utilizationKpi(fixture: { componentInstance: Reporting }): string {
   const kpi = fixture.componentInstance.kpis().find(k => k.label === 'Avg Resource Utilization');
   expect(kpi, 'the Avg Resource Utilization tile must exist').toBeDefined();
@@ -103,6 +126,123 @@ function openRequestsKpi(fixture: { componentInstance: Reporting }): string {
   expect(kpi, 'the Open Resource Requests tile must exist').toBeDefined();
   return kpi!.value;
 }
+
+describe('Reporting — trend-window, export and information architecture contract', () => {
+  it('names the control for its real scope, restores it from the URL and serializes changes', async () => {
+    const fixture = await setup([], {}, true, 'year');
+    await flush(fixture);
+    const page = host(fixture);
+    const select = page.querySelector<HTMLSelectElement>('#revenueTrendWindow')!;
+
+    expect(fixture.componentInstance.period()).toBe('year');
+    expect(select.value).toBe('year');
+    expect(page.querySelector('label[for="revenueTrendWindow"]')?.textContent)
+      .toContain('Recognised-revenue comparison window');
+    expect(page.querySelector('#revenueTrendWindowHelp')?.textContent)
+      .toContain('only the trend comparison in the Realization card');
+
+    select.value = 'quarter';
+    select.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.period()).toBe('quarter');
+    expect(TestBed.inject(Router).navigate).toHaveBeenCalledWith([], {
+      relativeTo: TestBed.inject(ActivatedRoute),
+      queryParams: { revenueTrendWindow: 'quarter' },
+      queryParamsHandling: 'merge',
+      replaceUrl: true,
+    });
+  });
+
+  it('falls back to the current-month comparison for an invalid deep-link value', async () => {
+    const fixture = await setup([], {}, true, 'all-time');
+    await flush(fixture);
+
+    expect(fixture.componentInstance.period()).toBe('30d');
+    expect(host(fixture).querySelector<HTMLSelectElement>('#revenueTrendWindow')?.value).toBe('30d');
+  });
+
+  it('disables summary and workbook exports while loading and after a failed read', async () => {
+    const loading = await setup([], {}, false);
+    await flush(loading);
+    for (const testId of ['export-summary', 'export-planning-xlsx', 'export-allocation-xlsx']) {
+      expect(host(loading).querySelector<HTMLButtonElement>(`[data-test="${testId}"]`)?.disabled).toBe(true);
+    }
+    loading.componentInstance.exportReport();
+    expect(TestBed.inject(NotificationService).show).not.toHaveBeenCalled();
+
+    TestBed.resetTestingModule();
+
+    const failed = await setup([], { getResources: () => throwError(() => new Error('offline')) } as Partial<ApiService>);
+    await flush(failed);
+    for (const testId of ['export-summary', 'export-planning-xlsx', 'export-allocation-xlsx']) {
+      expect(host(failed).querySelector<HTMLButtonElement>(`[data-test="${testId}"]`)?.disabled).toBe(true);
+    }
+    failed.componentInstance.exportReport();
+    expect(TestBed.inject(NotificationService).show).not.toHaveBeenCalled();
+  });
+
+  it('puts the exact selected window and local as-of date in the summary artifact and filename', async () => {
+    const fixture = await setup([], {}, true, 'quarter');
+    await flush(fixture);
+    const today = todayLocalIso();
+    const expectedWindow = `${shiftIso(today.slice(0, 7), -2)}-01 through ${today} (3 months)`;
+    const csv = fixture.componentInstance['buildSummaryCsv']() as string;
+
+    expect(csv.split('\n')[0]).toBe('KPI,Value,Trend,Note,Recognised Revenue Trend Window,As Of');
+    expect(csv).toContain(expectedWindow);
+    expect(csv.split('\n').slice(1).every(row => row.endsWith(`,${today}`))).toBe(true);
+    expect(fixture.componentInstance['summaryFilename']())
+      .toBe(`Reporting_Summary_3m_as-of_${today}.csv`);
+  });
+
+  it('offers one real summary export and marks every unimplemented report unavailable', async () => {
+    const fixture = await setup();
+    await flush(fixture);
+    await completeDeferred(fixture);
+    const page = host(fixture);
+    const reports = fixture.componentInstance.reports();
+
+    expect(reports.filter(report => report.available).map(report => report.name))
+      .toStrictEqual(['Portfolio KPI Summary']);
+    expect(reports.filter(report => !report.available)).toHaveLength(3);
+    expect(page.querySelectorAll('button[aria-label$="export unavailable"][disabled]')).toHaveLength(3);
+    expect(page.querySelector<HTMLButtonElement>('[data-test="export-summary-row"]')?.disabled).toBe(false);
+    expect(page.textContent).toContain('Not generated in this session');
+    for (const staleCopy of ['2 days ago', '1 week ago', '3 weeks ago', 'Yesterday']) {
+      expect(page.textContent).not.toContain(staleCopy);
+    }
+
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    try {
+      fixture.componentInstance.exportReport();
+      fixture.detectChanges();
+    } finally {
+      anchorClick.mockRestore();
+    }
+    const generatedAt = fixture.componentInstance.reports()[0].lastGeneratedAt;
+    expect(generatedAt).not.toBeNull();
+    expect(page.textContent).toContain(fixture.componentInstance.formatGeneratedAt(generatedAt!));
+    expect(page.textContent).not.toContain('Not generated in this session');
+  });
+
+  it('uses an h1/h2 outline and keeps wrapped header and report actions visible without hover', async () => {
+    const fixture = await setup();
+    await flush(fixture);
+    await completeDeferred(fixture);
+    const page = host(fixture);
+    const outline = Array.from(page.querySelectorAll('h1, h2, h3')).map(node => node.tagName);
+
+    expect(outline[0]).toBe('H1');
+    expect(outline.slice(1).every(tag => tag === 'H2')).toBe(true);
+    expect(page.querySelector('h3')).toBeNull();
+    expect(page.querySelector('[data-test="reporting-header-actions"]')?.className).toContain('sm:flex-wrap');
+    expect(page.querySelector('#revenueTrendWindow')?.className).toContain('min-w-0');
+    const summaryAction = page.querySelector('[data-test="export-summary-row"]')!;
+    expect(summaryAction.className).not.toContain('opacity-0');
+    expect(summaryAction.closest('td')?.className).toContain('sticky');
+  });
+});
 
 describe('Reporting — actionable staffing demand uses the shared definition', () => {
   it('counts residual Open and Published requests, not full or non-workable rows', async () => {
@@ -126,7 +266,7 @@ describe('Reporting — actionable staffing demand uses the shared definition', 
  * figure elsewhere on this large page.
  */
 function recognisedRevenueTrendCard(fixture: { nativeElement: unknown }): HTMLElement {
-  const heading = Array.from(host(fixture).querySelectorAll('h3')).find(h => h.textContent?.includes('Recognised Revenue Trend'));
+  const heading = Array.from(host(fixture).querySelectorAll('h2')).find(h => h.textContent?.includes('Recognised Revenue Trend'));
   expect(heading, 'the Recognised Revenue Trend heading must exist').toBeDefined();
   const card = heading!.closest('.command-card');
   expect(card, 'the Recognised Revenue Trend card must exist').toBeDefined();
@@ -141,7 +281,7 @@ function recognisedRevenueTrendCard(fixture: { nativeElement: unknown }): HTMLEl
  * table entirely.
  */
 function marginVarianceTable(fixture: { nativeElement: unknown }): HTMLElement {
-  const heading = Array.from(host(fixture).querySelectorAll('h3')).find(h => h.textContent?.includes('Project Margin & Variance'));
+  const heading = Array.from(host(fixture).querySelectorAll('h2')).find(h => h.textContent?.includes('Project Margin & Variance'));
   expect(heading, 'the Project Margin & Variance heading must exist').toBeDefined();
   const card = heading!.closest('.command-card');
   expect(card, 'the Project Margin & Variance card must exist').toBeDefined();
@@ -1044,7 +1184,7 @@ describe('Reporting — Q4 marks an away person instead of dropping them (struct
     // BYTES can be asserted: an export is the classic escape route for a field
     // that should never leave, and the only test worth having reads them.
     const csv = fixture.componentInstance['buildSummaryCsv']() as string;
-    expect(csv.split('\n')[0]).toBe('KPI,Value,Trend,Note');
+    expect(csv.split('\n')[0]).toBe('KPI,Value,Trend,Note,Recognised Revenue Trend Window,As Of');
     expect(csv).toContain('Excludes 1 away on leave all month');
     expect(csv).toContain('50%');
     for (const reason of ABSENCE_REASON_CODES) expect(csv).not.toContain(reason);

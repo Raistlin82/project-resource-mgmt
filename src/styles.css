@@ -428,6 +428,30 @@ textarea:focus-visible,
   box-shadow: 0 0 0 4px color-mix(in oklch, var(--color-accent) 18%, transparent);
 }
 
+@media (forced-colors: active) {
+  :focus-visible,
+  a:focus-visible,
+  button:focus-visible,
+  select:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
+    box-shadow: none;
+  }
+
+  .command-button,
+  .command-input,
+  .command-select,
+  .command-textarea,
+  .command-card,
+  .command-status,
+  .command-chip {
+    border-color: CanvasText;
+  }
+}
+
 /* Thin custom scrollbars */
 * {
   scrollbar-width: thin;
@@ -1061,6 +1085,8 @@ textarea:focus-visible,
   background: transparent;
   color: inherit;
   cursor: pointer;
+  min-width: 1.5rem;
+  min-height: 1.5rem;
   padding: 0;
   font-size: 0.875rem;
   line-height: 1;

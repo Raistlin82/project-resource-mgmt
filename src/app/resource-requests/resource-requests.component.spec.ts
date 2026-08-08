@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { ResourceRequestsComponent } from './resource-requests.component';
 import { ApiService, Assignment, ResourceRequest, Skill } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
@@ -264,5 +264,100 @@ describe('ResourceRequestsComponent — required skills without Ctrl/Cmd, and wi
     expect(api.updateRequest).toHaveBeenCalledWith('R-7', expect.objectContaining({
       skills: ['Java', 'LegacySkill'],
     }));
+  });
+});
+
+describe('ResourceRequestsComponent — form and lifecycle guardrails', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('announces the revealed editor and focuses its heading', async () => {
+    const { fixture } = await render();
+
+    const trigger = host(fixture).querySelector<HTMLButtonElement>('[aria-controls="requestEditor"]')!;
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    trigger.click();
+    await tick(fixture);
+
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    expect(document.activeElement).toBe(host(fixture).querySelector('#requestEditorTitle'));
+  });
+
+  it('keeps submit operable, explains invalid fields inline, and focuses the first error', async () => {
+    const { fixture, api } = await render();
+    fixture.componentInstance.openCreateForm();
+    await tick(fixture);
+
+    const save = Array.from(host(fixture).querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === 'Save Request')!;
+    expect(save.disabled).toBe(false);
+    save.click();
+    await tick(fixture);
+
+    const text = host(fixture).textContent ?? '';
+    expect(text).toContain('Project name is required.');
+    expect(text).toContain('Select a required role.');
+    expect(text).toContain('Required effort must be at least 1 hour.');
+    expect(document.activeElement).toBe(host(fixture).querySelector('#name'));
+    expect(api.createRequest).not.toHaveBeenCalled();
+  });
+
+  it('asks before discarding a dirty request draft', async () => {
+    const { fixture } = await render();
+    const component = fixture.componentInstance;
+    component.openCreateForm();
+    await tick(fixture);
+    component.requestForm.controls.name.setValue('Unsaved request');
+    component.requestForm.controls.name.markAsDirty();
+
+    component.closeForm();
+    await tick(fixture);
+    expect(component.showForm()).toBe(true);
+    expect(host(fixture).textContent).toContain('Discard unsaved request changes?');
+
+    component.closeForm(true);
+    await tick(fixture);
+    expect(component.showForm()).toBe(false);
+  });
+
+  it('publishes only after a named confirmation and guards duplicate confirmation', async () => {
+    const { fixture, api } = await render();
+    host(fixture).querySelector<HTMLButtonElement>(`button[aria-label="Publish request ${WITHDRAWN.name} (${WITHDRAWN.id})"]`)!.click();
+    await tick(fixture);
+
+    expect(api.updateRequest).not.toHaveBeenCalled();
+    const dialog = host(fixture).querySelector<HTMLElement>('[data-test="request-transition-confirm"]')!;
+    expect(dialog.textContent).toContain(WITHDRAWN.name);
+    expect(dialog.textContent).toContain(WITHDRAWN.id);
+    expect(dialog.textContent).toContain('40h remaining');
+
+    const confirm = dialog.querySelector<HTMLButtonElement>('[data-test="request-transition-confirm-action"]')!;
+    confirm.click();
+    confirm.click();
+    await tick(fixture);
+    expect(api.updateRequest).toHaveBeenCalledTimes(1);
+    expect(api.updateRequest).toHaveBeenCalledWith(WITHDRAWN.id, { status: 'Published' });
+  });
+
+  it('states the consequence of withdrawing a fulfilled request with linked assignments', async () => {
+    const fulfilled = { ...WITHDRAWN, status: 'Fulfilled' };
+    const { fixture, api } = await render({ getRequests: () => of([fulfilled]) });
+    host(fixture).querySelector<HTMLButtonElement>(`button[aria-label="Withdraw request ${fulfilled.name} (${fulfilled.id})"]`)!.click();
+    await tick(fixture);
+
+    const dialog = host(fixture).querySelector<HTMLElement>('[data-test="request-transition-confirm"]')!;
+    expect(dialog.querySelector('[data-test="withdraw-consequence"]')?.textContent).toContain('1 existing assignment(s)');
+    expect(dialog.textContent).toContain('This request is fulfilled');
+    expect(api.updateRequest).not.toHaveBeenCalled();
+  });
+
+  it('shows a retryable read error instead of an empty requests table', async () => {
+    const { fixture, api } = await render({ getRequests: () => throwError(() => new Error('offline')) });
+    const element = host(fixture);
+
+    expect(element.textContent).toContain("Couldn't load resource requests");
+    expect(element.textContent).not.toContain('No resource requests found.');
+    element.querySelector<HTMLButtonElement>('.command-card.border-critical\\! button')!.click();
+    await tick(fixture);
+    expect(api.getRequests).toHaveBeenCalledTimes(2);
   });
 });

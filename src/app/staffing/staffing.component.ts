@@ -108,14 +108,14 @@ function stateOf(
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8">
         <!-- Requests List -->
-        <div class="command-card overflow-hidden flex flex-col h-[min(800px,80vh)]">
+        <div class="command-card overflow-hidden flex flex-col">
           <div class="command-card-header">
             <div>
               <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Open Requests</h2>
               <p class="mt-1 text-sm text-[var(--cc-muted)]">Select a request to find matching resources</p>
             </div>
           </div>
-          <div class="overflow-y-auto flex-1">
+          <div class="flex-1">
             <app-list-state [loading]="poolState() === 'loading'" [error]="poolState() === 'error'" label="requests" (retry)="res.reload()">
             <ng-template>
             <div class="divide-y divide-[var(--cc-line)]">
@@ -156,7 +156,7 @@ function stateOf(
         </div>
 
         <!-- Resources List -->
-        <div class="command-card overflow-hidden flex flex-col h-[min(800px,80vh)]">
+        <div class="command-card overflow-hidden flex flex-col">
           <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)]">
             <div class="flex items-center justify-between mb-6">
               <div>
@@ -384,7 +384,7 @@ function stateOf(
                matching your criteria." about a read not yet made, and a failed
                read left the panel frozen with no message and no Retry. One
                wrapper over both legs owns all three states. -->
-          <div class="overflow-y-auto flex-1 divide-y divide-[var(--cc-line)]">
+          <div class="flex-1 divide-y divide-[var(--cc-line)]">
             <app-list-state [loading]="candidateListState() === 'loading'" [error]="candidateListState() === 'error'"
                             label="candidate resources" (retry)="reloadCandidateInputs()">
             <ng-template>
@@ -436,22 +436,61 @@ function stateOf(
                           <div class="command-card-muted p-3 text-sm text-[var(--cc-muted)]">
                             This creates an empty assignment. Book hours per day in the Allocation Calendar afterwards.
                           </div>
+                          @if (activeAssignmentRisk(); as risk) {
+                            <div id="assignmentRiskWarning" class="rounded-md bg-caution-tint ring-1 ring-caution p-3 text-sm text-caution-text"
+                                 role="alert" data-test="assignment-risk-warning">
+                              <p class="font-bold">Review this exception before assigning</p>
+                              <p class="mt-1">{{ risk }}</p>
+                              <label class="mt-3 flex min-h-10 items-start gap-2 font-semibold text-[var(--cc-ink)]">
+                                <input type="checkbox" class="mt-1 h-5 w-5 shrink-0"
+                                       [ngModel]="assignmentRiskAcknowledged()"
+                                       (ngModelChange)="assignmentRiskAcknowledged.set($event)"
+                                       aria-describedby="assignmentRiskWarning">
+                                <span>I reviewed the fit and capacity risk and want to continue.</span>
+                              </label>
+                            </div>
+                          }
                           <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                             <label class="command-field">
                               <span class="command-field-label">Allocation %</span>
-                              <input #allocInput data-test="assign-allocation" type="number" [ngModel]="assignAllocationPct()" (ngModelChange)="assignAllocationPct.set($event)" class="command-input font-mono tabular-nums" min="0" max="100" step="5">
+                              <input #allocInput id="assignAllocationPct" data-test="assign-allocation" type="number"
+                                     [ngModel]="assignAllocationPct()" (ngModelChange)="assignAllocationPct.set($event)"
+                                     class="command-input font-mono tabular-nums" min="1" max="100" step="5" required
+                                     aria-required="true" [attr.aria-invalid]="proposalErrors().allocation ? 'true' : null"
+                                     [attr.aria-describedby]="proposalErrors().allocation ? 'assignAllocationPctError' : null">
+                              @if (proposalErrors().allocation; as error) {
+                                <span id="assignAllocationPctError" class="command-field-error" role="alert">{{ error }}</span>
+                              }
                             </label>
                             <label class="command-field">
                               <span class="command-field-label">Start date</span>
-                              <input type="date" [ngModel]="assignStartDate()" (ngModelChange)="assignStartDate.set($event)" class="command-input font-mono tabular-nums">
+                              <input id="assignStartDate" type="date" [ngModel]="assignStartDate()" (ngModelChange)="assignStartDate.set($event)"
+                                     class="command-input font-mono tabular-nums" required aria-required="true"
+                                     [min]="minimumProposalStart()" [max]="selectedRequest()?.endDate || null"
+                                     [attr.aria-invalid]="proposalErrors().start ? 'true' : null"
+                                     [attr.aria-describedby]="proposalErrors().start ? 'assignStartDateError' : null">
+                              @if (proposalErrors().start; as error) {
+                                <span id="assignStartDateError" class="command-field-error" role="alert">{{ error }}</span>
+                              }
                             </label>
                             <label class="command-field">
                               <span class="command-field-label">End date</span>
-                              <input type="date" [ngModel]="assignEndDate()" (ngModelChange)="assignEndDate.set($event)" [min]="assignStartDate() || null" class="command-input font-mono tabular-nums">
+                              <input id="assignEndDate" type="date" [ngModel]="assignEndDate()" (ngModelChange)="assignEndDate.set($event)"
+                                     [min]="assignStartDate() || minimumProposalStart()" [max]="selectedRequest()?.endDate || null"
+                                     class="command-input font-mono tabular-nums" required aria-required="true"
+                                     [attr.aria-invalid]="proposalErrors().end ? 'true' : null"
+                                     [attr.aria-describedby]="proposalErrors().end ? 'assignEndDateError' : null">
+                              @if (proposalErrors().end; as error) {
+                                <span id="assignEndDateError" class="command-field-error" role="alert">{{ error }}</span>
+                              }
                             </label>
                           </div>
                           <div class="flex items-center gap-2">
-                            <button (click)="confirmAssign(cand.resourceId)" [disabled]="assigning()" class="command-button flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">Create proposal</button>
+                            <button type="button" (click)="confirmAssign(cand.resourceId)"
+                                    [disabled]="assigning() || !proposalValid()"
+                                    class="command-button flex-1 sm:flex-none disabled:opacity-50 disabled:cursor-not-allowed">
+                              {{ assigning() ? 'Creating proposal…' : 'Create proposal' }}
+                            </button>
                             <!-- Cancelling is the mirror of the reveal: the button
                                  the user came from is re-rendered, so focus goes
                                  back to it instead of to <body>. -->
@@ -956,7 +995,75 @@ export class StaffingComponent {
   /** Booking window + allocation for the new assignment. Default to the selected request's dates / 100% allocation. */
   assignStartDate = signal<string>('');
   assignEndDate = signal<string>('');
-  assignAllocationPct = signal<number>(100);
+  assignAllocationPct = signal<number | null>(100);
+  assignmentRiskAcknowledged = signal(false);
+
+  /** A low-fit or already-full candidate remains assignable, but only after the
+   *  operator explicitly acknowledges the exception in the revealed proposal. */
+  protected activeAssignmentRisk = computed<string | null>(() => {
+    const resourceId = this.assigningResourceId();
+    const candidate = this.rankedCandidates()?.find(item => item.resourceId === resourceId);
+    if (!candidate) return null;
+
+    const reasons: string[] = [];
+    if (candidate.score < 40) reasons.push(`Match score is only ${candidate.score.toFixed(0)} out of 100.`);
+    if (candidate.resource.utilization >= 100) {
+      reasons.push(`Current utilization is ${candidate.resource.utilization.toFixed(0)}%, so no uncommitted capacity is visible.`);
+    }
+    return reasons.length > 0 ? reasons.join(' ') : null;
+  });
+
+  private readonly proposalToday = todayLocalIso();
+
+  /** Earliest permitted booking date: today or the request boundary, whichever is later. */
+  protected minimumProposalStart = computed(() => {
+    const requestStart = this.selectedRequest()?.startDate ?? '';
+    return requestStart > this.proposalToday ? requestStart : this.proposalToday;
+  });
+
+  /** Inline, cross-field proposal validation shared by rendering and submit. */
+  protected proposalErrors = computed<{ allocation?: string; start?: string; end?: string }>(() => {
+    const request = this.selectedRequest();
+    if (!request || this.assigningResourceId() === null) return {};
+
+    const allocation = this.assignAllocationPct();
+    const start = this.assignStartDate().trim();
+    const end = this.assignEndDate().trim();
+    const errors: { allocation?: string; start?: string; end?: string } = {};
+
+    if (allocation === null || !Number.isFinite(allocation) || allocation <= 0 || allocation > 100) {
+      errors.allocation = 'Enter an allocation greater than 0% and no more than 100%.';
+    }
+
+    if (!start) {
+      errors.start = 'Start date is required.';
+    } else if (start < this.proposalToday) {
+      errors.start = 'Start date cannot be in the past.';
+    } else if (request.startDate && start < request.startDate) {
+      errors.start = `Start date cannot be before the request starts (${request.startDate}).`;
+    } else if (request.endDate && start > request.endDate) {
+      errors.start = `Start date cannot be after the request ends (${request.endDate}).`;
+    }
+
+    if (!end) {
+      errors.end = 'End date is required.';
+    } else if (end < this.proposalToday) {
+      errors.end = 'End date cannot be in the past.';
+    } else if (start && end < start) {
+      errors.end = 'End date must be on or after the start date.';
+    } else if (request.startDate && end < request.startDate) {
+      errors.end = `End date cannot be before the request starts (${request.startDate}).`;
+    } else if (request.endDate && end > request.endDate) {
+      errors.end = `End date cannot be after the request ends (${request.endDate}).`;
+    }
+
+    return errors;
+  });
+
+  protected proposalValid = computed(() =>
+    Object.keys(this.proposalErrors()).length === 0
+    && (!this.activeAssignmentRisk() || this.assignmentRiskAcknowledged()),
+  );
 
   /** True while a createAssignment request is in flight, to block duplicate submits (double-staffing). */
   assigning = signal(false);
@@ -1130,9 +1237,10 @@ export class StaffingComponent {
     if (req) {
       this.assigningResourceId.set(resourceId);
       // Seed the booking window from the request; allocation defaults to a full 100%.
-      this.assignStartDate.set(req.startDate ?? '');
+      this.assignStartDate.set(req.startDate && req.startDate > this.proposalToday ? req.startDate : this.proposalToday);
       this.assignEndDate.set(req.endDate ?? '');
       this.assignAllocationPct.set(100);
+      this.assignmentRiskAcknowledged.set(false);
     }
   }
 
@@ -1150,6 +1258,7 @@ export class StaffingComponent {
     this.assignStartDate.set('');
     this.assignEndDate.set('');
     this.assignAllocationPct.set(100);
+    this.assignmentRiskAcknowledged.set(false);
   }
 
   /**
@@ -1160,7 +1269,7 @@ export class StaffingComponent {
    * hours have been booked into an open month.
    */
   confirmAssign(resourceId: string) {
-    if (this.assigning()) return;
+    if (this.assigning() || !this.proposalValid()) return;
     const req = this.selectedRequest();
     if (req) {
       this.assigning.set(true);
@@ -1174,7 +1283,7 @@ export class StaffingComponent {
         // util falls back to the linked request's dates.
         ...(startDate ? { startDate } : {}),
         ...(endDate ? { endDate } : {}),
-        ...(Number.isFinite(allocationPct) ? { allocationPct } : {})
+        ...(allocationPct !== null && Number.isFinite(allocationPct) ? { allocationPct } : {})
       }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
         next: (created) => {
           this.assigning.set(false);

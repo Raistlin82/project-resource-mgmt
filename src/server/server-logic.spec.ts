@@ -8,10 +8,12 @@
  *     from staffing.util) the POST/PUT handlers enforce.
  *   - the POST /time-entries create-path invariant: the initial status is FORCED
  *     to 'Draft' regardless of the request body (mirrored here, not via HTTP).
+ *   - the shared POST /self/time-entries payload policy invoked by the handler.
  */
 import { maxIdSeq } from './id-seq.util';
 import { isAllowedTimeEntryTransition } from '../app/services/staffing.util';
 import type { TimeEntry } from '../app/services/api.service';
+import { validateTimeEntry } from '../app/services/time-entry-validation.util';
 
 describe('maxIdSeq', () => {
   it('returns the max suffix for purely-numeric ids', () => {
@@ -67,6 +69,24 @@ describe('time-entry transition guard (isAllowedTimeEntryTransition)', () => {
     for (const s of ['Draft', 'Submitted', 'Approved', 'Rejected'] as const) {
       expect(isAllowedTimeEntryTransition(s, s)).toBe(true);
     }
+  });
+});
+
+describe('POST /self/time-entries payload policy', () => {
+  const base = {
+    assignment: { startDate: '2026-08-01', endDate: '2026-08-31' },
+    request: { startDate: '2026-08-05', endDate: '2026-09-30' },
+    date: '2026-08-08',
+    hours: 2,
+    today: '2026-08-08',
+    dailyCap: 8,
+    existingEntries: [{ id: 'TE1', date: '2026-08-08', hours: 6, status: 'Submitted' as const }],
+  };
+
+  it('accepts an in-window payload at the cap and rejects direct future/over-cap variants', () => {
+    expect(validateTimeEntry(base).valid).toBe(true);
+    expect(validateTimeEntry({ ...base, date: '2026-08-09' }).message).toContain('later than today');
+    expect(validateTimeEntry({ ...base, hours: 2.01 }).message).toContain('daily limit');
   });
 });
 

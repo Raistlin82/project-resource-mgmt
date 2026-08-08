@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, DestroyRef, ElementRef, afterRenderEffect, inject, signal } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 import { SEARCH_FOCUS_PARAM } from '../../services/search-target.util';
 import { MatIconModule } from '@angular/material/icon';
@@ -24,7 +24,7 @@ import { SearchFilterBarComponent } from '../../shared/search-filter-bar.compone
           <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Customers</h1>
           <p class="mt-2 text-sm text-[var(--cc-muted)]">Manage commercial customers and their contracts.</p>
         </div>
-        <button (click)="openForm()" class="command-button w-full sm:w-auto">
+        <button type="button" (click)="openForm()" class="command-button w-full sm:w-auto">
           <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon> New Customer
         </button>
       </div>
@@ -37,7 +37,7 @@ import { SearchFilterBarComponent } from '../../shared/search-filter-bar.compone
       />
 
       <!-- Customers Table. [loading] folds auth readiness — see listLoading(). -->
-      <app-list-state [loading]="listLoading()" [error]="customersRes.status() === 'error'" label="customers" (retry)="customersRes.reload()">
+      <app-list-state [loading]="listLoading()" [error]="listError()" skeleton="table-rows" [rows]="5" [columns]="4" label="customers" (retry)="reloadList()">
       <ng-template>
       <div class="command-card overflow-hidden">
         <div class="overflow-x-auto">
@@ -66,10 +66,22 @@ import { SearchFilterBarComponent } from '../../shared/search-filter-bar.compone
               @if (!customers().length) {
                 <tr>
                   <td colspan="4">
-                    <div class="command-empty">
+                    <div class="command-empty" data-test="customers-source-empty">
                       <mat-icon>domain_disabled</mat-icon>
                       <h3 class="command-empty-title">No customers yet</h3>
                       <p class="command-empty-note">Get started by adding your first customer.</p>
+                      <button type="button" (click)="openForm()" class="command-button mt-4">Create customer</button>
+                    </div>
+                  </td>
+                </tr>
+              } @else if (!filteredCustomers().length) {
+                <tr>
+                  <td colspan="4">
+                    <div class="command-empty" data-test="customers-filtered-empty">
+                      <mat-icon>search_off</mat-icon>
+                      <h3 class="command-empty-title">No customers match your search</h3>
+                      <p class="command-empty-note break-words">No customer name contains “{{ customerQuery() }}”.</p>
+                      <button type="button" (click)="customerQuery.set('')" class="command-button secondary mt-4">Clear filters</button>
                     </div>
                   </td>
                 </tr>
@@ -84,25 +96,32 @@ import { SearchFilterBarComponent } from '../../shared/search-filter-bar.compone
 
     <!-- Create Modal -->
     @if (showForm()) {
-      <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
-           appModal ariaLabelledby="customerModalTitle" (dismiss)="closeForm()">
-        <div class="command-card w-full max-w-xl overflow-hidden flex flex-col max-h-[90vh]">
+      <div data-test="customer-form-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+           appModal ariaLabelledby="customerModalTitle" (dismiss)="closeForm()" (click)="onBackdropClick($event)">
+        <div data-test="customer-form-panel" class="command-card w-full max-w-xl overflow-hidden flex flex-col max-h-[90vh]" [attr.aria-busy]="saving()">
           <div class="command-card-header">
             <h2 id="customerModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">New Customer</h2>
-            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="p-2 rounded-full text-ink-muted hover:text-ink-secondary hover:bg-surface-muted transition-colors">
+            <button type="button" (click)="closeForm()" [disabled]="saving()" aria-label="Close new customer dialog" title="Close new customer dialog" class="p-2 rounded-full text-ink-muted hover:text-ink-secondary hover:bg-surface-muted transition-colors disabled:opacity-50">
               <mat-icon>close</mat-icon>
             </button>
           </div>
 
           <div class="p-6 sm:p-8 overflow-y-auto flex-1">
-            <form [formGroup]="customerForm" (ngSubmit)="save()" class="space-y-6">
+            <form id="customerCreateForm" [formGroup]="customerForm" (ngSubmit)="save()" class="space-y-6">
+              @if (formError(); as message) {
+                <div data-test="customer-form-error" class="rounded-md border border-critical bg-critical-tint p-4 text-sm font-semibold text-critical-text" role="alert">
+                  {{ message }}
+                </div>
+              }
+              <fieldset [disabled]="saving()" class="contents">
               <div class="grid grid-cols-1 gap-6">
                 <div>
                   <label for="customerName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Name *</label>
                   <input id="customerName" type="text" formControlName="name" class="command-input" placeholder="e.g. Acme Corporation"
-                         [attr.aria-invalid]="customerForm.controls.name.invalid && (customerForm.controls.name.touched || customerForm.controls.name.dirty)"
-                         [attr.aria-describedby]="customerForm.controls.name.invalid && (customerForm.controls.name.touched || customerForm.controls.name.dirty) ? 'customerNameError' : null">
-                  @if (customerForm.controls.name.invalid && (customerForm.controls.name.touched || customerForm.controls.name.dirty)) {
+                         required aria-required="true"
+                         [attr.aria-invalid]="showNameError() ? 'true' : null"
+                         [attr.aria-describedby]="showNameError() ? 'customerNameError' : null">
+                  @if (showNameError()) {
                     <p id="customerNameError" class="command-field-error" role="alert">Name is required.</p>
                   }
                 </div>
@@ -133,14 +152,28 @@ import { SearchFilterBarComponent } from '../../shared/search-filter-bar.compone
                   </select>
                 </div>
               </div>
+              </fieldset>
             </form>
           </div>
 
           <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
-            <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
-            <button type="button" (click)="save()" [disabled]="customerForm.invalid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
-              Create Customer
-            </button>
+            @if (confirmingDiscard()) {
+              <div role="alert" class="flex w-full flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p class="font-semibold text-ink">Discard unsaved customer?</p>
+                  <p class="text-sm text-ink-muted">The values entered in this form will be lost.</p>
+                </div>
+                <div class="flex justify-end gap-3">
+                  <button type="button" (click)="confirmingDiscard.set(false)" class="command-button secondary">Continue editing</button>
+                  <button type="button" (click)="closeForm(true)" class="command-button">Discard changes</button>
+                </div>
+              </div>
+            } @else {
+              <button type="button" (click)="closeForm()" [disabled]="saving()" class="command-button secondary disabled:opacity-50">Cancel</button>
+              <button type="submit" form="customerCreateForm" [disabled]="saving()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                {{ saving() ? 'Creating customer…' : 'Create Customer' }}
+              </button>
+            }
           </div>
         </div>
       </div>
@@ -152,6 +185,7 @@ export class Customers {
   private notifications = inject(NotificationService);
   private destroyRef = inject(DestroyRef);
   private auth = inject(AuthService);
+  private host = inject(ElementRef<HTMLElement>);
 
   // customers + contracts are principal-gated server-side (401 until a verified
   // JWT is attached). Gate each read on authReady() so the request fires only
@@ -163,7 +197,7 @@ export class Customers {
     stream: ({ params: ready }) => (ready ? this.api.getCustomers() : of<Customer[]>([])),
     defaultValue: [] as Customer[],
   });
-  private contractsRes = rxResource<Contract[], boolean>({
+  protected contractsRes = rxResource<Contract[], boolean>({
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) => (ready ? this.api.getContracts() : of<Contract[]>([])),
     defaultValue: [] as Contract[],
@@ -187,8 +221,11 @@ export class Customers {
    * Not-ready counts as loading, never as ready-and-empty — the same rule
    * resources.component.ts's `listLoading()` applies, whose shape this mirrors.
    */
-  protected readonly listLoading = computed<boolean>(
-    () => !this.auth.authReady() || this.customersRes.isLoading(),
+  protected readonly listLoading = computed<boolean>(() =>
+    !this.auth.authReady() || this.customersRes.isLoading() || this.contractsRes.isLoading(),
+  );
+  protected readonly listError = computed(() =>
+    this.customersRes.status() === 'error' || this.contractsRes.status() === 'error',
   );
 
   // First-ever filter on this screen (design spec §8) -- a plain client-side
@@ -237,6 +274,12 @@ export class Customers {
   });
 
   showForm = signal(false);
+  saving = signal(false);
+  formError = signal<string | null>(null);
+  submitAttempted = signal(false);
+  confirmingDiscard = signal(false);
+  private focusInvalidRequest = signal(0);
+  private handledFocusInvalidRequest = 0;
 
   customerForm = new FormGroup({
     name: new FormControl('', { nonNullable: true, validators: Validators.required }),
@@ -259,17 +302,45 @@ export class Customers {
     return this.countryOptions().some(c => c.name === current) ? null : current;
   });
 
+  constructor() {
+    afterRenderEffect(() => {
+      const request = this.focusInvalidRequest();
+      if (!this.showForm() || request <= this.handledFocusInvalidRequest) return;
+      const invalid = this.host.nativeElement.querySelector(
+        '[data-test="customer-form-panel"] input.ng-invalid, [data-test="customer-form-panel"] select.ng-invalid',
+      ) as HTMLElement | null;
+      if (!invalid) return;
+      this.handledFocusInvalidRequest = request;
+      invalid.focus();
+    });
+  }
+
+  protected reloadList(): void {
+    this.customersRes.reload();
+    this.contractsRes.reload();
+  }
+
   openForm(): void {
+    this.resetForm();
     this.showForm.set(true);
   }
 
-  closeForm(): void {
-    this.showForm.set(false);
-    this.customerForm.reset();
+  protected showNameError(): boolean {
+    const control = this.customerForm.controls.name;
+    return control.invalid && (control.touched || this.submitAttempted());
   }
 
   save(): void {
-    if (this.customerForm.invalid) return;
+    if (this.saving()) return;
+    this.submitAttempted.set(true);
+    this.formError.set(null);
+    this.customerForm.updateValueAndValidity();
+    if (this.customerForm.invalid) {
+      this.customerForm.markAllAsTouched();
+      this.formError.set('Review the highlighted fields before creating the customer.');
+      this.focusInvalidRequest.update(request => request + 1);
+      return;
+    }
 
     const raw = this.customerForm.getRawValue();
     const payload: Partial<Customer> = {
@@ -278,13 +349,51 @@ export class Customers {
       country: raw.country || undefined
     };
 
+    this.saving.set(true);
     this.api.createCustomer(payload).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: () => {
         this.customersRes.reload();
         this.notifications.show('Customer created successfully.', 'success');
-        this.closeForm();
+        this.saving.set(false);
+        this.closeForm(true);
       },
-      error: () => this.notifications.show('Failed to create customer.', 'error')
+      error: (error: unknown) => {
+        this.saving.set(false);
+        // A lost response can follow a committed POST. Refresh the list and keep
+        // the draft so the user can verify before choosing to retry.
+        this.customersRes.reload();
+        const serverMessage = (error as { error?: { error?: string } })?.error?.error;
+        const message = serverMessage
+          ? `${serverMessage} Your entries are still here; update them and try again.`
+          : 'Customer creation could not be confirmed. Your entries are still here. Before retrying, verify that the customer was not already created.';
+        this.formError.set(message);
+        this.notifications.show(message, 'error');
+      }
+    });
+  }
+
+  protected onBackdropClick(event: MouseEvent): void {
+    if (event.target === event.currentTarget) this.closeForm();
+  }
+
+  closeForm(discard = false): void {
+    if (this.saving()) return;
+    if (!discard && this.customerForm.dirty) {
+      this.confirmingDiscard.set(true);
+      return;
+    }
+    this.showForm.set(false);
+    this.resetForm();
+  }
+
+  private resetForm(): void {
+    this.submitAttempted.set(false);
+    this.confirmingDiscard.set(false);
+    this.formError.set(null);
+    this.customerForm.reset({
+      name: '',
+      industry: '',
+      country: '',
     });
   }
 }

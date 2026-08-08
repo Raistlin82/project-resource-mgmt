@@ -307,6 +307,20 @@ describe('IntegrationsComponent — declared, not connected', () => {
     expect(section!.textContent).toContain('Not connected');
   });
 
+  it('lets every technical card header wrap without clipping its title or status on mobile', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    const headers = Array.from(host(fixture).querySelectorAll<HTMLElement>('.command-card-header'));
+
+    expect(headers).toHaveLength(5);
+    for (const header of headers) {
+      expect(header.classList).toContain('flex-col');
+      expect(header.classList).toContain('sm:flex-row');
+      expect(header.querySelector('.min-w-0')).not.toBeNull();
+      expect(header.querySelector('.command-status')?.classList).toContain('self-start');
+    }
+  });
+
   it('lists every declared upstream source', async () => {
     const { fixture } = setup();
     await flush(fixture);

@@ -207,6 +207,12 @@ describe('MultiSelectChipsComponent — the ORPHAN-VALUE contract', () => {
     expect(labels).toStrictEqual(['Remove Java', 'Remove LegacySkill']);
   });
 
+  it('gives each compact remove control a 24px minimum target', () => {
+    const { fixture } = setup(['Java']);
+    const button = host(fixture).querySelector<HTMLButtonElement>('[aria-label="Remove Java"]');
+    expect(button?.className).toContain('size-6');
+  });
+
   it('shows the empty copy only while nothing is selected', () => {
     const { fixture } = setup();
     expect(host(fixture).querySelector('[data-test="chips-empty"]')!.textContent!.trim()).toBe('Nothing here yet.');

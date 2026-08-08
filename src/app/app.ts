@@ -21,8 +21,6 @@ import { forkJoin, of } from 'rxjs';
 import { catchError, filter, map } from 'rxjs/operators';
 import {
   ApiService,
-  ChangeRequest,
-  Issue,
   Resource,
   ResourceRequest,
 } from './services/api.service';
@@ -41,7 +39,7 @@ import {
 import { AUDIT_TRAIL_READ_ROLES } from './app.routes';
 import { countsTowardDeliveryCapacity, kindOf } from './services/resource-kind.util';
 
-type NavBadge = 'requests' | 'risks' | 'changes' | 'overbooked';
+type NavBadge = 'requests' | 'overbooked';
 
 /**
  * The single breakpoint at which `#primary-navigation` stops being the mobile
@@ -76,6 +74,8 @@ interface NavItem {
   label: string;
   icon: string;
   route: string;
+  /** Optional visual taxonomy inside a large accordion group. */
+  domain?: string;
   exact?: boolean;
   compact?: boolean;
   badge?: NavBadge;
@@ -88,8 +88,6 @@ interface NavGroup {
 
 interface NavState {
   requests: ResourceRequest[];
-  issues: Issue[];
-  changes: ChangeRequest[];
   resources: Resource[];
 }
 
@@ -211,28 +209,29 @@ interface NavState {
               <div class="mt-1 text-xs text-ink-muted">Professional Services Automation</div>
             </div>
           </div>
-          <div class="mt-4 grid grid-cols-2 gap-2 text-center" [class.grid-cols-4]="canReadStaffing()">
-            @if (canReadStaffing()) {
-              <div class="rounded-md border border-line bg-surface-muted px-2 py-2 ring-1 ring-black/5">
-                <div class="font-mono tabular-nums text-sm font-semibold text-accent-text">{{ openRequestsBadge() }}</div>
-                <div class="text-[10px] text-ink-muted">REQ</div>
-              </div>
-            }
-            <div class="rounded-md border border-line bg-surface-muted px-2 py-2 ring-1 ring-black/5">
-              <div class="font-mono tabular-nums text-sm font-semibold text-accent-text">{{ riskBadge() }}</div>
-              <div class="text-[10px] text-ink-muted">RISK</div>
+          @if (canManageStaffing() || canReadStaffing()) {
+            <div data-testid="sidebar-summary"
+                 class="mt-4 grid gap-2 text-center"
+                 [class.grid-cols-2]="canManageStaffing()"
+                 [class.grid-cols-1]="!canManageStaffing()">
+              @if (canManageStaffing()) {
+                <a routerLink="/requests"
+                   class="rounded-md border border-line bg-surface-muted px-2 py-2 ring-1 ring-black/5 transition-colors hover:border-accent hover:bg-accent-tint"
+                   [attr.aria-label]="openRequestsBadge() + ' open resource requests'">
+                  <span class="block font-mono tabular-nums text-sm font-semibold text-accent-text">{{ openRequestsBadge() }}</span>
+                  <span class="block text-[10px] leading-tight text-ink-muted">Open resource requests</span>
+                </a>
+              }
+              @if (canReadStaffing()) {
+                <a routerLink="/utilization"
+                   class="rounded-md border border-line bg-surface-muted px-2 py-2 ring-1 ring-black/5 transition-colors hover:border-accent hover:bg-accent-tint"
+                   [attr.aria-label]="overbookedBadge() + ' overbooked resources'">
+                  <span class="block font-mono tabular-nums text-sm font-semibold text-accent-text">{{ overbookedBadge() }}</span>
+                  <span class="block text-[10px] leading-tight text-ink-muted">Overbooked resources</span>
+                </a>
+              }
             </div>
-            <div class="rounded-md border border-line bg-surface-muted px-2 py-2 ring-1 ring-black/5">
-              <div class="font-mono tabular-nums text-sm font-semibold text-accent-text">{{ changesBadge() }}</div>
-              <div class="text-[10px] text-ink-muted">CR</div>
-            </div>
-            @if (canReadStaffing()) {
-              <div class="rounded-md border border-line bg-surface-muted px-2 py-2 ring-1 ring-black/5">
-                <div class="font-mono tabular-nums text-sm font-semibold text-accent-text">{{ overbookedBadge() }}</div>
-                <div class="text-[10px] text-ink-muted">LOAD</div>
-              </div>
-            }
-          </div>
+          }
         </div>
 
         <nav class="min-h-0 flex-1 overflow-y-auto px-3 py-4">
@@ -276,7 +275,13 @@ interface NavState {
                 [id]="navGroupId(group.label)"
                 [inert]="!isGroupOpen(group.label)">
                 <div class="space-y-1 pt-1">
-                  @for (item of group.items; track item.route) {
+                  @for (item of group.items; track item.route; let itemIndex = $index) {
+                    @if (startsDomain(group.items, itemIndex)) {
+                      <p data-testid="nav-domain-label"
+                         class="px-3 pb-1 pt-3 text-[10px] font-bold uppercase tracking-[0.14em] text-ink-muted">
+                        {{ item.domain }}
+                      </p>
+                    }
                     <a
                       [routerLink]="item.route"
                       routerLinkActive="active"
@@ -410,7 +415,9 @@ interface NavState {
       <div class="fixed bottom-4 left-4 right-4 z-[100] flex max-h-[calc(100dvh-2rem)] w-auto max-w-sm flex-col overflow-y-auto pointer-events-none sm:left-auto sm:w-full">
         <div role="alert" aria-live="assertive" class="flex flex-col gap-2">
           @for (toast of errorToasts(); track toast.id) {
-            <div class="pointer-events-auto flex items-start gap-3 rounded-md border p-4 text-sm font-semibold shadow-lg ring-1 animate-in bg-critical-tint border-critical ring-critical text-critical-text">
+            <div class="pointer-events-auto flex items-start gap-3 rounded-md border p-4 text-sm font-semibold shadow-lg ring-1 animate-in bg-critical-tint border-critical ring-critical text-critical-text"
+                 (mouseenter)="pauseNotification(toast.id)" (mouseleave)="resumeNotification(toast.id)"
+                 (focusin)="pauseNotification(toast.id)" (focusout)="resumeNotification(toast.id)">
               <mat-icon class="text-[20px] w-[20px] h-[20px] shrink-0">error</mat-icon>
               <span class="flex-1">{{ toast.message }}</span>
               <button
@@ -426,6 +433,8 @@ interface NavState {
         <div role="status" aria-live="polite" class="flex flex-col gap-2" [class.mt-2]="errorToasts().length && statusToasts().length">
           @for (toast of statusToasts(); track toast.id) {
             <div class="pointer-events-auto flex items-start gap-3 rounded-md border p-4 text-sm font-semibold shadow-lg ring-1 animate-in"
+                 (mouseenter)="pauseNotification(toast.id)" (mouseleave)="resumeNotification(toast.id)"
+                 (focusin)="pauseNotification(toast.id)" (focusout)="resumeNotification(toast.id)"
                  [class.bg-positive-tint]="toast.type === 'success'" [class.border-positive]="toast.type === 'success'" [class.ring-positive]="toast.type === 'success'" [class.text-positive-text]="toast.type === 'success'"
                  [class.bg-surface]="toast.type === 'info'" [class.border-line]="toast.type === 'info'" [class.ring-line]="toast.type === 'info'" [class.text-ink-secondary]="toast.type === 'info'">
               <mat-icon class="text-[20px] w-[20px] h-[20px] shrink-0">
@@ -542,32 +551,38 @@ export class App {
   // the user through — no dead-end affordances for unauthorized/anonymous users.
   private readonly allNavGroups: NavGroup[] = [
     {
-      label: 'Resource Control',
+      label: 'My workspace',
       items: [
         { label: 'Dashboard', icon: 'dashboard', route: '/', exact: true },
-        { label: 'Search', icon: 'search', route: '/search' },
         { label: 'My Profile', icon: 'person', route: '/profile' },
         { label: 'My Assignments', icon: 'event_note', route: '/assignments' },
+      ],
+    },
+    {
+      label: 'Resource Operations',
+      items: [
+        { label: 'Search records', icon: 'search', route: '/search' },
         { label: 'Resource Requests', icon: 'assignment', route: '/requests', badge: 'requests' },
         { label: 'Resources', icon: 'badge', route: '/resources' },
         { label: 'Staffing', icon: 'group_add', route: '/staffing' },
         { label: 'Schedule', icon: 'calendar_view_week', route: '/schedule' },
-        { label: 'Approvals', icon: 'fact_check', route: '/approvals' },
         { label: 'Absences', icon: 'person_off', route: '/absences' },
+        { label: 'Approvals Inbox', icon: 'inbox', route: '/approvals' },
+        { label: 'Monthly Allocation Review', icon: 'calendar_month', route: '/allocation-approvals' },
       ],
     },
     {
       label: 'Project Control',
       items: [
         { label: 'Projects', icon: 'folder', route: '/projects' },
-        { label: 'Project Plans', icon: 'account_tree', route: '/project-plans' },
-        { label: 'Tasks', icon: 'task', route: '/project-tasks' },
-        { label: 'Issues', icon: 'bug_report', route: '/project-issues', badge: 'risks' },
-        { label: 'Change Control', icon: 'published_with_changes', route: '/change-requests', badge: 'changes' },
-        { label: 'Documents', icon: 'description', route: '/project-documents' },
-        { label: 'Project Partners', icon: 'handshake', route: '/project-partners' },
-        { label: 'Financial Plans', icon: 'payments', route: '/financial-plans' },
-        { label: 'Project Cost Centers', icon: 'account_balance', route: '/project-cost-centers' },
+        { label: 'All Project Plans', icon: 'account_tree', route: '/project-plans' },
+        { label: 'Task Register', icon: 'task', route: '/project-tasks' },
+        { label: 'Issue Register', icon: 'bug_report', route: '/project-issues' },
+        { label: 'Change Control', icon: 'published_with_changes', route: '/change-requests' },
+        { label: 'Document Register', icon: 'description', route: '/project-documents' },
+        { label: 'Partner Register', icon: 'handshake', route: '/project-partners' },
+        { label: 'Financial Plan Register', icon: 'payments', route: '/financial-plans' },
+        { label: 'Project Cost Center Register', icon: 'account_balance', route: '/project-cost-centers' },
         { label: 'Engagement Classification', icon: 'label', route: '/project-classification' },
       ],
     },
@@ -588,30 +603,29 @@ export class App {
         { label: 'Utilization', icon: 'bar_chart', route: '/utilization', badge: 'overbooked' },
         { label: 'Capacity', icon: 'calendar_view_month', route: '/capacity' },
         { label: 'Bench', icon: 'event_busy', route: '/bench' },
-        { label: 'Allocation Approvals', icon: 'fact_check', route: '/allocation-approvals' },
-        { label: 'Reporting', icon: 'insights', route: '/reporting', badge: 'risks' },
+        { label: 'Reporting', icon: 'insights', route: '/reporting' },
         { label: 'History', icon: 'history', route: '/audit-trail' },
       ],
     },
     {
       label: 'Configuration',
       items: [
-        { label: 'Default Language', icon: 'language', route: '/config/language', compact: true },
-        { label: 'Skill Catalogs', icon: 'category', route: '/config/skill-catalogs', compact: true },
-        { label: 'Proficiency Sets', icon: 'military_tech', route: '/config/proficiency-sets', compact: true },
-        { label: 'Manage Skills', icon: 'psychology', route: '/config/skills', compact: true },
-        { label: 'Project Roles', icon: 'badge', route: '/config/project-roles', compact: true },
-        { label: 'Organization Cost Centers', icon: 'account_balance', route: '/config/cost-centers', compact: true },
-        { label: 'Service Orgs', icon: 'business', route: '/config/service-orgs', compact: true },
-        { label: 'Resource Orgs', icon: 'domain', route: '/config/resource-orgs', compact: true },
-        { label: 'Locations', icon: 'public', route: '/config/locations', compact: true },
-        { label: 'Industries', icon: 'factory', route: '/config/industries', compact: true },
-        { label: 'Cost Categories', icon: 'sell', route: '/config/cost-categories', compact: true },
-        { label: 'Partner Roles', icon: 'diversity_3', route: '/config/partner-roles', compact: true },
-        { label: 'Vendors', icon: 'storefront', route: '/config/vendors', compact: true },
-        { label: 'Rate Cards', icon: 'request_quote', route: '/config/rate-cards', compact: true },
-        { label: 'Availability Data', icon: 'event_available', route: '/config/availability', compact: true },
-        { label: 'Integrations', icon: 'cable', route: '/config/integrations', compact: true },
+        { label: 'Skill Catalogs', icon: 'category', route: '/config/skill-catalogs', domain: 'Catalogs', compact: true },
+        { label: 'Proficiency Sets', icon: 'military_tech', route: '/config/proficiency-sets', domain: 'Catalogs', compact: true },
+        { label: 'Skills', icon: 'psychology', route: '/config/skills', domain: 'Catalogs', compact: true },
+        { label: 'Project Roles', icon: 'badge', route: '/config/project-roles', domain: 'Catalogs', compact: true },
+        { label: 'Locations', icon: 'public', route: '/config/locations', domain: 'Catalogs', compact: true },
+        { label: 'Industries', icon: 'factory', route: '/config/industries', domain: 'Catalogs', compact: true },
+        { label: 'Partner Roles', icon: 'diversity_3', route: '/config/partner-roles', domain: 'Catalogs', compact: true },
+        { label: 'Vendors', icon: 'storefront', route: '/config/vendors', domain: 'Catalogs', compact: true },
+        { label: 'Default Language', icon: 'language', route: '/config/language', domain: 'Organization', compact: true },
+        { label: 'Service Organizations', icon: 'business', route: '/config/service-orgs', domain: 'Organization', compact: true },
+        { label: 'Resource Organizations', icon: 'domain', route: '/config/resource-orgs', domain: 'Organization', compact: true },
+        { label: 'Availability Data', icon: 'event_available', route: '/config/availability', domain: 'Organization', compact: true },
+        { label: 'Cost Centers', icon: 'account_balance', route: '/config/cost-centers', domain: 'Finance', compact: true },
+        { label: 'Cost Categories', icon: 'sell', route: '/config/cost-categories', domain: 'Finance', compact: true },
+        { label: 'Rate Cards', icon: 'request_quote', route: '/config/rate-cards', domain: 'Finance', compact: true },
+        { label: 'Financial Integrations', icon: 'cable', route: '/config/integrations', domain: 'Integrations', compact: true },
       ],
     },
   ];
@@ -657,11 +671,12 @@ export class App {
     // roles that own resource master data (resource-manager/delivery-executive/admin).
     return this.allNavGroups
       .map(group => {
-        if (group.label === 'Resource Control') {
+        if (group.label === 'Resource Operations') {
           const items = group.items.filter(item => {
             if (item.route === '/requests' || item.route === '/staffing' || item.route === '/schedule') return canManageStaffing;
             if (item.route === '/resources') return canManageResources;
             if (item.route === '/approvals') return canApproveWorkflow;
+            if (item.route === '/allocation-approvals') return canViewAllocationApprovals;
             if (item.route === '/absences') return canViewAbsences;
             return true;
           });
@@ -687,7 +702,6 @@ export class App {
           const items = group.items.filter(item => {
             if (item.route === '/capacity') return canViewCapacity;
             if (item.route === '/bench') return canViewCapacity;
-            if (item.route === '/allocation-approvals') return canViewAllocationApprovals;
             if (item.route === '/reporting') return canViewPortfolio;
             if (item.route === '/audit-trail') return canViewAuditTrail;
             return canReadStaffing;
@@ -723,27 +737,29 @@ export class App {
   // principal-gated read, so firing before the post-redirect token is attached
   // 401s and latches the badges at 0 until a manual reload (the same latch the
   // page components fixed). authReady false->true re-runs the stream.
-  private navRes = rxResource<NavState, { ready: boolean; canReadStaffing: boolean }>({
+  private navRes = rxResource<NavState, { ready: boolean; canReadStaffing: boolean; canManageStaffing: boolean }>({
     params: () => ({
       ready: this.auth.authReady() && this.auth.isAuthenticated(),
       canReadStaffing: this.auth.canReadStaffing(),
+      canManageStaffing: this.auth.canManageStaffing(),
     }),
     stream: ({ params }) =>
       params.ready
         ? forkJoin({
-            requests: params.canReadStaffing ? this.api.getRequests() : of<ResourceRequest[]>([]),
-            issues: this.api.getProjectIssues(),
-            changes: this.api.getChangeRequests(),
+            // A count is loaded only when the shell can lead to its owning
+            // register. Finance may read staffing data but cannot open
+            // /requests, so showing its queue total would be a dead end.
+            requests: params.canManageStaffing ? this.api.getRequests() : of<ResourceRequest[]>([]),
             resources: params.canReadStaffing ? this.api.getResources() : of<Resource[]>([]),
           }).pipe(
             // Resilience: a failure of the badge-data endpoints (e.g. a transient
             // 401/403 or outage) must NOT throw out of the resource value — that
             // would break change detection for the whole shell and freeze the nav.
             // Degrade gracefully to empty badges; the navigation stays fully usable.
-            catchError(() => of<NavState>({ requests: [], issues: [], changes: [], resources: [] })),
+            catchError(() => of<NavState>({ requests: [], resources: [] })),
           )
-        : of<NavState>({ requests: [], issues: [], changes: [], resources: [] }),
-    defaultValue: { requests: [], issues: [], changes: [], resources: [] },
+        : of<NavState>({ requests: [], resources: [] }),
+    defaultValue: { requests: [], resources: [] },
   });
 
   // Auth state surfaced to the sidebar footer control.
@@ -753,6 +769,7 @@ export class App {
   readonly displayName = this.auth.displayName;
   readonly role = this.auth.role;
   readonly canReadStaffing = this.auth.canReadStaffing;
+  readonly canManageStaffing = this.auth.canManageStaffing;
 
   /** Mobile-only (below lg): whether the drawer is open. See the model comment on
    *  the <aside> — this is never set at lg+, because it also inerts <main>. */
@@ -835,19 +852,15 @@ export class App {
         label: group.label,
         items: group.label.toLowerCase().includes(q)
           ? group.items
-          : group.items.filter(i => i.label.toLowerCase().includes(q)),
+          : group.items.filter(i =>
+              i.label.toLowerCase().includes(q) || i.domain?.toLowerCase().includes(q),
+            ),
       }))
       .filter(group => group.items.length > 0);
   });
 
   private navState = this.navRes.value;
   openRequestsBadge = computed(() => this.navState().requests.filter(r => r.status === 'Open').length);
-  riskBadge = computed(() =>
-    this.navState().issues.filter(i => i.status !== 'Resolved' && (i.severity === 'High' || i.severity === 'Critical' || i.escalated)).length,
-  );
-  changesBadge = computed(() =>
-    this.navState().changes.filter(c => c.status === 'Submitted' || c.status === 'Draft').length,
-  );
   /**
    * C1: same "who is overbooked" semantic as the dashboard's
    * `overbookedResourcesList` — a dummy is a placeholder hole, not a real
@@ -962,6 +975,11 @@ export class App {
     return `navgroup-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}`;
   }
 
+  protected startsDomain(items: NavItem[], index: number): boolean {
+    const domain = items[index]?.domain;
+    return Boolean(domain) && (index === 0 || items[index - 1]?.domain !== domain);
+  }
+
   onFilterInput(event: Event): void {
     this.navFilter.set((event.target as HTMLInputElement).value);
   }
@@ -986,6 +1004,14 @@ export class App {
     this.notifications.dismiss(id);
   }
 
+  pauseNotification(id: number): void {
+    this.notifications.pause(id);
+  }
+
+  resumeNotification(id: number): void {
+    this.notifications.resume(id);
+  }
+
   signIn(): void {
     this.auth.login();
   }
@@ -996,13 +1022,11 @@ export class App {
 
   badgeValue(key?: NavBadge): number {
     if (key === 'requests') return this.openRequestsBadge();
-    if (key === 'risks') return this.riskBadge();
-    if (key === 'changes') return this.changesBadge();
     if (key === 'overbooked') return this.overbookedBadge();
     return 0;
   }
 
   badgeDanger(key?: NavBadge): boolean {
-    return key === 'risks' || key === 'overbooked';
+    return key === 'overbooked';
   }
 }

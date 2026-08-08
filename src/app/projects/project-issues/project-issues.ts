@@ -16,15 +16,15 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
   template: `
     <div [class]="projectId() ? '' : 'command-page space-y-6'">
       <div class="space-y-6">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-4">
+        <div data-test="issues-header" class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div class="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
             @if (headingLevel() === 1) {
               <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Issues</h1>
             } @else {
               <h2 class="font-display text-lg font-bold text-[var(--cc-ink)]">Issues</h2>
             }
             @if (!projectId()) {
-              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
+              <select [ngModel]="selectedProjectId()" (ngModelChange)="selectedProjectId.set($event)" aria-label="Select project" class="block w-full min-w-0 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-2.5 text-sm font-semibold text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)] sm:w-auto">
                 <option value="" disabled>Select a project...</option>
                 @for (p of projects(); track p.id) {
                   <option [value]="p.id">{{ p.name }}</option>
@@ -37,11 +37,11 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
                readable BEFORE the click and reaches a screen reader through
                aria-describedby. The hint is the accessible description, so it is
                referenced only while the control is actually disabled. -->
-          <div class="flex flex-col items-start gap-1">
+          <div class="flex w-full flex-col items-start gap-1 sm:w-auto">
             <button (click)="openForm()" [disabled]="!activeProjectId()"
                     [attr.aria-describedby]="activeProjectId() ? null : 'createIssueHint'"
                     data-test="create-issue"
-                    class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                    class="command-button w-full disabled:opacity-50 disabled:cursor-not-allowed sm:w-auto">
               <mat-icon class="text-sm">add</mat-icon> Create Issue
             </button>
             @if (!activeProjectId()) {
@@ -58,11 +58,15 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
           </div>
         } @else {
         <div class="command-card overflow-hidden">
-          <div class="overflow-x-auto">
-          <table class="command-data-table">
+          <p id="issuesTableHint" class="border-b border-[var(--cc-line)] bg-surface-muted px-4 py-2 text-xs font-semibold text-[var(--cc-muted)] lg:hidden">
+            Swipe horizontally to view every issue field. Issue stays visible.
+          </p>
+          <div data-test="issues-table-scroll" class="overflow-x-auto overscroll-x-contain outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent" role="region"
+               aria-label="Project issues table" aria-describedby="issuesTableHint" tabindex="0">
+          <table class="command-data-table min-w-[72rem]">
             <thead>
               <tr>
-                <th>Issue</th>
+                <th class="sticky left-0 z-10 w-48 max-w-48 bg-surface-muted!">Issue</th>
                 <th>Type</th>
                 <th>Severity</th>
                 <th>Status</th>
@@ -74,7 +78,7 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
             <tbody>
               @for (issue of filteredIssues(); track issue.id) {
                 <tr data-test="issue-row">
-                  <td class="font-medium" data-test="issue-title">{{ issue.title }}</td>
+                  <td class="sticky left-0 z-[1] w-48 max-w-48 break-words bg-surface! font-medium" data-test="issue-title">{{ issue.title }}</td>
                   <td class="text-[var(--cc-muted)]">{{ issue.type }}</td>
                   <td>
                     <span class="command-status"
@@ -91,7 +95,7 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
                             [class.bg-surface-muted]="issue.status === 'Mitigated' || issue.status === 'Closed'" [class.text-ink-secondary]="issue.status === 'Mitigated' || issue.status === 'Closed'" [class.ring-line]="issue.status === 'Mitigated' || issue.status === 'Closed'">
                         {{ issue.status }}
                       </span>
-                      <select #statusSelect data-test="issue-status" [ngModel]="issue.status" (ngModelChange)="updateStatus(issue, $event, statusSelect)" [attr.aria-label]="'Update status for issue ' + issue.title" class="rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] p-1.5 text-xs text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
+                      <select #statusSelect data-test="issue-status" [ngModel]="issue.status" (ngModelChange)="updateStatus(issue, $event, statusSelect)" [attr.aria-label]="'Update status for issue ' + issue.title" class="min-h-11 rounded-md border border-[var(--cc-line)] bg-[var(--cc-panel)] px-2 py-1.5 text-xs text-[var(--cc-ink)] outline-none focus:border-[var(--cc-primary)]">
                         <option value="Open">Open</option>
                         <option value="Mitigated">Mitigated</option>
                         <option value="Closed">Closed</option>
@@ -130,17 +134,17 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
 
       <!-- Report Issue Modal -->
       @if (showForm()) {
-        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
+        <div data-test="issue-form-overlay" class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-scrim/40 p-4 backdrop-blur-sm sm:items-center sm:p-6"
              appModal ariaLabelledby="issueModalTitle" (dismiss)="closeForm()">
-          <div class="command-card w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+          <div data-test="issue-form-panel" class="command-card flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden">
             <div class="command-card-header">
               <h2 id="issueModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Report Issue</h2>
-              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-[var(--cc-muted)] hover:text-[var(--cc-ink)] hover:bg-surface-muted p-2 rounded-full transition-colors">
+              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" data-test="issue-form-close" class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-full text-[var(--cc-muted)] transition-colors hover:bg-surface-muted hover:text-[var(--cc-ink)]">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
 
-            <div class="p-6 sm:p-8 overflow-y-auto flex-1">
+            <div data-test="issue-form-body" class="min-h-0 flex-1 overflow-y-auto p-6 sm:p-8">
               <form [formGroup]="issueForm" (ngSubmit)="saveIssue()" class="space-y-6">
                 <!-- Rendered INLINE rather than left to the interceptor's toast, because
                      error toasts in this app auto-dismiss: a dialog that stays open with a
@@ -154,7 +158,7 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
                   <input id="issueTitle" type="text" formControlName="title" class="command-input" placeholder="e.g. API Rate Limiting">
                 </div>
 
-                <div class="grid grid-cols-2 gap-4">
+                <div data-test="issue-type-grid" class="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div>
                     <label for="issueType" class="block text-sm font-semibold text-ink-secondary mb-1.5">Type *</label>
                     <select id="issueType" formControlName="type" class="command-select">
@@ -189,7 +193,7 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
                   </select>
                 </div>
 
-                <div class="grid grid-cols-2 gap-4">
+                <div data-test="issue-owner-grid" class="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div>
                     <label for="issueOwner" class="block text-sm font-semibold text-ink-secondary mb-1.5">Owner</label>
                     <!-- A person reference: bound to the resources (people) catalog by name. -->
@@ -226,7 +230,7 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
               </form>
             </div>
 
-            <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
+            <div data-test="issue-form-actions" class="flex flex-wrap justify-end gap-3 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] px-6 py-5 sm:px-8">
               <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
               <button type="button" (click)="saveIssue()" [disabled]="!issueForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
                 Report Issue

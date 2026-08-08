@@ -276,16 +276,55 @@ describe('ProjectTasks — responsive table pan port', () => {
 
   it('keeps every column in a labelled keyboard-scrollable region', async () => {
     const { fixture } = await render('pm');
-    const region = host(fixture).querySelector<HTMLElement>('[data-test="tasks-table-scroll"]')!;
+    const rendered = host(fixture);
+    const region = rendered.querySelector<HTMLElement>('[data-test="tasks-table-scroll"]')!;
     const table = region.querySelector<HTMLTableElement>('table')!;
+    const hint = rendered.querySelector<HTMLElement>(`#${region.getAttribute('aria-describedby')}`)!;
+    const identityHeader = table.querySelector<HTMLElement>('thead th:first-child')!;
+    const identityCell = table.querySelector<HTMLElement>('[data-test="task-name"]')!;
+    const status = table.querySelector<HTMLElement>('[data-test="task-status"]')!;
 
     expect(region).not.toBeNull();
     expect(region.getAttribute('role')).toBe('region');
     expect(region.getAttribute('aria-label')).toBe('Project tasks table');
     expect(region.tabIndex).toBe(0);
-    expect(region.className.split(/\s+/)).toContain('overflow-x-auto');
+    expect(classTokens(region)).toEqual(expect.arrayContaining([
+      'overflow-x-auto', 'overscroll-x-contain', 'outline-none', 'focus-visible:ring-2',
+    ]));
+    expect(hint.textContent).toContain('Swipe horizontally');
+    expect(classTokens(hint)).toContain('lg:hidden');
     expect(table.className).toContain('min-w-[');
     expect(table.querySelectorAll('thead th')).toHaveLength(6);
+    expect(classTokens(identityHeader)).toEqual(expect.arrayContaining(['sticky', 'left-0', 'bg-surface-muted!']));
+    expect(classTokens(identityCell)).toEqual(expect.arrayContaining(['sticky', 'left-0', 'bg-surface!']));
+    expect(classTokens(status)).toContain('min-h-11');
+  });
+
+  it('stacks the header and task date fields at 320px and keeps the long dialog scroll-safe', async () => {
+    const { fixture } = await render('pm');
+    const rendered = host(fixture);
+    const header = rendered.querySelector<HTMLElement>('[data-test="tasks-header"]')!;
+    expect(classTokens(header)).toEqual(expect.arrayContaining(['flex-col', 'sm:flex-row']));
+    expect(classTokens(header)).not.toContain('flex-row');
+
+    fixture.componentInstance.openForm();
+    await tick(fixture);
+
+    const overlay = rendered.querySelector<HTMLElement>('[data-test="task-form-overlay"]')!;
+    const panel = rendered.querySelector<HTMLElement>('[data-test="task-form-panel"]')!;
+    const body = rendered.querySelector<HTMLElement>('[data-test="task-form-body"]')!;
+    const dateGrid = rendered.querySelector<HTMLElement>('[data-test="task-date-grid"]')!;
+    const actions = rendered.querySelector<HTMLElement>('[data-test="task-form-actions"]')!;
+    const close = rendered.querySelector<HTMLElement>('[data-test="task-form-close"]')!;
+
+    expect(classTokens(overlay)).toEqual(expect.arrayContaining(['items-start', 'sm:items-center', 'overflow-y-auto']));
+    expect(classTokens(overlay)).not.toContain('items-center');
+    expect(classTokens(panel)).toEqual(expect.arrayContaining(['max-h-[90vh]', 'overflow-hidden']));
+    expect(classTokens(body)).toEqual(expect.arrayContaining(['min-h-0', 'flex-1', 'overflow-y-auto']));
+    expect(classTokens(dateGrid)).toEqual(expect.arrayContaining(['grid-cols-1', 'sm:grid-cols-2']));
+    expect(classTokens(dateGrid)).not.toContain('grid-cols-2');
+    expect(classTokens(actions)).toContain('flex-wrap');
+    expect(classTokens(close)).toEqual(expect.arrayContaining(['min-h-11', 'min-w-11']));
   });
 });
 

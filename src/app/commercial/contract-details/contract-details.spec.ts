@@ -1,6 +1,8 @@
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { Observable, of, Subject, throwError } from 'rxjs';
 import { ContractDetails } from './contract-details';
 import {
@@ -36,6 +38,97 @@ async function tick(fixture: { detectChanges: () => void }, microtasks = 5): Pro
   fixture.detectChanges();
 }
 
+interface PanPortSource {
+  name: string;
+  opening: string;
+  tableOpening: string;
+  table: string;
+}
+
+const CONTRACT_DETAILS_SOURCE = readFileSync(
+  resolve(process.cwd(), 'src/app/commercial/contract-details/contract-details.ts'),
+  'utf8',
+);
+
+/**
+ * Source-level by design: jsdom has no layout, scrollWidth or sticky positioning.
+ * Each `data-test="…-pan"` wrapper is sliced only through its own first </table>,
+ * so a sticky column in a later table cannot make an earlier pan-port pass.
+ */
+function contractPanPorts(): PanPortSource[] {
+  return [...CONTRACT_DETAILS_SOURCE.matchAll(/<div(?=[^>]*data-test="([^"]+-pan)")([^>]*)>/g)].map(match => {
+    const start = (match.index ?? 0) + match[0].length;
+    const afterOpening = CONTRACT_DETAILS_SOURCE.slice(start);
+    const tableEnd = afterOpening.indexOf('</table>');
+    if (tableEnd < 0) throw new Error(`${match[1]} must contain a table`);
+    const table = afterOpening.slice(0, tableEnd + '</table>'.length);
+    const tableOpening = table.match(/<table[^>]*>/)?.[0] ?? '';
+    return { name: match[1], opening: match[0], tableOpening, table };
+  });
+}
+
+describe('ContractDetails — wide tables expose keyboard/touch pan ports and keep only record identity pinned', () => {
+  const identityHeadings = new Map<string, string>([
+    ['contract-projects-pan', 'Project'],
+    ['negotiated-rates-pan', 'Role'],
+    ['billing-control-pan', 'Period / Project'],
+    ['billing-plan-pan', 'Label'],
+    ['recognition-periods-pan', 'Period'],
+    ['journal-preview-pan', 'Date'],
+    ['contract-orders-pan', 'Order'],
+  ]);
+  const ports = contractPanPorts();
+
+  it('covers every one of the seven real horizontal pan ports, with no anonymous overflow left behind', () => {
+    expect(ports.map(port => port.name)).toStrictEqual([...identityHeadings.keys()]);
+    expect(CONTRACT_DETAILS_SOURCE.match(/overflow-x-auto/g) ?? []).toHaveLength(ports.length);
+  });
+
+  it('names and focuses every region, connects a mobile swipe hint and declares a deterministic wide table', () => {
+    for (const port of ports) {
+      expect(port.opening).toContain('overflow-x-auto');
+      expect(port.opening).toContain('overscroll-x-contain');
+      expect(port.opening).toContain('role="region"');
+      expect(port.opening).toContain('tabindex="0"');
+      expect(port.opening).toContain('focus-visible:ring-2');
+      expect(port.opening).toMatch(/aria-label="[^"]+ table"/);
+      const hintId = port.opening.match(/aria-describedby="([^"]+)"/)?.[1];
+      expect(hintId, `${port.name} must reference its swipe hint`).toBeTruthy();
+      const hintOpening = CONTRACT_DETAILS_SOURCE.match(new RegExp(`<p[^>]*id="${hintId}"[^>]*>`))?.[0] ?? '';
+      expect(hintOpening).toContain('lg:hidden');
+      const hintText = CONTRACT_DETAILS_SOURCE.slice(
+        CONTRACT_DETAILS_SOURCE.indexOf(hintOpening),
+        CONTRACT_DETAILS_SOURCE.indexOf('</p>', CONTRACT_DETAILS_SOURCE.indexOf(hintOpening)),
+      );
+      expect(hintText).toMatch(/Swipe horizontally/);
+      expect(port.tableOpening).toMatch(/min-w-\[\d+px\]/);
+    }
+  });
+
+  it('pins the meaningful identity column with opaque backgrounds, never an arbitrary amount/status column', () => {
+    for (const port of ports) {
+      const heading = identityHeadings.get(port.name)!;
+      expect(port.table).toMatch(new RegExp(`<th[^>]*class="[^"]*sticky left-0[^"]*bg-surface-muted![^"]*"[^>]*>\\s*${heading}\\s*</th>`));
+      expect(port.table).toMatch(/<td[^>]*class="[^"]*sticky left-0[^"]*bg-surface![^"]*"/);
+    }
+  });
+
+  it('pins Actions only for negotiated rates and gives both existing controls 44px targets', () => {
+    const rates = ports.find(port => port.name === 'negotiated-rates-pan')!;
+    expect(rates.table.match(/sticky right-0/g)).toHaveLength(2);
+    expect(rates.table.match(/min-h-11 min-w-11/g)).toHaveLength(2);
+
+    for (const port of ports.filter(port => port !== rates)) expect(port.table).not.toContain('sticky right-0');
+  });
+
+  it('adds a real order identity and repeats the journal date on every posting line', () => {
+    expect(ports.find(port => port.name === 'contract-orders-pan')!.table).toContain('{{ o.invoiceNumber || o.id }}');
+    const journal = ports.find(port => port.name === 'journal-preview-pan')!.table;
+    expect(journal).toContain('{{ entry.date }}');
+    expect(journal).not.toContain("first ? entry.date : ''");
+  });
+});
+
 describe('ContractDetails — primary page state', () => {
   function apiWithContracts(source: Observable<Contract[]>) {
     return {
@@ -58,7 +151,7 @@ describe('ContractDetails — primary page state', () => {
     } as unknown as ApiService;
   }
 
-  async function render(api: ApiService): Promise<ComponentFixture<ContractDetails>> {
+  async function render(api: ApiService, id = 'missing-contract'): Promise<ComponentFixture<ContractDetails>> {
     TestBed.configureTestingModule({
       imports: [ContractDetails],
       providers: [
@@ -73,7 +166,7 @@ describe('ContractDetails — primary page state', () => {
     });
     await TestBed.compileComponents();
     const fixture = TestBed.createComponent(ContractDetails);
-    fixture.componentRef.setInput('id', 'missing-contract');
+    fixture.componentRef.setInput('id', id);
     await tick(fixture);
     return fixture;
   }
@@ -103,6 +196,39 @@ describe('ContractDetails — primary page state', () => {
     expect(host(fixture).textContent).toContain('Retry');
     expect(host(fixture).textContent).not.toContain('Contract not found');
     expect(host(fixture).textContent).not.toContain('Projects under this contract');
+  });
+
+  it('leaves route width and responsive padding to the authenticated router shell', async () => {
+    const fixture = await render(apiWithContracts(of<Contract[]>([])));
+    const page = host(fixture).firstElementChild as HTMLElement;
+    const tokens = [...page.classList];
+
+    expect(tokens).toContain('space-y-6');
+    expect(tokens).not.toContain('command-page');
+    for (const padding of ['p-4', 'sm:p-6', 'lg:p-7']) expect(tokens).not.toContain(padding);
+  });
+
+  it('renders Contracts / record name as a semantic breadcrumb with one current page', async () => {
+    const contract: Contract = {
+      id: 'CT-BREADCRUMB', customerId: 'CU1', name: 'Public Sector Framework 2026',
+      type: 'Framework', totalValue: 250000, currency: 'EUR', status: 'Active',
+      startDate: '2026-01-01', endDate: '2026-12-31',
+    };
+    const fixture = await render(apiWithContracts(of([contract])), contract.id);
+    const h = host(fixture);
+    const breadcrumb = h.querySelector<HTMLElement>('nav[aria-label="Breadcrumb"]');
+    expect(breadcrumb).toBeTruthy();
+
+    const items = breadcrumb!.querySelectorAll(':scope > ol > li');
+    expect(items).toHaveLength(2);
+    const contractsLink = items[0].querySelector<HTMLAnchorElement>('a');
+    expect(contractsLink?.textContent?.trim()).toBe('Contracts');
+    expect(contractsLink?.getAttribute('href')).toBe('/contracts');
+    expect(contractsLink?.querySelector('mat-icon')).toBeNull();
+    expect(items[1].getAttribute('aria-current')).toBe('page');
+    expect(items[1].querySelector('[aria-hidden="true"]')?.textContent).toBe('/');
+    expect(items[1].querySelector('[data-test="contract-breadcrumb-current"]')?.textContent?.trim()).toBe(contract.name);
+    expect(h.querySelector('h1')?.textContent?.trim()).toBe(contract.name);
   });
 });
 
