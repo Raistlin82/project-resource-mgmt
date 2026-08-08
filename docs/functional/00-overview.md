@@ -19,12 +19,12 @@ request flows into the project's effective budget without manual re-keying.
 
 | # | Functional area | Document | Primary roles | Key processes |
 |---|-----------------|----------|---------------|---------------|
-| 1 | Resource management | [`resource-management.md`](resource-management.md) | `employee`, `pm`, `resource-manager`, `delivery-executive` | Maintain profile; log & submit time; create/publish resource requests; match & rank candidates and assign; approve time (SoD); monitor utilization & rebalance; capacity forecast; what-if scenarios |
-| 2 | Project delivery | [`project-delivery.md`](project-delivery.md) | `pm`, `delivery-executive`, `finance` | Create projects; Project 360 review; tasks; issues & escalation; work packages/plans; financial plans & project cost centers; partners & documents; change requests (SoD); milestone → billing "Ready" |
+| 1 | Resource management | [`resource-management.md`](resource-management.md) | `employee`, `pm`, `resource-manager`, `delivery-executive` | Maintain profile; log & submit time; create/publish resource requests; match & rank candidates and assign; approve time (SoD); **record absences**; monitor utilization, the **bench** and availability; capacity forecast; what-if scenarios |
+| 2 | Project delivery | [`project-delivery.md`](project-delivery.md) | `pm`, `delivery-executive`, `finance` | Create projects; **classify the engagement (billable vs non-billable BASKET)**; Project 360 review; tasks; issues & escalation; work packages/plans; financial plans & project cost centers; partners & documents; change requests (SoD); milestone → billing "Ready" |
 | 3 | Commercial | [`commercial.md`](commercial.md) | `sales`, `finance`, `delivery-executive` | Customers; contracts; orders & order lines; purchase orders; invoice numbering |
 | 4 | Billing & revenue | [`billing-and-revenue.md`](billing-and-revenue.md) | `finance`, `delivery-executive` | Billing-plan items; milestone/progress → "Ready"; capped not-to-exceed; revenue recognition; A/R aging |
 | 5 | Approvals & governance | [`approvals-governance.md`](approvals-governance.md) | `pm`, `resource-manager`, `finance`, `delivery-executive`, `admin` | Multi-step approval engine; step-role enforcement; segregation of duties; append-only audit trail |
-| 6 | Reporting & analytics | [`reporting-analytics.md`](reporting-analytics.md) | `pm`, `resource-manager`, `finance`, `delivery-executive` | Portfolio rollups; margin drivers; realization; customer profitability; CSV export |
+| 6 | Reporting & analytics | [`reporting-analytics.md`](reporting-analytics.md) | `pm`, `resource-manager`, `finance`, `delivery-executive` | Portfolio rollups; **fully-loaded margin**; margin drivers; realization; customer profitability; margin-compression alerts; CSV and RPT `.xlsx` exports |
 | 7 | Configuration | [`configuration.md`](configuration.md) | `admin`, `delivery-executive` | Skill catalogs; proficiency sets; skills; project roles; resource organizations; languages; cost centers |
 | 8 | Integrations | [`integrations.md`](integrations.md) | `finance`, `delivery-executive`, `admin` | ERP GL journal export; e-invoice (FatturaPA) generation; CRM outbox; BI financial feed |
 | 9 | Keycloak / identity setup | [`keycloak-setup.md`](keycloak-setup.md) | `admin` | Realm, clients, roles, JWT verification, audience pinning |
@@ -79,6 +79,8 @@ use, but the authoritative gate is `roleGate` in `src/server.ts`:
 | Collection(s) | Roles allowed to mutate |
 |---|---|
 | `/resources` | `resource-manager`, `delivery-executive`, `admin` |
+| `/absences` | `resource-manager`, `admin` (`pm` and `employee` deliberately excluded) |
+| `PUT /projects/:id/classification` | `delivery-executive`, `admin` (narrower than `/projects`, and registered **before** it) |
 | `/assignments`, `/requests` | `pm`, `resource-manager`, `delivery-executive`, `admin` |
 | `/time-entries` | `employee`, `pm`, `resource-manager`, `finance`, `delivery-executive`, `admin` (approval additionally SoD-gated: approver ≠ entry owner) |
 | `/projects`, `/project-partners`, `/project-documents`, `/work-packages`, `/milestones`, `/project-tasks`, `/project-issues`, `/change-requests` | `pm`, `delivery-executive`, `admin` |
@@ -93,6 +95,8 @@ use, but the authoritative gate is `roleGate` in `src/server.ts`:
 | Collection(s) | Roles allowed to read |
 |---|---|
 | `/audit-logs` | `admin`, `delivery-executive` |
+| `/absences` (with the **reason** — GDPR art. 9) | `resource-manager`, `delivery-executive`, `admin`; `employee` narrowed to their own rows |
+| `/absences/calendar` (redacted: who and when, never why), `/capacity`, `/bench` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
 | `/customers`, `/contracts`, `/orders`, `/order-lines`, `/billing-plan-items` | `sales`, `finance`, `delivery-executive`, `admin` |
 | `/project-financials`, `/project-cost-centers`, `/cost-centers` | `finance`, `delivery-executive`, `admin` |
 | `/resources`, `/users` | `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |

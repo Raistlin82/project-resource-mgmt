@@ -93,6 +93,71 @@ flowchart TD
 
 ---
 
+## The fully-loaded portfolio margin
+
+The headline margin on `/` and `/reporting` is **fully loaded**: it carries the
+cost of work no customer pays for.
+
+```
+fullyLoadedMargin    = revenue − deliveryCost − nonBillableCost
+fullyLoadedMarginPct = fullyLoadedMargin / revenue
+```
+
+`deliveryCost` is the `actualCost` of the **billable** engagements;
+`nonBillableCost` is the `actualCost` of the ones classified non-billable
+([Classify an engagement](project-delivery.md#classify-an-engagement-billable-delivery-vs-non-billable-basket)).
+Both tiles read **one function**, `portfolioMarginFullyLoaded`, rather than each
+open-coding a sum — which is how the same-named tile on two screens used to
+answer two different questions with nothing on either screen saying so.
+
+The tile **names the split**: how much non-billable cost, across how many
+engagements, with the caveat that it is *not comparable with a single project's
+delivery margin*. Without that line, a drop in the headline number is
+unexplainable at the point of reading.
+
+A project's **own** margin is deliberately untouched by any of this: it still
+reports `revenue − actualCost`, because that cost is real and must stay visible
+on its own page. What classification changes is **who consumes** that margin —
+customer profitability, the margin-compression alerts and the realization
+rollups all exclude non-billable engagements, because "how profitable is this
+customer" is a question they cannot answer.
+
+### A margin % needs revenue to be a percentage OF
+
+Every margin percentage in `finance.util.ts` is computed as
+`revenue > 0 ? (margin / revenue) × 100 : 0`. **That trailing `0` is a sentinel
+for "undefined", not a measurement.** Returning `NaN` instead would poison every
+downstream sum, so the sentinel exists — but rendering it as a number says
+something false.
+
+For a non-billable engagement, revenue is zero **by construction**, so the
+sentinel is not an edge case: it is the only value it ever has. Printing "0%"
+beside a red negative amount asserted break-even on an engagement that had lost
+every euro of its cost.
+
+**The rule.** Ask `hasMeasuredMarginPct(revenue)` before RENDERING a margin
+percentage. Where it is false:
+
+| Surface | What is shown instead |
+|---------|----------------------|
+| Screen (tiles, tables, KPIs) | an **em dash**, with the tile's red/amber tint suppressed — there is no verdict to tint |
+| CSV export | an **em dash**, matching the `PCP Delta %` column already in those files |
+| RPT `.xlsx` workbook | an **empty cell** — Excel skips empty cells in `=AVERAGE()`/`=SUM()`, where a `0` would silently drag a portfolio figure down, and unlike a dash it keeps the column numeric |
+
+The **amount** is always measured and always shown. Only the ratio is undefined.
+
+Three consumers deliberately keep the raw sentinel, and each is asserted to be
+unreachable rather than assumed: the per-project margin chart (its source filters
+`revenue > 0`), the margin-compression alerts and their CSV (they return nothing
+at all when there is no revenue). A fourth — the BI-feed preview in
+`/configuration` — shows the sentinel **on purpose**, because it previews the
+artefact and a preview that disagrees with the downloaded file is the one that
+lies.
+
+A repo-wide scan requires every file naming a margin percentage to either import
+the guard or carry a written exemption, so a new render site cannot quietly print
+the sentinel.
+
 ## SOPs
 
 ### Read the Portfolio Analytics dashboard

@@ -1,5 +1,9 @@
 # Bug Hunt & Security Audit #2 — Resource Scheduling App
 
+> **Historical snapshot (2026-06-09).** Findings and counts describe the codebase
+> as it was then. The current defect register is
+> [`docs/audits/2026-08-05-full-audit.md`](docs/audits/2026-08-05-full-audit.md).
+
 Scope: second audit, focused on the changes since audit #1 — the rewritten
 `src/server.ts`, the new Commercial domain (customers / contracts / orders /
 order-lines), `finance.util.ts`, the Project 360 Overview tab, the analytics in

@@ -25,6 +25,25 @@ Full documentation lives in [`docs/`](docs/README.md) — start there.
 | **Keycloak setup** (step-by-step) | [`docs/functional/keycloak-setup.md`](docs/functional/keycloak-setup.md) |
 | **Install & deploy (incl. Docker)** | [`docs/architecture/06-deployment-operations.md`](docs/architecture/06-deployment-operations.md) |
 | Glossary | [`docs/glossary.md`](docs/glossary.md) |
+| **Gap register** vs Lutech RPT (56 capabilities, graded) | [`docs/rpt-comparison.md`](docs/rpt-comparison.md) |
+| Current defect register (26 lenses, 140 findings) | [`docs/audits/2026-08-05-full-audit.md`](docs/audits/2026-08-05-full-audit.md) |
+
+---
+
+## 🧭 What it covers
+
+| Area | What you get |
+|------|--------------|
+| **Resource management** | People, skills and rate cards; resource requests; time-phased assignments down to the day; monthly FTE capacity; utilization |
+| **Bench & availability** | Who is unallocated, for how long (aging buckets), the 6-month availability outlook, hiring/subco demand, and the Unchargeable workbook |
+| **Absences** | Recorded periods when a person cannot be staffed. An absence is an HR fact: no customer, no allocation approval, no cost. Reasons are special-category data and never leave the register |
+| **Project delivery** | Projects, plans and work packages, tasks, issues, milestones, documents, partners, change control |
+| **Engagement classification** | Billable delivery vs **non-billable** work (a "BASKET": AMS duty, internal presidio) — carried in the cost base, excluded from customer profitability |
+| **Commercial chain** | Customers → contracts → orders → order lines, with negotiated sell rates |
+| **Billing & revenue** | Billing plans, invoice issuance, revenue recognition (POC and as-incurred), AR aging and DSO |
+| **Budget & baseline** | Financial plans, cost baselines frozen per period (PCP), baseline-vs-planned variance |
+| **Approvals & governance** | Allocation and financial approvals with Segregation of Duties, a two-step chain above a value threshold, and an append-only audit trail with its own screen |
+| **Reporting** | Portfolio margin (fully loaded), EAC/VAC, burn, customer profitability and concentration, margin-compression alerts, forecast and what-if, CSV and RPT Excel exports |
 
 ---
 
@@ -98,8 +117,15 @@ Segregation of Duties on time entries, change requests and approvals. Details in
 npx ng serve            # dev server (http://localhost:4200)
 npm run build           # production build (browser + SSR)
 npm run serve:ssr:app   # run the built SSR server (dist/app/server/server.mjs)
-npm test                # unit tests
-npm run lint            # lint
+npm test                # unit tests (Vitest via @angular/build:unit-test)
+npm run lint            # lint (TS + HTML templates)
+npm run start:dev       # build + run the full server on :4000 with demo data
+```
+
+Smoke-test the API against a running server (dependency-free, no test runner):
+
+```bash
+SMOKE_BASE=http://localhost:4200 node scripts/smoke-api.mjs
 ```
 
 ---
@@ -124,7 +150,8 @@ src/
   server.ts     Express API: routing, RBAC, audit, persistence wiring
   db/           Repository layer (in-memory + Postgres/Drizzle)
   server/       Integration adapters
-drizzle/        Database migrations
+drizzle/        Database migrations (Drizzle; 46 tables in src/db/schema.ts)
+scripts/        Dependency-free API smoke test and tooling
 docs/           Project documentation (architecture + functional)
 Dockerfile, docker-compose*.yml   Container packaging
 ```

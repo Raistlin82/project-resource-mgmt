@@ -1,5 +1,9 @@
 # Bug Hunt & Security Report — project-resource-mgmt
 
+> **Historical snapshot (2026-06-07).** Findings and counts describe the codebase
+> as it was then; most are long since fixed. The current defect register is
+> [`docs/audits/2026-08-05-full-audit.md`](docs/audits/2026-08-05-full-audit.md).
+
 Date: 2026-06-07
 Scope: Angular 21 frontend (`src/app`), in-memory mock backend (`src/server.ts`), shared API layer (`src/app/services/api.service.ts`).
 Inputs: confirmed bug + security findings, AUDIT.md remediation tasks, Angular pattern-debt tasks.

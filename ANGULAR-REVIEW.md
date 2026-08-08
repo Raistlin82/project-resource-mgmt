@@ -1,5 +1,10 @@
 # Angular Review — verifica best practice v20+/v21
 
+> **Historical snapshot (2026-06-07).** Kept for the record of what was reviewed
+> and decided then. The application has changed substantially since — trust the
+> code and [`docs/`](docs/README.md) for current behaviour. The current defect
+> register is [`docs/audits/2026-08-05-full-audit.md`](docs/audits/2026-08-05-full-audit.md).
+
 > Verifica dell'implementazione contro le 10 skill `/angular` (signals, component, http, routing, forms, di, ssr, tooling, testing, directives).
 > Generato il 2026-06-07. Complementare ad `AUDIT.md` (che copre la completezza *funzionale*); questo documento copre la **qualità del codice Angular**.
 

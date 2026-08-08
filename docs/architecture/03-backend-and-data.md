@@ -322,6 +322,48 @@ gated by the **same** `READ_RULES` predicate
 `src/server.ts`) — extended, not duplicated, when Block F was added — and both
 run under `roleGate`'s GLOBAL middleware, so neither handler re-gates itself.
 
+## Absences: two levels of read
+
+`resource_absences` is the one table in this schema whose CONTENT is regulated,
+not merely permissioned. `reasonCode` and `note` are **GDPR art. 9
+special-category data** (a sickness absence reveals health), so the endpoint is
+split in two and the split is the whole design:
+
+| Endpoint | Carries | Audience |
+| --- | --- | --- |
+| `GET /absences` | the full row, **reason and note included** | `resource-manager`, `delivery-executive`, `admin` — plus `employee`, **narrowed to its own rows inside the handler** (`absenceReadScope`), because a `READ_RULE` is per-path and never per-row |
+| `GET /absences/calendar` | a **redacted projection**: who, which dates, nothing about why | the wider planning audience — the same `AVAILABILITY_READ_ROLES` as `/capacity` and `/bench` (`pm`, `resource-manager`, `delivery-executive`, `finance`, `admin`), one shared constant rather than a third copy of the list |
+| `POST`/`PUT`/`DELETE /absences` | — | `resource-manager`, `admin` only |
+
+Three consequences worth stating explicitly, because each is easy to undo by
+accident:
+
+1. **`READ_RULES` ORDER MATTERS.** The `/absences/calendar` rule must precede the
+   `/absences` prefix rule. Reversed, the prefix rule swallows the calendar and
+   the planner audience loses availability data entirely — or, worse under a
+   later edit, gains the reason.
+2. **The arithmetic must never branch on `reasonCode`.** Availability,
+   utilization, bench state and the Unchargeable report all subtract absent days
+   without asking why. That is precisely what makes the redacted projection
+   *numerically complete*: a planner sees the same numbers a `delivery-executive`
+   sees, having been told strictly less.
+3. **Audit snapshots stay WHOLE rows.** They are not trimmed to the changed keys
+   — a register exists to reconstruct a state, and a trimmed one reconstructs
+   nothing (it also makes "the key was absent" indistinguishable from "it did not
+   change"). The consequence is named rather than hidden: an untouched reason
+   travels in every `/absences` audit entry, and the audit audience is the same
+   `admin` + `delivery-executive`. **Minimisation happens at render time**, fixed
+   by a test — per-field audit redaction was considered and deliberately
+   rejected.
+
+Writes are excluded for `pm` for the same reason project classification is: they
+are measured on these metrics. `recordedBy`/`recordedAt` are server-pinned, so
+the SoD rule "the recorder is not the subject" compares against an actor the
+client cannot forge. A write that lands on a date already carrying booked hours
+succeeds but reports the conflicts (`bookedDayConflicts`), and a booking written
+INTO a recorded absence is refused with a message that names the date and the
+person and **never the reason**.
+
 ## Cross-entity search (Block G, no schema, no new endpoint)
 
 Six existing collection reads — `GET /resources`, `/projects`, `/requests`,
@@ -365,7 +407,7 @@ one backward-compatibility invariant every pre-existing caller (`resources.compo
 
 ## Domain ER diagrams (reference)
 
-The 43 tables (`src/db/schema.ts`) are split into four domain groups below.
+The 46 tables (`src/db/schema.ts`) are split into four domain groups below.
 Crow's-foot relationships show the **declared** foreign keys; soft links
 (`requesterId`, `ownerId`, `refId`) carry the column without a hard FK and are
 called out in the catalogue. Money/FX columns use `doublePrecision`; date-like
@@ -801,12 +843,13 @@ they cannot deadlock against each other.
 
 ## Entity catalogue (reference)
 
-All 43 tables in `src/db/schema.ts`. **Key FKs** lists declared `references()`
+All 46 tables in `src/db/schema.ts`. **Key FKs** lists declared `references()`
 foreign keys; *(soft)* marks columns that carry a reference without a hard FK.
 
 | Entity (table) | Purpose | Key fields & FKs | Domain |
 | --- | --- | --- | --- |
 | `resources` | People with skills, capacity, rates | `id`, `capacity`, `utilization`, `costRate`, `billRate`, `kind` (`internal`\|`dummy`\|`subco`, default `internal`, C1); `managerId` *(soft self-ref)*; **FK** `vendorId→vendors` (subco only, C1) | Resourcing |
+| `resourceAbsences` | Recorded periods when a person cannot be staffed (H). An absence is an **HR fact**: no customer, no allocation approval, no cost | `id`, `startDate`, `endDate`, `reasonCode`, `note`, `recordedBy`/`recordedAt` *(both **server-pinned**, never read from the body, so the SoD rule "the recorder is not the subject" has a trustworthy actor)*; **FK** `resourceId→resources`; indexed on `resourceId` and `(resourceId, startDate)` — the hot query is "absences intersecting `[from,to]`". `reasonCode`/`note` are **GDPR art. 9 special-category data**: see [the two-level read](#absences-two-levels-of-read) | Resourcing |
 | `users` | Identity → resource + RBAC role mapping | `id`, `role`; **FK** `resourceId→resources` | Resourcing |
 | `requests` | Demand (resource requests) | `id`, `requiredEffort`, `staffedEffort`, `status`; **FK** `projectId→projects`; `requesterId` *(soft)* | Resourcing |
 | `assignments` | Staffing of a resource onto a request | `id`, `assignedHours`; **FK** `requestId→requests`, `resourceId→resources` | Resourcing |
@@ -830,7 +873,7 @@ foreign keys; *(soft)* marks columns that carry a reference without a hard FK.
 | `holidays` | Non-working days (natural key: the ISO date IS the `id`) | `id` = `YYYY-MM-DD`, `name` | Config |
 | `planningPeriods` | Open/closed state of a calendar month (natural key: `id` IS `YYYY-MM`) | `id` = `YYYY-MM`, `status` | Config |
 | `settings` | Global key/value settings (e.g. hours-per-day) | `id` PK, `value` | Config |
-| `projects` | Delivery projects | `id`, `status`; **FK** `contractId→contracts`; `ownerId` *(soft)* | Projects |
+| `projects` | Delivery projects | `id`, `status`; **FK** `contractId→contracts`; `ownerId` *(soft)*; H: `billable` *(notNull, default `true`)* — the **single source of truth** for "does this engagement earn customer revenue" — and `type` *(notNull, default `Delivery`)*, a **LABEL the arithmetic never reads**. Both are additive and move ONLY through `PUT /projects/:id/classification`; they are not in `PROJECT_FIELDS`, and the ordinary project routes **403 rather than silently drop** a body that carries them | Projects |
 | `projectPartners` | Partner companies on a project | `id`, `company`, `status`; **FK** `projectId→projects` | Projects |
 | `projectDocuments` | Project document metadata | `id`, `name`, `type`; **FK** `projectId→projects` | Projects |
 | `workPackages` | Work breakdown items | `id`, `progress`, `status`; **FK** `projectId→projects` | Projects |

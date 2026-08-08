@@ -1,7 +1,7 @@
 # Lutech RPT vs Delivery Control — comparativa side by side
 
 _Fonte lato RPT: **Manuale Utente Resource Planning Tool (RPT), v04 del 07/07/2026**, 49 pagine, letto integralmente._
-_Fonte lato nostro: **il codice su `main`**, verificato riga per riga il 2026-08-06 e riverificato dopo la prima wave di chiusura il 2026-08-07 — **2453 test unitari** su 115 file, 790 check smoke API (792 e un solo skip su Postgres). 46 tabelle, 20 migrazioni, 50 rotte. Non la roadmap, non la memoria di sessione (che su due punti si è rivelata già superata)._
+_Fonte lato nostro: **il codice su `main`**, verificato riga per riga il 2026-08-06, riverificato dopo la wave di chiusura il 2026-08-07 e riallineato ai conteggi il 2026-08-08 — **2479 test unitari** su 115 file (verdi anche a UTC+14 e UTC−8), 790 check smoke API (792 e un solo skip, che solo Postgres può esercitare). 46 tabelle, 20 migrazioni, 51 rotte. Non la roadmap, non la memoria di sessione (che su due punti si è rivelata già superata)._
 _Questi sono gli **unici conteggi** del documento: il resto del testo vi rimanda invece di ripeterli, perché una cifra scritta in due posti è una cifra che prima o poi ne contraddice un'altra._
 
 ---

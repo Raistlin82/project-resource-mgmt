@@ -7,14 +7,33 @@
 
 ## A
 
+**Absence** — A recorded period during which a person **cannot be staffed**. An
+absence is an *HR fact*, not delivery work: it carries no customer, raises no
+allocation approval and costs nothing. It removes working days from availability,
+puts the person in the ABSENT bench state, and is excluded from the Unchargeable
+report. Its reason is *special-category data* — see the next entry.
+
+**Absence reason** — One of `Maternity`, `ParentalLeave`, `Vacation`,
+`Sickness`, `Indisposition`, `Other`, plus an optional note. **GDPR art. 9
+special-category data** (a sickness absence reveals health), so it is served by a
+narrower endpoint than the availability feed, and **no calculation ever branches
+on it** — which is exactly what makes the redacted feed numerically complete.
+
+
 **Advance** — Billing type: a down payment taken up front, before delivery.
 
-**AR Aging** — Accounts-receivable aging: the breakdown of outstanding invoices
-by how long they have been unpaid (e.g. 0–30, 31–60, 61–90, 90+ days).
+**Aging bucket (bench)** — How long someone has been unallocated, in **working
+days**: **B** up to one working month, **C** up to two, **D** beyond. Derived
+from real idle days rather than calendar months, so a holiday-heavy or part-time
+period does not inflate the bucket.
 
 **Approval** — A governance gate (an approval request) that must be granted
 before an action takes effect; routed by role and subject to segregation of
 duties.
+
+**AR Aging** — Accounts-receivable aging: the breakdown of outstanding invoices
+by how long they have been unpaid (e.g. 0–30, 31–60, 61–90, 90+ days).
+
 
 **Assignment** — The allocation of a Resource to a Resource Request for a number
 of assigned hours; the source of truth from which a resource's utilization is
@@ -27,12 +46,25 @@ never edited or deleted.
 **Backlog** — Contracted-but-not-yet-delivered/recognized work; the remaining
 value still to be earned on signed commercial agreements.
 
+
+
 **Base currency / FX** — The single reporting currency that all amounts are
 converted into (via FX rates) so multi-currency contracts can be compared and
 aggregated.
 
+**BASKET** — A **non-billable engagement**: real delivery work that no customer
+pays for directly — AMS duty rosters, internal presidio, technical practice
+groups. The term comes from Lutech's RPT. Its cost is real and stays visible on
+the engagement's own page; what changes is who consumes it. See *Engagement
+classification*.
+
 **Bearer token** — A JWT presented in the `Authorization: Bearer <token>` header;
 the backend verifies it against Keycloak before trusting the caller's identity.
+
+**Bench** — The people who are unallocated or only partially allocated, with how
+long they have been so (*aging bucket*), when they next free up, and the 6-month
+availability outlook. Derived entirely from assignments, absences and holidays —
+there is no bench table.
 
 **Billing type** — The model that governs how a billing plan item is invoiced.
 The eight values are: **Milestone**, **Recurring**, **TimeAndMaterials**,
@@ -73,6 +105,12 @@ payment after invoicing; a cash-flow / collections health metric.
 **EAC** — Estimate At Completion: the forecast total cost (or effort) of a
 project once it is finished.
 
+**Engagement classification** — Whether a project is **billable** (earns customer
+revenue) or **non-billable** (only consumes cost). Two columns carry it:
+`billable`, the single source of truth every rollup asks, and `type`, a label the
+arithmetic never reads. Set only through `PUT /projects/:id/classification`;
+`type: 'Basket'` implies `billable: false`. See *BASKET*, *Fully-loaded margin*.
+
 **ETC** — Estimate To Complete: the forecast remaining cost (or effort) from now
 until project completion (EAC = actuals + ETC).
 
@@ -83,6 +121,11 @@ optionally with a markup percentage.
 
 **FatturaPA** — The Italian electronic-invoice XML standard. The e-invoice
 integration adapter emits FatturaPA-shaped artifacts.
+
+**Fully-loaded margin** — Portfolio margin with the cost of non-billable work
+included: `revenue − deliveryCost − nonBillableCost`. Deliberately distinct from
+a single project's delivery margin, and the tile says so — the two are not
+comparable.
 
 **FX rate** — A currency conversion rate used to translate amounts into the base
 currency. See *Base currency / FX*.
@@ -120,6 +163,12 @@ the users, roles, and the `psa-web` client.
 cost rate over the hours delivered).
 
 **Margin %** — Margin expressed as a percentage of revenue.
+
+**Margin-% sentinel** — Every margin percentage is `revenue > 0 ? … : 0`, and
+that `0` means **undefined**, not zero. It exists so a division by zero cannot
+poison a downstream sum; it must never be RENDERED as a number. Screens and CSVs
+show an em dash, workbooks an empty cell. The margin *amount* is always real and
+always shown.
 
 **Milestone** — (1) A scheduled project checkpoint with an Achieved/Pending
 status. (2) **Billing type**: fixed-price (SAL) billing triggered when the linked
@@ -194,9 +243,14 @@ multiplied by the resource's bill rate.
 
 ## U
 
+**Unchargeable** — The RPT report of people not chargeable to a customer, split
+into four sheets by *aging bucket*. Absent people are excluded: being on leave is
+not the same fact as sitting on the bench.
+
 **Utilization** — The percentage of a resource's capacity consumed by
 assignments; recomputed from the full set of a resource's assignments (never a
 lossy running delta) and clamped to a sensible range.
+
 
 ## V
 

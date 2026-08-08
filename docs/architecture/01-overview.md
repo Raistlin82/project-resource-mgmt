@@ -43,7 +43,7 @@ responsibility and a narrow boundary to the next.
    `Repository<T>` abstraction (`src/db`), so the API code never talks to a
    specific store directly. See [`03-backend-and-data.md`](03-backend-and-data.md).
 3. **PostgreSQL** — the production system of record, modeled with **Drizzle ORM**
-   (31 entities). The Repository's PostgreSQL adapter reads and writes here.
+   (46 entities). The Repository's PostgreSQL adapter reads and writes here.
 4. **Keycloak** — the identity provider. The browser authenticates against the
    `psa` realm via OIDC (Authorization Code + PKCE); the backend verifies the
    resulting JWTs and applies RBAC. See
@@ -135,7 +135,7 @@ C4Container
         Container(adapters, "Integration adapters", "TypeScript", "ERP, e-invoice (FatturaPA), CRM, BI")
     }
 
-    SystemDb_Ext(postgres, "PostgreSQL", "Drizzle ORM — 31 entities")
+    SystemDb_Ext(postgres, "PostgreSQL", "Drizzle ORM — 46 entities")
     System_Ext(keycloak, "Keycloak", "OIDC realm 'psa', client 'psa-web'")
     System_Ext(ext, "External systems", "ERP / e-invoice / CRM / BI")
 
@@ -157,7 +157,7 @@ C4Container
 | Reactivity | **signals / `rxResource`** | Signal-based state; `rxResource` for async reads |
 | Server rendering | **`@angular/ssr`** | `AngularNodeAppEngine`, host allow-list |
 | HTTP server | **Express 5** | `src/server.ts` — SSR host + `/api`, rate limiting, RBAC |
-| Data access | **Drizzle ORM** | 31 `pgTable` entities in `src/db/schema.ts` |
+| Data access | **Drizzle ORM** | 46 `pgTable` entities in `src/db/schema.ts` |
 | PostgreSQL driver | **`pg`** (node-postgres) | Pool with hardened TLS; prod only |
 | Identity provider | **Keycloak 26** | Realm `psa`, client `psa-web` |
 | Token verification | **`jose`** | Remote JWKS, issuer + audience checks |

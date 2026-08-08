@@ -70,7 +70,7 @@ and hosts, keeping the established `TE`/`AL`/`AR`/`OB` prefix conventions.
 **natural-key adapters** that synthesize `id === key`. Full detail:
 `docs/architecture/03-backend-and-data.md`.
 
-## Backend: `src/server.ts` is the real security boundary (~2900 lines)
+## Backend: `src/server.ts` is the real security boundary (~8100 lines)
 
 One Express app is both the SSR handler (`AngularNodeAppEngine`) and the host of the
 `/api` router. Wiring order matters: `/api` is matched first, static assets next, a
@@ -140,11 +140,46 @@ initializers. Routes (`src/app/app.routes.ts`) are all lazy `loadComponent`.
 
 ## Database migrations
 
-Drizzle. Schema in `src/db/schema.ts` (31 tables); SQL migrations in `drizzle/`;
-config `drizzle.config.ts`. **`src/db/seed.ts` is the single source of truth for seed
-data** — consumed by both the in-memory adapter and the Postgres seeder, so they never
-drift. Money columns are `doublePrecision` today (matches the JS `number` runtime);
-they should move to `numeric(14,2)` before issuing real invoices (noted in the docs).
+Drizzle. Schema in `src/db/schema.ts` (46 tables); SQL migrations in `drizzle/` (20
+today, next free number `0020`); config `drizzle.config.ts`. **Two features cannot be
+built in parallel if both need a migration** — they collide on `_journal.json`.
+**`src/db/seed.ts` is the single source of truth for seed data** — consumed by both
+the in-memory adapter and the Postgres seeder, so they never drift. Money columns are
+`doublePrecision` today (matches the JS `number` runtime); they should move to
+`numeric(14,2)` before issuing real invoices (noted in the docs).
+
+## Non-billable engagements, absences, and the money rules they carry
+
+Two additive columns on `projects` — `billable` (the SINGLE source of truth) and
+`type` (a LABEL, never read by the arithmetic) — split the portfolio into work that
+earns customer revenue and work that only consumes cost (a Lutech "BASKET": AMS duty,
+internal presidio, technical groups). Four rules are load-bearing:
+
+- **`billable`/`type` are NOT in `PROJECT_FIELDS`.** They move only through
+  `PUT /projects/:id/classification` (delivery-executive/admin — `pm` is excluded
+  because they are measured on these metrics), and the ordinary project routes **403
+  rather than silently drop** a body that carries them. Invariant: `type: 'Basket'`
+  implies `billable: false`; the converse is free. A project with billing plan items
+  cannot be flipped non-billable (409 naming the count).
+- **A non-billable engagement still reports `margin = revenue − actualCost`** — the
+  cost is real and must stay visible. What changes is WHO CONSUMES that margin:
+  `customerProfitability`, the margin alerts and the realization rollups all exclude
+  them (`finance.util.ts`).
+- **A margin PERCENTAGE has no value without revenue.** Every `marginPct` is
+  `revenue > 0 ? … : 0` and that `0` is a SENTINEL. Ask `hasMeasuredMarginPct(revenue)`
+  before RENDERING one — screen, CSV or workbook — or "0%" asserts break-even on an
+  engagement that lost money. A repo-wide scan in `finance.util.spec.ts` requires every
+  file naming a margin percentage to import the guard or carry a written exemption.
+- **Absence `reasonCode`/`note` are GDPR art. 9 special-category data.** The
+  arithmetic must NEVER branch on `reasonCode` — that is what makes the redacted
+  `/absences/calendar` projection numerically complete. `GET /absences` (with the
+  reason) is `resource-manager`/`delivery-executive`/`admin`, **plus `employee`
+  narrowed to its OWN rows inside the handler** (a `READ_RULE` is per-path, never
+  per-row); the calendar is the wider planner audience (`+pm`, `+finance`); writes
+  are `resource-manager`/`admin` only. `READ_RULES` ORDER MATTERS: the
+  `/absences/calendar` rule must precede the `/absences` prefix rule, and both ship
+  as ONE order-sensitive exported array (`ABSENCE_READ_RULES`) so they cannot be
+  separated. Minimisation happens at render time, not by trimming audit payloads.
 
 ## Integrations
 

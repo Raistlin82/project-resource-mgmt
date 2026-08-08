@@ -256,7 +256,7 @@ base currency `EUR` is fixed at rate 1).
 > Substituting is an *approver* action, so `pm` may book a dummy's hours (via
 > `/assignments`) and *read* the raw month rows, but may not hand them to a
 > person (see
-> [C2 substitution](#c2-substituting-a-dummy-with-a-real-person) below).
+> [C2 substitution](#c2--substituting-a-dummy-with-a-real-person) below).
 >
 > `/cost-baselines` (block E) is the same narrowing shape again, and for the
 > same reason as `/resources`: whoever is *measured* on a variance must not be

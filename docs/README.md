@@ -12,9 +12,9 @@ development** (when `DATABASE_URL` is unset) and **PostgreSQL in production**.
 Identity is handled by **Keycloak** (OIDC, Authorization Code + PKCE); the server
 verifies JWTs and enforces role-based access control (RBAC).
 
-> **This `docs/` tree is the real documentation.** The repository-root
-> `README.md` is stale scaffolding boilerplate ("Run and deploy your AI Studio
-> app") and does not describe this product — ignore it.
+> **This `docs/` tree is the reference documentation.** The repository-root
+> [`README.md`](../README.md) is the landing page — quick start, tech stack, and
+> the map into this tree. Read it first if you are new; come here for depth.
 
 ---
 
@@ -25,7 +25,8 @@ verifies JWTs and enforces role-based access control (RBAC).
 | **Developer / Architect** | [`architecture/`](#architecture) — system design, frontend, backend, security, integrations, deployment |
 | **Business / Process owner** | [`functional/`](#functional-areas) — what each functional area does and how the workflows run |
 | **Security / Ops engineer** | [`architecture/04-security-identity.md`](architecture/04-security-identity.md) · [`architecture/06-deployment-operations.md`](architecture/06-deployment-operations.md) · [`functional/keycloak-setup.md`](functional/keycloak-setup.md) |
-| **Maintainer / reviewer** | [`audits/2026-08-04-ui-application-audit.md`](audits/2026-08-04-ui-application-audit.md) — current defect register, remediation status and residual acceptance criteria |
+| **Maintainer / reviewer** | [`audits/2026-08-05-full-audit.md`](audits/2026-08-05-full-audit.md) — the current defect register (26 lenses, 140 confirmed findings). Read it **before re-auditing**. |
+| **Product / competitive** | [`rpt-comparison.md`](rpt-comparison.md) — capability-by-capability comparison against Lutech RPT, and the authoritative gap register |
 | **Everyone** | [`roles-and-permissions.md`](roles-and-permissions.md) · [`glossary.md`](glossary.md) |
 
 ---
@@ -80,9 +81,29 @@ What the product does, by area, for business and process owners.
 
 - [`glossary.md`](glossary.md) — alphabetized domain and technical terms
 
+### Product comparison and gap register
+
+- [`rpt-comparison.md`](rpt-comparison.md) — 56 Lutech RPT capabilities graded one by
+  one against the code on `main`: where we are at parity, ahead, partial, or missing.
+  This is the **authoritative gap register**; the roadmap and any session notes are not.
+
 ### Audits
 
-- [`audits/2026-08-04-ui-application-audit.md`](audits/2026-08-04-ui-application-audit.md) — UI/UX and application-logic findings, fixes and guarded backlog
+Historical analysis. They record what was true on their date — **the code and the rest
+of this tree are authoritative for current behaviour**.
+
+- [`audits/2026-08-05-full-audit.md`](audits/2026-08-05-full-audit.md) — the full
+  application audit: 26 lenses, 140 confirmed findings, 3 P0s closed. Start here.
+- [`audits/2026-08-04-ui-application-audit.md`](audits/2026-08-04-ui-application-audit.md) — the earlier UI/UX and application-logic pass
+- [`ux-remediation/`](ux-remediation/triage-2026-08-05.md) — the UX issue register and its triage
+
+### Decision records and delivery plans
+
+- [`adr/0001-commercial-domain.md`](adr/0001-commercial-domain.md) — why the commercial
+  chain is modelled as customers → contracts → orders → order lines
+- [`superpowers/specs/`](superpowers/) — the design spec for each delivery block
+  (the DECISIONS and their rationale). [`superpowers/plans/`](superpowers/) — the
+  task-by-task execution plans. Both are historical once a block has landed.
 
 ---
 

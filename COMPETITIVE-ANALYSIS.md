@@ -1,5 +1,12 @@
 # Competitive Analysis — Delivery Control (PSA Platform)
 
+> **Historical snapshot (2026-06-12).** Every figure below (table counts, feature
+> coverage, gaps) describes the product as it was on that date, and several gaps
+> have since been closed — the numbers are deliberately NOT refreshed, because a
+> dated analysis whose figures are edited stops being a record of anything. For
+> the current capability position see
+> [`docs/rpt-comparison.md`](docs/rpt-comparison.md).
+
 _Prepared for product & executive review. Status: internal, candid._
 
 **Last updated: 2026-06-12** (verified against the codebase; supersedes the 2026-06-08 "modeled, not operational" baseline)

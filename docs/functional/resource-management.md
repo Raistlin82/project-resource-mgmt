@@ -3,22 +3,30 @@
 > **Diátaxis mode: How-to.** This document holds the SOPs for the resource
 > lifecycle: maintaining a profile, logging and submitting time, raising and
 > publishing demand, matching and assigning people, approving time under
-> segregation of duties, monitoring utilization, and forecasting capacity. Each
+> segregation of duties, recording absences, monitoring utilization and the
+> bench, and forecasting capacity. Each
 > SOP follows the format described in [`00-overview.md`](00-overview.md). Roles
 > and the authorization model are defined in
 > [`../roles-and-permissions.md`](../roles-and-permissions.md).
 
 **Source of truth.** The procedures below are grounded in the Angular components
-under `src/app/{my-profile,my-assignments,resource-requests,staffing,utilization,forecast,schedule}/`,
-the pure decision modules `src/app/services/{forecast.util,match.util,staffing.util,schedule.util}.ts`,
+under `src/app/{my-profile,my-assignments,resource-requests,staffing,utilization,forecast,schedule,bench,absences}/`,
+the pure decision modules
+`src/app/services/{forecast.util,match.util,staffing.util,schedule.util,bench.util,absence.util,capacity.util}.ts`,
 and the server handlers + RBAC in `src/server.ts` (`/resources`, `/requests`,
-`/assignments`, `/time-entries`).
+`/assignments`, `/time-entries`, `/absences`, `/capacity/monthly`,
+`/bench/monthly`) with the absence policy in
+`src/server/absence-policy.util.ts`.
 
 **Roles touching this domain (mutation RBAC, from `src/server.ts`):**
 
 - `/resources` → `resource-manager`, `delivery-executive`, `admin`
 - `/requests`, `/assignments` → `pm`, `resource-manager`, `delivery-executive`, `admin`
 - `/time-entries` → all of `employee`, `pm`, `resource-manager`, `finance`, `delivery-executive`, `admin` (approval is SoD-gated: approver ≠ the entry's resource owner)
+- `/absences` → **write:** `resource-manager`, `admin` only (`pm` and `employee`
+  deliberately excluded). **Read with the reason:** `resource-manager`,
+  `delivery-executive`, `admin`, plus `employee` narrowed to their own rows.
+  **Read redacted** (`/absences/calendar`): the wider planning audience
 
 ---
 
@@ -35,6 +43,10 @@ flowchart TD
   A --> S[RM / PM reviews Resource Schedule<br/>date-level timeline + conflict detection]
   U[RM monitors Utilization<br/>& rebalances] --> F
   S --> U
+  X[RM records an Absence<br/>HR fact: no customer, no cost] --> XC
+  XC["Redacted calendar feed:<br/>who and when, never why"] --> U
+  XC --> B
+  B[RM / Delivery Exec reviews the Bench<br/>unallocated, aging, 6-month outlook] --> F
   F[RM / Delivery Exec runs<br/>Capacity Forecast] --> W
   W[RM / Delivery Exec models<br/>What-If scenario]
 ```
@@ -604,6 +616,117 @@ flowchart TD
 
 **Related.** [View My Assignments + submit Time Entries](#view-my-assignments--submit-time-entries),
 [Approvals & governance](approvals-governance.md), [Billing & revenue](billing-and-revenue.md).
+
+---
+
+### Record an absence (leave, sickness, parental)
+
+**Purpose.** Record a period during which a person **cannot be staffed**, so
+availability, bench, capacity and the Unchargeable report all stop counting them
+as biddable. An absence is an **HR fact, not delivery work**: it carries no
+customer, raises no allocation approval, and costs nothing.
+
+**Scope.**
+- *In:* the `/absences` register — listing, creating (`POST /absences`), editing
+  (`PUT /absences/:id`) and deleting (`DELETE /absences/:id`) a
+  `(resource, startDate, endDate, reasonCode, note?)` period; the redacted
+  availability feed `GET /absences/calendar?from&to` that every planning surface
+  reads.
+- *Out:* a leave **request** workflow (there is none — see the exceptions), any
+  effect on cost or revenue, and any use of `reasonCode` in a calculation.
+
+**The reason is regulated data.** `reasonCode` and `note` are **GDPR art. 9
+special-category data** — a sickness absence reveals health. Two endpoints, two
+audiences:
+
+| Read | Carries | Who |
+|------|---------|-----|
+| `GET /absences` | the full row, reason and note included | `resource-manager`, `delivery-executive`, `admin` — plus `employee`, **narrowed to their own rows** inside the handler |
+| `GET /absences/calendar` | who and which dates. **Never why** | the planning audience: `pm`, `resource-manager`, `delivery-executive`, `finance`, `admin` |
+
+**No calculation ever branches on `reasonCode`.** That is what makes the redacted
+feed *numerically complete*: a PM planning a squad sees exactly the same
+availability numbers a `delivery-executive` sees, having been told strictly less.
+
+**RACI.**
+
+| Step | Responsible | Accountable | Consulted | Informed |
+|------|-------------|-------------|-----------|----------|
+| Open the Absences register | resource-manager | resource-manager | — | — |
+| Record an absence | resource-manager | resource-manager | delivery-executive | pm (via availability only) |
+| Correct or delete an absence | resource-manager | resource-manager | — | — |
+| Read the reason | delivery-executive | delivery-executive | — | — |
+| Consume availability while planning | pm | resource-manager | — | — |
+
+**Process flow.**
+
+```mermaid
+flowchart TD
+  A[Open /absences on authReady] --> B[getAbsences]
+  B --> C{Record absence}
+  C --> D[Pick person, dates, reason, optional note]
+  D --> E[POST /absences]
+  E --> F{Validations}
+  F -->|dates, employment window, overlap| G[400 / 409 with the reason named]
+  F -->|actor is the subject| H[403 segregation of duties]
+  F -->|ok| I[Row stored; recordedBy/recordedAt pinned server-side]
+  I --> J[Booked days on those dates reported as bookedDayConflicts]
+  I --> K["Redacted calendar feed now carries it:<br/>who and when, never why"]
+  K --> L[Bench: state ABSENT · Capacity and Utilization: days removed · Unchargeable: excluded]
+```
+
+**Steps.**
+
+1. **Open the register.**
+   - **Who:** `resource-manager`. **How:** `/absences` lists every recorded period
+     with a lock notice stating that reasons appear on this screen only and are
+     never exported.
+2. **Record an absence.**
+   - **Who:** `resource-manager` or `admin`. **Never `pm`** — declaring a
+     colleague absent removes them from the bench and from staffing availability,
+     which moves a metric the PM is measured on, and it is an HR fact the PM does
+     not own.
+   - **How:** person + `startDate` + `endDate` + one of `Maternity`,
+     `ParentalLeave`, `Vacation`, `Sickness`, `Indisposition`, `Other`, plus an
+     optional free-text note → `POST /absences`.
+   - **Output:** the period is stored. `recordedBy`/`recordedAt` are
+     **server-pinned** and never read from the body, so the SoD rule below has an
+     actor the client cannot forge.
+3. **Correct or delete.** `PUT`/`DELETE /absences/:id`, same audience, same
+   validations. Both are audited.
+4. **Consume it.** Nothing else has to be done: `/bench` shows the person as
+   **ABSENT** (a fourth state, not a flag on another one), `/capacity` and
+   `/utilization` remove the absent working days from availability, and the
+   Unchargeable workbook stops counting them as unallocated.
+
+**Exceptions & edge cases.**
+
+| Situation | System response |
+|-----------|-----------------|
+| `startDate`/`endDate` missing or not `YYYY-MM-DD` | `400` — `<field> is required and must match YYYY-MM-DD`. |
+| `endDate` before `startDate` | `400` — `endDate … must be on or after startDate …`. |
+| `reasonCode` outside the six allowed values | `400` naming the allowed list. |
+| Period overlaps an existing absence for the same person | `409` — `absence …..… overlaps an existing absence …`. |
+| Period starts before `hireDate` or ends after `terminationDate` | `400` naming the employment boundary crossed. |
+| The actor is the subject | `403` — `the actor recording an absence cannot be its subject (segregation of duties)`. |
+| The dates already carry booked hours | **Allowed**, and the write reports them as `bookedDayConflicts` so the planner can rebook. The absence is the HR truth; the booking is the thing to fix. |
+| A booking is written INTO a recorded absence | `400` — `booking date <date> falls in a recorded absence for <person>`. The message names the date and the person and **never the reason**. |
+| `pm` or `employee` attempts a write | `403`. There is no self-service leave request: one would let anyone take themselves off the bench. If it is ever added it will be an approval workflow, not a direct write. |
+| An `employee` reads `/absences` | Their own rows only. An employee whose principal maps to no resource sees an **empty list**, never everybody's. |
+
+**Metrics.**
+
+| Metric | Definition |
+|--------|------------|
+| Absence days | Working days (holiday- and weekend-aware) inside recorded absences in a period. |
+| Availability | Working days in the period − absence days. The denominator every bench and capacity figure uses. |
+| Away headcount | People with an absence intersecting the month — shown beside the bench counts, never mixed into them. |
+
+**Related.** [Manage resources](#manage-resources--onboard--terminate-employees),
+[Monitor Utilization & rebalance](#monitor-utilization--rebalance),
+[Capacity Forecast](#capacity-forecast),
+[Approvals & governance](approvals-governance.md) (why the audit snapshot is a
+whole row and what that means for the reason).
 
 ---
 

@@ -25,6 +25,10 @@
   `finance`, `delivery-executive`, `admin`
 - Change-request **approval** is additionally SoD-gated: only
   `delivery-executive`/`admin` may approve, and the approver ≠ the CR's creator.
+- `PUT /projects/:id/classification` → `delivery-executive`, `admin` only. **`pm`
+  is deliberately excluded** even though they may edit everything else about the
+  project: the classification decides whether the engagement's cost lands in
+  delivery margin or in the non-billable bucket, and a PM is measured on that.
 
 ---
 
@@ -32,7 +36,8 @@
 
 ```mermaid
 flowchart TD
-  C[PM creates Project] --> O[Project 360 review<br/>health, EAC, burn, alerts]
+  C[PM creates Project] --> CL[Delivery Exec classifies the engagement<br/>billable delivery or non-billable BASKET]
+  CL --> O[Project 360 review<br/>health, EAC, burn, alerts]
   O --> T[Manage Tasks]
   O --> I[Log & escalate Issues]
   O --> P[Plan Work Packages & Milestones]
@@ -107,6 +112,112 @@ flowchart TD
 | Projects without a contract link | Data-hygiene signal for revenue attribution. |
 
 **Related.** [Project 360 review](#project-360-review), [commercial](commercial.md).
+
+---
+
+### Classify an engagement (billable delivery vs non-billable BASKET)
+
+**Purpose.** State whether a project **earns customer revenue** or only
+**consumes cost**. Delivery organisations run real work that no customer pays
+for directly — AMS duty rosters, internal presidio, technical practice groups,
+the platform team. Lutech's RPT calls that container a **BASKET**. Until an
+engagement is classified, its cost is indistinguishable from billable delivery,
+and every margin, realization and customer-profitability figure in the portfolio
+quietly absorbs it.
+
+**Scope.**
+- *In:* the two fields `billable` (boolean) and `type` (`Delivery` | `Basket` |
+  `Internal` …), set through `PUT /projects/:id/classification` and the
+  **Engagement Classification** screen.
+- *Out:* everything else about the project (the Create/Edit SOPs), and any change
+  to how a project's OWN margin is computed — see the invariant below.
+
+**Two fields, and only one of them is authoritative.**
+
+| Field | Role |
+|-------|------|
+| `billable` | The **single source of truth**. Every rollup asks this and only this. |
+| `type` | A **label** for humans and reports. The arithmetic never reads it. |
+
+Two fields that can contradict each other would force every consumer to pick one
+to believe — and the one it picked would be invisible at the call site. So there
+is one rule and one guard: **`type: 'Basket'` implies `billable: false`**
+(rejected otherwise); the converse is free, because plenty of non-billable work
+is not a basket.
+
+**Why it is not an ordinary project field.** `billable` and `type` are **not in
+`PROJECT_FIELDS`**. Sending them to `POST /projects` or `PUT /projects/:id`
+returns **403 with the reason**, rather than silently dropping them — a silent
+drop is how a classification change appears to succeed and does nothing.
+
+**RACI.**
+
+| Step | Responsible | Accountable | Consulted | Informed |
+|------|-------------|-------------|-----------|----------|
+| Propose a classification | pm | delivery-executive | — | — |
+| Set / change it | delivery-executive | delivery-executive | finance | pm |
+| Consume it in margin & profitability | — | finance | — | delivery-executive |
+
+**Process flow.**
+
+```mermaid
+flowchart TD
+  A[Open Engagement Classification] --> B[Pick the engagement]
+  B --> C{Set billable / type}
+  C -->|type Basket with billable true| D[400 — a Basket engagement must be non-billable]
+  C -->|to non-billable, billing items exist| E[409 — names how many items block it]
+  C -->|ok| F[PUT /projects/:id/classification]
+  F --> G[Project's OWN margin is UNCHANGED<br/>revenue minus actualCost, as before]
+  F --> H[Excluded from customer profitability,<br/>margin alerts and realization]
+  F --> I[Cost enters the FULLY LOADED portfolio margin<br/>as nonBillableCost, with the engagements named]
+```
+
+**Steps.**
+
+1. **Open the screen.** `/project-classification` lists every engagement with its
+   current classification.
+2. **Set it.** `delivery-executive` or `admin` → `PUT /projects/:id/classification`.
+3. **Read the consequences.** They are the point of the whole SOP:
+   - The engagement's **own margin does not move**. It still reports
+     `revenue − actualCost`, i.e. minus its real cost, because that cost is real
+     and must stay visible on its own page.
+   - It **leaves** customer profitability, the margin-compression alerts and the
+     realization rollups. A non-billable engagement has no contract, so it used
+     to land under the synthetic "unknown" customer and show up as a customer
+     permanently in the red — a "customer" that was in fact our own AMS team.
+   - Its cost **enters the fully-loaded portfolio margin** as `nonBillableCost`,
+     and the tile names the engagements behind the figure. Without that, the drop
+     in the headline number is unexplainable at the point of reading.
+   - It can no longer carry **billing plan items** (`400` on create).
+   - A **margin percentage** is no longer rendered for it anywhere — with no
+     revenue there is nothing to be a percentage of. See
+     [Reporting & analytics](reporting-analytics.md#a-margin--needs-revenue-to-be-a-percentage-of).
+
+**Exceptions & edge cases.**
+
+| Situation | System response |
+|-----------|-----------------|
+| `type: 'Basket'` with `billable: true` | `400` — `a Basket engagement must be non-billable (billable: false)`. |
+| `billable: false` with `type: 'Delivery'` | **Allowed.** Internal delivery work that is not a basket is a real category. |
+| Flipping a project to non-billable while it has billing plan items | `409` — `cannot classify this engagement as non-billable: N billing plan item(s) still reference it`. The count is in the message so the user knows the size of the cleanup. |
+| Flipping to **billable** | Never blocked. Nothing about becoming chargeable is unsafe. |
+| `billable`/`type` sent to `POST /projects` or `PUT /projects/:id` | `403` — `<field> is set by PUT /projects/:id/classification and cannot be sent here`. Not a silent drop. |
+| `pm` calls the classification endpoint | `403`. The narrow rule is registered **before** the coarse `/projects` rule, and the order is load-bearing. |
+| A project row that predates the columns, or a caller that sends no project data | Reads as **billable** (`?? true`). The safe direction: it keeps margin alerts on and hours counted as billable value, rather than silently switching either off for the whole portfolio the first time a field is forgotten. |
+
+**Metrics.**
+
+| Metric | Definition |
+|--------|------------|
+| Non-billable cost | Σ `actualCost` of engagements with `billable: false`, in base currency. |
+| Fully-loaded portfolio margin | `revenue − deliveryCost − nonBillableCost`. The headline the CFO reads. |
+| Basket share | Non-billable cost ÷ total delivery cost. How much of the organisation is not chargeable. |
+
+**Related.** [Create a Project](#create-a-project),
+[Billing & revenue](billing-and-revenue.md),
+[Reporting & analytics](reporting-analytics.md#the-fully-loaded-portfolio-margin),
+[Record an absence](resource-management.md#record-an-absence-leave-sickness-parental)
+(the other half of "why is this person not chargeable").
 
 ---
 
