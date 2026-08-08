@@ -78,7 +78,12 @@ type CommercialCoverage =
           </div>
         } @else {
         <div class="command-card overflow-hidden">
-          <table class="command-data-table">
+          <p id="tasksTableHint" class="px-4 py-2 text-xs text-[var(--cc-muted)] border-b border-[var(--cc-line)] sm:hidden">
+            Scroll horizontally to view every task field.
+          </p>
+          <div data-test="tasks-table-scroll" class="overflow-x-auto overscroll-x-contain" role="region"
+               aria-label="Project tasks table" aria-describedby="tasksTableHint" tabindex="0">
+          <table class="command-data-table min-w-[60rem]">
             <thead>
               <tr>
                 <th class="px-6 py-4 font-medium">Task</th>
@@ -146,7 +151,8 @@ type CommercialCoverage =
                 </tr>
               }
             </tbody>
-        </table>
+          </table>
+          </div>
       </div>
       }
     </div>

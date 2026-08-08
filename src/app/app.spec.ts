@@ -6,11 +6,11 @@ import { of } from 'rxjs';
 import { App, DESKTOP_NAV_QUERY, navShortcutHint } from './app';
 import { ApiService, UserRole } from './services/api.service';
 import { AuthService } from './services/auth.service';
-import { NotificationService } from './services/notification.service';
+import { AppNotification, NotificationService } from './services/notification.service';
 import { ThemeService } from './services/theme.service';
 
 /** Routed placeholder, so a navigation in a spec resolves to something real. */
-@Component({ selector: 'app-stub-page', template: '' })
+@Component({ selector: 'app-stub-page', template: '<h1>Routed screen</h1>' })
 class StubPage {}
 
 const DRAWER_OPEN_CLASS = 'command-drawer-open';
@@ -115,7 +115,7 @@ function makeAuthStub(initialRole: UserRole) {
 async function render(role: UserRole, routes: Routes = []) {
   const api = makeApiStub();
   const auth = makeAuthStub(role);
-  const notifications = { items: signal([]), dismiss: vi.fn() };
+  const notifications = { items: signal<AppNotification[]>([]), dismiss: vi.fn() };
   const theme = { theme: signal<'light' | 'dark'>('light'), toggle: vi.fn() };
 
   TestBed.configureTestingModule({
@@ -132,7 +132,7 @@ async function render(role: UserRole, routes: Routes = []) {
   fixture.detectChanges();
   await fixture.whenStable();
   fixture.detectChanges();
-  return { fixture, app: fixture.componentInstance, api };
+  return { fixture, app: fixture.componentInstance, api, notifications };
 }
 
 describe('App capability-aware shell', () => {
@@ -193,6 +193,81 @@ describe('App capability-aware shell', () => {
     expect(toastStack.classList).toContain('w-auto');
     expect(toastStack.classList).toContain('sm:left-auto');
     expect(toastStack.classList).toContain('sm:w-full');
+  });
+
+  it('gives every toast a message-specific, comfortably sized dismiss control', async () => {
+    const { fixture, notifications } = await render('employee');
+    notifications.items.set([
+      { id: 1, type: 'error', message: 'Save failed' },
+      { id: 2, type: 'success', message: 'Saved' },
+    ]);
+    fixture.detectChanges();
+
+    const dismissButtons = Array.from(
+      fixture.nativeElement.querySelectorAll('.fixed.bottom-4 button'),
+    ) as HTMLButtonElement[];
+    expect(dismissButtons.map(button => button.getAttribute('aria-label'))).toEqual([
+      'Dismiss error notification: Save failed',
+      'Dismiss notification: Saved',
+    ]);
+    for (const button of dismissButtons) {
+      expect(button.type).toBe('button');
+      expect(button.classList).toContain('size-10');
+    }
+
+    dismissButtons[0].click();
+    expect(notifications.dismiss).toHaveBeenCalledWith(1);
+  });
+
+  it('moves focus to the new page heading after SPA navigation', async () => {
+    const { fixture } = await render('employee', [{ path: 'next', component: StubPage }]);
+    const router = TestBed.inject(Router);
+    const menuButton = fixture.nativeElement.querySelector('[data-testid="mobile-menu-toggle"]') as HTMLButtonElement;
+    menuButton.focus();
+
+    await router.navigate(['/next']);
+    fixture.detectChanges();
+    await nextFrame();
+
+    const heading = fixture.nativeElement.querySelector('#main-content h1') as HTMLHeadingElement;
+    expect(heading.textContent).toContain('Routed screen');
+    expect(heading.getAttribute('tabindex')).toBe('-1');
+    expect(document.activeElement).toBe(heading);
+  });
+
+  it('declares one desktop viewport shell with independently scrolling nav and main', async () => {
+    const { fixture } = await render('employee');
+    const aside = fixture.nativeElement.querySelector('#primary-navigation') as HTMLElement;
+    const nav = aside.querySelector('nav') as HTMLElement;
+    const footer = Array.from(aside.children).at(-1) as HTMLElement;
+    const main = fixture.nativeElement.querySelector('#main-content') as HTMLElement;
+
+    expect(aside.classList).toContain('overflow-hidden');
+    expect(nav.classList).toContain('min-h-0');
+    expect(nav.classList).toContain('overflow-y-auto');
+    expect(footer.classList).toContain('shrink-0');
+    expect(footer.classList).not.toContain('sticky');
+    expect(main.classList).toContain('min-h-0');
+    expect(main.classList).toContain('min-w-0');
+    expect(main.classList).toContain('lg:h-full');
+
+    const css = readFileSync('src/styles.css', 'utf8');
+    const desktopRules = cssBlocks(css, `@media ${DESKTOP_NAV_QUERY}`).join('\n');
+    expect(desktopRules).toMatch(/\.command-shell\s*{[^}]*block-size:\s*100dvh/);
+    expect(desktopRules).toMatch(/\.command-shell\s*{[^}]*overflow:\s*hidden/);
+    expect(desktopRules).toMatch(/\.command-drawer,[^}]*\.command-shell\s*>\s*main[^}]*block-size:\s*100%/);
+  });
+
+  it('uses an opaque focus indicator and leaves fixed overlays outside transformed containing blocks', () => {
+    const css = readFileSync('src/styles.css', 'utf8');
+    const focusRule = cssBlocks(css, ':focus-visible {')[0];
+    const revealKeyframes = cssBlocks(css, '@keyframes cc-reveal')[0];
+
+    expect(focusRule).toMatch(/outline:\s*3px solid var\(--color-accent\)/);
+    expect(focusRule).not.toMatch(/outline:[^;]*transparent/);
+    expect(revealKeyframes).not.toMatch(/transform\s*:/);
+    expect(cssBlocks(css, '.command-card:hover')[0]).not.toMatch(/transform\s*:/);
+    expect(cssBlocks(css, '.command-kpi:hover')[0]).not.toMatch(/transform\s*:/);
   });
 
   it('exposes the mobile navigation as a dismissible modal region', async () => {

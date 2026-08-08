@@ -61,7 +61,12 @@ const BASE_CURRENCY = 'EUR';
           </div>
         </div>
 
-        <table class="command-data-table">
+        <p id="rateCardsTableHint" class="px-4 py-2 text-xs text-[var(--cc-muted)] border-b border-[var(--cc-line)] sm:hidden">
+          Scroll horizontally to view rates and actions.
+        </p>
+        <div data-test="rate-cards-table-scroll" class="overflow-x-auto overscroll-x-contain" role="region"
+             aria-label="Rate cards table" aria-describedby="rateCardsTableHint" tabindex="0">
+        <table class="command-data-table min-w-[48rem]">
           <thead>
             <tr>
               <th>Role</th>
@@ -81,10 +86,16 @@ const BASE_CURRENCY = 'EUR';
                 <td class="text-right tabular-nums">{{ it.costRate | number:'1.0-2' }}</td>
                 <td class="text-right tabular-nums">{{ it.billRate | number:'1.0-2' }}</td>
                 <td class="text-right">
-                  <button type="button" (click)="openForm(it)" [attr.aria-label]="'Edit ' + it.role" [attr.title]="'Edit ' + it.role" class="text-ink-muted hover:text-accent-text transition-colors p-1">
+                  <button type="button" (click)="openForm(it)"
+                          [attr.aria-label]="'Edit rate card for ' + it.role + ', ' + (it.organization || 'all organizations')"
+                          [attr.title]="'Edit ' + it.role + ' — ' + (it.organization || 'all organizations')"
+                          class="text-ink-muted hover:text-accent-text transition-colors p-1">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                   </button>
-                  <button type="button" (click)="deleteItem(it.id)" [attr.aria-label]="'Delete rate card for ' + it.role" [attr.title]="'Delete'" class="text-ink-muted hover:text-critical-text transition-colors p-1 ml-2">
+                  <button type="button" (click)="deleteItem(it.id)"
+                          [attr.aria-label]="'Delete rate card for ' + it.role + ', ' + (it.organization || 'all organizations')"
+                          [attr.title]="'Delete ' + it.role + ' — ' + (it.organization || 'all organizations')"
+                          class="text-ink-muted hover:text-critical-text transition-colors p-1 ml-2">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                   </button>
                 </td>
@@ -97,6 +108,7 @@ const BASE_CURRENCY = 'EUR';
             }
           </tbody>
         </table>
+        </div>
       </div>
 
       @if (showForm()) {

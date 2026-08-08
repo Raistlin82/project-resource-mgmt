@@ -261,6 +261,35 @@ describe('ManageRateCardsComponent form overlay — STRUCTURAL contract only (js
   });
 });
 
+describe('ManageRateCardsComponent responsive table pan port', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('keeps all columns and actions in a labelled keyboard-scrollable region', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    const region = (fixture.nativeElement as HTMLElement).querySelector<HTMLElement>('[data-test="rate-cards-table-scroll"]')!;
+    const table = region.querySelector<HTMLTableElement>('table')!;
+
+    expect(region.getAttribute('role')).toBe('region');
+    expect(region.getAttribute('aria-label')).toBe('Rate cards table');
+    expect(region.tabIndex).toBe(0);
+    expect(region.className.split(/\s+/)).toContain('overflow-x-auto');
+    expect(table.className).toContain('min-w-[');
+    expect(table.querySelectorAll('thead th')).toHaveLength(6);
+  });
+
+  it('includes role and organization in repeated action names', async () => {
+    const { fixture } = setup(ORG_NODES, [
+      { id: 'RC1', role: 'Developer', organization: 'Engineering', currency: 'EUR', costRate: 600, billRate: 1120 },
+    ]);
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(host.querySelector('[aria-label="Edit rate card for Developer, Engineering"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="Delete rate card for Developer, Engineering"]')).not.toBeNull();
+  });
+});
+
 describe('ManageRateCardsComponent working-hours-per-day field', () => {
   afterEach(() => TestBed.resetTestingModule());
 

@@ -135,3 +135,21 @@ describe('ManageCostCentersComponent form overlay — STRUCTURAL contract only (
     expect(verdict.panelBounded).toBe(false);
   });
 });
+
+describe('ManageCostCentersComponent responsive table pan port', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('keeps all columns and actions in a labelled keyboard-scrollable region', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    const region = (fixture.nativeElement as HTMLElement).querySelector<HTMLElement>('[data-test="cost-centers-table-scroll"]')!;
+    const table = region.querySelector<HTMLTableElement>('table')!;
+
+    expect(region.getAttribute('role')).toBe('region');
+    expect(region.getAttribute('aria-label')).toBe('Cost centers table');
+    expect(region.tabIndex).toBe(0);
+    expect(region.className.split(/\s+/)).toContain('overflow-x-auto');
+    expect(table.className).toContain('min-w-[');
+    expect(table.querySelectorAll('thead th')).toHaveLength(5);
+  });
+});

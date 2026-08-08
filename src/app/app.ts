@@ -98,7 +98,7 @@ interface NavState {
   selector: 'app-root',
   imports: [RouterOutlet, RouterLink, RouterLinkActive, MatIconModule, CdkTrapFocus],
   template: `
-    <div class="command-shell min-h-screen flex flex-col lg:flex-row font-sans">
+    <div class="command-shell min-h-[100dvh] flex flex-col lg:flex-row font-sans">
       <a
         href="#main-content"
         (click)="focusMain($event)"
@@ -163,7 +163,7 @@ interface NavState {
       <aside
         id="primary-navigation"
         aria-label="Primary navigation"
-        class="command-sidebar command-drawer fixed inset-y-0 left-0 z-50 w-72 flex flex-col transform transition-transform duration-300 ease-in-out lg:translate-x-0 overflow-y-auto shadow-2xl lg:shadow-none"
+        class="command-sidebar command-drawer fixed inset-y-0 left-0 z-50 w-72 flex flex-col overflow-hidden transform transition-transform duration-300 ease-in-out lg:translate-x-0 shadow-2xl lg:shadow-none"
         [attr.data-drawer]="isMobileMenuOpen() ? 'open' : 'closed'"
         [cdkTrapFocus]="isMobileMenuOpen()"
         [cdkTrapFocusAutoCapture]="drawerAutoCapture()"
@@ -173,7 +173,7 @@ interface NavState {
         [class.translate-x-0]="isMobileMenuOpen()"
         [class.lg:relative]="desktopSidebarOpen()"
         [class.lg:hidden]="!desktopSidebarOpen()">
-        <div class="flex items-center justify-between border-b border-line bg-surface px-4 py-3 lg:hidden">
+        <div class="flex shrink-0 items-center justify-between border-b border-line bg-surface px-4 py-3 lg:hidden">
           <span class="text-sm font-semibold text-ink">Navigation</span>
           <button
             data-testid="mobile-menu-close"
@@ -184,7 +184,7 @@ interface NavState {
             <mat-icon>close</mat-icon>
           </button>
         </div>
-        <div class="hidden lg:block sticky top-0 z-10 border-b border-line bg-surface px-5 py-5">
+        <div class="hidden shrink-0 border-b border-line bg-surface px-5 py-5 lg:block">
           <div class="flex items-center gap-3 text-ink">
             <span class="grid size-10 place-items-center rounded-md border border-accent bg-accent-tint text-accent-text ring-1 ring-accent">
               <mat-icon>hub</mat-icon>
@@ -221,7 +221,7 @@ interface NavState {
           </div>
         </div>
 
-        <nav class="flex-1 px-3 py-4">
+        <nav class="min-h-0 flex-1 overflow-y-auto px-3 py-4">
           <div class="command-nav-search">
             <mat-icon>search</mat-icon>
             <input
@@ -287,7 +287,7 @@ interface NavState {
           }
         </nav>
 
-        <div class="sticky bottom-0 border-t border-line bg-surface p-4">
+        <div class="shrink-0 border-t border-line bg-surface p-4">
           @if (isAuthenticated()) {
             <div class="flex items-center gap-3">
               <span class="grid size-9 shrink-0 place-items-center rounded-full border border-accent bg-accent-tint text-accent-text ring-1 ring-accent">
@@ -338,7 +338,7 @@ interface NavState {
         </div>
       </aside>
 
-      <main id="main-content" tabindex="-1" [inert]="isMobileMenuOpen()" class="flex-1 overflow-y-auto lg:h-screen outline-none">
+      <main id="main-content" tabindex="-1" [inert]="isMobileMenuOpen()" class="min-h-0 min-w-0 flex-1 overflow-y-auto outline-none lg:h-full">
         <!-- Desktop top bar: hamburger to collapse/expand the left navigation. -->
         <div class="hidden lg:flex items-center gap-3 sticky top-0 z-30 border-b border-line bg-canvas/85 backdrop-blur px-4 py-2">
           <button
@@ -370,7 +370,11 @@ interface NavState {
             <div class="pointer-events-auto flex items-start gap-3 rounded-md border p-4 text-sm font-semibold shadow-lg ring-1 animate-in bg-critical-tint border-critical ring-critical text-critical-text">
               <mat-icon class="text-[20px] w-[20px] h-[20px] shrink-0">error</mat-icon>
               <span class="flex-1">{{ toast.message }}</span>
-              <button (click)="dismiss(toast.id)" class="shrink-0 hover:opacity-70 transition-opacity" aria-label="Dismiss notification">
+              <button
+                type="button"
+                (click)="dismiss(toast.id)"
+                class="grid size-10 shrink-0 place-items-center rounded-md transition-colors hover:bg-critical/10"
+                [attr.aria-label]="'Dismiss error notification: ' + toast.message">
                 <mat-icon class="text-[18px] w-[18px] h-[18px]">close</mat-icon>
               </button>
             </div>
@@ -385,7 +389,11 @@ interface NavState {
                 {{ toast.type === 'success' ? 'check_circle' : 'info' }}
               </mat-icon>
               <span class="flex-1">{{ toast.message }}</span>
-              <button (click)="dismiss(toast.id)" class="shrink-0 hover:opacity-70 transition-opacity" aria-label="Dismiss notification">
+              <button
+                type="button"
+                (click)="dismiss(toast.id)"
+                class="grid size-10 shrink-0 place-items-center rounded-md transition-colors hover:bg-ink/5"
+                [attr.aria-label]="'Dismiss notification: ' + toast.message">
                 <mat-icon class="text-[18px] w-[18px] h-[18px]">close</mat-icon>
               </button>
             </div>
@@ -444,17 +452,22 @@ export class App {
       document.addEventListener('keydown', handler);
       this.destroyRef.onDestroy(() => document.removeEventListener('keydown', handler));
 
-      // On every navigation, reset scroll to the top so each screen opens at its
-      // start. The content pane <main> is the scroll container on desktop
-      // (lg:h-screen + overflow-y-auto); on smaller viewports the window/document
-      // scrolls instead. Reset BOTH so it works at every breakpoint.
+      // On every navigation, reset scroll and move programmatic focus to the new
+      // page heading (or the main landmark when no h1 exists). A deferred focus
+      // waits for the routed view to render and gives keyboard/screen-reader users
+      // the same change-of-context cue sighted users get from the new screen.
       const navSub = this.router.events
         .pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd))
         .subscribe(() => {
+          this.closeMenu();
           document.getElementById('main-content')?.scrollTo({ top: 0, left: 0 });
           window.scrollTo({ top: 0, left: 0 });
+          this.scheduleRouteFocus();
         });
-      this.destroyRef.onDestroy(() => navSub.unsubscribe());
+      this.destroyRef.onDestroy(() => {
+        navSub.unsubscribe();
+        if (this.routeFocusFrame !== null) cancelAnimationFrame(this.routeFocusFrame);
+      });
     });
 
     // Scroll lock for the open mobile drawer (P1-23): below lg the document —
@@ -706,6 +719,7 @@ export class App {
    * the search input. Withheld for that open only, and re-armed on close.
    */
   private searchFocusPending = signal(false);
+  private routeFocusFrame: number | null = null;
   /** Whether the drawer's focus trap may capture focus on open. */
   readonly drawerAutoCapture = computed(() => this.isMobileMenuOpen() && !this.searchFocusPending());
 
@@ -854,6 +868,23 @@ export class App {
   private isDesktopViewport(): boolean {
     const query = typeof window === 'undefined' ? undefined : window.matchMedia;
     return query ? query.call(window, DESKTOP_NAV_QUERY).matches : true;
+  }
+
+  /** Focus the freshly rendered routed view without adding its heading to Tab. */
+  private scheduleRouteFocus(): void {
+    if (this.routeFocusFrame !== null) cancelAnimationFrame(this.routeFocusFrame);
+    this.routeFocusFrame = requestAnimationFrame(() => {
+      this.routeFocusFrame = null;
+      // Never compete with a dialog that a route opened synchronously.
+      if (document.querySelector('[aria-modal="true"]')) return;
+
+      const main = document.getElementById('main-content');
+      if (!main || main.closest('[inert]')) return;
+      const heading = main.querySelector<HTMLElement>('h1');
+      const target = heading ?? main;
+      if (heading && !heading.hasAttribute('tabindex')) heading.setAttribute('tabindex', '-1');
+      target.focus({ preventScroll: true });
+    });
   }
 
   toggleGroup(label: string): void {

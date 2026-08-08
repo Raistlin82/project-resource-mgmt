@@ -36,7 +36,12 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
           </div>
         </div>
 
-        <table class="command-data-table">
+        <p id="costCentersTableHint" class="px-4 py-2 text-xs text-[var(--cc-muted)] border-b border-[var(--cc-line)] sm:hidden">
+          Scroll horizontally to view financials and actions.
+        </p>
+        <div data-test="cost-centers-table-scroll" class="overflow-x-auto overscroll-x-contain" role="region"
+             aria-label="Cost centers table" aria-describedby="costCentersTableHint" tabindex="0">
+        <table class="command-data-table min-w-[42rem]">
           <thead>
             <tr>
               <th>Name</th>
@@ -70,6 +75,7 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
             }
           </tbody>
         </table>
+        </div>
       </div>
 
       <!-- Form Modal -->

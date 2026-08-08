@@ -87,6 +87,8 @@ interface SetupOptions {
   pending?: boolean;
   /** Fail the /approval-requests leg, as an expired bearer does. */
   failing?: boolean;
+  /** Control the decision write without changing the read resource. */
+  decisionResult?: 'success' | 'pending' | 'error';
   /** Skip the flush, for the states where whenStable() never settles. */
   noFlush?: boolean;
   /** Leave the filter on 'mine' (the real default) instead of 'all'. */
@@ -107,6 +109,7 @@ async function setup({
   authReady = true,
   pending = false,
   failing = false,
+  decisionResult = 'success',
   noFlush = false,
   keepFilter = false,
 }: SetupOptions = {}) {
@@ -120,7 +123,11 @@ async function setup({
     getUsers: vi.fn(() => leg(USERS)),
     getAssignments: vi.fn(() => leg(assignments)),
     getResourceOrganizations: vi.fn(() => leg(orgNodes)),
-    decideApprovalRequest: vi.fn(() => of({})),
+    decideApprovalRequest: vi.fn(() => decisionResult === 'pending'
+      ? NEVER
+      : decisionResult === 'error'
+        ? throwError(() => new Error('decision failed'))
+        : of({})),
   } as unknown as ApiService;
   const authStub = {
     authReady: signal(authReady), isAuthenticated: signal(true),
@@ -151,7 +158,7 @@ async function setup({
     await fixture.whenStable();
     fixture.detectChanges();
   }
-  return { fixture, component, apiStub };
+  return { fixture, component, apiStub, notifyStub };
 }
 
 /** The list-state's loading region — its own contract (role=status +
@@ -364,47 +371,158 @@ describe('Approvals inbox — the segmented filter exposes its selection (P2-09)
   });
 });
 
-/**
- * UX register P3-01 — the decision note's placeholder read "Nota (opzionale)" in an
- * app whose every other string is English. On THIS control it was worse than a
- * translation slip: the input already carried an English `aria-label`, so one field
- * announced "Approval note for AR1" to a screen reader while the sighted user read
- * Italian — two labels for one input, disagreeing.
- *
- * Asserted with toBe, deliberately: 'Nota' CONTAINS 'Not', so `toContain('Note')`
- * passes on the defect itself.
- */
-describe('Approvals inbox — the decision note is labelled in one language (P3-01)', () => {
-  /** The note input on a row this actor may decide. */
-  function noteInput(host: HTMLElement): HTMLInputElement {
-    const input = host.querySelector<HTMLInputElement>('td input[type="text"]');
-    expect(input, 'no decision-note input rendered — the fixture never reached a decidable row').not.toBeNull();
-    return input!;
-  }
-
-  it('gives the note an English placeholder that agrees with its aria-label', async () => {
-    // 'mid' is rr's manager, so the Allocation row is decidable and the note renders —
-    // the same fixture the scope cases above use.
-    const { fixture } = await setup({ approvals: [allocation('AR1', 'A_RR')], userId: 'mid' });
-    const input = noteInput(fixture.nativeElement as HTMLElement);
-
-    expect(input.getAttribute('placeholder')).toBe('Note (optional)');
-    // The two labels on this one input must not disagree: the aria-label was already
-    // English, which is what made the Italian placeholder a contradiction rather than
-    // just an untranslated string.
-    expect(input.getAttribute('aria-label')).toBe('Approval note for A_RR:2026-09');
-  });
-
-  it('leaves no Italian copy anywhere on the screen', async () => {
-    // The ABSENCE half, and the reason the assertion above is not the whole claim: a
-    // fix that only edited the placeholder while another Italian string survived
-    // elsewhere on the row would pass it. Scoped to whole words so 'Nota' cannot hide
-    // inside an English word and an English word cannot trip the scan.
+describe('Approvals inbox — responsive records keep their action context', () => {
+  it('renders a desktop table and a no-horizontal-pan card view with the same record and person', async () => {
     const { fixture } = await setup({ approvals: [allocation('AR1', 'A_RR')], userId: 'mid' });
     const host = fixture.nativeElement as HTMLElement;
+    const desktop = host.querySelector<HTMLElement>('[data-test="approvals-desktop"]')!;
+    const mobile = host.querySelector<HTMLElement>('[data-test="approvals-mobile"]')!;
+    const card = mobile.querySelector<HTMLElement>('article[data-request-id="AR1"]')!;
 
+    // With the persistent 18rem sidebar, even a 1280px viewport leaves too little
+    // room for nine columns. Keep cards through xl so actions never start off-screen.
+    expect(desktop.classList.contains('hidden')).toBe(true);
+    expect(desktop.classList.contains('2xl:block')).toBe(true);
+    expect(mobile.classList.contains('2xl:hidden')).toBe(true);
+    expect(card).not.toBeNull();
+    expect(card.textContent).toContain('Resource allocation — 2026-09');
+    expect(card.textContent).toContain('A_RR:2026-09');
+    expect(card.textContent).toContain('Requested by');
+    expect(card.textContent).toContain('planner');
+    expect(card.textContent).toContain('No project');
+
+    const expectedApprove = 'Approve Allocation A_RR:2026-09 on No project, requested by planner';
+    const expectedReject = 'Reject Allocation A_RR:2026-09 on No project, requested by planner';
+    expect(mobile.querySelector('[data-test="approval-approve"]')!.getAttribute('aria-label')).toBe(expectedApprove);
+    expect(mobile.querySelector('[data-test="approval-reject"]')!.getAttribute('aria-label')).toBe(expectedReject);
+    expect(desktop.querySelector('[data-test="approval-approve"]')!.getAttribute('aria-label')).toBe(expectedApprove);
+    expect(desktop.querySelector('[data-test="approval-reject"]')!.getAttribute('aria-label')).toBe(expectedReject);
+  });
+});
+
+describe('Approvals inbox — explicit, contextual decisions', () => {
+  function mobileAction(host: HTMLElement, action: 'approve' | 'reject'): HTMLButtonElement {
+    const button = host.querySelector<HTMLButtonElement>(`[data-test="approvals-mobile"] [data-test="approval-${action}"]`);
+    expect(button, `missing mobile ${action} action`).not.toBeNull();
+    return button!;
+  }
+
+  function decisionDialog(host: HTMLElement): HTMLElement {
+    const dialog = host.querySelector<HTMLElement>('[data-test="decision-dialog"]');
+    expect(dialog, 'decision action did not open its confirmation dialog').not.toBeNull();
+    return dialog!;
+  }
+
+  it('opens a contextual approval confirmation before calling the API', async () => {
+    const { fixture, apiStub } = await setup({ approvals: [allocation('AR1', 'A_RR')], userId: 'mid' });
+    const host = fixture.nativeElement as HTMLElement;
+
+    mobileAction(host, 'approve').click();
+    fixture.detectChanges();
+
+    expect(apiStub.decideApprovalRequest).not.toHaveBeenCalled();
+    const dialog = decisionDialog(host);
+    expect(dialog.textContent).toContain('Confirm approval');
+    expect(dialog.textContent).toContain('Resource allocation — 2026-09');
+    expect(dialog.textContent).toContain('A_RR:2026-09');
+    expect(dialog.textContent).toContain('planner');
+    expect(dialog.textContent).toContain('No project');
+
+    const note = dialog.querySelector<HTMLTextAreaElement>('[data-test="decision-note"]')!;
+    const confirm = dialog.querySelector<HTMLButtonElement>('[data-test="confirm-decision"]')!;
+    expect(note.required).toBe(false);
+    expect(note.getAttribute('aria-label')).toBe('Optional note for approving Allocation A_RR:2026-09 on No project, requested by planner');
+    expect(confirm.getAttribute('aria-label')).toBe('Confirm approval for Allocation A_RR:2026-09 on No project, requested by planner');
+    expect(confirm.disabled).toBe(false);
     expect(host.innerHTML).not.toMatch(/\b(Nota|opzionale|obbligatorio|Annulla|Conferma)\b/i);
-    // …and the row really is there, so the scan above is not passing on an empty page.
-    expect(noteInput(host)).not.toBeNull();
+
+    confirm.click();
+    fixture.detectChanges();
+    expect(apiStub.decideApprovalRequest).toHaveBeenCalledTimes(1);
+    expect(apiStub.decideApprovalRequest).toHaveBeenCalledWith('AR1', 'Approved', undefined);
+    expect(host.querySelector('[data-test="decision-dialog"]')).toBeNull();
+  });
+
+  it('requires and records a non-blank rejection reason', async () => {
+    const { fixture, component, apiStub } = await setup({ approvals: [allocation('AR1', 'A_RR')], userId: 'mid' });
+    const host = fixture.nativeElement as HTMLElement;
+
+    mobileAction(host, 'reject').click();
+    fixture.detectChanges();
+    const dialog = decisionDialog(host);
+    const reason = dialog.querySelector<HTMLTextAreaElement>('[data-test="decision-note"]')!;
+    const confirm = dialog.querySelector<HTMLButtonElement>('[data-test="confirm-decision"]')!;
+
+    expect(apiStub.decideApprovalRequest).not.toHaveBeenCalled();
+    expect(reason.required).toBe(true);
+    expect(reason.getAttribute('aria-invalid')).toBe('true');
+    expect(reason.getAttribute('aria-label')).toBe('Reason for rejecting Allocation A_RR:2026-09 on No project, requested by planner');
+    expect(dialog.textContent).toContain('Enter a rejection reason to continue.');
+    expect(confirm.disabled).toBe(true);
+    // The component-level guard mirrors the disabled control for programmatic calls.
+    component.confirmDecision();
+    expect(apiStub.decideApprovalRequest).not.toHaveBeenCalled();
+
+    reason.value = '  Budget exceeds baseline  ';
+    reason.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    expect(reason.getAttribute('aria-invalid')).toBe('false');
+    expect(confirm.disabled).toBe(false);
+
+    confirm.click();
+    fixture.detectChanges();
+    expect(apiStub.decideApprovalRequest).toHaveBeenCalledWith('AR1', 'Rejected', 'Budget exceeds baseline');
+    expect(host.querySelector('[data-test="decision-dialog"]')).toBeNull();
+  });
+
+  it('keeps the confirmation open and locks dismissal while a decision is pending', async () => {
+    const { fixture, apiStub } = await setup({
+      approvals: [allocation('AR1', 'A_RR')], userId: 'mid', decisionResult: 'pending',
+    });
+    const host = fixture.nativeElement as HTMLElement;
+    mobileAction(host, 'approve').click();
+    fixture.detectChanges();
+    decisionDialog(host).querySelector<HTMLButtonElement>('[data-test="confirm-decision"]')!.click();
+    fixture.detectChanges();
+
+    const dialog = decisionDialog(host);
+    expect(apiStub.decideApprovalRequest).toHaveBeenCalledTimes(1);
+    expect(dialog.textContent).toContain('Approving…');
+    expect(dialog.querySelector<HTMLButtonElement>('[data-test="confirm-decision"]')!.disabled).toBe(true);
+    expect(dialog.querySelector<HTMLButtonElement>('[aria-label="Close decision dialog"]')!.disabled).toBe(true);
+    expect([...dialog.querySelectorAll('button')].find(b => b.textContent!.trim() === 'Cancel')!.disabled).toBe(true);
+  });
+
+  it('cancels the explicit confirmation without submitting', async () => {
+    const cancelled = await setup({ approvals: [allocation('AR1', 'A_RR')], userId: 'mid' });
+    const cancelledHost = cancelled.fixture.nativeElement as HTMLElement;
+    mobileAction(cancelledHost, 'approve').click();
+    cancelled.fixture.detectChanges();
+    [...decisionDialog(cancelledHost).querySelectorAll<HTMLButtonElement>('button')]
+      .find(button => button.textContent!.trim() === 'Cancel')!.click();
+    cancelled.fixture.detectChanges();
+    expect(cancelled.apiStub.decideApprovalRequest).not.toHaveBeenCalled();
+    expect(cancelledHost.querySelector('[data-test="decision-dialog"]')).toBeNull();
+  });
+
+  it('keeps a failed decision and its reason available for correction or retry', async () => {
+    const { fixture, apiStub, notifyStub } = await setup({
+      approvals: [allocation('AR1', 'A_RR')], userId: 'mid', decisionResult: 'error',
+    });
+    const host = fixture.nativeElement as HTMLElement;
+    mobileAction(host, 'reject').click();
+    fixture.detectChanges();
+    const dialog = decisionDialog(host);
+    const reason = dialog.querySelector<HTMLTextAreaElement>('[data-test="decision-note"]')!;
+    reason.value = 'Missing evidence';
+    reason.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    dialog.querySelector<HTMLButtonElement>('[data-test="confirm-decision"]')!.click();
+    fixture.detectChanges();
+
+    expect(apiStub.decideApprovalRequest).toHaveBeenCalledWith('AR1', 'Rejected', 'Missing evidence');
+    expect(decisionDialog(host).querySelector<HTMLTextAreaElement>('[data-test="decision-note"]')!.value).toBe('Missing evidence');
+    expect(notifyStub.error).toHaveBeenCalled();
+    expect(decisionDialog(host).querySelector<HTMLButtonElement>('[data-test="confirm-decision"]')!.disabled).toBe(false);
   });
 });

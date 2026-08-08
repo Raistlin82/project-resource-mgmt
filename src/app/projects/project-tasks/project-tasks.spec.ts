@@ -271,6 +271,24 @@ describe('ProjectTasks — Commercial Coverage under the commercial read gate', 
   });
 });
 
+describe('ProjectTasks — responsive table pan port', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('keeps every column in a labelled keyboard-scrollable region', async () => {
+    const { fixture } = await render('pm');
+    const region = host(fixture).querySelector<HTMLElement>('[data-test="tasks-table-scroll"]')!;
+    const table = region.querySelector<HTMLTableElement>('table')!;
+
+    expect(region).not.toBeNull();
+    expect(region.getAttribute('role')).toBe('region');
+    expect(region.getAttribute('aria-label')).toBe('Project tasks table');
+    expect(region.tabIndex).toBe(0);
+    expect(region.className.split(/\s+/)).toContain('overflow-x-auto');
+    expect(table.className).toContain('min-w-[');
+    expect(table.querySelectorAll('thead th')).toHaveLength(6);
+  });
+});
+
 /**
  * The status <select> is a one-way `[ngModel]` binding: when the server refuses
  * the PUT the model never moves, so Angular re-renders nothing and the control

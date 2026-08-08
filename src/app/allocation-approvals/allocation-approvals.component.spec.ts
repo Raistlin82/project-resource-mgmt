@@ -22,6 +22,23 @@ const FEED: AllocationApprovalFeed = {
   ],
 };
 
+/** A realistic planning horizon: all nine months must survive both layouts. */
+const NINE_MONTHS = [
+  '2026-01', '2026-02', '2026-03', '2026-04', '2026-05',
+  '2026-06', '2026-07', '2026-08', '2026-09',
+];
+const NINE_MONTH_FEED: AllocationApprovalFeed = {
+  months: NINE_MONTHS,
+  rows: [
+    {
+      resourceId: 'r9', resourceName: 'Nine Month Ada', managerId: 'm1', kind: 'internal', contractHoursPerDay: 8,
+      targetHours: Object.fromEntries(NINE_MONTHS.map(month => [month, 160])),
+      totalHours: Object.fromEntries(NINE_MONTHS.map((month, index) => [month, 80 + index * 5])),
+      items: [{ assignmentMonthId: 'A9:2026-01', assignmentId: 'A9', month: '2026-01', status: 'Requested', requestId: '9', projectName: 'Horizon', hours: 80, approvalId: 'AR9' }],
+    },
+  ],
+};
+
 function setup(ready: boolean, overrides: {
   orgNodes?: ResourceOrganization[];
   feed?: AllocationApprovalFeed;
@@ -76,6 +93,90 @@ function retryButton(host: HTMLElement): HTMLButtonElement | undefined {
 }
 
 describe('AllocationApprovalsComponent', () => {
+  it('presents the page as a monthly workflow and collapses the one filter panel on mobile', async () => {
+    const { fixture } = setup(true);
+    await flush(fixture);
+
+    const host = fixture.nativeElement as HTMLElement;
+    expect(host.querySelector('h1')?.textContent?.trim()).toBe('Monthly Allocation Approval');
+
+    const toggle = host.querySelector('[data-test="filters-toggle"]') as HTMLButtonElement;
+    const panel = host.querySelector('[data-test="filters-panel"]') as HTMLElement;
+    expect(toggle).not.toBeNull();
+    expect(panel).not.toBeNull();
+    expect(toggle.getAttribute('aria-controls')).toBe(panel.id);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(panel.classList).not.toContain('is-open');
+    expect(host.querySelector('[data-test="filter-summary"]')?.textContent).toContain('Pending');
+    expect(host.querySelector('[data-test="filter-summary"]')?.textContent).toContain('All teams');
+
+    toggle.click();
+    fixture.detectChanges();
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(panel.classList).toContain('is-open');
+
+    // There is still ONE set of controls: mobile disclosure and desktop layout
+    // reveal the same panel instead of rendering duplicate selects with
+    // divergent values or duplicate accessible names.
+    expect(host.querySelectorAll('[data-test="status-filter"]').length).toBe(1);
+    expect(host.querySelectorAll('[data-test="manager-filter"]').length).toBe(1);
+    expect(host.querySelectorAll('select[aria-label="Range start month"]').length).toBe(1);
+    expect(host.querySelectorAll('select[aria-label="Range end month"]').length).toBe(1);
+  });
+
+  it('keeps all nine loaded months in both responsive representations and explains overflow', async () => {
+    const { fixture } = setup(true, { feed: NINE_MONTH_FEED });
+    await flush(fixture);
+
+    const host = fixture.nativeElement as HTMLElement;
+    expect(host.querySelectorAll('[data-test="month-heading"]').length).toBe(9);
+    expect(host.querySelectorAll('[data-test^="mobile-cell-r9-"]').length).toBe(9);
+
+    const context = host.querySelector('[data-test="approval-context"]') as HTMLElement;
+    expect(context.textContent).toContain('9 months');
+    expect(context.textContent).toContain('Jan 26');
+    expect(context.textContent).toContain('Sep 26');
+
+    const mobileList = host.querySelector('[data-test="approval-mobile-list"]') as HTMLElement;
+    const desktopGrid = host.querySelector('[data-test="approval-desktop-grid"]') as HTMLElement;
+    expect(mobileList.classList).toContain('md:hidden');
+    expect(desktopGrid.classList).toContain('hidden');
+    expect(desktopGrid.classList).toContain('md:block');
+
+    const mobileScroll = host.querySelector('[data-test="mobile-month-scroll"]') as HTMLElement;
+    const mobileHintId = mobileScroll.getAttribute('aria-describedby')!;
+    expect(mobileScroll.getAttribute('role')).toBe('region');
+    expect(mobileScroll.tabIndex).toBe(0);
+    expect(host.querySelector(`#${mobileHintId}`)?.textContent).toContain('all 9 months');
+
+    const desktopScroll = host.querySelector('[data-test="approval-table-scroll"]') as HTMLElement;
+    const desktopHintId = desktopScroll.getAttribute('aria-describedby')!;
+    expect(desktopScroll.getAttribute('role')).toBe('region');
+    expect(desktopScroll.tabIndex).toBe(0);
+    expect(host.querySelector(`#${desktopHintId}`)?.textContent).toContain('all 9 months');
+  });
+
+  it('keeps contextual selection and review actions outside the mobile month scroller', async () => {
+    const { fixture } = setup(true, { feed: NINE_MONTH_FEED });
+    await flush(fixture);
+
+    const host = fixture.nativeElement as HTMLElement;
+    const card = host.querySelector('[data-test="approval-card"]') as HTMLElement;
+    const mobileScroll = card.querySelector('[data-test="mobile-month-scroll"]') as HTMLElement;
+    const mobileCheckbox = card.querySelector('[data-test="select-resource-mobile"]') as HTMLInputElement;
+    const mobileAction = card.querySelector('[data-test="open-modal-mobile"]') as HTMLButtonElement;
+    const desktopCheckbox = host.querySelector('[data-test="select-resource"]') as HTMLInputElement;
+    const desktopAction = host.querySelector('[data-test="open-modal"]') as HTMLButtonElement;
+
+    expect(mobileCheckbox.getAttribute('aria-label')).toBe('Select Nine Month Ada for bulk monthly approval');
+    expect(desktopCheckbox.getAttribute('aria-label')).toBe('Select Nine Month Ada for bulk monthly approval');
+    expect(mobileAction.getAttribute('aria-label')).toBe('Review monthly approvals for Nine Month Ada across 9 months');
+    expect(desktopAction.getAttribute('aria-label')).toBe('Review monthly approvals for Nine Month Ada across 9 months');
+    expect(mobileScroll.contains(mobileCheckbox)).toBe(false);
+    expect(mobileScroll.contains(mobileAction)).toBe(false);
+    expect(desktopAction.closest('td')?.classList).toContain('right-0');
+  });
+
   it('renders one row per resource once auth is ready', async () => {
     const { fixture, getAllocationApprovals } = setup(true);
     await flush(fixture);
