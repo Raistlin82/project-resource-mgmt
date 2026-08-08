@@ -6615,6 +6615,94 @@ async function checkRateCardInheritance() {
  * the section can run anywhere in the order and leaves the seed's own rows — the
  * ones checkBenchMonthly and checkCapacityMonthly assert on — untouched.
  */
+/**
+ * RPT row 10 — the human-typeable resource code.
+ *
+ * Every check has its pair, because each half is separately satisfiable by a
+ * broken implementation: a server that never mints a code passes "the code is
+ * not client-settable", and one that accepts any code passes "the code is
+ * present".
+ */
+async function checkResourceCode() {
+  const ADMIN = { 'X-User-Id': '1', 'X-User-Role': 'admin' };
+  const PERSON_CODE = /^[A-Z]{6}\d{6}$/;
+
+  // 1) Every seeded resource carries one, and the SHAPE follows `kind`.
+  const { status: listStatus, body: all } = await req('GET', '/resources', { headers: ADMIN });
+  check('GET /api/resources -> 200', listStatus === 200, `status=${listStatus}`);
+  const rows = Array.isArray(all) ? all : [];
+  check(
+    'every seeded resource carries a code',
+    rows.length > 0 && rows.every(r => typeof r.code === 'string' && r.code.length > 0),
+    `${rows.filter(r => !r.code).length} without one of ${rows.length}`,
+  );
+  const people = rows.filter(r => (r.kind ?? 'internal') === 'internal');
+  const placeholders = rows.filter(r => r.kind === 'dummy' || r.kind === 'subco');
+  check(
+    'a PERSON gets the ARMJUL000001 shape',
+    people.length > 0 && people.every(r => PERSON_CODE.test(r.code)),
+    people.filter(r => !PERSON_CODE.test(r.code)).map(r => `${r.name}=${r.code}`).join(', ') || 'all ok',
+  );
+  check(
+    'a PLACEHOLDER is described, never given a person shape',
+    placeholders.length > 0 && placeholders.every(r => !PERSON_CODE.test(r.code) && r.code.startsWith('ZZ - ')),
+    placeholders.filter(r => PERSON_CODE.test(r.code)).map(r => `${r.name}=${r.code}`).join(', ') || 'all ok',
+  );
+  // THE INVARIANT, over the WHOLE directory rather than over the seed. This is
+  // the check that found the defect it now guards: a dummy PROMOTED to a real
+  // person kept `ZZ - Subco - …`, because the code was minted at create and the
+  // kind changed later. Two per-population assertions above cannot see it —
+  // each one only looks at rows whose kind already matches what it expects.
+  const mismatched = rows.filter(r => {
+    const placeholderKind = r.kind === 'dummy' || r.kind === 'subco';
+    return PERSON_CODE.test(r.code) === placeholderKind;
+  });
+  check(
+    "every row's code SHAPE agrees with its kind, after any number of edits",
+    mismatched.length === 0,
+    mismatched.map(r => `${r.name} kind=${r.kind ?? 'internal'} code=${r.code}`).join(' | ') || 'all ok',
+  );
+  const personCodes = rows.map(r => r.code).filter(c => PERSON_CODE.test(c));
+  check('person codes are unique', new Set(personCodes).size === personCodes.length, `${personCodes.length} codes, ${new Set(personCodes).size} distinct`);
+
+  // 2) It is SEARCHABLE — the entire point of having one.
+  const sample = people[0];
+  if (sample) {
+    const prefix = sample.code.slice(0, 6);
+    const { body: byPrefix } = await req('GET', `/resources?q=${encodeURIComponent(prefix)}`, { headers: ADMIN });
+    const prefixRows = Array.isArray(byPrefix) ? byPrefix : (byPrefix && byPrefix.rows) || [];
+    check(
+      `GET /api/resources?q=${prefix} finds the person behind the code`,
+      prefixRows.some(r => r.id === sample.id),
+      `${prefixRows.length} row(s)`,
+    );
+    const { body: byNothing } = await req('GET', '/resources?q=ZZZQQQ999999', { headers: ADMIN });
+    const noRows = Array.isArray(byNothing) ? byNothing : (byNothing && byNothing.rows) || [];
+    check('a code that matches nobody returns nobody — the search is not a no-op', noRows.length === 0, `${noRows.length} row(s)`);
+  }
+
+  // 3) It is SERVER-PINNED, and a body that carries one is REFUSED.
+  const base = { role: 'Developer', capacity: 40, hireDate: '2026-01-01', organization: 'Engineering' };
+  const { status: forged, body: forgedBody } = await req('POST', '/resources', {
+    headers: ADMIN, body: { ...base, name: 'Forged Person', code: 'HACKED000001' },
+  });
+  check('POST /api/resources with a code -> 403 (not a silent drop)', forged === 403, `status=${forged} error=${forgedBody && forgedBody.error}`);
+  const { status: forgedPut } = await req('PUT', '/resources/1', { headers: ADMIN, body: { code: 'HACKED000001' } });
+  check('PUT /api/resources/:id with a code -> 403', forgedPut === 403, `status=${forgedPut}`);
+  const { body: untouched } = await req('GET', '/resources/1', { headers: ADMIN });
+  check("the refused write did NOT change the target's code", untouched && PERSON_CODE.test(untouched.code), `code=${untouched && untouched.code}`);
+
+  // 4) A create MINTS one, and a colliding prefix advances the sequence.
+  const { status: c1, body: r1 } = await req('POST', '/resources', { headers: ADMIN, body: { ...base, name: 'Zeno Quintavalle' } });
+  check('POST /api/resources -> 201 and the server minted a code', c1 === 201 && PERSON_CODE.test(r1 && r1.code), `status=${c1} code=${r1 && r1.code}`);
+  const { body: r2 } = await req('POST', '/resources', { headers: ADMIN, body: { ...base, name: 'Zenobia Quintavalle' } });
+  check(
+    'a second person with the SAME 6-letter prefix advances the sequence',
+    r1 && r2 && r1.code.slice(0, 6) === r2.code.slice(0, 6) && r2.code !== r1.code,
+    `${r1 && r1.code} then ${r2 && r2.code}`,
+  );
+}
+
 async function checkBlockHAbsencesAndClassification() {
   const PM = { 'X-User-Id': '3', 'X-User-Role': 'pm' };
   const RM = { 'X-User-Id': '2', 'X-User-Role': 'resource-manager' };
@@ -7672,6 +7760,13 @@ async function main() {
   // assignment, and every classification write it performs restores the seed's
   // own value (project '3' stays Basket/non-billable, projects '1' and '4' end
   // as they started), so no seed row another section reads is left moved.
+  try {
+    await checkResourceCode();
+  } catch (err) {
+    console.log(`FAIL  resource code — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
   try {
     await checkBlockHAbsencesAndClassification();
   } catch (err) {

@@ -35,29 +35,47 @@ export interface Facet {
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="flex flex-col gap-3">
-      <div class="flex flex-col sm:flex-row gap-3">
-        <input
-          data-test="filter-bar-query"
-          type="text"
-          class="command-input flex-1"
-          [attr.placeholder]="placeholder()"
-          [value]="query()"
-          (input)="queryChange.emit($any($event.target).value)"
-        />
-        @for (facet of facets(); track facet.id) {
-          <select
-            [attr.data-test]="'filter-bar-facet-' + facet.id"
-            [attr.aria-label]="'Filter by ' + facet.label"
-            class="command-select sm:w-48"
-            (change)="facetChange.emit({ id: facet.id, value: $any($event.target).value })"
-          >
-            <option value="" [selected]="facet.value === ''">{{ allLabelFor(facet) }}</option>
-            @for (opt of facet.options; track opt.value) {
-              <option [value]="opt.value" [selected]="opt.value === facet.value">{{ opt.label }}</option>
-            }
-          </select>
-        }
-      </div>
+      <!--
+        The query gets its OWN row and the facets a GRID, instead of all six
+        competing in one flex line.
+
+        The bug this replaces, measured on /resources at 1280px: the search box
+        was 28 pixels wide — present, focusable and unusable. Five facets, each
+        carrying width:100% from .command-select, against an input that grows
+        from a zero basis: the input was the only item that could give, so it
+        gave everything. Note that the per-facet width utility was never
+        deciding anything; flex shrinking was.
+
+        A grid removes the competition rather than re-balancing it: each facet
+        fills its own cell (which is what width:100% is right for), the column
+        count steps with the viewport, and the query keeps a full row at every
+        size because nothing shares it.
+      -->
+      <input
+        data-test="filter-bar-query"
+        type="text"
+        class="command-input"
+        [attr.placeholder]="placeholder()"
+        [value]="query()"
+        (input)="queryChange.emit($any($event.target).value)"
+      />
+      @if (facets().length > 0) {
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
+          @for (facet of facets(); track facet.id) {
+            <select
+              [attr.data-test]="'filter-bar-facet-' + facet.id"
+              [attr.aria-label]="'Filter by ' + facet.label"
+              class="command-select"
+              (change)="facetChange.emit({ id: facet.id, value: $any($event.target).value })"
+            >
+              <option value="" [selected]="facet.value === ''">{{ allLabelFor(facet) }}</option>
+              @for (opt of facet.options; track opt.value) {
+                <option [value]="opt.value" [selected]="opt.value === facet.value">{{ opt.label }}</option>
+              }
+            </select>
+          }
+        </div>
+      }
       @if (activeChips().length > 0) {
         <div class="flex flex-wrap items-center gap-2">
           @for (chip of activeChips(); track chip.key) {

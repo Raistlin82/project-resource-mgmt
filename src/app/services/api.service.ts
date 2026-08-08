@@ -22,6 +22,18 @@ export type {
 export interface Resource {
   id: string;
   name: string;
+  /**
+   * The human-typeable code (RPT row 10) — `ARMJUL000001` for a person,
+   * `ZZ - Dummy - <practice> - <role>` for a placeholder.
+   *
+   * SERVER-PINNED: derived on create by `nextResourceCode` and never read from
+   * a request body, so it cannot be forged into a collision or into something
+   * that reads like a different person. Optional here because rows that predate
+   * the column have none, and a UI must render that absence rather than an
+   * empty string. `resource-code.util.ts` owns the two shapes and the rule that
+   * picks between them.
+   */
+  code?: string;
   role: string;
   skills: { name: string; level: number }[];
   projectRoles: string[];

@@ -10,7 +10,7 @@ import { SEARCH_MAX_LIMIT } from '../services/search.util';
 
 function apiStub(overrides: Partial<Record<string, unknown>> = {}) {
   return {
-    getResources: () => of([{ id: '1', name: 'Julie Armstrong', role: 'Developer', kind: 'internal' }]),
+    getResources: () => of([{ id: '1', name: 'Julie Armstrong', code: 'ARMJUL000001', role: 'Developer', kind: 'internal' }]),
     getRequests: () => of([]),
     getProjects: () => of([{ id: '1', name: 'Project Alpha', location: 'Berlin' }]),
     getCustomers: () => of([]),
@@ -420,5 +420,35 @@ describe('SearchComponent', () => {
       const projects = (fixture.nativeElement as HTMLElement).querySelector('[data-test="section-projects"]')!;
       expect(projects.querySelectorAll('a').length).toBe(0);
     });
+  });
+
+  // --- The human-typeable code on a search hit (RPT row 10) ------------------
+  //
+  // A planner searching by code needs to SEE the code on the row that comes
+  // back — otherwise the match is unexplainable ("why is this person here?").
+  // Both directions, because a row without one must render the name alone
+  // rather than an empty badge.
+
+  it('shows the resource code beside the name on a hit', async () => {
+    const fixture = await setupAndSubmit();
+    const hit = (fixture.nativeElement as HTMLElement).querySelector('[data-test="search-hit-resources"]')!;
+    expect(hit.textContent).toContain('Julie Armstrong');
+    expect(hit.querySelector('[data-test="search-hit-code"]')?.textContent).toContain('ARMJUL000001');
+  });
+
+  it('renders the name ALONE when the row carries no code', async () => {
+    const fixture = await setupAndSubmit({
+      getResources: () => of([{ id: '1', name: 'Julie Armstrong', role: 'Developer', kind: 'internal' }]),
+    });
+    const hit = (fixture.nativeElement as HTMLElement).querySelector('[data-test="search-hit-resources"]')!;
+    expect(hit.textContent).toContain('Julie Armstrong');
+    expect(hit.querySelector('[data-test="search-hit-code"]')).toBeNull();
+  });
+
+  it('does NOT put a code badge on a non-resource hit', async () => {
+    // The sections share a template shape; the code belongs to people only.
+    const fixture = await setupAndSubmit();
+    const projects = (fixture.nativeElement as HTMLElement).querySelector('[data-test="section-projects"]')!;
+    expect(projects.querySelector('[data-test="search-hit-code"]')).toBeNull();
   });
 });

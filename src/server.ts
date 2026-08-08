@@ -24,6 +24,7 @@ import { pickRateCard } from './app/services/rate-card.util';
 import { billingPlanValidationError, customerFacingBillingAmount } from './app/services/billing-validation.util';
 import type { FxRate, RateCard, ResourceAbsence } from './app/services/api.service';
 import { isResourceKind, RESOURCE_KINDS, kindOf, dailyCapFor } from './app/services/resource-kind.util';
+import { isPersonCode, nextResourceCode } from './app/services/resource-code.util';
 import { ORG_LEVELS, wouldCycleInOrgTree, wouldCycleInOrgChart, scopeOf, accountableApproversOf, nodeManagersAbove, isTerminatedAsOf, type OrgLevel, type OrgNode } from './app/services/org-scope.util';
 import { maxIdSeq } from './server/id-seq.util';
 import { isUuidV4, newEntityId } from './server/entity-id.util';
@@ -1093,6 +1094,60 @@ apiRouter.use((req, res, next) => {
 // are the RESOLVED effective rate (override ?? rate card). The per-resource
 // OVERRIDE is written via costRateOverride/billRateOverride, which the handlers
 // map onto the cost_rate/bill_rate columns (see applyRateOverrides).
+/**
+ * RPT row 10 — `code` is DERIVED, and a body that carries one is REFUSED.
+ *
+ * Same shape and same reasoning as block H's classification guard: the field is
+ * absent from `RESOURCE_FIELDS`, so `pick()` would drop it silently, and a
+ * silent drop is how "I corrected the code" becomes a 200 that changed nothing.
+ * Applied to POST **and** PUT: there is no endpoint that sets a code, because
+ * the code is a function of the name and the kind — letting it be typed would
+ * let two rows claim one identity, which is the single thing a lookup key must
+ * never allow.
+ */
+function clientSuppliedCodeError(body: unknown): string | null {
+  if (body === null || typeof body !== 'object') return null;
+  const raw = body as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(raw, 'code') || raw['code'] === undefined) return null;
+  return 'code is derived from the resource name and kind, and cannot be sent';
+}
+
+/**
+ * The `code` patch a PUT must carry, or `{}` when the stored code still holds.
+ *
+ * See the call site for the two rules. `taken` is deliberately NOT consulted: a
+ * placeholder code needs no sequence, and a crossing into the person shape is
+ * resolved by the caller passing the current code list — which is why this
+ * returns a patch rather than writing, so the whole read-derive-write stays
+ * inside the lock the handler already holds.
+ */
+function resourceCodePatch(
+  current: Resource,
+  merged: Resource,
+  mergedKind: Resource['kind'],
+  taken: readonly string[] = [],
+): Partial<Resource> {
+  const isPlaceholderKind = mergedKind === 'dummy' || mergedKind === 'subco';
+  const stored = current.code;
+  if (isPlaceholderKind) {
+    // A description: always re-derive, so it never describes a past state.
+    const next = nextResourceCode(
+      { name: merged.name, kind: mergedKind, organization: merged.organization, role: merged.role },
+      taken,
+    );
+    return next === stored ? {} : { code: next };
+  }
+  // A person: keep an existing PERSON code untouched (identity), and mint one
+  // only when there is none or when the stored one is a placeholder's.
+  if (stored !== undefined && isPersonCode(stored)) return {};
+  return {
+    code: nextResourceCode(
+      { name: merged.name, kind: 'internal', organization: merged.organization, role: merged.role },
+      taken,
+    ),
+  };
+}
+
 const RESOURCE_FIELDS = [
   'name', 'role', 'skills', 'projectRoles', 'externalExperience', 'profilePicture',
   'resume', 'capacity', 'contractHoursPerDay', 'managerId', 'organization',
@@ -1959,7 +2014,10 @@ async function validateResourceKind(kind: unknown, vendorId: unknown): Promise<s
 apiRouter.get('/resources', async (req, res) => {
   const all = await repos.resources.list();
   const q = typeof req.query['q'] === 'string' ? req.query['q'] : undefined;
-  const page = q === undefined ? all : searchPage(all, ['name', 'role', 'organization', 'location'], q, clampSearchPage(req.query));
+  // 'code' joins the match set (RPT row 10): the whole point of a typeable code
+  // is that a planner types it. A person who remembers only `ARMJUL`, or only
+  // the sequence, still finds the row.
+  const page = q === undefined ? all : searchPage(all, ['name', 'role', 'organization', 'location', 'code'], q, clampSearchPage(req.query));
   res.json(await resolveResourceRates(page));
 });
 apiRouter.get('/users', async (_req, res) => { res.json(await repos.users.list()); });
@@ -1975,6 +2033,14 @@ apiRouter.get('/resources/:id', async (req, res) => {
 // utilization math) and hireDate (data di assunzione) is REQUIRED + ISO-parseable.
 // utilization starts at 0 (derived server-side from assignments), id is server-set.
 apiRouter.post('/resources', async (req, res) => {
+  // The code is DERIVED, never supplied — and a body that carries one is
+  // refused rather than silently dropped, for the same reason `billable`/`type`
+  // are (block H): a silent drop makes a correction look like it succeeded and
+  // do nothing. There is no "set the code" endpoint on purpose; the code is a
+  // function of the name and the kind, and letting it be typed would let two
+  // rows claim one identity.
+  const codeErr = clientSuppliedCodeError(req.body);
+  if (codeErr) { res.status(403).json({ error: codeErr }); return; }
   const body = pick<Resource>(req.body, RESOURCE_FIELDS);
   // D — hoisted so the cycle guard below can check a client-supplied
   // managerId against THIS resource's own about-to-be-assigned id, before it
@@ -2042,13 +2108,30 @@ apiRouter.post('/resources', async (req, res) => {
     // key in the closure map instead of being ignored. `undefined`, not
     // `null`, for the identical adapter-parity reason as vendorId.
     if (body.managerId === '' || body.managerId === null) body.managerId = undefined;
-    const item = {
-      skills: [], projectRoles: [], externalExperience: [],
-      ...body,
-      id, // D — hoisted above (see comment there); NOT a fresh newId() call.
-      utilization: 0,
-    } as Resource;
-    return { created: await repos.resources.create(item) };
+    // RPT row 10 — mint the human-typeable code.
+    //
+    // LOCK ORDER: 'resource-code' is acquired INNERMOST and nowhere else in this
+    // file, so it cannot participate in a cycle. It has to be held across the
+    // read AND the write: the sequence is derived from the codes already in use,
+    // so two concurrent onboardings of two Julie Armstrongs would otherwise both
+    // read "nothing under ARMJUL" and both mint ARMJUL000001 — which the partial
+    // unique index would then reject on Postgres and happily accept in memory,
+    // i.e. the dev/prod parity break this codebase exists to avoid.
+    return withLock('resource-code', async () => {
+      const existing = await repos.resources.list();
+      const taken = existing.map(r => r.code).filter((c): c is string => typeof c === 'string');
+      const item = {
+        skills: [], projectRoles: [], externalExperience: [],
+        ...body,
+        id, // D — hoisted above (see comment there); NOT a fresh newId() call.
+        utilization: 0,
+        code: nextResourceCode(
+          { name: String(body.name ?? ''), kind: body.kind, organization: body.organization, role: body.role },
+          taken,
+        ),
+      } as Resource;
+      return { created: await repos.resources.create(item) };
+    });
   };
   // D (review round 1, CRITICAL) — see the matching comment at the PUT
   // handler's `org-chart` lock for the full rationale (two concurrent writers
@@ -2087,6 +2170,8 @@ apiRouter.post('/resources', async (req, res) => {
   res.status(201).json(resolved);
 });
 apiRouter.put('/resources/:id', async (req, res) => {
+  const codeErr = clientSuppliedCodeError(req.body);
+  if (codeErr) { res.status(403).json({ error: codeErr }); return; }
   // Preflight snapshot: it answers the 404 and supplies the stored hireDate for
   // the terminationDate ordering rule. It is deliberately NOT the basis of the
   // kind/vendorId merge or the daily-cap guard below — those re-read the row
@@ -2238,7 +2323,39 @@ apiRouter.put('/resources/:id', async (req, res) => {
         return { status: 400, error: `changing kind to ${mergedKind} would exceed the daily capacity on ${offender}` };
       }
     }
-    return { updated: await repos.resources.update(req.params.id, body) };
+    // RPT row 10 — keep the code's SHAPE honest across a kind change.
+    //
+    // Two different rules, because the two shapes mean different things:
+    //
+    //   a PERSON code is an IDENTITY. Minted once and never re-derived, so a
+    //   rename (marriage, a spelling correction) does not silently invalidate
+    //   every plan, email and spreadsheet that already names the old one.
+    //
+    //   a PLACEHOLDER code is a DESCRIPTION. It must track what it describes,
+    //   so a dummy that moves practice or changes role is re-described — a
+    //   stale description is simply a wrong one.
+    //
+    // The crossing case is what this exists for, and the smoke suite is what
+    // found it: a dummy or subco PROMOTED to a real person (RPT row 29's own
+    // flow) kept `ZZ - Subco - …` as its code, so the directory listed a person
+    // described as vendor capacity.
+    //
+    // LOCK ORDER: 'resource-code' INNERMOST, as in the POST handler — it is
+    // acquired at exactly two call sites, both innermost, so it cannot
+    // participate in a cycle. Taken unconditionally rather than only when a
+    // patch turns out to be needed: deciding that requires deriving the code,
+    // and a rule that reads "we take the lock except when we already know the
+    // answer" is the kind of conditional locking that is right until someone
+    // adds a third caller. Resource edits are human-scale; the contention is
+    // theoretical.
+    return withLock('resource-code', async () => {
+      const taken = (await repos.resources.list())
+        .filter(r => r.id !== current.id)
+        .map(r => r.code)
+        .filter((c): c is string => typeof c === 'string');
+      const codePatch = resourceCodePatch(current, mergedResource, mergedKind, taken);
+      return { updated: await repos.resources.update(req.params.id, { ...body, ...codePatch }) };
+    });
   });
   // D (review round 1, CRITICAL) — a SINGLE global lock key, not a per-pair
   // `withLock` (the pattern used elsewhere in this file for exactly-two-known-

@@ -141,6 +141,13 @@
       "when": 1786077718485,
       "tag": "0019_purple_shinko_yamashiro",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1786170684852,
+      "tag": "0020_overjoyed_stark_industries",
+      "breakpoints": true
     }
   ]
 }

@@ -176,9 +176,9 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
                         @if (targetFor('resources', r); as t) {
                           <a [routerLink]="t.link" [queryParams]="t.queryParams ?? null"
                              data-test="search-hit-resources"
-                             class="block rounded px-2 py-1 -mx-2 text-[var(--cc-primary)] hover:bg-surface-muted hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--cc-primary)]">{{ r.name }}</a>
+                             class="block rounded px-2 py-1 -mx-2 text-[var(--cc-primary)] hover:bg-surface-muted hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--cc-primary)]"><span>{{ r.name }}</span>@if (r.code) {<span data-test="search-hit-code" class="ml-2 font-mono text-xs text-[var(--cc-muted)]">{{ r.code }}</span>}</a>
                         } @else {
-                          <div class="px-2 py-1 -mx-2">{{ r.name }}</div>
+                          <div class="px-2 py-1 -mx-2"><span>{{ r.name }}</span>@if (r.code) {<span data-test="search-hit-code" class="ml-2 font-mono text-xs text-[var(--cc-muted)]">{{ r.code }}</span>}</div>
                         }
                       }
                       @empty { <p class="text-[var(--cc-muted)]">No results for "{{ displayQueryFor('resources') }}" in Resources.</p> }

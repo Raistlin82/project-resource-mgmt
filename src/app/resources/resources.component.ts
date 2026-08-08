@@ -70,7 +70,7 @@ const REMOTE_LOCATION = 'Remote';
           <app-search-filter-bar
             [query]="search()"
             [facets]="filterFacets()"
-            placeholder="Search by name, role, organization, or location..."
+            placeholder="Search by code, name, role, organization, or location..."
             (queryChange)="search.set($event)"
             (facetChange)="onFacetChange($event)"
             (clearAll)="clearAllFilters()"
@@ -120,6 +120,16 @@ const REMOTE_LOCATION = 'Remote';
                       <span data-test="resource-name">{{ r.name }}</span>
                       <app-resource-kind-badge [kind]="r.kind" />
                     </span>
+                    <!-- RPT row 10 — the code lives UNDER the name rather than in
+                         its own column: it is how you recognise and dictate this
+                         person, so it belongs next to who they are. Monospace so
+                         the fixed-width sequence lines up down the column and a
+                         transposed digit is visible. Rows that predate the column
+                         render nothing at all — an em dash here would read as a
+                         value, and "this person has no code" is not one. -->
+                    @if (r.code) {
+                      <div data-test="resource-code" class="mt-0.5 font-mono text-xs font-normal text-[var(--cc-muted)]">{{ r.code }}</div>
+                    }
                   </td>
                   <td>{{ r.role }}</td>
                   <td>{{ r.organization || '—' }}</td>
@@ -872,7 +882,12 @@ export class ResourcesComponent {
       if (pra && dims.practice !== pra) return false;
       if (com && dims.competence !== com) return false;
       if (mgr && r.managerId !== mgr) return false;
-      return [r.name, r.role, r.organization, r.location].some(
+      // `code` joins the match set (RPT row 10). The whole point of a typeable
+      // code is that it is TYPED — and this box is where a planner looking at
+      // the directory types. Leaving it out would have made the code searchable
+      // on /search and not on the screen that lists the codes, which is the
+      // kind of half-wiring nobody discovers until they need it.
+      return [r.name, r.role, r.organization, r.location, r.code].some(
         v => (v ?? '').toLowerCase().includes(q),
       );
     });
