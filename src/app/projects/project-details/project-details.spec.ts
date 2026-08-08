@@ -819,3 +819,61 @@ describe('ProjectDetailsComponent — exactly ONE h1 on the page, whichever tab 
     expect(host(fixture).querySelector('h1')?.textContent?.trim()).toBe(PROJECT.name);
   });
 });
+
+// -----------------------------------------------------------------------------
+// The Margin tile's PERCENTAGE, and the sentinel behind it.
+//
+// finance.util computes marginPct as `revenue > 0 ? … : 0`. The 0 is a sentinel
+// for "undefined", and on a non-billable (BASKET) engagement — revenue 0 BY
+// CONSTRUCTION — it was the only value the caption ever had, so the page read
+// "0% margin" in red beside a red negative amount: two contradictory claims
+// about the same engagement.
+//
+// This is a DIFFERENT question from the withheld-access suite above, and the
+// pair is worth keeping straight: WITHHELD asks "may this reader see it", the
+// tests below ask "is there anything to see". A reader with full access still
+// gets a dash here, and the money AMOUNT is real and shown in both cases.
+// -----------------------------------------------------------------------------
+describe('ProjectDetailsComponent — a margin % needs revenue to be a percentage OF', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('renders the real percentage when the project earns customer revenue', async () => {
+    // moneyProject(): revenue 100,000, cost 60,000 -> margin 40,000 -> 40.0%.
+    const { fixture } = await render('delivery-executive', moneyProject());
+    const tile = kpi(fixture, 'Margin');
+
+    expect(tile.value).toContain('40,000');
+    expect(tile.note).toContain('40% margin');
+    expect(host(fixture).querySelector('[data-test="margin-pct"]')?.textContent).toContain('%');
+  });
+
+  it('renders an em dash — never "0% margin" — when it earns none, and KEEPS the amount', async () => {
+    // Same reader, same access, same cost. The ONLY thing removed is the
+    // customer order, which is exactly what a non-billable engagement lacks.
+    const { fixture } = await render('delivery-executive', moneyProject({
+      getOrders: () => of([]),
+      getOrderLines: () => of([]),
+    }));
+    const tile = kpi(fixture, 'Margin');
+
+    // The AMOUNT survives: 60,000 of real cost against no revenue.
+    expect(tile.value).toContain('60,000');
+    expect(tile.value).not.toBe(WITHHELD);
+
+    const note = host(fixture).querySelector('[data-test="margin-pct"]')?.textContent ?? '';
+    expect(note).toContain('—');
+    expect(note, 'the pre-fix caption said "0.0% margin" here').not.toContain('%');
+    // And it is NOT the access notice: this reader has every capability.
+    expect(note).not.toContain(WITHHELD_NOTE);
+  });
+
+  it('leaves the withheld branch untouched — a pm still sees the ACCESS notice, not the dash reason', async () => {
+    // The two @else branches are adjacent in the template and both render a
+    // dash-ish note. Without this, a fix that collapsed them would pass every
+    // assertion above while telling a pm the wrong reason for what they see.
+    const { fixture } = await render('pm', moneyProject());
+    expect(kpi(fixture, 'Margin').value).toBe(WITHHELD);
+    expect(kpi(fixture, 'Margin').note).toBe(WITHHELD_NOTE);
+    expect(host(fixture).querySelector('[data-test="margin-pct"]'), 'the % caption belongs to the visible branch only').toBeNull();
+  });
+});

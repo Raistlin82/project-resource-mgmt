@@ -1079,3 +1079,210 @@ function shiftIso(month: string, delta: number): string {
   const zeroBased = y * 12 + (m - 1) + delta;
   return `${Math.floor(zeroBased / 12)}-${String((zeroBased % 12) + 1).padStart(2, '0')}`;
 }
+
+// -----------------------------------------------------------------------------
+// The no-revenue margin-% sentinel must never render as "0%" on /reporting.
+//
+// finance.util computes every margin percentage as `revenue > 0 ? … : 0`. That
+// 0 stands for "undefined". Printing it asserts break-even on an engagement, or
+// a customer, that may have lost money.
+//
+// Which of this page's five margin-% render sites can actually reach it is the
+// interesting part, and each is tested at the site that can:
+//
+//   • the P&L drill-down row  — YES. `marginRows()` admits a project on
+//     `revenue > 0 || anyCost > 0`, which is exactly a non-billable engagement.
+//   • the customer table row  — YES, but NOT via a basket: `customerProfitability`
+//     excludes non-billable engagements outright (§5, F-5). It is reachable the
+//     ordinary way — a signed customer whose delivery started before the order
+//     landed.
+//   • the customer TOTAL     — YES, when no customer has billed yet.
+//   • the fully-loaded tile  — YES, for a portfolio of only internal work.
+//   • the margin CHART list  — NO. It reads `projectMargins()`, which filters
+//     `revenue > 0`; a guard there would be dead code. Asserted as such below.
+//   • the compression alert  — NO. `evaluateCompression` returns null on
+//     `revenue <= 0` AND skips non-billable ids. Asserted as such below.
+// -----------------------------------------------------------------------------
+
+/** A billable customer (C2/CT2/PC) with delivery cost and NO order line yet. */
+const NO_REVENUE_CUSTOMER = {
+  customers: [
+    { id: 'C1', name: 'Paying Customer' },
+    { id: 'C2', name: 'Pre-Revenue Customer' },
+  ],
+  contracts: [
+    { id: 'CT', customerId: 'C1', name: 'Signed', type: 'T&M' as const, totalValue: 120000, currency: 'EUR', status: 'Active' as const, startDate: '2026-01-01', endDate: '2026-12-31' },
+    { id: 'CT2', customerId: 'C2', name: 'Signed, unbilled', type: 'T&M' as const, totalValue: 50000, currency: 'EUR', status: 'Active' as const, startDate: '2026-01-01', endDate: '2026-12-31' },
+  ],
+  /** PB and PL keep their revenue via CT; PC carries 20h x 100 = 2000 of cost only. */
+  projects: [
+    ...H_PROJECTS.map(p => (p.id === 'PB' || p.id === 'PL' ? { ...p, contractId: 'CT' } : p)),
+    { id: 'PC', name: 'Delivery Before Order', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution', billable: true, type: 'Delivery', contractId: 'CT2' } as Project,
+  ],
+  time: [...H_TIME, { id: 'T5', assignmentId: 'a', requestId: 'r', resourceId: 'R1', projectId: 'PC', date: '2026-05-04', hours: 20, status: 'Approved' } as TimeEntry],
+  /**
+   * PC needs a REQUEST to appear in the customer table at all, and the reason is
+   * worth knowing: `customerProfitability` walks `allProjectIds()`, which
+   * collects ids from financials, order lines, requests, billing items and
+   * change requests — but NOT from time entries or the project master. (Its
+   * sibling `attributableProjectIds()`, which the fully-loaded portfolio tile
+   * uses, DOES add both.) So a project whose only activity is booked labour is
+   * invisible to the customer rollup, with or without this fix. That asymmetry
+   * is pre-existing and deliberately left alone here — correcting it would move
+   * customer money figures, which is not this change's business. The request
+   * also makes the fixture more truthful: staffing was requested and filled,
+   * the customer order simply has not landed yet.
+   */
+  requests: [
+    { id: 'REQ-PC', name: 'Delivery squad', requiredRole: 'Developer', requiredEffort: 20, status: 'Fulfilled', skills: [], projectId: 'PC' },
+  ],
+};
+
+/** The cell carrying `test` inside the table row whose FIRST cell names `label`. */
+function cellInRow(fixture: { nativeElement: unknown }, label: string, test: string): HTMLElement {
+  const rows = Array.from(host(fixture).querySelectorAll('tbody tr'));
+  const row = rows.find(r => (r.querySelector('td')?.textContent ?? '').includes(label));
+  expect(row, `a row for ${label} must exist`).toBeTruthy();
+  const cell = row!.querySelector<HTMLElement>(`[data-test="${test}"]`);
+  expect(cell, `${label}'s row must carry a ${test} cell`).not.toBeNull();
+  return cell!;
+}
+
+describe('Reporting — a margin % is rendered only where revenue makes it measurable', () => {
+  it('P&L drill-down: real percentages for the revenue-bearing rows', async () => {
+    const fixture = await setup(H_RESOURCES, hOverrides(H_PROJECTS));
+    await flush(fixture);
+    // PB: revenue 100000, cost 30000 -> 70.0%.  PL: 20000 / 5000 -> 75.0%.
+    expect(cellInRow(fixture, 'Billable Delivery', 'margin-row-pct').textContent).toContain('70%');
+    expect(cellInRow(fixture, 'Legacy Row', 'margin-row-pct').textContent).toContain('75%');
+  });
+
+  it('P&L drill-down: an em dash — never "0%" — for the rows carrying only cost', async () => {
+    const fixture = await setup(H_RESOURCES, hOverrides(H_PROJECTS));
+    await flush(fixture);
+    for (const name of ['Internal Platform', 'BASKET Engineering']) {
+      const text = cellInRow(fixture, name, 'margin-row-pct').textContent ?? '';
+      expect(text, `${name} earns nothing, so its margin % is undefined`).toContain('—');
+      expect(text, `${name} must not assert a percentage`).not.toContain('%');
+    }
+  });
+
+  it('customer table: the paying customer keeps a percentage, the pre-revenue one gets a dash', async () => {
+    const fixture = await setup(H_RESOURCES, hOverrides(NO_REVENUE_CUSTOMER.projects, {
+      getCustomers: () => of(NO_REVENUE_CUSTOMER.customers),
+      getContracts: () => of(NO_REVENUE_CUSTOMER.contracts),
+      getTimeEntries: () => of(NO_REVENUE_CUSTOMER.time),
+      getRequests: () => of(NO_REVENUE_CUSTOMER.requests),
+    }));
+    await flush(fixture);
+
+    // C1: revenue 120000, cost 35000 -> margin 85000 -> 70.8%.
+    const paying = cellInRow(fixture, 'Paying Customer', 'customer-margin-pct').textContent ?? '';
+    expect(paying).toContain('70.8%');
+
+    // C2: revenue 0, cost 2000. Delivery started before the order landed —
+    // ordinary, and NOT a basket (customerProfitability excludes those).
+    const preRevenue = cellInRow(fixture, 'Pre-Revenue Customer', 'customer-margin-pct').textContent ?? '';
+    expect(preRevenue).toContain('—');
+    expect(preRevenue).not.toContain('%');
+  });
+
+  it('customer TOTAL: a percentage while anyone has billed, a dash when nobody has', async () => {
+    const billed = await setup(H_RESOURCES, hOverrides(NO_REVENUE_CUSTOMER.projects, {
+      getCustomers: () => of(NO_REVENUE_CUSTOMER.customers),
+      getContracts: () => of(NO_REVENUE_CUSTOMER.contracts),
+      getTimeEntries: () => of(NO_REVENUE_CUSTOMER.time),
+      getRequests: () => of(NO_REVENUE_CUSTOMER.requests),
+    }));
+    await flush(billed);
+    const withRevenue = host(billed).querySelector('[data-test="customer-total-margin-pct"]')?.textContent ?? '';
+    expect(withRevenue).toContain('%');
+    expect(withRevenue).not.toContain('—');
+
+    TestBed.resetTestingModule();
+
+    const unbilled = await setup(H_RESOURCES, hOverrides(NO_REVENUE_CUSTOMER.projects, {
+      getCustomers: () => of(NO_REVENUE_CUSTOMER.customers),
+      getContracts: () => of(NO_REVENUE_CUSTOMER.contracts),
+      getTimeEntries: () => of(NO_REVENUE_CUSTOMER.time),
+      getRequests: () => of(NO_REVENUE_CUSTOMER.requests),
+      getOrders: () => of([]),
+      getOrderLines: () => of([]),
+    }));
+    await flush(unbilled);
+    const withoutRevenue = host(unbilled).querySelector('[data-test="customer-total-margin-pct"]')?.textContent ?? '';
+    expect(withoutRevenue).toContain('—');
+    expect(withoutRevenue).not.toContain('%');
+  });
+
+  it('fully-loaded tile: 59.2% with revenue, a dash without, and the AMOUNT survives both', async () => {
+    const earning = await setup(H_RESOURCES, hOverrides(H_PROJECTS));
+    await flush(earning);
+    expect(host(earning).querySelector('[data-test="portfolio-margin-pct"]')?.textContent).toContain('59.2%');
+
+    TestBed.resetTestingModule();
+
+    // Same cost base, no customer orders at all.
+    const internalOnly = await setup(H_RESOURCES, hOverrides(H_PROJECTS, {
+      getOrders: () => of([]),
+      getOrderLines: () => of([]),
+    }));
+    await flush(internalOnly);
+    const pct = host(internalOnly).querySelector('[data-test="portfolio-margin-pct"]')?.textContent ?? '';
+    expect(pct).toContain('—');
+    expect(pct).not.toContain('%');
+    // -49000 of carried cost is a real figure and must still be on screen.
+    expect(internalOnly.componentInstance.totalMargin()).toBe(-49000);
+  });
+
+  /** The value under `header` on the CSV line whose first field is `label`. */
+  function csvCell(csv: string, label: string, header: string): string {
+    const [head, ...lines] = csv.split('\r\n');
+    const col = head.split(',').indexOf(header);
+    expect(col, `the "${header}" column must exist`).toBeGreaterThanOrEqual(0);
+    const line = lines.find(l => l.split(',')[0].replace(/^"|"$/g, '') === label);
+    expect(line, `a CSV line for ${label} must exist`).toBeTruthy();
+    return line!.split(',')[col].replace(/^"|"$/g, '');
+  }
+
+  it('EXPORTS carry the same dash — a "0.0" in a file outlives every caveat on the screen', async () => {
+    const fixture = await setup(H_RESOURCES, hOverrides(NO_REVENUE_CUSTOMER.projects, {
+      getCustomers: () => of(NO_REVENUE_CUSTOMER.customers),
+      getContracts: () => of(NO_REVENUE_CUSTOMER.contracts),
+      getTimeEntries: () => of(NO_REVENUE_CUSTOMER.time),
+      getRequests: () => of(NO_REVENUE_CUSTOMER.requests),
+    }));
+    await flush(fixture);
+    const c = fixture.componentInstance;
+
+    const margins = c['buildMarginVarianceCsv']();
+    expect(csvCell(margins, 'Billable Delivery', 'Margin %'), 'a measured row still exports its number').toBe('70.0');
+    expect(csvCell(margins, 'BASKET Engineering', 'Margin %')).toBe('—');
+    expect(csvCell(margins, 'Internal Platform', 'Margin %')).toBe('—');
+    // The AMOUNT is real and must still export as a number in both cases.
+    expect(csvCell(margins, 'BASKET Engineering', 'Margin (EUR base)')).toBe('-4000.00');
+
+    const customers = c['buildCustomerProfitabilityCsv']();
+    expect(csvCell(customers, 'Paying Customer', 'Margin %')).toBe('70.8');
+    expect(csvCell(customers, 'Pre-Revenue Customer', 'Margin %')).toBe('—');
+    expect(csvCell(customers, 'Pre-Revenue Customer', 'Cost (EUR base)')).toBe('2000.00');
+  });
+
+  it('CONFIRMS the two sites left alone are genuinely unreachable, so their guards would be dead code', async () => {
+    const fixture = await setup(H_RESOURCES, hOverrides(H_PROJECTS));
+    await flush(fixture);
+    const c = fixture.componentInstance;
+
+    // The margin chart/list: `projectMargins()` filters `revenue > 0`, so the
+    // two zero-revenue engagements never enter it in the first place.
+    const charted = c['marginBars']().map((p: { name: string; revenue: number }) => p.name);
+    expect(charted).toContain('Billable Delivery');
+    expect(charted).not.toContain('Internal Platform');
+    expect(charted).not.toContain('BASKET Engineering');
+    for (const bar of c['marginBars']()) expect(bar.revenue).toBeGreaterThan(0);
+
+    // The compression alerts: null on `revenue <= 0`, and non-billable ids are
+    // skipped before that. Every alert therefore carries measurable revenue.
+    for (const alert of c['compressionAlerts']()) expect(alert.revenue).toBeGreaterThan(0);
+  });
+});

@@ -1,5 +1,8 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import {
   computeProjectFinancials,
+  hasMeasuredMarginPct,
   resourceBillability,
   isProjectBillable,
   hasAnyAlert,
@@ -2526,5 +2529,129 @@ describe('finance.util H — differential 2: only the `billable` flag differs', 
     expect(portfolioRealization(a)).toStrictEqual(portfolioRealization(b));
     expect(portfolioMarginFullyLoaded(a)).toStrictEqual(portfolioMarginFullyLoaded(b));
     expect(resourceBillability('1', a)).toStrictEqual(resourceBillability('1', b));
+  });
+});
+
+// -----------------------------------------------------------------------------
+// The no-revenue margin-% sentinel: the rule, and the guarantee that every
+// place printing one has been classified against it.
+// -----------------------------------------------------------------------------
+describe('hasMeasuredMarginPct — the rule behind every margin-% render site', () => {
+  it('is false exactly when there is no revenue to be a percentage of', () => {
+    expect(hasMeasuredMarginPct(1)).toBe(true);
+    expect(hasMeasuredMarginPct(0.01)).toBe(true);
+    expect(hasMeasuredMarginPct(0)).toBe(false);
+    // Negative revenue (a credit note larger than the billings) is not a
+    // denominator either — the percentage it yields has the wrong sign.
+    expect(hasMeasuredMarginPct(-1)).toBe(false);
+  });
+
+  it('agrees with the sentinel every producer in this file actually emits', () => {
+    // The predicate is only useful if it is TRUE exactly where the arithmetic
+    // produced a measurement. Asserting that against the real functions is what
+    // stops the two drifting: change one branch and this goes red.
+    const billable = { id: 'PB', name: 'Billable', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution', billable: true };
+    const basket = { id: 'PK', name: 'Basket', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution', billable: false, type: 'Basket' as const };
+    const d = {
+      projects: [billable, basket],
+      orders: [{ id: 'O1', contractId: 'CT', type: 'Customer' as const, amount: 1000, currency: 'EUR', status: 'Invoiced' as const, orderDate: '2026-01-01' }],
+      orderLines: [{ id: 'L1', orderId: 'O1', projectId: 'PB', description: 'x', amount: 1000 }],
+      resources: [{ id: 'R1', name: 'R', role: 'Dev', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40, costRate: 100, billRate: 200 }],
+      timeEntries: [
+        { id: 'T1', assignmentId: 'a', requestId: 'r', resourceId: 'R1', projectId: 'PB', date: '2026-05-04', hours: 2, status: 'Approved' as const },
+        { id: 'T2', assignmentId: 'a', requestId: 'r', resourceId: 'R1', projectId: 'PK', date: '2026-05-04', hours: 3, status: 'Approved' as const },
+      ],
+      requests: [], assignments: [], financials: [], billingItems: [], changeRequests: [], contracts: [], customers: [],
+    } as unknown as Parameters<typeof computeProjectFinancials>[1];
+
+    const earning = computeProjectFinancials('PB', d);
+    expect(hasMeasuredMarginPct(earning.revenue)).toBe(true);
+    expect(earning.marginPct).toBeCloseTo(80, 6); // (1000 - 200) / 1000
+
+    const carrying = computeProjectFinancials('PK', d);
+    // The sentinel, exactly: a REAL negative margin reported at a 0 percentage.
+    // Both halves matter — the amount is measured, the percentage is not.
+    expect(carrying.margin).toBe(-300);
+    expect(carrying.marginPct).toBe(0);
+    expect(hasMeasuredMarginPct(carrying.revenue)).toBe(false);
+  });
+});
+
+/**
+ * Every file that names a margin percentage must be CLASSIFIED, not merely
+ * correct today.
+ *
+ * The point is not to re-test the guards — the component specs do that, both
+ * directions, at each site. It is that a NEW render site added tomorrow cannot
+ * quietly print the sentinel: it will not be in this table, and this test will
+ * say so at the moment it is written rather than the day someone reads a "0%"
+ * on a losing engagement and believes it.
+ *
+ * Membership is decided by importing `hasMeasuredMarginPct`. That is a
+ * deliberately coarse signal — it proves the author MET the rule, not that they
+ * applied it correctly — and it is paired with an explicit exemption list whose
+ * entries each carry a reason. A file in neither bucket fails.
+ */
+describe('every margin-% site in the app is classified against the sentinel', () => {
+  const APP_DIR = resolve(__dirname, '..');
+
+  /** Files that name a margin percentage but deliberately do NOT guard it. */
+  const EXEMPT: Record<string, string> = {
+    'services/finance.util.ts':
+      'defines the sentinel and the predicate; it is the rule, not a consumer of it',
+    'services/export.util.ts':
+      'mentions marginPct only in a prose comment about column formatting — no render site',
+    'configuration/integrations.component.ts':
+      'previews the BI feed ARTIFACT; it must show the bytes the download carries, ' +
+      'or preview and file disagree. A sentinel that is wrong for a consumer is a ' +
+      'feed-builder question (src/server/integrations/), not a rendering one.',
+  };
+
+  /** Every .ts under src/app except specs. */
+  function sourceFiles(dir: string, acc: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) sourceFiles(full, acc);
+      else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.spec.ts')) acc.push(full);
+    }
+    return acc;
+  }
+
+  it('leaves no file naming a margin percentage unguarded and unexempted', () => {
+    const unclassified: string[] = [];
+    for (const file of sourceFiles(APP_DIR)) {
+      const src = readFileSync(file, 'utf8');
+      if (!/marginPct/.test(src)) continue;
+      const rel = relative(APP_DIR, file);
+      if (rel in EXEMPT) continue;
+      if (src.includes('hasMeasuredMarginPct')) continue;
+      unclassified.push(rel);
+    }
+    expect(unclassified, 'add the guard, or add an EXEMPT entry saying why not').toStrictEqual([]);
+  });
+
+  it('keeps the exemption list HONEST — no entry for a file that no longer qualifies', () => {
+    // The pair of the assertion above, and the one that rots without it: an
+    // exemption left behind after a file stopped naming a margin percentage
+    // (or was deleted) would silently widen the hole for whatever takes its
+    // place at that path.
+    for (const [rel, reason] of Object.entries(EXEMPT)) {
+      const src = readFileSync(resolve(APP_DIR, rel), 'utf8');
+      expect(/marginPct/.test(src), `${rel} is exempt but no longer names a margin %`).toBe(true);
+      expect(reason.length, `${rel}'s exemption must carry a reason`).toBeGreaterThan(30);
+    }
+  });
+
+  it('CONFIRMS the scan can fail — a guarded file stripped of its import is caught', () => {
+    // Without this, the two tests above are satisfied by a scan that matches
+    // nothing at all. This proves the detector actually looks at the files it
+    // claims to: the real dashboard names a margin % and imports the guard, so
+    // removing the import from its TEXT must move it into the unclassified set.
+    const rel = 'dashboard/dashboard.component.ts';
+    const src = readFileSync(resolve(APP_DIR, rel), 'utf8');
+    expect(/marginPct/.test(src), 'the probe file must name a margin %').toBe(true);
+    expect(src.includes('hasMeasuredMarginPct'), 'and must currently import the guard').toBe(true);
+    expect(rel in EXEMPT, 'and must not be exempt').toBe(false);
+    expect(src.replace(/hasMeasuredMarginPct/g, 'x').includes('hasMeasuredMarginPct')).toBe(false);
   });
 });

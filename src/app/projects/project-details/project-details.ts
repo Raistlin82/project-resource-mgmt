@@ -6,7 +6,7 @@ import { RouterLink } from '@angular/router';
 import { of } from 'rxjs';
 import { ApiService, Project, Order, OrderLine, ResourceRequest, Assignment, Resource, FinancialItem, TimeEntry, Issue, ChangeRequest, CostBaseline, AssignmentDay, AssignmentMonth, FxRate } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
-import { computeProjectFinancials, costBaselineComparison, CostBaselineComparisonRow, FinanceData } from '../../services/finance.util';
+import { computeProjectFinancials, costBaselineComparison, CostBaselineComparisonRow, FinanceData, hasMeasuredMarginPct } from '../../services/finance.util';
 import { NotificationService } from '../../services/notification.service';
 import { ProjectPartners } from '../project-partners/project-partners';
 import { ProjectDocuments } from '../project-documents/project-documents';
@@ -268,7 +268,19 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
                 <p class="command-kpi-label">Margin</p>
                 @if (financeVisible()) {
                   <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="f.margin >= 0" [class.text-critical-text]="f.margin < 0">{{ f.margin | currency:'EUR':'symbol':'1.0-0' }}</p>
-                  <p class="command-kpi-note font-semibold" [class.text-positive-text]="f.margin >= 0" [class.text-critical-text]="f.margin < 0">{{ f.marginPct | number:'1.0-1' }}% margin</p>
+                  <!-- The AMOUNT above is always real and always shown. The
+                       PERCENTAGE below is not: with no revenue to be a
+                       percentage of it is finance.util's no-revenue sentinel 0,
+                       and "0% margin" beside a red negative amount asserted
+                       break-even on an engagement that lost money. A
+                       non-billable engagement earns no revenue by construction,
+                       so on those pages the sentinel is the only value it ever
+                       had. -->
+                  @if (hasMarginPct(f.revenue)) {
+                    <p class="command-kpi-note font-semibold" data-test="margin-pct" [class.text-positive-text]="f.margin >= 0" [class.text-critical-text]="f.margin < 0">{{ f.marginPct | number:'1.0-1' }}% margin</p>
+                  } @else {
+                    <p class="command-kpi-note" data-test="margin-pct">&mdash; no customer revenue, so there is no percentage to compute</p>
+                  }
                 } @else {
                   <p class="command-kpi-value font-mono tabular-nums">—</p>
                   <p class="command-kpi-note">needs commercial + financial access</p>
@@ -648,6 +660,13 @@ export class ProjectDetailsComponent {
   protected financialsWithheld = computed(() => !this.auth.canApproveFinancials());
   /** Every money figure on the Overview is real only when BOTH halves are readable. */
   protected financeVisible = computed(() => !this.commercialWithheld() && !this.financialsWithheld());
+
+  /**
+   * finance.util's rule for "is this margin percentage measured, or the
+   * no-revenue sentinel?". Independent of `financeVisible()` above: that one
+   * answers MAY the reader see it, this one answers IS THERE anything to see.
+   */
+  protected hasMarginPct(revenue: number): boolean { return hasMeasuredMarginPct(revenue); }
 
   /**
    * READINESS of the Overview money grid — the gate the grid never had.

@@ -5,7 +5,7 @@ import { forkJoin, of, map } from 'rxjs';
 import { rxResource } from '@angular/core/rxjs-interop';
 import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, OrderLine, FinancialItem, TimeEntry, Issue, ChangeRequest, Milestone, BillingPlanItem, Contract, Customer, FxRate, NegotiatedRate, BASE_CURRENCY, AssignmentDay, AssignmentMonth, CostBaseline, BenchRollup } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
-import { computeProjectFinancials, costBaselineComparison, FinanceData, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, recognitionSchedule, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity, portfolioMarginFullyLoaded, PortfolioMargin, portfolioRealization, PortfolioRealization } from '../services/finance.util';
+import { computeProjectFinancials, costBaselineComparison, FinanceData, hasMeasuredMarginPct, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, recognitionSchedule, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity, portfolioMarginFullyLoaded, PortfolioMargin, portfolioRealization, PortfolioRealization } from '../services/finance.util';
 import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
 import { NotificationService } from '../services/notification.service';
 import { toCsv, downloadCsv, downloadXlsx, XlsxSheet } from '../services/export.util';
@@ -245,10 +245,17 @@ const EMPTY_DATA: ReportingData = {
             <p class="command-note" data-test="fully-loaded-note">No non-billable engagement in the cost base, so this equals delivery margin today</p>
           }
         </div>
-        <div class="command-kpi" [class.warning]="portfolioMarginPct() >= 0 && portfolioMarginPct() < 15" [class.danger]="portfolioMarginPct() < 0">
+        <!-- Tile tone suppressed with the figure: "warning" fires on [0,15), so
+             the sentinel would paint an amber tile off a number never measured. -->
+        <div class="command-kpi" [class.warning]="hasPortfolioMarginPct() && portfolioMarginPct() >= 0 && portfolioMarginPct() < 15" [class.danger]="hasPortfolioMarginPct() && portfolioMarginPct() < 0">
           <p class="command-kpi-label">Margin % (fully loaded)</p>
-          <p class="command-kpi-value font-mono tabular-nums" [class.text-positive-text]="portfolioMarginPct() >= 0" [class.text-critical-text]="portfolioMarginPct() < 0">{{ portfolioMarginPct() | number:'1.0-1' }}%</p>
-          <p class="command-note">Fully-loaded margin over portfolio revenue</p>
+          @if (hasPortfolioMarginPct()) {
+            <p class="command-kpi-value font-mono tabular-nums" data-test="portfolio-margin-pct" [class.text-positive-text]="portfolioMarginPct() >= 0" [class.text-critical-text]="portfolioMarginPct() < 0">{{ portfolioMarginPct() | number:'1.0-1' }}%</p>
+            <p class="command-note">Fully-loaded margin over portfolio revenue</p>
+          } @else {
+            <p class="command-kpi-value font-mono tabular-nums text-ink-muted" data-test="portfolio-margin-pct">&mdash;</p>
+            <p class="command-note">No portfolio revenue, so there is no percentage to compute</p>
+          }
         </div>
         <div class="command-kpi info">
           <p class="command-kpi-label">Backlog</p>
@@ -561,7 +568,16 @@ const EMPTY_DATA: ReportingData = {
                   <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ r.externalCost | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ r.expenseCost | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-5 text-right font-mono tabular-nums font-bold" [class.text-positive-text]="r.margin >= 0" [class.text-critical-text]="r.margin < 0">{{ r.margin | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-positive-text]="r.marginPct >= 0" [class.text-critical-text]="r.marginPct < 0">{{ r.marginPct | number:'1.0-1' }}%</td>
+                  <!-- marginRows() admits a project with cost and NO revenue
+                       (its filter is revenue &gt; 0 OR any cost &gt; 0), which is
+                       exactly a non-billable engagement — so this cell is where
+                       finance.util's no-revenue sentinel 0 reached the P&amp;L
+                       table. -->
+                  @if (hasMarginPct(r.revenue)) {
+                    <td class="px-4 py-5 text-right font-mono tabular-nums" data-test="margin-row-pct" [class.text-positive-text]="r.marginPct >= 0" [class.text-critical-text]="r.marginPct < 0">{{ r.marginPct | number:'1.0-1' }}%</td>
+                  } @else {
+                    <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-muted" data-test="margin-row-pct" title="No customer revenue — a margin percentage is undefined">&mdash;</td>
+                  }
                   <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ r.eac | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-positive-text]="r.vac >= 0" [class.text-critical-text]="r.vac < 0">{{ r.vac | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-critical-text]="r.burnPct >= alertThresholds.burnWarnPct" [class.text-ink-secondary]="r.burnPct < alertThresholds.burnWarnPct">{{ r.burnPct | number:'1.0-0' }}%</td>
@@ -823,7 +839,15 @@ const EMPTY_DATA: ReportingData = {
                   <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ c.revenue | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-secondary">{{ c.cost | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-5 text-right font-mono tabular-nums font-bold" [class.text-positive-text]="c.margin >= 0" [class.text-critical-text]="c.margin < 0">{{ c.margin | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-5 text-right font-mono tabular-nums" [class.text-positive-text]="c.marginPct >= 0" [class.text-critical-text]="c.marginPct < 0">{{ c.marginPct | number:'1.0-1' }}%</td>
+                  <!-- customerProfitability() buckets EVERY project, including
+                       the ones with cost and no revenue (they land under the
+                       'unknown' customer when unattributed), so a customer row
+                       can carry the sentinel too. -->
+                  @if (hasMarginPct(c.revenue)) {
+                    <td class="px-4 py-5 text-right font-mono tabular-nums" data-test="customer-margin-pct" [class.text-positive-text]="c.marginPct >= 0" [class.text-critical-text]="c.marginPct < 0">{{ c.marginPct | number:'1.0-1' }}%</td>
+                  } @else {
+                    <td class="px-4 py-5 text-right font-mono tabular-nums text-ink-muted" data-test="customer-margin-pct" title="No customer revenue — a margin percentage is undefined">&mdash;</td>
+                  }
                   <td class="px-4 py-5 text-right">
                     <div class="flex items-center justify-end gap-2">
                       <span class="font-mono tabular-nums text-ink-secondary">{{ c.sharePct | number:'1.0-1' }}%</span>
@@ -847,7 +871,13 @@ const EMPTY_DATA: ReportingData = {
                   <td class="px-4 py-4 text-right font-mono tabular-nums">{{ customerTotals().revenue | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-4 text-right font-mono tabular-nums">{{ customerTotals().cost | currency:'EUR':'symbol':'1.0-0' }}</td>
                   <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-positive-text]="customerTotals().margin >= 0" [class.text-critical-text]="customerTotals().margin < 0">{{ customerTotals().margin | currency:'EUR':'symbol':'1.0-0' }}</td>
-                  <td class="px-4 py-4 text-right font-mono tabular-nums" [class.text-positive-text]="customerTotals().marginPct >= 0" [class.text-critical-text]="customerTotals().marginPct < 0">{{ customerTotals().marginPct | number:'1.0-1' }}%</td>
+                  <!-- Reachable when the whole customer base has no revenue —
+                       a portfolio of only internal / non-billable work. -->
+                  @if (hasMarginPct(customerTotals().revenue)) {
+                    <td class="px-4 py-4 text-right font-mono tabular-nums" data-test="customer-total-margin-pct" [class.text-positive-text]="customerTotals().marginPct >= 0" [class.text-critical-text]="customerTotals().marginPct < 0">{{ customerTotals().marginPct | number:'1.0-1' }}%</td>
+                  } @else {
+                    <td class="px-4 py-4 text-right font-mono tabular-nums text-ink-muted" data-test="customer-total-margin-pct" title="No customer revenue — a margin percentage is undefined">&mdash;</td>
+                  }
                   <td class="px-4 py-4 text-right font-mono tabular-nums">100%</td>
                   <td class="px-4 py-4"></td>
                 </tr>
@@ -1214,6 +1244,16 @@ export class Reporting {
   totalRevenue = computed(() => this.portfolioMargin().revenue);
   totalMargin = computed(() => this.portfolioMargin().fullyLoadedMargin);
   portfolioMarginPct = computed(() => this.portfolioMargin().fullyLoadedMarginPct);
+
+  /**
+   * finance.util's rule for "is this margin percentage measured, or the
+   * no-revenue sentinel?", per ROW — so a non-billable engagement in the P&L
+   * table is judged on its own revenue, not the portfolio's.
+   */
+  protected hasMarginPct(revenue: number): boolean { return hasMeasuredMarginPct(revenue); }
+
+  /** The same question for the fully-loaded PORTFOLIO tile. */
+  protected readonly hasPortfolioMarginPct = computed(() => hasMeasuredMarginPct(this.portfolioMargin().revenue));
   totalBacklog = computed(() =>
     this.envelope().projects.reduce((s, p) => s + computeProjectFinancials(p.id, this.financeData()).backlog, 0),
   );
@@ -1820,18 +1860,29 @@ export class Reporting {
     this.notificationService.show('A/R by customer exported', 'success');
   }
 
-  /** Export the Margin & Variance drill-down (amounts in base currency) as CSV. */
-  exportMarginVarianceCsv(): void {
-    if (!isPlatformBrowser(this.platformId)) return;
+  /**
+   * The Margin & Variance drill-down as CSV text.
+   *
+   * Split out from the exporter below for the same reason `buildPlanningSheet`
+   * is split out from its download: a column map that can only be reached
+   * through `downloadCsv` can only be tested by mocking the download, and the
+   * thing worth asserting is the CELL, not that a click happened.
+   */
+  private buildMarginVarianceCsv(): string {
     const cur = this.baseCurrency;
-    const csv = toCsv(this.marginRows(), [
+    return toCsv(this.marginRows(), [
       { key: 'name', header: 'Project' },
       { key: 'revenue', header: `Revenue (${cur} base)`, map: r => r.revenue.toFixed(2) },
       { key: 'laborCost', header: `Labor (${cur} base)`, map: r => r.laborCost.toFixed(2) },
       { key: 'externalCost', header: `External (${cur} base)`, map: r => r.externalCost.toFixed(2) },
       { key: 'expenseCost', header: `Expense (${cur} base)`, map: r => r.expenseCost.toFixed(2) },
       { key: 'margin', header: `Margin (${cur} base)`, map: r => r.margin.toFixed(2) },
-      { key: 'marginPct', header: 'Margin %', map: r => r.marginPct.toFixed(1) },
+      // Same rule as the on-screen cell, and it matters MORE here: a "0.0" that
+      // leaves the app gets pasted into a deck or averaged in a spreadsheet,
+      // where nothing recalls it was a sentinel. The em dash matches the
+      // pcpDeltaPct column two rows down, which already spells "undefined" that
+      // way in this very file.
+      { key: 'marginPct', header: 'Margin %', map: r => hasMeasuredMarginPct(r.revenue) ? r.marginPct.toFixed(1) : '—' },
       { key: 'eac', header: `EAC (${cur} base)`, map: r => r.eac.toFixed(2) },
       { key: 'vac', header: `VAC (${cur} base)`, map: r => r.vac.toFixed(2) },
       { key: 'burnPct', header: 'Burn %', map: r => r.burnPct.toFixed(0) },
@@ -1840,24 +1891,33 @@ export class Reporting {
       { key: 'pcpDelta', header: `PCP Delta (${cur} base)`, map: r => r.pcpDelta.toFixed(2) },
       { key: 'pcpDeltaPct', header: 'PCP Delta %', map: r => r.pcpDeltaPct !== null ? r.pcpDeltaPct.toFixed(2) : '—' },
     ]);
-    downloadCsv('Margin_And_Variance.csv', csv);
+  }
+
+  /** Export the Margin & Variance drill-down (amounts in base currency) as CSV. */
+  exportMarginVarianceCsv(): void {
+    if (!isPlatformBrowser(this.platformId)) return;
+    downloadCsv('Margin_And_Variance.csv', this.buildMarginVarianceCsv());
     this.notificationService.show('Margin & variance exported', 'success');
+  }
+
+  /** The per-customer profitability table as CSV text (see buildMarginVarianceCsv). */
+  private buildCustomerProfitabilityCsv(): string {
+    const cur = this.baseCurrency;
+    return toCsv(this.customerRows(), [
+      { key: 'customerName', header: 'Customer' },
+      { key: 'revenue', header: `Revenue (${cur} base)`, map: r => r.revenue.toFixed(2) },
+      { key: 'cost', header: `Cost (${cur} base)`, map: r => r.cost.toFixed(2) },
+      { key: 'margin', header: `Margin (${cur} base)`, map: r => r.margin.toFixed(2) },
+      { key: 'marginPct', header: 'Margin %', map: r => hasMeasuredMarginPct(r.revenue) ? r.marginPct.toFixed(1) : '—' },
+      { key: 'sharePct', header: 'Revenue Share %', map: r => r.sharePct.toFixed(1) },
+      { key: 'projectIds', header: 'Projects', map: r => String(r.projectIds.length) },
+    ]);
   }
 
   /** Export the per-customer profitability table (amounts in base currency) as CSV. */
   exportCustomerProfitabilityCsv(): void {
     if (!isPlatformBrowser(this.platformId)) return;
-    const cur = this.baseCurrency;
-    const csv = toCsv(this.customerRows(), [
-      { key: 'customerName', header: 'Customer' },
-      { key: 'revenue', header: `Revenue (${cur} base)`, map: r => r.revenue.toFixed(2) },
-      { key: 'cost', header: `Cost (${cur} base)`, map: r => r.cost.toFixed(2) },
-      { key: 'margin', header: `Margin (${cur} base)`, map: r => r.margin.toFixed(2) },
-      { key: 'marginPct', header: 'Margin %', map: r => r.marginPct.toFixed(1) },
-      { key: 'sharePct', header: 'Revenue Share %', map: r => r.sharePct.toFixed(1) },
-      { key: 'projectIds', header: 'Projects', map: r => String(r.projectIds.length) },
-    ]);
-    downloadCsv('Customer_Profitability.csv', csv);
+    downloadCsv('Customer_Profitability.csv', this.buildCustomerProfitabilityCsv());
     this.notificationService.show('Customer profitability exported', 'success');
   }
 

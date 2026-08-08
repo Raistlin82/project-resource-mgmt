@@ -989,3 +989,110 @@ describe('Dashboard trailing windows use the local civil month (P2-21)', () => {
       ['2026-03', '2026-04', '2026-05', '2026-06', '2026-07', '2026-08']);
   });
 });
+
+// -----------------------------------------------------------------------------
+// The no-revenue margin-% sentinel must never render as "0%".
+//
+// finance.util computes every margin percentage as `revenue > 0 ? … : 0`. That
+// 0 is a SENTINEL for "undefined", and printing it asserts break-even on an
+// engagement that lost money. Non-billable engagements (H) earn no revenue BY
+// CONSTRUCTION, so this is their normal state — which is what made a
+// previously-unreachable rendering branch reachable on this screen.
+//
+// Both directions are asserted for every site. A test that only checked for the
+// dash would pass against a component that renders a dash unconditionally, and
+// a test that only checked the percentage would pass against the defect itself.
+// `H_PROJECTS` gives both populations in ONE render: PB/PL carry revenue, PN/PK
+// carry cost and none.
+// -----------------------------------------------------------------------------
+
+/**
+ * Render with the control board actually PRESENT. The board lives inside
+ * `@defer (hydrate on viewport)`, which never plays through on its own in
+ * TestBed — without this, every row lookup below would find nothing and the
+ * suite would report the absence of a defect it had not looked for.
+ */
+async function renderBoard(overrides: Partial<Record<(typeof DASHBOARD_METHODS)[number], ReturnType<typeof vi.fn>>>) {
+  const { fixture } = await render('finance', overrides);
+  for (const block of await fixture.getDeferBlocks()) await block.render(DeferBlockState.Complete);
+  fixture.detectChanges();
+  await fixture.whenStable();
+  return fixture;
+}
+
+/** The control-board row whose first cell names `project`, with its margin-% cell. */
+function marginCellFor(fixture: { nativeElement: unknown }, project: string): HTMLElement {
+  const rows = Array.from((fixture.nativeElement as HTMLElement).querySelectorAll('tbody tr'));
+  const row = rows.find(r => (r.querySelector('td')?.textContent ?? '').includes(project));
+  expect(row, `a control-board row for ${project} must exist`).toBeTruthy();
+  const cell = row!.querySelector<HTMLElement>('[data-test="project-margin-pct"]');
+  expect(cell, `${project}'s row must carry a margin-% cell`).not.toBeNull();
+  return cell!;
+}
+
+describe('Dashboard — a margin % is rendered only where revenue makes it measurable', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('prints the real percentage for the engagements that DO carry revenue', async () => {
+    const fixture = await renderBoard(hMoneyOverrides(H_PROJECTS));
+
+    // PB: revenue 100000, cost 300h x 100 = 30000 -> margin 70000 -> 70.0%
+    expect(marginCellFor(fixture, 'Billable Delivery').textContent).toContain('70%');
+    // PL: revenue 20000, cost 50h x 100 = 5000 -> margin 15000 -> 75.0%
+    expect(marginCellFor(fixture, 'Legacy Row').textContent).toContain('75%');
+  });
+
+  it('prints an em dash — never "0%" — for the engagements that carry NONE', async () => {
+    const fixture = await renderBoard(hMoneyOverrides(H_PROJECTS));
+
+    for (const name of ['Internal Platform', 'BASKET Engineering']) {
+      const text = marginCellFor(fixture, name).textContent ?? '';
+      expect(text, `${name} has no revenue, so its margin % is undefined`).toContain('—');
+      // The claim that matters. Before the fix this cell read "0.0%", beside a
+      // negative margin, on a project that had lost every euro of its cost.
+      expect(text, `${name} must not assert a percentage`).not.toContain('%');
+    }
+  });
+
+  it('drops the margin METER with the figure — a bar at the 0 mark is the same claim', async () => {
+    const fixture = await renderBoard(hMoneyOverrides(H_PROJECTS));
+
+    const withRevenue = marginCellFor(fixture, 'Billable Delivery').parentElement!;
+    const without = marginCellFor(fixture, 'BASKET Engineering').parentElement!;
+    expect(withRevenue.querySelector('.command-meter'), 'a measured row keeps its meter').not.toBeNull();
+    expect(without.querySelector('.command-meter'), 'an unmeasurable row must not draw one').toBeNull();
+  });
+
+  it('renders the PORTFOLIO tile percentage and its gauge while the portfolio earns revenue', async () => {
+    const { fixture } = await render('finance', hMoneyOverrides(H_PROJECTS));
+    const tile = marginTile(fixture);
+
+    expect(fixture.componentInstance['hasPortfolioMarginPct']()).toBe(true);
+    expect(tile.querySelector('[data-test="portfolio-margin-pct"]')?.textContent).toContain('59.2%');
+    expect(tile.querySelector('command-donut-chart'), 'the gauge measures a real ratio here').not.toBeNull();
+  });
+
+  it('em-dashes the PORTFOLIO tile, drops its gauge and suppresses its tone when NOTHING earns revenue', async () => {
+    // A portfolio of only non-billable work: real cost, no customer revenue.
+    // `fullyLoadedMarginPct` is then the sentinel 0 — and "warning" fires on
+    // [0,15), so before the fix this painted an amber tile off a number that
+    // was never measured.
+    const noRevenue = { ...hMoneyOverrides(H_PROJECTS), getOrderLines: vi.fn(() => of([])), getOrders: vi.fn(() => of([])) };
+    const { fixture } = await render('finance', noRevenue);
+    const tile = marginTile(fixture);
+
+    expect(fixture.componentInstance.totalRevenue()).toBe(0);
+    expect(fixture.componentInstance['hasPortfolioMarginPct']()).toBe(false);
+
+    const pct = tile.querySelector('[data-test="portfolio-margin-pct"]')?.textContent ?? '';
+    expect(pct).toContain('—');
+    expect(pct).not.toContain('%');
+    expect(tile.querySelector('command-donut-chart'), 'a ring measuring nothing must not be drawn').toBeNull();
+    expect(tile.classList.contains('warning'), 'the sentinel must not tint the tile').toBe(false);
+    expect(tile.classList.contains('danger')).toBe(false);
+
+    // The margin AMOUNT is real and must survive: -49000 of cost carried.
+    expect(fixture.componentInstance.totalMargin()).toBe(-49000);
+    expect(tile.textContent).toContain('€49,000');
+  });
+});

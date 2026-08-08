@@ -249,6 +249,14 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
                         <td>{{ cellText(row, 'status') }}</td>
                         <td class="font-mono">{{ cellNumber(row, 'revenue') | number:'1.0-0' }}</td>
                         <td class="font-mono">{{ cellNumber(row, 'actualCost') | number:'1.0-0' }}</td>
+                        <!-- DELIBERATELY NOT em-dashed for a zero-revenue row,
+                             unlike every other margin-% render site in the app.
+                             This table is a PREVIEW OF THE ARTIFACT: it must
+                             show the bytes the downloaded feed actually carries,
+                             or the preview and the file disagree and the preview
+                             is the one that lies. If the sentinel is wrong FOR A
+                             CONSUMER, the fix belongs in the feed builder
+                             (src/server/integrations/), not here. -->
                         <td class="font-mono">{{ cellNumber(row, 'marginPct') | number:'1.0-1' }}</td>
                         <td class="font-mono">{{ cellNumber(row, 'vac') | number:'1.0-0' }}</td>
                       </tr>

@@ -32,6 +32,7 @@ import {
   computeProjectFinancials,
   costBaselineComparison,
   FinanceData,
+  hasMeasuredMarginPct,
   PeriodDelta,
   PortfolioAlertRow,
   portfolioAlerts,
@@ -232,11 +233,21 @@ interface ProjectCommandRow {
           to be told the two are different quantities. The second note line gives
           the term that reconciles them.
         -->
-        <div class="command-kpi xl:col-span-2" data-test="portfolio-margin-tile" [class.danger]="portfolioMarginPct() < 0" [class.warning]="portfolioMarginPct() >= 0 && portfolioMarginPct() < 15">
+        <div class="command-kpi xl:col-span-2" data-test="portfolio-margin-tile" [class.danger]="hasPortfolioMarginPct() && portfolioMarginPct() < 0" [class.warning]="hasPortfolioMarginPct() && portfolioMarginPct() >= 0 && portfolioMarginPct() < 15">
           <div class="flex items-start justify-between gap-3">
             <div>
               <div class="command-kpi-label">Portfolio Margin (fully loaded)</div>
-              <div class="command-kpi-value">{{ portfolioMarginPct() | number:'1.0-1' }}%</div>
+              <!-- Reachable with no revenue at all: a portfolio running only
+                   non-billable engagements earns none by construction, and then
+                   the fully-loaded margin % is finance.util's no-revenue
+                   sentinel 0. The tile tone is suppressed with it — "warning"
+                   fires on [0,15), so the sentinel would have painted an amber
+                   tile off a number that was never measured. -->
+              @if (hasPortfolioMarginPct()) {
+                <div class="command-kpi-value" data-test="portfolio-margin-pct">{{ portfolioMarginPct() | number:'1.0-1' }}%</div>
+              } @else {
+                <div class="command-kpi-value text-[var(--cc-muted)]" data-test="portfolio-margin-pct" title="No customer revenue — a margin percentage is undefined">&mdash;</div>
+              }
               <div class="command-kpi-note">{{ totalMargin() | currency:'EUR':'symbol':'1.0-0' }} on {{ totalRevenue() | currency:'EUR':'symbol':'1.0-0' }} revenue</div>
               @if (nonBillableCount() > 0) {
                 <div class="command-kpi-note" data-test="fully-loaded-note">Includes {{ portfolioMargin().nonBillableCost | currency:'EUR':'symbol':'1.0-0' }} of non-billable cost across {{ nonBillableCount() }} {{ nonBillableCount() === 1 ? 'engagement' : 'engagements' }} — not comparable with a single project&rsquo;s delivery margin</div>
@@ -253,16 +264,21 @@ interface ProjectCommandRow {
                 </div>
               }
             </div>
-            <!-- Portfolio margin% as a radial gauge (capped at a 40% full ring). -->
-            <command-donut-chart
-              [value]="marginGaugeValue()"
-              [max]="40"
-              [size]="76"
-              [thickness]="12"
-              [tone]="marginGaugeTone()"
-              [displayText]="(portfolioMarginPct() | number:'1.0-0') + '%'"
-              ariaLabel="Fully loaded portfolio margin gauge"
-              caption="Fully loaded portfolio margin percent (non-billable cost included) of a 40 percent target ring" />
+            <!-- Portfolio margin% as a radial gauge (capped at a 40% full ring).
+                 Dropped entirely when there is no revenue: an arc drawn at the
+                 sentinel 0 is the "0%" claim in another shape, and a gauge whose
+                 centre reads "—" is a ring measuring nothing. -->
+            @if (hasPortfolioMarginPct()) {
+              <command-donut-chart
+                [value]="marginGaugeValue()"
+                [max]="40"
+                [size]="76"
+                [thickness]="12"
+                [tone]="marginGaugeTone()"
+                [displayText]="(portfolioMarginPct() | number:'1.0-0') + '%'"
+                ariaLabel="Fully loaded portfolio margin gauge"
+                caption="Fully loaded portfolio margin percent (non-billable cost included) of a 40 percent target ring" />
+            }
           </div>
           @if (hasRecognitionChart()) {
             <!-- Real trailing-6-month recognised-revenue spark (same dated source as the chip). -->
@@ -467,13 +483,25 @@ interface ProjectCommandRow {
                     </td>
                     <td><span class="command-status" [class.green]="project.health === 'green'" [class.amber]="project.health === 'amber'" [class.red]="project.health === 'red'">{{ healthLabel(project.health) }}</span></td>
                     <td>
-                      <!-- --cc-red-text, not --cc-red: this is a 14px semibold
-                           FIGURE, so AA's 4.5:1 applies and the fill tone only
-                           reaches 4.47:1 against the dark surface (4.16:1 on a
-                           muted row) while the positive figure in the VAC column
-                           beside it already uses the -text shade at ~10.8:1. -->
-                      <div class="font-mono font-semibold" [style.color]="project.marginPct < 0 ? 'var(--cc-red-text)' : null">{{ project.marginPct | number:'1.0-1' }}%</div>
-                      <div class="mt-1 command-meter"><span [style.width.%]="meter(project.marginPct, 40)"></span></div>
+                      <!-- A margin PERCENTAGE needs revenue to be a percentage
+                           OF. With none it is finance.util's no-revenue
+                           sentinel 0 (hasMeasuredMarginPct), and printing "0%"
+                           would assert break-even on an engagement that lost
+                           money — which is every non-billable row, since
+                           revenue is 0 there by construction. The meter goes
+                           too: a bar at the 0 mark is the same claim in another
+                           shape. -->
+                      @if (hasMarginPct(project.revenue)) {
+                        <!-- --cc-red-text, not --cc-red: this is a 14px semibold
+                             FIGURE, so AA's 4.5:1 applies and the fill tone only
+                             reaches 4.47:1 against the dark surface (4.16:1 on a
+                             muted row) while the positive figure in the VAC column
+                             beside it already uses the -text shade at ~10.8:1. -->
+                        <div class="font-mono font-semibold" data-test="project-margin-pct" [style.color]="project.marginPct < 0 ? 'var(--cc-red-text)' : null">{{ project.marginPct | number:'1.0-1' }}%</div>
+                        <div class="mt-1 command-meter"><span [style.width.%]="meter(project.marginPct, 40)"></span></div>
+                      } @else {
+                        <div class="font-mono font-semibold text-[var(--cc-muted)]" data-test="project-margin-pct" title="No customer revenue — a margin percentage is undefined">&mdash;</div>
+                      }
                     </td>
                     <td class="font-mono">{{ project.eac | currency:'EUR':'symbol':'1.0-0' }}</td>
                     <!-- Both halves of one signed figure must use the -text
@@ -883,6 +911,17 @@ export class DashboardComponent {
   protected readonly hasRecognitionChart = computed(() =>
     this.recognitionRows().some(r => r.recognized !== 0),
   );
+
+  /**
+   * Template access to finance.util's rule for "is this percentage measured, or
+   * the no-revenue sentinel?". Taken per ROW (the control-board table), so a
+   * non-billable engagement beside a revenue-bearing one is judged on its own
+   * revenue rather than the portfolio's.
+   */
+  protected hasMarginPct(revenue: number): boolean { return hasMeasuredMarginPct(revenue); }
+
+  /** The same question for the fully-loaded PORTFOLIO tile and its gauge. */
+  protected readonly hasPortfolioMarginPct = computed(() => hasMeasuredMarginPct(this.portfolioMargin().revenue));
 
   // --- Portfolio margin gauge --------------------------------------------------
   // The donut arc fills against a 40% full ring; the centred text shows the true
