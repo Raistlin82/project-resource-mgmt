@@ -92,7 +92,7 @@ export interface ProjectFinancials {
   actualCost: number;    // laborCost + externalCost
   budget: number;        // effective budget: Σ financial-plan budget + Σ committed CR impactBudget
   margin: number;        // revenue − actualCost
-  marginPct: number;     // margin / revenue (0 when no revenue)
+  marginPct: number;     // margin / revenue (SENTINEL 0 when no revenue — hasMeasuredMarginPct)
   burnPct: number;       // actualCost / effective budget (0 when no budget)
   etc: number;           // estimated cost to complete
   eac: number;           // estimate at completion (actualLaborCost + externalCost + ETC; CR-independent)
@@ -113,6 +113,36 @@ export interface ProjectFinancials {
 
 const finite = (v: number) => Number.isFinite(v) ? v : 0;
 const sum = (xs: number[]) => xs.reduce((a, b) => a + finite(b), 0);
+
+// --- The no-revenue margin-percentage sentinel -------------------------------
+//
+// Every margin PERCENTAGE in this file is `revenue > 0 ? (margin / revenue) *
+// 100 : 0` — `marginPct` on ProjectFinancials (computeProjectFinancials),
+// MarginDrivers (marginDrivers) and CustomerProfitabilityRow
+// (customerProfitability), plus `fullyLoadedMarginPct` on PortfolioMargin.
+// That trailing `0` is a SENTINEL standing for "undefined", not a measurement:
+// a percentage OF nothing has no value, and returning NaN would poison every
+// downstream sum.
+//
+// Consumers that do ARITHMETIC may take the sentinel as-is, and the ones that
+// must not already guard themselves: `evaluateCompression` returns null on
+// `revenue <= 0`, and `projectAlerts` requires `f.billable && f.revenue > 0`.
+//
+// Consumers that RENDER it must not. Printing `0%` asserts break-even on an
+// engagement that may have lost money — and for a non-billable (BASKET)
+// engagement, revenue is zero BY CONSTRUCTION, so that is its normal state
+// rather than an edge case. The predicate below is the one place that rule
+// lives; render an em dash wherever it is false. The margin AMOUNT is always a
+// real figure and must still be shown beside it.
+
+/**
+ * Is a margin percentage derived from this revenue a measured value, or the
+ * no-revenue sentinel described above? Render `—` instead of a percentage
+ * whenever this is false.
+ */
+export function hasMeasuredMarginPct(revenue: number): boolean {
+  return revenue > 0;
+}
 
 // --- Billability: the ONE place the arithmetic asks "does this earn revenue?" -
 //
@@ -1132,7 +1162,7 @@ export interface MarginDrivers {
   externalCost: number;
   expenseCost: number;
   margin: number;     // revenue − (labor + external + expense)
-  marginPct: number;  // margin / revenue (0 when no revenue)
+  marginPct: number;  // margin / revenue (SENTINEL 0 when no revenue — hasMeasuredMarginPct)
 }
 
 /** Break a project's margin into revenue and its labor / external / expense cost drivers. */
@@ -1706,7 +1736,7 @@ export interface CustomerProfitabilityRow {
   revenue: number;
   cost: number;       // actualCost (labor + external) across the customer's projects
   margin: number;     // revenue − cost
-  marginPct: number;  // margin / revenue × 100 (0 when no revenue)
+  marginPct: number;  // margin / revenue × 100 (SENTINEL 0 when no revenue — hasMeasuredMarginPct)
   projectIds: string[];
 }
 
@@ -1864,7 +1894,10 @@ export interface PortfolioMargin {
   /** revenue − deliveryCost − nonBillableCost. THE headline portfolio margin.
    *  The tile must say "fully loaded" in the LABEL, not only the caption. */
   fullyLoadedMargin: number;
-  /** fullyLoadedMargin / revenue × 100; 0 when there is no revenue (never NaN).
+  /** fullyLoadedMargin / revenue × 100; the SENTINEL 0 when there is no revenue
+   *  (never NaN) — see `hasMeasuredMarginPct`, which is what a RENDERER must ask
+   *  before printing this. A portfolio of only non-billable engagements has no
+   *  revenue by construction, so the sentinel is reachable on the headline tile.
    *  Raw, unrounded, like every other percentage in this file — display
    *  rounding to 2 decimals belongs to the view. */
   fullyLoadedMarginPct: number;

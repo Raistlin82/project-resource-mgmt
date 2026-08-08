@@ -29,6 +29,7 @@ import {
   computeProjectFinancials,
   convertToBase,
   FinanceData,
+  hasMeasuredMarginPct,
   JournalEntry,
   journalTotals,
   recognitionJournal,
@@ -151,13 +152,22 @@ interface BillingControlRow {
               {{ kpis().margin | currency: BASE_CURRENCY }}
             </p>
           </div>
-          <div class="command-kpi" [class.danger]="kpis().marginPct < 0">
+          <!-- A signed contract with no order lines yet has zero revenue and
+               real delivery cost — an ordinary state, not an edge — and then
+               the margin % here is finance.util's no-revenue sentinel 0. The
+               tone goes with the figure so the tile does not turn red off it. -->
+          <div class="command-kpi" [class.danger]="hasMarginPct(kpis().revenue) && kpis().marginPct < 0">
             <p class="command-kpi-label">Margin %</p>
-            <p class="command-kpi-value"
-               [class.text-positive-text]="kpis().marginPct >= 0"
-               [class.text-critical-text]="kpis().marginPct < 0">
-              {{ kpis().marginPct.toFixed(1) }}%
-            </p>
+            @if (hasMarginPct(kpis().revenue)) {
+              <p class="command-kpi-value" data-test="contract-margin-pct"
+                 [class.text-positive-text]="kpis().marginPct >= 0"
+                 [class.text-critical-text]="kpis().marginPct < 0">
+                {{ kpis().marginPct.toFixed(1) }}%
+              </p>
+            } @else {
+              <p class="command-kpi-value text-ink-muted" data-test="contract-margin-pct"
+                 title="No customer revenue — a margin percentage is undefined">&mdash;</p>
+            }
           </div>
           <div class="command-kpi info">
             <p class="command-kpi-label">EAC</p>
@@ -217,11 +227,16 @@ interface BillingControlRow {
                         [class.text-critical-text]="row.fin.margin < 0">
                       {{ row.fin.margin | currency: BASE_CURRENCY }}
                     </td>
-                    <td class="text-right font-medium font-mono tabular-nums"
-                        [class.text-positive-text]="row.fin.marginPct >= 0"
-                        [class.text-critical-text]="row.fin.marginPct < 0">
-                      {{ row.fin.marginPct.toFixed(1) }}%
-                    </td>
+                    @if (hasMarginPct(row.fin.revenue)) {
+                      <td class="text-right font-medium font-mono tabular-nums" data-test="contract-project-margin-pct"
+                          [class.text-positive-text]="row.fin.marginPct >= 0"
+                          [class.text-critical-text]="row.fin.marginPct < 0">
+                        {{ row.fin.marginPct.toFixed(1) }}%
+                      </td>
+                    } @else {
+                      <td class="text-right font-medium font-mono tabular-nums text-ink-muted" data-test="contract-project-margin-pct"
+                          title="No customer revenue — a margin percentage is undefined">&mdash;</td>
+                    }
                   </tr>
                 }
                 @if (!projectRows().length) {
@@ -1401,6 +1416,14 @@ export class ContractDetails {
       fin: computeProjectFinancials(project.id, d),
     }));
   });
+
+  /**
+   * finance.util's rule for "is this margin percentage measured, or the
+   * no-revenue sentinel?". Used per project row AND on the contract KPI, each
+   * against its OWN revenue: one project under the contract can be measurable
+   * while another is not.
+   */
+  protected hasMarginPct(revenue: number): boolean { return hasMeasuredMarginPct(revenue); }
 
   kpis = computed(() => {
     const d = this.data();

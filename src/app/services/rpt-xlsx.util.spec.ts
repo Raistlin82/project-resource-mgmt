@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { inflateRawSync } from 'node:zlib';
 import {
@@ -898,4 +900,93 @@ describe('rpt-xlsx.util — the Unchargeable workbook carries NO absence cause',
     expect(at(SHEET_UNCHARGEABLE_D, 3, 'Resource')).toBe('Subco Sergio');
     expect(at(SHEET_UNCHARGEABLE_D, 2, 'Available From')).toBe('Beyond 2026-09');
   }, 20_000);
+});
+
+// -----------------------------------------------------------------------------
+// The Margin % column and the no-revenue sentinel.
+//
+// finance.util reports `marginPct` as 0 when there is no revenue — a sentinel
+// for "undefined", not a measurement. Writing that 0 into a workbook is the
+// worst place for it: nothing in the file recalls the caveat, and Excel will
+// happily average it into a portfolio figure.
+//
+// EMPTY rather than an em dash, deliberately: this sheet's own convention for a
+// missing money figure is `null` (see "leaves them EMPTY where there are none"
+// above), Excel skips empty cells in =AVERAGE()/=SUM() where a 0 would drag the
+// result down, and a dash would turn a numeric column into text.
+// -----------------------------------------------------------------------------
+describe('rpt-xlsx.util — Margin % is written only where revenue makes it measurable', () => {
+  /** P1 earns; P2 carries real cost against no revenue (a non-billable engagement). */
+  const MIXED: RptProjectFinancials[] = [
+    ...FINANCIALS,
+    {
+      id: 'P2', revenue: 0, laborCost: 8000, externalCost: 0, expenseCost: 0,
+      margin: -8000, marginPct: 0, eac: 8000, vac: -8000,
+      pcpBaseline: 0, pcpPlanned: 0, pcpDelta: 0,
+    },
+  ];
+  const sheet = planningSheet(DATA, MIXED, OPTS);
+
+  it('writes the real percentage for a commessa that earns revenue', () => {
+    expect(cellFor(sheet, 'Commessa', 'Alpha Migration', 'Margin %')).toBe(54);
+  });
+
+  it('leaves the cell EMPTY — never 0 — for a commessa that earns none', () => {
+    expect(cellFor(sheet, 'Commessa', 'Beta Rollout', 'Margin %')).toBeNull();
+  });
+
+  it('KEEPS the margin AMOUNT, which is measured, beside the percentage that is not', () => {
+    // The distinction the whole change turns on: -8,000 is a real figure and
+    // must reach the workbook. Only the ratio is undefined.
+    expect(cellFor(sheet, 'Commessa', 'Beta Rollout', `Margin (${OPTS.currency})`)).toBe(-8000);
+    expect(cellFor(sheet, 'Commessa', 'Beta Rollout', `Labor Cost (${OPTS.currency})`)).toBe(8000);
+  });
+
+  it('still blanks the cell for a commessa with NO financial row at all', () => {
+    // A different absence with the same rendering, and both must hold: the
+    // guard reads `l.fin && …`, so dropping either half regresses one of them.
+    expect(cellFor(sheet, 'Commessa', 'Gamma Idle', 'Margin %')).toBeNull();
+  });
+});
+
+/**
+ * No source file may contain a LITERAL NUL byte.
+ *
+ * `allocationCube` builds its composite key as `${resourceId}\0${projectId}`,
+ * and a NUL really is the right separator — no id can contain one, so the key
+ * is unambiguous. The hazard is writing it RAW instead of as the escape `\0`:
+ * git then classifies the whole file as binary, which costs a line diff, a
+ * line-level merge, and — the one that actually bit — grep, which silently
+ * skips binary files. A repo-wide grep for a symbol in this file returned
+ * nothing while the symbol sat on line 295, and only a scan that read bytes
+ * found it.
+ *
+ * The escape and the literal produce the identical runtime string, so this
+ * costs nothing to keep true.
+ */
+describe('no source file is secretly binary', () => {
+  function sourceFiles(dir: string, acc: string[] = []): string[] {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) { if (entry.name !== 'node_modules') sourceFiles(full, acc); }
+      else if (/\.(ts|html|css|json|mjs)$/.test(entry.name)) acc.push(full);
+    }
+    return acc;
+  }
+
+  it('contains no literal NUL byte anywhere under src/', () => {
+    const SRC = resolve(__dirname, '..', '..');
+    const offenders = sourceFiles(SRC)
+      .filter(f => readFileSync(f).includes(0x00))
+      .map(f => relative(SRC, f));
+    expect(offenders, "write '\\0' as an escape; a raw NUL makes git treat the file as binary").toStrictEqual([]);
+  });
+
+  it('CONFIRMS the detector works — a byte array carrying a NUL is recognised', () => {
+    // Without this the test above is satisfied by a scan that reads nothing.
+    expect(Buffer.from([0x61, 0x00, 0x62]).includes(0x00)).toBe(true);
+    expect(Buffer.from('ab', 'utf8').includes(0x00)).toBe(false);
+    // And the escape this file uses really is one byte of value zero.
+    expect(Buffer.from(`a\0b`, 'utf8')).toStrictEqual(Buffer.from([0x61, 0x00, 0x62]));
+  });
 });

@@ -783,3 +783,127 @@ describe('ContractDetails — derived figures are in the reporting base currency
     expect(text).toContain('Recognition figures are unavailable');
   });
 });
+
+// -----------------------------------------------------------------------------
+// The no-revenue margin-% sentinel on a contract page.
+//
+// finance.util computes marginPct as `revenue > 0 ? … : 0` — a sentinel for
+// "undefined", not a measurement. The reachable state here is ordinary rather
+// than exotic: a signed contract whose delivery has started before the customer
+// order landed earns nothing yet while already carrying labour cost, and the
+// page printed "0.0%" for it — break-even, on a project that had only spent.
+//
+// Both directions are asserted at both sites (the per-project row and the
+// contract KPI). One fixture carries both populations: PR has revenue, PN has
+// only cost, and they sit under the SAME contract — so a guard that keyed off
+// the contract instead of the row would fail the row test.
+// -----------------------------------------------------------------------------
+describe('ContractDetails — a margin % is rendered only where revenue makes it measurable', () => {
+  const CONTRACT: Contract = {
+    id: 'CTM', customerId: 'CM', name: 'Mixed', type: 'T&M', totalValue: 50_000,
+    currency: 'EUR', status: 'Active', startDate: '2026-01-01', endDate: '2026-12-31',
+  };
+  const CUSTOMER: Customer = { id: 'CM', name: 'Mixed Co' };
+  const EARNING: Project = { id: 'PR', name: 'Earning Project', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution', contractId: 'CTM' };
+  const UNBILLED: Project = { id: 'PN', name: 'Unbilled Project', location: 'EU', startDate: '2026-01-01', endDate: '2026-12-31', status: 'In Execution', contractId: 'CTM' };
+  const DEV: Resource = { id: 'R1', name: 'Dev One', role: 'Developer', skills: [], projectRoles: [], externalExperience: [], utilization: 80, capacity: 40, costRate: 100, billRate: 200 };
+  const TIME: TimeEntry[] = [
+    // PR: 10h x 100 = 1000 of cost.   PN: 20h x 100 = 2000 of cost.
+    { id: 'TE-R', assignmentId: 'a', requestId: 'r', resourceId: 'R1', projectId: 'PR', date: '2026-05-01', hours: 10, status: 'Approved' },
+    { id: 'TE-N', assignmentId: 'a', requestId: 'r', resourceId: 'R1', projectId: 'PN', date: '2026-05-01', hours: 20, status: 'Approved' },
+  ];
+  const ORDER: Order = { id: 'OM', contractId: 'CTM', type: 'Customer', amount: 5000, currency: 'EUR', status: 'Invoiced', orderDate: '2026-01-01' };
+  /** Imputed to PR ONLY — PN is the project that has not been ordered yet. */
+  const LINE: OrderLine = { id: 'OLM', orderId: 'OM', projectId: 'PR', description: 'x', amount: 5000 };
+
+  function stub(overrides: Partial<Record<string, unknown>> = {}): ApiService {
+    const empty = () => of([]);
+    return {
+      getContracts: () => of([CONTRACT]),
+      getCustomers: () => of([CUSTOMER]),
+      getProjects: () => of([EARNING, UNBILLED]),
+      getOrders: () => of([ORDER]),
+      getOrderLines: () => of([LINE]),
+      getResources: () => of([DEV]),
+      getTimeEntries: () => of(TIME),
+      getBillingPlanItems: empty,
+      getProjectFinancials: empty,
+      getRequests: empty,
+      getAssignments: empty,
+      getNegotiatedRates: empty,
+      getFxRates: empty,
+      getHoursPerDay: () => of({ value: 8 }),
+      ...overrides,
+    } as unknown as ApiService;
+  }
+
+  async function show(api: ApiService): Promise<ComponentFixture<ContractDetails>> {
+    const authStub = { authReady: signal(true), canApproveFinancials: signal(true) } as unknown as AuthService;
+    TestBed.configureTestingModule({
+      imports: [ContractDetails],
+      providers: [
+        provideRouter([]),
+        { provide: ApiService, useValue: api },
+        { provide: AuthService, useValue: authStub },
+        { provide: NotificationService, useValue: { show: vi.fn() } as unknown as NotificationService },
+      ],
+    });
+    await TestBed.compileComponents();
+    const fixture: ComponentFixture<ContractDetails> = TestBed.createComponent(ContractDetails);
+    fixture.componentRef.setInput('id', 'CTM');
+    await tick(fixture);
+    return fixture;
+  }
+
+  /** The margin-% cell of the project row named `label`. */
+  function rowPct(fixture: ComponentFixture<ContractDetails>, label: string): string {
+    const rows = Array.from(host(fixture).querySelectorAll('tbody tr'));
+    const row = rows.find(r => (r.textContent ?? '').includes(label));
+    expect(row, `a project row for ${label} must exist`).toBeTruthy();
+    const cell = row!.querySelector('[data-test="contract-project-margin-pct"]');
+    expect(cell, `${label}'s row must carry a margin-% cell`).not.toBeNull();
+    return cell!.textContent ?? '';
+  }
+
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('keeps the percentage on the project that HAS revenue', async () => {
+    // PR: revenue 5000, cost 1000 -> margin 4000 -> 80.0%.
+    expect(rowPct(await show(stub()), 'Earning Project')).toContain('80.0%');
+  });
+
+  it('em-dashes the project under the SAME contract that has none', async () => {
+    // PN: revenue 0, cost 2000. Before the fix this cell read "0.0%".
+    const text = rowPct(await show(stub()), 'Unbilled Project');
+    expect(text).toContain('—');
+    expect(text).not.toContain('%');
+  });
+
+  it('keeps the contract KPI percentage while the contract has billed anything', async () => {
+    const fixture = await show(stub());
+    // Contract: revenue 5000, margin 4000 - 2000 = 2000 -> 40.0%.
+    expect(fixture.componentInstance.kpis().revenue).toBe(5000);
+    expect(fixture.componentInstance.kpis().margin).toBe(2000);
+    const kpi = host(fixture).querySelector('[data-test="contract-margin-pct"]')?.textContent ?? '';
+    expect(kpi).toContain('40.0%');
+  });
+
+  it('em-dashes the contract KPI, and drops its danger tint, when nothing has been ordered', async () => {
+    // Same cost, no customer order. `margin` is -3000 and `marginPct` the
+    // sentinel 0 — so the pre-fix tile showed a NON-negative "0.0%" and, being
+    // >= 0, was not even tinted as the loss it is. The tint must not key off
+    // the sentinel in either direction.
+    const fixture = await show(stub({ getOrders: () => of([]), getOrderLines: () => of([]) }));
+    expect(fixture.componentInstance.kpis().revenue).toBe(0);
+    expect(fixture.componentInstance.kpis().margin).toBe(-3000);
+
+    const cell = host(fixture).querySelector('[data-test="contract-margin-pct"]');
+    expect(cell?.textContent).toContain('—');
+    expect(cell?.textContent).not.toContain('%');
+    expect(cell!.closest('.command-kpi')!.classList.contains('danger'), 'no percentage means no verdict to tint').toBe(false);
+
+    // Both project rows are unmeasurable now, and both say so.
+    expect(rowPct(fixture, 'Earning Project')).toContain('—');
+    expect(rowPct(fixture, 'Unbilled Project')).toContain('—');
+  });
+});
