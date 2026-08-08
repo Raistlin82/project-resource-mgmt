@@ -1,7 +1,7 @@
 /**
  * The RPT .xlsx reports, as pure functions over plain data.
  *
- * Lutech's RPT ships three Excel reports and the SHAPE of the workbook is part of
+ * RPT ships three Excel reports and the SHAPE of the workbook is part of
  * the requirement, not decoration (`docs/rpt-comparison.md`, matrix rows 24, 44, 53):
  *
  *  1. **Pianificazione** (PM) — ONE sheet: every commessa with its plan, its details

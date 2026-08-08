@@ -23,6 +23,7 @@
  *    hard FK and a `// TODO` note.
  */
 
+import { sql } from 'drizzle-orm';
 import {
   pgTable,
   text,
@@ -118,9 +119,26 @@ export const resources = pgTable(
     // marker — a resource is Terminated when set to a date <= today, else Active.
     hireDate: text('hire_date'),
     terminationDate: text('termination_date'),
+    // The human-typeable code (RPT row 10) — `ARMJUL000001` for a person,
+    // `ZZ - Dummy - <practice> - <role>` for a placeholder. See
+    // `resource-code.util.ts` for the two shapes and why `kind` picks between
+    // them. NULLABLE ON PURPOSE, twice over: rows that predate the column keep
+    // working untouched (no backfill in the migration), and the unique index
+    // below is a PARTIAL one, because several dummies for the same practice and
+    // role legitimately share a description. The id remains the identity; this
+    // is a lookup key a human can dictate over the phone.
+    code: text('code'),
   },
   (t) => [
     index('resources_manager_id_idx').on(t.managerId),
+    // Uniqueness on the PERSON shape only, and only among rows that HAVE a
+    // code — Postgres treats NULLs as distinct, so unmigrated rows never
+    // collide with each other. The `~` predicate is what keeps a repeated
+    // placeholder description legal while a duplicated person code is not.
+    uniqueIndex('resources_person_code_unique_idx')
+      .on(t.code)
+      .where(sql`${t.code} ~ '^[A-Z]{6}[0-9]{6}$'`),
+    index('resources_code_idx').on(t.code),
   ],
 );
 

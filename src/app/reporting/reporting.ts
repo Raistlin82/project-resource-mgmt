@@ -123,7 +123,7 @@ const EMPTY_DATA: ReportingData = {
             <mat-icon class="text-[20px] w-[20px] h-[20px]">download</mat-icon> Export Report
           </button>
           <!-- RPT parity (docs/rpt-comparison.md rows 24 + 44): the two Excel
-               reports Lutech's planners expect, in the workbook SHAPE RPT uses —
+               reports RPT's planners expect, in the workbook SHAPE RPT uses —
                Pianificazione is one sheet, Allocazione is two. Disabled on a failed
                read: a workbook built from an errored envelope is a file of confident
                zeros, which is worse than no file (same reasoning as the capacity

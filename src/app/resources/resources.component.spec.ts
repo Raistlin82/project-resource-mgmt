@@ -1228,3 +1228,84 @@ describe('ResourcesComponent', () => {
     });
   });
 });
+
+// -----------------------------------------------------------------------------
+// The human-typeable code (RPT row 10).
+//
+// It is shown UNDER the name rather than in its own column, because it is how
+// you recognise and dictate a person — it belongs beside who they are, not in a
+// far-right cell nobody scans.
+//
+// Both directions, at both shapes, plus the absence case: a row that predates
+// the column must render NOTHING, not an em dash. A dash is a value; "this
+// person has no code" is not one, and the two must not look the same.
+// -----------------------------------------------------------------------------
+describe('ResourcesComponent — the resource code', () => {
+  const codeCells = (fixture: { nativeElement: unknown }) =>
+    Array.from((fixture.nativeElement as HTMLElement).querySelectorAll('[data-test="resource-code"]'))
+      .map(el => el.textContent?.trim() ?? '');
+
+  it('renders a PERSON code beside the name', async () => {
+    const { fixture } = setup([
+      { ...RESOURCES[0], code: 'SMIALI000001' },
+    ]);
+    await flush(fixture);
+    expect(codeCells(fixture)).toStrictEqual(['SMIALI000001']);
+  });
+
+  it('renders a PLACEHOLDER code in the same place, unchanged', async () => {
+    // The two shapes share one slot on purpose: a planner looking for "the
+    // thing I type" must find it in one place regardless of what the row is.
+    const { fixture } = setup([
+      { ...RESOURCES[2], code: 'ZZ - Subco - Engineering - Developer' },
+    ]);
+    await flush(fixture);
+    expect(codeCells(fixture)).toStrictEqual(['ZZ - Subco - Engineering - Developer']);
+  });
+
+  it('renders NOTHING — not a dash — for a row that has no code', async () => {
+    // The assertion of absence. Without it, a template that always printed the
+    // fallback would satisfy both tests above the moment a code went missing.
+    const { fixture } = setup([{ ...RESOURCES[0] }]);
+    await flush(fixture);
+    expect(codeCells(fixture)).toStrictEqual([]);
+    expect((fixture.nativeElement as HTMLElement).textContent).toContain(RESOURCES[0].name);
+  });
+
+  it('FILTERS by the code, not only by the name', async () => {
+    // The promise the placeholder makes. A code you can see but not type is
+    // half a feature, and this screen is the one that displays the codes.
+    const { fixture } = setup([
+      { ...RESOURCES[0], code: 'SMIALI000001' },
+      { ...RESOURCES[1], code: 'BOBBOB000001' },
+    ]);
+    await flush(fixture);
+
+    fixture.componentInstance.search.set('SMIALI');
+    fixture.detectChanges();
+    expect(codeCells(fixture)).toStrictEqual(['SMIALI000001']);
+
+    // The pair: a query that matches NO code must empty the list, or the filter
+    // is simply passing everything through.
+    fixture.componentInstance.search.set('ZZZQQQ');
+    fixture.detectChanges();
+    expect(codeCells(fixture)).toStrictEqual([]);
+  });
+
+  it('keeps the placeholder honest about what it searches', async () => {
+    // A placeholder that under-promises is how a usable feature stays unused.
+    const { fixture } = setup([{ ...RESOURCES[0], code: 'SMIALI000001' }]);
+    await flush(fixture);
+    const input = (fixture.nativeElement as HTMLElement).querySelector('input[placeholder]');
+    expect(input?.getAttribute('placeholder')?.toLowerCase()).toContain('code');
+  });
+
+  it('shows each row its OWN code, never the first row\'s', async () => {
+    const { fixture } = setup([
+      { ...RESOURCES[0], code: 'SMIALI000001' },
+      { ...RESOURCES[1], code: 'BOBBOB000001' },
+    ]);
+    await flush(fixture);
+    expect(codeCells(fixture)).toStrictEqual(['SMIALI000001', 'BOBBOB000001']);
+  });
+});

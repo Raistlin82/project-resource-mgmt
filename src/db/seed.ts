@@ -115,15 +115,15 @@ export const resources: Resource[] = [
   // fallback; it was already the outcome before this change (the self-loop was
   // stopped by the traversal's `visited` set), so removing the field fixes the
   // DATA without changing who can decide.
-  { id: '1', name: 'Julie Armstrong', role: 'Developer', kind: 'internal',
+  { id: '1', name: 'Julie Armstrong', code: 'ARMJUL000001', role: 'Developer', kind: 'internal',
     skills: [{ name: 'Java', level: 3 }, { name: 'Spring', level: 2 }],
     projectRoles: ['Senior Developer', 'Backend Engineer'],
     externalExperience: [{ projectName: 'E-commerce Migration', company: 'TechCorp', role: 'Java Developer', startDate: '2020-01-01', endDate: '2022-12-31', comment: 'Migrated legacy system to Spring Boot.' }],
     profilePicture: '', resume: '', utilization: 95, utilizationPlanned: 95, capacity: 40, organization: 'Engineering', location: 'New York', costRate: 600, billRate: 1120, hireDate: '2019-03-04', contractHoursPerDay: 8 },
-  { id: '2', name: 'John Miller', role: 'Consultant', kind: 'internal',
+  { id: '2', name: 'John Miller', code: 'MILJOH000001', role: 'Consultant', kind: 'internal',
     skills: [{ name: 'Project Management', level: 2 }], projectRoles: ['Business Consultant'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 90, utilizationPlanned: 90, capacity: 40, managerId: '1', organization: 'Consulting', location: 'London', costRate: 720, billRate: 1440, hireDate: '2021-09-13', contractHoursPerDay: 8 },
-  { id: '3', name: 'Alice Smith', role: 'Designer', kind: 'internal',
+  { id: '3', name: 'Alice Smith', code: 'SMIALI000001', role: 'Designer', kind: 'internal',
     skills: [{ name: 'Figma', level: 3 }], projectRoles: ['UX Designer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 55, utilizationPlanned: 55, capacity: 40, managerId: '2', organization: 'Design', location: 'Remote', hireDate: '2023-01-16', contractHoursPerDay: 4 },
   // C1 — placeholder and external resources. The manual pre-loads dummies by
@@ -132,15 +132,15 @@ export const resources: Resource[] = [
   // ONE FTE — the multi-FTE ceiling is derived from it (dailyCapFor), never
   // stored. `utilization` starts at 0: nothing is booked on them yet, and for a
   // placeholder the scalar is meaningless anyway (it is not an internal KPI).
-  { id: '4', name: 'Dummy — Senior Developer', role: 'Developer', kind: 'dummy',
+  { id: '4', name: 'Dummy — Senior Developer', code: 'ZZ - Dummy - Engineering - Developer', role: 'Developer', kind: 'dummy',
     skills: [], projectRoles: ['Senior Developer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 0, utilizationPlanned: 0, capacity: 40,
     organization: 'Engineering', location: 'Remote', hireDate: '2026-01-01', contractHoursPerDay: 8 },
-  { id: '5', name: 'Dummy — Associate PMO', role: 'Consultant', kind: 'dummy',
+  { id: '5', name: 'Dummy — Associate PMO', code: 'ZZ - Dummy - Consulting - Consultant', role: 'Consultant', kind: 'dummy',
     skills: [], projectRoles: ['Business Consultant'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 0, utilizationPlanned: 0, capacity: 40,
     organization: 'Consulting', location: 'Remote', hireDate: '2026-01-01', contractHoursPerDay: 8 },
-  { id: '6', name: 'Subco — Mediolanum Senior Developer', role: 'Developer', kind: 'subco', vendorId: 'V4',
+  { id: '6', name: 'Subco — Mediolanum Senior Developer', code: 'ZZ - Subco - Engineering - Developer', role: 'Developer', kind: 'subco', vendorId: 'V4',
     skills: [{ name: 'Java', level: 3 }], projectRoles: ['Senior Developer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 0, utilizationPlanned: 0, capacity: 40,
     organization: 'Engineering', location: 'Remote', hireDate: '2026-01-01', contractHoursPerDay: 8 },
@@ -150,7 +150,7 @@ export const resources: Resource[] = [
   // shown month even though the look-ahead month (Oct, fetched but never
   // shown) already knows the answer — the two fields deliberately have
   // different data scopes (spec §7).
-  { id: '7', name: 'Priya Kapoor', role: 'Developer', kind: 'internal',
+  { id: '7', name: 'Priya Kapoor', code: 'KAPPRI000001', role: 'Developer', kind: 'internal',
     skills: [{ name: 'Java', level: 3 }], projectRoles: ['Senior Developer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 100, utilizationPlanned: 100, capacity: 40,
     organization: 'Engineering', location: 'Remote', hireDate: '2020-01-01', contractHoursPerDay: 8 },
@@ -159,7 +159,7 @@ export const resources: Resource[] = [
   // truncates the look-back at Feb/Mar (both inactive) instead of reading the
   // absence of earlier months as "idle since forever" — April must bucket B,
   // never D.
-  { id: '8', name: 'Marco Belli', role: 'Developer', kind: 'internal',
+  { id: '8', name: 'Marco Belli', code: 'BELMAR000001', role: 'Developer', kind: 'internal',
     skills: [{ name: 'Java', level: 2 }], projectRoles: ['Developer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 0, utilizationPlanned: 0, capacity: 40,
     organization: 'Engineering', location: 'Remote', hireDate: '2026-04-01', contractHoursPerDay: 8 },
@@ -167,7 +167,7 @@ export const resources: Resource[] = [
   // booking inside the fetch window's look-back (Jan-Mar15) — proves the
   // exclusion from every displayed month (Apr-Sep) is the termination gate,
   // not an absence of data that would pass for lack of trying.
-  { id: '9', name: 'Elena Rossi', role: 'Developer', kind: 'internal',
+  { id: '9', name: 'Elena Rossi', code: 'ROSELE000001', role: 'Developer', kind: 'internal',
     skills: [{ name: 'Java', level: 2 }], projectRoles: ['Developer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 100, utilizationPlanned: 100, capacity: 40,
     organization: 'Engineering', location: 'Remote', hireDate: '2018-01-01', terminationDate: '2026-03-15', contractHoursPerDay: 8 },
@@ -185,7 +185,7 @@ export const resources: Resource[] = [
   // Id '13', not '7': ids '7'-'9' are already taken in this very array
   // (Priya/Marco/Elena above), '7'-'11' in requests/assignmentsBase, and '12'
   // on a concurrent branch -- verified against the live seed before picking 13.
-  { id: '13', name: 'Nora Keller', role: 'Developer', kind: 'internal',
+  { id: '13', name: 'Nora Keller', code: 'KELNOR000001', role: 'Developer', kind: 'internal',
     skills: [{ name: 'Java', level: 2 }], projectRoles: ['Backend Engineer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 0, utilizationPlanned: 0, capacity: 40,
     organization: 'Backend', location: 'Remote', hireDate: '2026-02-01', contractHoursPerDay: 8 },
@@ -218,7 +218,7 @@ export const resources: Resource[] = [
   // Id '14' continues the id discipline the '13' comment above started: ids are
   // taken to be GLOBAL across resources/requests/assignments, so this block's
   // four new requests+assignments start at '15' rather than reusing '13'/'14'.
-  { id: '14', name: 'Sofia Ferrari', role: 'Developer', kind: 'internal',
+  { id: '14', name: 'Sofia Ferrari', code: 'FERSOF000001', role: 'Developer', kind: 'internal',
     skills: [{ name: 'Java', level: 3 }], projectRoles: ['Senior Developer'],
     externalExperience: [], profilePicture: '', resume: '', utilization: 100, utilizationPlanned: 100, capacity: 40,
     organization: 'Engineering', location: 'Remote', hireDate: '2022-03-01', contractHoursPerDay: 8,

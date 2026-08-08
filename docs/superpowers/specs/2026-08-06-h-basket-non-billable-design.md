@@ -2,7 +2,7 @@
 
 - **Data:** 2026-08-06
 - **Stato:** Design da rivedere (spec review + review utente). Contiene **5 domande di prodotto aperte** (§10) che muovono numeri visibili o toccano la privacy: non sono decise qui.
-- **Origine:** allineamento al Lutech RPT — `docs/rpt-comparison.md` §3.6, righe 54-55 della matrice e il riquadro immediatamente sotto. È l'unico gap della comparazione classificato **bloccante perché rende falsa una metrica già a schermo**, non perché manchi una feature.
+- **Origine:** allineamento a RPT — `docs/rpt-comparison.md` §3.6, righe 54-55 della matrice e il riquadro immediatamente sotto. È l'unico gap della comparazione classificato **bloccante perché rende falsa una metrica già a schermo**, non perché manchi una feature.
 - **Riferimenti:** `docs/superpowers/specs/2026-08-04-f-bench-availability-design.md` (il bench/unchargeable che questo blocco corregge); `2026-08-02-c1-dummy-subco-multi-fte-design.md` (il pattern `notNull().default(...)` senza backfill, e la lezione delle quattro superfici dimenticate); `2026-08-03-c2-dummy-substitution-design.md` (la lezione dello sweep: la domanda giusta è «cosa CREO che altri leggeranno»); `2026-08-04-e-pcp-baseline-design.md` (i cost baseline, che questo blocco riusa per i piani annuali dei basket); `docs/roles-and-permissions.md` (i 7 ruoli e le tabelle RBAC citate al §7).
 
 ---

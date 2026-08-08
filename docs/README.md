@@ -26,7 +26,7 @@ verifies JWTs and enforces role-based access control (RBAC).
 | **Business / Process owner** | [`functional/`](#functional-areas) — what each functional area does and how the workflows run |
 | **Security / Ops engineer** | [`architecture/04-security-identity.md`](architecture/04-security-identity.md) · [`architecture/06-deployment-operations.md`](architecture/06-deployment-operations.md) · [`functional/keycloak-setup.md`](functional/keycloak-setup.md) |
 | **Maintainer / reviewer** | [`audits/2026-08-05-full-audit.md`](audits/2026-08-05-full-audit.md) — the current defect register (26 lenses, 140 confirmed findings). Read it **before re-auditing**. |
-| **Product / competitive** | [`rpt-comparison.md`](rpt-comparison.md) — capability-by-capability comparison against Lutech RPT, and the authoritative gap register |
+| **Product / competitive** | [`rpt-comparison.md`](rpt-comparison.md) — capability-by-capability comparison against RPT, and the authoritative gap register |
 | **Everyone** | [`roles-and-permissions.md`](roles-and-permissions.md) · [`glossary.md`](glossary.md) |
 
 ---
@@ -83,7 +83,7 @@ What the product does, by area, for business and process owners.
 
 ### Product comparison and gap register
 
-- [`rpt-comparison.md`](rpt-comparison.md) — 56 Lutech RPT capabilities graded one by
+- [`rpt-comparison.md`](rpt-comparison.md) — 56 RPT capabilities graded one by
   one against the code on `main`: where we are at parity, ahead, partial, or missing.
   This is the **authoritative gap register**; the roadmap and any session notes are not.
 

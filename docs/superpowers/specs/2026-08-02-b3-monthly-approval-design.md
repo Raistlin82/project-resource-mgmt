@@ -2,7 +2,7 @@
 
 - **Data:** 2026-08-02
 - **Stato:** Design approvato (in attesa di spec review + review utente)
-- **Gap di riferimento:** «B — Allocazione mensile time-phased + FTE» della gap analysis RPT (Lutech Resource Planning Tool) vs Delivery Control. B è decomposto in 3 fasi; questa spec copre **B3**, l'ultima.
+- **Gap di riferimento:** «B — Allocazione mensile time-phased + FTE» della gap analysis RPT (Resource Planning Tool) vs Delivery Control. B è decomposto in 3 fasi; questa spec copre **B3**, l'ultima.
 - **Fonte funzionale:** `Manuale utente RPT (ITA) v4.pdf`, §3.3 (Dettaglio Calendario), §3.5 (Campo Note), §4.1–4.2 (People Manager, Gestione Allocazione Risorse).
 
 ---

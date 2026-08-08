@@ -68,4 +68,39 @@ describe('SearchFilterBarComponent', () => {
     const btn = (fixture.nativeElement as HTMLElement).querySelector('[data-test="filter-bar-clear-all"]');
     expect(btn).toBeFalsy();
   });
+
+  // --- Layout contract: the query never competes with the facets -------------
+  //
+  // jsdom does no layout, so these assert the STRUCTURE that made the bug
+  // possible rather than the pixels. The bug: six items in one flex line, five
+  // of them carrying width:100%, and a query input growing from a zero basis —
+  // measured at 28px wide on /resources, i.e. present, focusable and unusable.
+
+  it('puts the query OUTSIDE the facet container, so nothing shares its row', async () => {
+    const fixture = await setup('', FACETS);
+    const host = fixture.nativeElement as HTMLElement;
+    const input = host.querySelector('[data-test="filter-bar-query"]')!;
+    const firstFacet = host.querySelector('[data-test^="filter-bar-facet-"]')!;
+    expect(input).toBeTruthy();
+    expect(firstFacet).toBeTruthy();
+    // The claim: they are not siblings in one flex row any more.
+    expect(firstFacet.parentElement!.contains(input)).toBe(false);
+  });
+
+  it('lays the facets out in a GRID, where width:100% is the right answer', async () => {
+    const fixture = await setup('', FACETS);
+    const host = fixture.nativeElement as HTMLElement;
+    const container = host.querySelector('[data-test^="filter-bar-facet-"]')!.parentElement!;
+    expect(container.className).toContain('grid');
+  });
+
+  it('renders NO facet container at all when there are no facets', async () => {
+    // Four of the five consumers pass none. An empty grid would still occupy a
+    // gap-sized strip under the query, on every one of those screens.
+    const fixture = await setup('', []);
+    const host = fixture.nativeElement as HTMLElement;
+    expect(host.querySelector('[data-test^="filter-bar-facet-"]')).toBeNull();
+    expect(host.querySelector('.grid')).toBeNull();
+    expect(host.querySelector('[data-test="filter-bar-query"]')).toBeTruthy();
+  });
 });

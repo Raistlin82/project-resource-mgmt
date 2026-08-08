@@ -6615,6 +6615,213 @@ async function checkRateCardInheritance() {
  * the section can run anywhere in the order and leaves the seed's own rows — the
  * ones checkBenchMonthly and checkCapacityMonthly assert on — untouched.
  */
+/**
+ * RPT row 10 — the human-typeable resource code.
+ *
+ * Every check has its pair, because each half is separately satisfiable by a
+ * broken implementation: a server that never mints a code passes "the code is
+ * not client-settable", and one that accepts any code passes "the code is
+ * present".
+ */
+/**
+ * The three declared-but-not-connected seams (RPT rows 29, 43, 56).
+ *
+ * What is worth asserting over HTTP, as opposed to in the adapter specs that
+ * already cover the mapping and the rules: that the wiring is real, that the
+ * "not connected" claim survives the round trip, and — the one that has bitten
+ * this codebase repeatedly — that the NARROW RBAC rule precedes the coarse one.
+ */
+async function checkDeclaredSeams() {
+  const ADMIN = { 'X-User-Id': '1', 'X-User-Role': 'admin' };
+  const FIN = { 'X-User-Id': '4', 'X-User-Role': 'finance' };
+  const RM = { 'X-User-Id': '2', 'X-User-Role': 'resource-manager' };
+  const PM = { 'X-User-Id': '3', 'X-User-Role': 'pm' };
+
+  // 1) All seven adapters are registered, and every one says it is disconnected.
+  const { status: descStatus, body: reg } = await req('GET', '/integrations', { headers: ADMIN });
+  check('GET /api/integrations -> 200', descStatus === 200, `status=${descStatus}`);
+  const kinds = (reg.adapters ?? []).map(a => a.kind).sort();
+  check(
+    'all seven integration kinds are registered',
+    JSON.stringify(kinds) === JSON.stringify(['bi', 'crm', 'demand', 'einvoice', 'email', 'erp', 'inbound']),
+    kinds.join(','),
+  );
+  check(
+    'EVERY adapter reports connected:false — the claim, over the wire',
+    (reg.adapters ?? []).length > 0 && reg.adapters.every(a => a.connected === false),
+    (reg.adapters ?? []).filter(a => a.connected !== false).map(a => a.kind).join(',') || 'all false',
+  );
+
+  // 2) INBOUND — the landscape, and a preview that changes nothing.
+  const { body: sources } = await req('GET', '/integrations/inbound/sources', { headers: ADMIN });
+  const list = sources.sources ?? [];
+  check('the six upstream systems are declared', list.length === 6, `${list.length} declared`);
+  check(
+    'the landscape is honest: some mapped, some declared only',
+    list.some(x => x.mappable) && list.some(x => !x.mappable),
+    list.map(x => `${x.key}:${x.mappable}`).join(' '),
+  );
+
+  const { body: before } = await req('GET', '/resources', { headers: ADMIN });
+  const sample = (before ?? []).find(r => (r.kind ?? 'internal') === 'internal' && r.code);
+  const { status: prevStatus, body: preview } = await req('POST', '/integrations/inbound/zucchetti/preview', {
+    headers: ADMIN,
+    body: { payload: [{ matricola: sample.code, cognome: 'Ferrari', nome: 'Sofia', mansione: 'Changed By Feed' }] },
+  });
+  check('POST inbound preview -> 200', prevStatus === 200, `status=${prevStatus}`);
+  check('the preview reports applied:false', preview.applied === false, `applied=${preview.applied}`);
+  check(
+    'it diffs against the row we actually hold',
+    preview.counts && preview.counts.update === 1,
+    JSON.stringify(preview.counts),
+  );
+  // THE assertion the seam exists for: a preview that previewed nothing.
+  const { body: after } = await req('GET', `/resources/${sample.id}`, { headers: ADMIN });
+  check(
+    'the preview WROTE NOTHING — the role it claimed to change is untouched',
+    after.role !== 'Changed By Feed',
+    `role=${after.role}`,
+  );
+
+  const { status: unmapped } = await req('POST', '/integrations/inbound/skill-matrix/preview', {
+    headers: ADMIN, body: { payload: [{ x: 1 }] },
+  });
+  check('a declared-but-unmapped source answers 400, not 500', unmapped === 400, `status=${unmapped}`);
+
+  // 3) DEMAND — a requisition for a placeholder, refused for a person.
+  const dummy = (before ?? []).find(r => r.kind === 'dummy' && !String(r.code ?? '').startsWith('RES'));
+  const person = (before ?? []).find(r => (r.kind ?? 'internal') === 'internal');
+  const { status: demandStatus, body: demand } = await req('POST', `/integrations/demand/${dummy.id}`, { headers: ADMIN, body: {} });
+  check('POST a demand for a dummy -> 200', demandStatus === 200, `status=${demandStatus}`);
+  check('the demand is Prepared and carries the placeholder code', demand.status === 'Prepared' && demand.placeholderCode === dummy.code, JSON.stringify(demand));
+  const { status: refused, body: refusedBody } = await req('POST', `/integrations/demand/${person.id}`, { headers: ADMIN, body: {} });
+  check('a demand for a REAL person -> 400', refused === 400, `status=${refused} error=${refusedBody && refusedBody.error}`);
+
+  // 4) The RES rewrite: RBAC ORDER first, then the effect.
+  const { status: pmRes } = await req('PUT', `/integrations/demand/${dummy.id}/res-code`, { headers: PM, body: { resCode: 'RES0001111' } });
+  check('PUT res-code (pm) -> 403', pmRes === 403, `status=${pmRes}`);
+  const { status: finRes } = await req('PUT', `/integrations/demand/${dummy.id}/res-code`, { headers: FIN, body: { resCode: 'RES0001111' } });
+  check(
+    'PUT res-code (finance) -> 403 — the NARROW rule precedes the coarse /integrations one',
+    finRes === 403,
+    `status=${finRes} (200 here means the narrow rule is registered after the coarse one and is dead)`,
+  );
+  const { status: rmRes, body: fulfilled } = await req('PUT', `/integrations/demand/${dummy.id}/res-code`, { headers: RM, body: { resCode: 'RES0001111' } });
+  check('PUT res-code (resource-manager) -> 200 — the pair of the two refusals above', rmRes === 200, `status=${rmRes}`);
+  check(
+    'the RES number is PREFIXED onto the description, keeping both halves',
+    fulfilled && fulfilled.specificCode === `RES0001111 - ${dummy.code}`,
+    fulfilled && fulfilled.specificCode,
+  );
+  const { body: reread } = await req('GET', `/resources/${dummy.id}`, { headers: ADMIN });
+  check('and it is persisted', reread.code === `RES0001111 - ${dummy.code}`, `code=${reread.code}`);
+  const { status: conflicting } = await req('PUT', `/integrations/demand/${dummy.id}/res-code`, { headers: RM, body: { resCode: 'RES0009999' } });
+  check('a DIFFERENT requisition on the same seat -> 400', conflicting === 400, `status=${conflicting}`);
+
+  // 5) EMAIL — prepared, never sent.
+  const { status: mailStatus, body: mail } = await req('POST', '/integrations/email/outbox', {
+    headers: ADMIN,
+    body: { event: 'basket-engagement-created', to: ['lead@example.com'], subjectName: 'BASKET — Engineering Practice' },
+  });
+  check('POST a notification -> 201', mailStatus === 201, `status=${mailStatus}`);
+  check('it is Prepared, never Sent', mail.status === 'Prepared', `status=${mail.status}`);
+  check('and it says so in the body', /not transmitted/i.test(mail.body ?? ''), (mail.body ?? '').slice(-80));
+  const { status: noRecipient } = await req('POST', '/integrations/email/outbox', {
+    headers: ADMIN, body: { event: 'dummy-created', to: [], subjectName: 'X' },
+  });
+  check('a message with no recipient -> 400', noRecipient === 400, `status=${noRecipient}`);
+  const { body: outbox } = await req('GET', '/integrations/email/outbox', { headers: ADMIN });
+  check('the outbox holds it', Array.isArray(outbox) && outbox.length >= 1, `${(outbox ?? []).length} message(s)`);
+}
+
+async function checkResourceCode() {
+  const ADMIN = { 'X-User-Id': '1', 'X-User-Role': 'admin' };
+  const PERSON_CODE = /^[A-Z]{6}\d{6}$/;
+
+  // 1) Every seeded resource carries one, and the SHAPE follows `kind`.
+  const { status: listStatus, body: all } = await req('GET', '/resources', { headers: ADMIN });
+  check('GET /api/resources -> 200', listStatus === 200, `status=${listStatus}`);
+  const rows = Array.isArray(all) ? all : [];
+  check(
+    'every seeded resource carries a code',
+    rows.length > 0 && rows.every(r => typeof r.code === 'string' && r.code.length > 0),
+    `${rows.filter(r => !r.code).length} without one of ${rows.length}`,
+  );
+  const people = rows.filter(r => (r.kind ?? 'internal') === 'internal');
+  const placeholders = rows.filter(r => r.kind === 'dummy' || r.kind === 'subco');
+  check(
+    'a PERSON gets the ARMJUL000001 shape',
+    people.length > 0 && people.every(r => PERSON_CODE.test(r.code)),
+    people.filter(r => !PERSON_CODE.test(r.code)).map(r => `${r.name}=${r.code}`).join(', ') || 'all ok',
+  );
+  // A placeholder code is EITHER the plain description or a RES-prefixed one —
+  // `RES0005555 - ZZ - Dummy - SAP - Associate PMO` is not a degraded state, it
+  // is what a fulfilled hiring demand produces (row 29). Accepting only the
+  // plain form made this fail the moment the seams section ran first.
+  const describedPlaceholder = code => /^(RES\d{7} - )?ZZ - /.test(code ?? '');
+  const badPlaceholders = placeholders.filter(r => PERSON_CODE.test(r.code) || !describedPlaceholder(r.code));
+  check(
+    'a PLACEHOLDER is described (optionally RES-prefixed), never given a person shape',
+    placeholders.length > 0 && badPlaceholders.length === 0,
+    // The detail lists what ACTUALLY failed. The previous version only listed
+    // person-shaped rows, so a startsWith failure printed 'all ok' next to a FAIL.
+    badPlaceholders.map(r => `${r.name}=${r.code}`).join(', ') || 'all ok',
+  );
+  // THE INVARIANT, over the WHOLE directory rather than over the seed. This is
+  // the check that found the defect it now guards: a dummy PROMOTED to a real
+  // person kept `ZZ - Subco - …`, because the code was minted at create and the
+  // kind changed later. Two per-population assertions above cannot see it —
+  // each one only looks at rows whose kind already matches what it expects.
+  const mismatched = rows.filter(r => {
+    const placeholderKind = r.kind === 'dummy' || r.kind === 'subco';
+    return PERSON_CODE.test(r.code) === placeholderKind;
+  });
+  check(
+    "every row's code SHAPE agrees with its kind, after any number of edits",
+    mismatched.length === 0,
+    mismatched.map(r => `${r.name} kind=${r.kind ?? 'internal'} code=${r.code}`).join(' | ') || 'all ok',
+  );
+  const personCodes = rows.map(r => r.code).filter(c => PERSON_CODE.test(c));
+  check('person codes are unique', new Set(personCodes).size === personCodes.length, `${personCodes.length} codes, ${new Set(personCodes).size} distinct`);
+
+  // 2) It is SEARCHABLE — the entire point of having one.
+  const sample = people[0];
+  if (sample) {
+    const prefix = sample.code.slice(0, 6);
+    const { body: byPrefix } = await req('GET', `/resources?q=${encodeURIComponent(prefix)}`, { headers: ADMIN });
+    const prefixRows = Array.isArray(byPrefix) ? byPrefix : (byPrefix && byPrefix.rows) || [];
+    check(
+      `GET /api/resources?q=${prefix} finds the person behind the code`,
+      prefixRows.some(r => r.id === sample.id),
+      `${prefixRows.length} row(s)`,
+    );
+    const { body: byNothing } = await req('GET', '/resources?q=ZZZQQQ999999', { headers: ADMIN });
+    const noRows = Array.isArray(byNothing) ? byNothing : (byNothing && byNothing.rows) || [];
+    check('a code that matches nobody returns nobody — the search is not a no-op', noRows.length === 0, `${noRows.length} row(s)`);
+  }
+
+  // 3) It is SERVER-PINNED, and a body that carries one is REFUSED.
+  const base = { role: 'Developer', capacity: 40, hireDate: '2026-01-01', organization: 'Engineering' };
+  const { status: forged, body: forgedBody } = await req('POST', '/resources', {
+    headers: ADMIN, body: { ...base, name: 'Forged Person', code: 'HACKED000001' },
+  });
+  check('POST /api/resources with a code -> 403 (not a silent drop)', forged === 403, `status=${forged} error=${forgedBody && forgedBody.error}`);
+  const { status: forgedPut } = await req('PUT', '/resources/1', { headers: ADMIN, body: { code: 'HACKED000001' } });
+  check('PUT /api/resources/:id with a code -> 403', forgedPut === 403, `status=${forgedPut}`);
+  const { body: untouched } = await req('GET', '/resources/1', { headers: ADMIN });
+  check("the refused write did NOT change the target's code", untouched && PERSON_CODE.test(untouched.code), `code=${untouched && untouched.code}`);
+
+  // 4) A create MINTS one, and a colliding prefix advances the sequence.
+  const { status: c1, body: r1 } = await req('POST', '/resources', { headers: ADMIN, body: { ...base, name: 'Zeno Quintavalle' } });
+  check('POST /api/resources -> 201 and the server minted a code', c1 === 201 && PERSON_CODE.test(r1 && r1.code), `status=${c1} code=${r1 && r1.code}`);
+  const { body: r2 } = await req('POST', '/resources', { headers: ADMIN, body: { ...base, name: 'Zenobia Quintavalle' } });
+  check(
+    'a second person with the SAME 6-letter prefix advances the sequence',
+    r1 && r2 && r1.code.slice(0, 6) === r2.code.slice(0, 6) && r2.code !== r1.code,
+    `${r1 && r1.code} then ${r2 && r2.code}`,
+  );
+}
+
 async function checkBlockHAbsencesAndClassification() {
   const PM = { 'X-User-Id': '3', 'X-User-Role': 'pm' };
   const RM = { 'X-User-Id': '2', 'X-User-Role': 'resource-manager' };
@@ -7672,6 +7879,20 @@ async function main() {
   // assignment, and every classification write it performs restores the seed's
   // own value (project '3' stays Basket/non-billable, projects '1' and '4' end
   // as they started), so no seed row another section reads is left moved.
+  try {
+    await checkDeclaredSeams();
+  } catch (err) {
+    console.log(`FAIL  declared seams (inbound / demand / email) — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
+  try {
+    await checkResourceCode();
+  } catch (err) {
+    console.log(`FAIL  resource code — unexpected error — ${err && err.message ? err.message : err}`);
+    failed++;
+  }
+
   try {
     await checkBlockHAbsencesAndClassification();
   } catch (err) {

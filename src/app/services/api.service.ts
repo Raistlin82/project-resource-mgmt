@@ -22,6 +22,18 @@ export type {
 export interface Resource {
   id: string;
   name: string;
+  /**
+   * The human-typeable code (RPT row 10) — `ARMJUL000001` for a person,
+   * `ZZ - Dummy - <practice> - <role>` for a placeholder.
+   *
+   * SERVER-PINNED: derived on create by `nextResourceCode` and never read from
+   * a request body, so it cannot be forged into a collision or into something
+   * that reads like a different person. Optional here because rows that predate
+   * the column have none, and a UI must render that absence rather than an
+   * empty string. `resource-code.util.ts` owns the two shapes and the rule that
+   * picks between them.
+   */
+  code?: string;
   role: string;
   skills: { name: string; level: number }[];
   projectRoles: string[];
@@ -1003,8 +1015,18 @@ export interface FxRate {
 
 // --- Integrations (local-artifact adapters: implemented, NOT connected) ---
 
-/** The four supported integration kinds. */
-export type IntegrationKind = 'erp' | 'einvoice' | 'crm' | 'bi';
+/**
+ * The supported integration kinds — the CLIENT mirror of the server contract in
+ * `src/server/integrations/types.ts`. The two lists must agree; a kind added on
+ * one side and not the other is a compile error at the first call site, which is
+ * how this one was caught.
+ *
+ * The first four are OUTBOUND (data we hold becomes an artifact). The last three
+ * are declared seams: an upstream master feed (`inbound`, dry-run only — nothing
+ * is written), a hiring requisition (`demand`), and a notification that would be
+ * emailed (`email`). All seven report `connected: false`.
+ */
+export type IntegrationKind = 'erp' | 'einvoice' | 'crm' | 'bi' | 'inbound' | 'demand' | 'email';
 
 /** Server-side adapter self-description (mirror of the server contract). */
 export interface IntegrationDescriptor {
@@ -1021,6 +1043,22 @@ export interface IntegrationDescriptor {
 export interface IntegrationsInfo {
   adapters: IntegrationDescriptor[];
   active: Record<IntegrationKind, string>;
+}
+
+/**
+ * One upstream master-data system (RPT row 56), as the server declares it.
+ *
+ * `mappable` is the field that carries the honesty: a system can be DECLARED
+ * (we know it exists and what it owns) without a normaliser for its payload.
+ * Saying so beats a mapping invented to make the list look complete.
+ */
+export interface InboundSourceDescriptor {
+  key: string;
+  name: string;
+  owns: string;
+  target: 'resources' | 'projects' | 'skills';
+  mappable: boolean;
+  connected: false;
 }
 
 /** CRM account record inside a prepared sync payload. */
@@ -1659,6 +1697,10 @@ export class ApiService {
   getIntegrations(): Observable<IntegrationsInfo> { return this.http.get<IntegrationsInfo>(`${this.baseUrl}/integrations`); }
 
   getCrmOutbox(): Observable<CrmOutboxEntry[]> { return this.http.get<CrmOutboxEntry[]>(`${this.baseUrl}/integrations/crm/outbox`); }
+  /** The declared upstream master-data landscape (row 56). Read-only. */
+  getInboundSources(): Observable<{ sources: InboundSourceDescriptor[] }> {
+    return this.http.get<{ sources: InboundSourceDescriptor[] }>(`${this.baseUrl}/integrations/inbound/sources`);
+  }
 
   prepareCrmSync(): Observable<CrmOutboxEntry> { return this.http.post<CrmOutboxEntry>(`${this.baseUrl}/integrations/crm/outbox`, {}); }
 
