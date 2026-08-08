@@ -179,6 +179,65 @@ async function render(role: StubRole, apiOverrides: Partial<Record<string, unkno
   return { fixture, api };
 }
 
+describe('ProjectDetailsComponent — core project states gate the workspace', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('shows an explicit retryable error without mounting tabs, panels, or KPIs', async () => {
+    const getProjects = vi.fn(() => throwError(() => new Error('offline')));
+    const { fixture } = await render('delivery-executive', { getProjects });
+
+    expect(host(fixture).querySelector('h1')?.textContent?.trim()).toBe('Project details');
+    expect(host(fixture).textContent).toContain("Couldn't load project");
+    expect(host(fixture).textContent).toContain('The project record could not be loaded');
+    expect(host(fixture).querySelector('.project-tab-active')).toBeNull();
+    expect(host(fixture).querySelector('.command-kpi')).toBeNull();
+    expect(headings(fixture).map(heading => heading.level)).toEqual([1, 2, 3]);
+
+    const retry = Array.from(host(fixture).querySelectorAll('button'))
+      .find(button => button.textContent?.includes('Retry')) as HTMLButtonElement;
+    retry.click();
+    await tick(fixture);
+    expect(getProjects).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows a contextual not-found state for an unknown project ID and no workspace chrome', async () => {
+    const { fixture } = await render('delivery-executive', {
+      getProjects: () => of([]),
+    });
+
+    const state = host(fixture).querySelector('[data-test="project-not-found"]');
+    expect(state).not.toBeNull();
+    expect(state?.querySelector('h1')?.textContent?.trim()).toBe('Project not found');
+    expect(state?.textContent).toContain('P1');
+    expect(state?.querySelector('a[href="/projects"]')).not.toBeNull();
+    expect(host(fixture).querySelector('.project-tab-active')).toBeNull();
+    expect(host(fixture).querySelector('.command-kpi')).toBeNull();
+  });
+
+  it('keeps a long resolved project name complete and introduces the overview h2 before card h3s', async () => {
+    const longName = 'A project name that must remain completely readable even when the viewport becomes very narrow';
+    const longProject: Project = { ...PROJECT, id: 'PROJECT-2026-LONG-ID', name: longName };
+    const { fixture } = createFixture('delivery-executive', {
+      getProjects: () => of([longProject]),
+    });
+    fixture.componentRef.setInput('id', longProject.id);
+    await tick(fixture);
+
+    const title = host(fixture).querySelector('h1') as HTMLElement;
+    expect(title.textContent?.trim()).toBe(longName);
+    expect(title.classList.contains('truncate')).toBe(false);
+    expect(title.classList.contains('line-clamp-3')).toBe(false);
+    expect(host(fixture).textContent).toContain(longProject.id);
+
+    const outline = headings(fixture);
+    expect(outline[0]).toEqual({ level: 1, text: longName });
+    expect(outline[1]).toEqual({ level: 2, text: 'Project overview' });
+    for (let index = 1; index < outline.length; index++) {
+      expect(outline[index].level - outline[index - 1].level).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
 describe('ProjectDetailsComponent — Baseline vs Planned card (design spec, block E)', () => {
   afterEach(() => TestBed.resetTestingModule());
 
@@ -533,34 +592,24 @@ describe('ProjectDetailsComponent — a withheld commercial/financial read is NO
 describe('ProjectDetailsComponent — the money grid sits behind a readiness gate', () => {
   afterEach(() => TestBed.resetTestingModule());
 
-  it('pre-authReady it renders a skeleton, never EUR 0 tiles and never a confident "On Track"', async () => {
+  it('pre-authReady it holds the whole workspace behind the core-project skeleton', async () => {
     const { fixture, api } = await render('delivery-executive', moneyProject(), /* authReady */ false);
 
-    // Scoped to the MONEY grid. The Baseline card is skeletonised in this state
-    // too (it always was), so a bare `.command-skeleton` count is green before
-    // and after the fix and proves nothing.
-    const region = moneySkeleton(fixture);
-    expect(region, 'the money grid must have its own loading region').not.toBeNull();
+    const region = host(fixture).querySelector('[role="status"]');
+    expect(region, 'the core project must have an explicit loading region').not.toBeNull();
     expect(region!.getAttribute('role')).toBe('status');
     expect(region!.getAttribute('aria-live')).toBe('polite');
     expect(region!.getAttribute('aria-busy')).toBe('true');
-    expect(region!.querySelector('.sr-only')?.textContent).toContain('Loading project financials');
+    expect(region!.querySelector('.sr-only')?.textContent).toContain('Loading project');
     expect(region!.querySelectorAll('.command-skeleton').length).toBeGreaterThan(0);
+    expect(moneySkeleton(fixture), 'the financial panel must not mount before the project record').toBeNull();
+    expect(host(fixture).querySelector('.project-tab-active')).toBeNull();
 
-    // Where the red sits: before the fix this shipped a full strip of zero
-    // tiles plus a verdict, in the SSR HTML and through the whole pre-hydration
-    // window, and every number then jumped.
+    // No secondary KPI can mount from empty pre-auth envelopes.
     expect(findKpi(fixture, 'Budget'), 'no Budget tile may render before authReady').toBeNull();
     expect(findKpi(fixture, 'Contract Revenue')).toBeNull();
     expect(findKpi(fixture, 'Delivery Health')).toBeNull();
     expect(host(fixture).textContent).not.toContain('On Track');
-    // NOT asserted here: that the header chip is absent. It would be — the whole
-    // header sits inside `@if (project(); as p)` and projectsRes is itself
-    // pre-readiness — so the assertion would pass with the pill's own gate torn
-    // out, i.e. it would be vacuous. The chip's real red lives in the errored
-    // case below, where project() HAS resolved and the pill must read
-    // "Health unavailable" instead of throwing.
-
     // And the gate is not "fetch anyway, hide the result".
     expect(api.getOrders).not.toHaveBeenCalled();
     expect(api.getProjectFinancials).not.toHaveBeenCalled();
@@ -789,34 +838,30 @@ describe('ProjectDetailsComponent — exactly ONE h1 on the page, whichever tab 
     });
   }
 
-  it('the level is passed by the PARENT, not inferred from projectId, so no h1 appears while the project is still loading', async () => {
-    // `[projectId]="project()?.id"` is undefined until projectsRes resolves. A
-    // child that keyed its heading off "do I have an id" — the discriminator
-    // these panels already use for their project picker — would render its
-    // standalone h1 inside this page for that whole window. Here the project
-    // never resolves at all, so the state is held open and observable.
+  it('does not mount a selected tab panel until the core project has resolved', async () => {
     const pending = new Subject<Project[]>();
-    const { fixture } = await render('delivery-executive', moneyProject({
+    const { fixture, api } = await render('delivery-executive', moneyProject({
       getProjects: () => pending.asObservable(),
     }));
     fixture.componentInstance.activeTab.set('tasks');
     await tick(fixture);
 
-    // The page's own h1 is inside `@if (project(); as p)`, so it is absent too:
-    // zero h1 elements is the honest count here, and the panel must not supply
-    // one of its own.
-    expect(host(fixture).querySelectorAll('h1')).toHaveLength(0);
-    // The panel IS rendered — this is not a vacuous count over an empty page.
-    const panelTitle = headings(fixture).find(h => h.text === 'Tasks');
-    expect(panelTitle, 'the tasks panel must be on screen in this state').toBeDefined();
-    expect(panelTitle!.level).toBe(2);
+    expect(host(fixture).querySelector('h1')?.textContent?.trim()).toBe('Project details');
+    expect(host(fixture).textContent).toContain('Loading project');
+    expect(headings(fixture).find(h => h.text === 'Tasks')).toBeUndefined();
+    expect(host(fixture).querySelector('.project-tab-active')).toBeNull();
+    expect(host(fixture).querySelector('.command-kpi')).toBeNull();
+    expect(api.getProjectTasks).not.toHaveBeenCalled();
 
     pending.next([PROJECT]);
     pending.complete();
     await tick(fixture);
-    // MIRROR: once the project lands, the page h1 appears — exactly one of it.
     expect(host(fixture).querySelectorAll('h1')).toHaveLength(1);
     expect(host(fixture).querySelector('h1')?.textContent?.trim()).toBe(PROJECT.name);
+    const panelTitle = headings(fixture).find(h => h.text === 'Tasks');
+    expect(panelTitle, 'the tasks panel mounts only after the project resolves').toBeDefined();
+    expect(panelTitle!.level).toBe(2);
+    expect(api.getProjectTasks).toHaveBeenCalledOnce();
   });
 });
 

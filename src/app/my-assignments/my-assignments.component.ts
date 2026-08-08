@@ -50,6 +50,7 @@ const BUSINESS_DAYS_PER_WEEK = 5;
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">My Assignments</h1>
+        @if (auth.authReady() && auth.isAuthenticated() && auth.hasResourceIdentity()) {
         <div class="command-card flex items-center gap-2 p-1.5">
           <button type="button"
                   (click)="setViewMode('week')"
@@ -78,6 +79,7 @@ const BUSINESS_DAYS_PER_WEEK = 5;
             Month
           </button>
         </div>
+        }
       </div>
 
       <!-- ONE READ-STATE BOUNDARY OWNS THE WHOLE BODY.
@@ -101,6 +103,23 @@ const BUSINESS_DAYS_PER_WEEK = 5;
            SSR-rendered document, telling a person with five live bookings
            "Active Assignments 0", "0h", a 0% utilization tile and "No
            assignments found for this period.". Withheld is not zero. -->
+      @if (auth.authReady() && !auth.isAuthenticated()) {
+        <section class="command-card p-8 text-center" aria-labelledby="assignmentsSignInTitle">
+          <mat-icon class="text-accent-text">lock</mat-icon>
+          <h2 id="assignmentsSignInTitle" class="mt-3 font-display text-xl font-bold text-ink">Sign in required</h2>
+          <p class="mx-auto mt-2 max-w-lg text-ink-muted">Sign in to view assignments associated with your resource profile.</p>
+          <button type="button" (click)="auth.login()" class="command-button mt-5">Sign in</button>
+        </section>
+      } @else if (auth.authReady() && auth.isAuthenticated() && !auth.hasResourceIdentity()) {
+        <section data-test="account-not-linked" role="status" class="command-card p-8 text-center" aria-labelledby="accountNotLinkedTitle">
+          <mat-icon class="text-caution-text">link_off</mat-icon>
+          <h2 id="accountNotLinkedTitle" class="mt-3 font-display text-xl font-bold text-ink">Account not linked</h2>
+          <p class="mx-auto mt-2 max-w-lg text-ink-muted">
+            You are signed in, but this account is not linked to a resource profile.
+            Ask an administrator to link the account before viewing assignments or logging time.
+          </p>
+        </section>
+      } @else {
       <app-list-state [loading]="!auth.authReady() || dataRes.isLoading()"
                       [error]="dataRes.status() === 'error'"
                       label="assignments" [rows]="5" (retry)="dataRes.reload()">
@@ -114,7 +133,7 @@ const BUSINESS_DAYS_PER_WEEK = 5;
                     <mat-icon class="text-[28px] w-[28px] h-[28px]">assignment</mat-icon>
                   </div>
                   <div>
-                    <p class="command-kpi-label">Active Assignments</p>
+                    <p class="command-kpi-label">Assignments (selected {{ viewMode() }})</p>
                     <p class="command-kpi-value">{{ activeAssignmentsCount() }}</p>
                   </div>
                 </div>
@@ -125,7 +144,7 @@ const BUSINESS_DAYS_PER_WEEK = 5;
                     <mat-icon class="text-[28px] w-[28px] h-[28px]">schedule</mat-icon>
                   </div>
                   <div>
-                    <p class="command-kpi-label">Total Assigned Hours</p>
+                    <p class="command-kpi-label">Estimated hours (selected {{ viewMode() }})</p>
                     <p class="command-kpi-value">{{ totalAssignedHours() | number:'1.0-2' }}h</p>
                   </div>
                 </div>
@@ -407,7 +426,7 @@ const BUSINESS_DAYS_PER_WEEK = 5;
                   }
                   @if (!myAssignments().length) {
                     <div class="text-center py-8 text-ink-muted">
-                      You don't have any active assignments.
+                      You don't have any assignments.
                     </div>
                   }
                 </div>
@@ -416,6 +435,7 @@ const BUSINESS_DAYS_PER_WEEK = 5;
           </div>
         </ng-template>
       </app-list-state>
+      }
     </div>
   `
 })
@@ -435,7 +455,7 @@ export class MyAssignmentsComponent {
   // on the error (page shows zeros forever). Key the load on auth readiness so it
   // fires only AFTER the OAuth bootstrap has settled and the bearer token is attached.
   protected dataRes = rxResource<{ assignments: Assignment[]; requests: ResourceRequest[]; profile: Resource | null; timeEntries: TimeEntry[] }, boolean>({
-    params: () => this.auth.authReady() && this.auth.hasResourceIdentity(),
+    params: () => this.auth.authReady() && this.auth.isAuthenticated() && this.auth.hasResourceIdentity(),
     stream: ({ params: ready }) => ready
       ? forkJoin({
           assignments: this.api.getMyAssignments(),
@@ -506,7 +526,7 @@ export class MyAssignmentsComponent {
 
   periodAssignments = computed(() => {
     const { start, end } = this.periodRange();
-    return this.myAssignments().filter(a => {
+    return this.myAssignments().filter(a => a.status !== 'Rejected').filter(a => {
       const win = this.assignmentWindow(a);
       if (!win) return this.periodOffset() === 0;
       return this.rangesOverlap(win.start, win.end, start, end);
@@ -546,11 +566,6 @@ export class MyAssignmentsComponent {
     return days;
   });
 
-  // An assignment counts as "active" when it isn't Rejected — i.e. Draft,
-  // Requested or Allocated (the allocation-approval workflow states).
-  activeAssignmentsCount = computed(() => this.myAssignments().filter(a => a.status !== 'Rejected').length);
-  totalAssignedHours = computed(() => this.myAssignments().reduce((sum, a) => sum + a.assignedHours, 0));
-
   /** Every business-day ISO inside the displayed period. Both halves of the
    *  utilization ratio are derived from this ONE list, so the numerator and the
    *  denominator can never be scoped to different windows. */
@@ -576,6 +591,10 @@ export class MyAssignmentsComponent {
     }
     return this.roundHours(total);
   });
+
+  /** KPI pair scoped to exactly the selected week/month shown by the calendar. */
+  activeAssignmentsCount = computed(() => this.periodAssignments().length);
+  totalAssignedHours = computed(() => this.periodAssignedHours());
 
   /**
    * Utilization over the DISPLAYED PERIOD — booked hours in the period against

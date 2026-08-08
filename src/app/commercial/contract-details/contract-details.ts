@@ -67,8 +67,33 @@ interface BillingControlRow {
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CurrencyPipe, DatePipe, DecimalPipe, MatIconModule, ReactiveFormsModule, RouterLink, ModalDialogDirective],
   template: `
-    <div class="command-page space-y-6 p-4 sm:p-6 lg:p-8">
-      @if (contract(); as c) {
+    <div class="command-page space-y-6">
+      @if (contractState() === 'loading') {
+        <section class="command-card p-8" role="status" aria-live="polite" aria-busy="true">
+          <h1 class="sr-only">Loading contract</h1>
+          <span class="sr-only">Loading contract details</span>
+          <div class="space-y-4" aria-hidden="true">
+            <div class="command-skeleton h-7 w-2/5"></div>
+            <div class="command-skeleton h-4 w-3/5"></div>
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 pt-4">
+              @for (tile of [1, 2, 3, 4]; track tile) {
+                <div class="command-skeleton h-20"></div>
+              }
+            </div>
+          </div>
+        </section>
+      } @else if (contractState() === 'error') {
+        <section class="command-card border-critical! p-8 sm:p-12 text-center" role="alert">
+          <div class="w-16 h-16 bg-critical-tint ring-1 ring-critical rounded-full flex items-center justify-center mx-auto mb-4">
+            <mat-icon class="text-critical-text text-3xl">error_outline</mat-icon>
+          </div>
+          <h1 class="font-display text-xl font-bold text-[var(--cc-ink)]">Couldn't load contract</h1>
+          <p class="text-[var(--cc-muted)] mt-2">The contract could not be retrieved. No financial or delivery data is being shown.</p>
+          <button type="button" class="command-button mt-5" (click)="reloadContract()">
+            <mat-icon class="text-[18px] w-[18px] h-[18px]">refresh</mat-icon> Retry
+          </button>
+        </section>
+      } @else if (contract(); as c) {
         <!-- Header card -->
         <div class="command-card p-6 sm:p-8">
           <div class="flex flex-col sm:flex-row sm:items-start justify-between gap-6">
@@ -79,7 +104,7 @@ interface BillingControlRow {
                 </a>
               </div>
               <p class="command-eyebrow">Contract</p>
-              <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight truncate">{{ c.name }}</h1>
+              <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight break-words">{{ c.name }}</h1>
               <div class="flex flex-wrap items-center gap-3 mt-3 text-sm text-[var(--cc-muted)]">
                 <span class="inline-flex items-center gap-1.5 font-medium">
                   <mat-icon class="text-[18px] w-[18px] h-[18px] text-ink-muted">business</mat-icon>
@@ -945,12 +970,15 @@ interface BillingControlRow {
           </div>
         }
       } @else {
-        <div class="command-card-muted p-12 text-center">
+        <div class="command-card-muted p-8 sm:p-12 text-center">
           <div class="w-20 h-20 bg-surface shadow-sm ring-1 ring-line rounded-full flex items-center justify-center mx-auto mb-4">
             <mat-icon class="text-ink-muted text-4xl">description</mat-icon>
           </div>
-          <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-2">Contract not found</h3>
-          <p class="text-[var(--cc-muted)]">The contract you are looking for is unavailable or still loading.</p>
+          <h1 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-2">Contract not found</h1>
+          <p class="text-[var(--cc-muted)]">No contract matches this identifier. It may have been removed or the link may be incorrect.</p>
+          <a routerLink="/contracts" class="command-button mt-5 inline-flex">
+            <mat-icon class="text-[18px] w-[18px] h-[18px]">arrow_back</mat-icon> Back to contracts
+          </a>
         </div>
       }
     </div>
@@ -1129,6 +1157,22 @@ export class ContractDetails {
   });
 
   contract = computed<Contract | undefined>(() => this.contracts().find(c => c.id === this.id()));
+
+  /**
+   * The primary contract read owns the page state. Keeping these outcomes
+   * distinct prevents a pending or failed request from being presented as a
+   * legitimate missing identifier, and keeps all dependent panels unmounted
+   * until the contract itself is known.
+   */
+  protected contractState = computed<'loading' | 'error' | 'not-found' | 'ready'>(() => {
+    if (!this.auth.authReady() || this.contractsRes.isLoading()) return 'loading';
+    if (this.contractsRes.status() === 'error') return 'error';
+    return this.contract() ? 'ready' : 'not-found';
+  });
+
+  protected reloadContract(): void {
+    this.contractsRes.reload();
+  }
 
   customerName = computed(() => {
     const c = this.contract();

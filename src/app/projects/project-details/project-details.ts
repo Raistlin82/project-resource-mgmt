@@ -42,6 +42,46 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
   ],
   template: `
     <div class="command-page space-y-6">
+      @if (projectLoading() || projectReadFailed()) {
+        <div class="flex flex-col sm:flex-row sm:items-start gap-4">
+          <a routerLink="/projects" class="command-button secondary w-12 h-12 p-0 shrink-0" aria-label="Back to projects">
+            <mat-icon>arrow_back</mat-icon>
+          </a>
+          <div>
+            <div class="command-section-label">Project Control</div>
+            <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Project details</h1>
+            <p class="mt-2 text-sm text-[var(--cc-muted)]">
+              {{ projectReadFailed() ? 'The project record could not be loaded. Retry to restore its workspace.' : 'Loading the project record before its workspace becomes available.' }}
+            </p>
+          </div>
+        </div>
+        <section aria-labelledby="projectRecordStateHeading">
+          <h2 id="projectRecordStateHeading" class="sr-only">Project record</h2>
+          <app-list-state
+            [loading]="projectLoading()"
+            [error]="projectReadFailed()"
+            skeleton="cards"
+            [rows]="2"
+            label="project"
+            (retry)="reloadProject()" />
+        </section>
+      } @else if (!project()) {
+        <div data-test="project-not-found" class="command-card p-6 sm:p-8">
+          <div class="flex flex-col sm:flex-row sm:items-start gap-6">
+            <a routerLink="/projects" class="command-button secondary w-12 h-12 p-0 shrink-0" aria-label="Back to projects">
+              <mat-icon>arrow_back</mat-icon>
+            </a>
+            <div class="min-w-0">
+              <div class="command-section-label">Project Control</div>
+              <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Project not found</h1>
+              <p class="mt-3 text-[var(--cc-muted)] break-words">
+                No project with ID <span class="font-mono text-[var(--cc-ink)] break-all">{{ id() }}</span> is available. It may have been removed, or the link may be incorrect.
+              </p>
+              <a routerLink="/projects" class="command-button mt-6">Return to projects</a>
+            </div>
+          </div>
+        </div>
+      } @else {
       <!-- Header & Main Info -->
       <div class="command-card overflow-hidden p-6 sm:p-8">
         <div class="flex flex-col sm:flex-row sm:items-start gap-6">
@@ -52,7 +92,7 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
             @if (project(); as p) {
               <div>
                 <div class="flex flex-wrap items-center gap-3 mb-2">
-                  <h1 class="font-display text-3xl sm:text-4xl font-bold text-[var(--cc-ink)] truncate">{{ p.name }}</h1>
+                  <h1 class="font-display text-3xl sm:text-4xl font-bold text-[var(--cc-ink)] break-words" [attr.title]="p.name">{{ p.name }}</h1>
                   <span class="command-status"
                         [class.amber]="p.status === 'In Planning'"
                         [class.green]="p.status === 'In Execution'"
@@ -83,7 +123,7 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
                     <span data-test="health-chip" class="command-status red">Health unavailable</span>
                   }
                 </div>
-                <p class="text-sm text-[var(--cc-muted)] font-mono bg-[var(--cc-panel-muted)] inline-block px-2.5 py-1 rounded-md">{{ p.id }}</p>
+                <p class="text-sm text-[var(--cc-muted)] font-mono bg-[var(--cc-panel-muted)] inline-block max-w-full px-2.5 py-1 rounded-md break-all">{{ p.id }}</p>
               </div>
 
               <!--
@@ -153,6 +193,7 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
       <div class="mt-6">
         @if (activeTab() === 'overview') {
           <div class="space-y-6">
+            <h2 class="sr-only">Project overview</h2>
             <!--
               READINESS FIRST, THEN PERMISSION, THEN THE FIGURES.
               The money grid used to sit outside every gate, with the
@@ -505,6 +546,7 @@ import { authGatedResource } from '../../services/auth-gated-resource.util';
           <app-change-requests [projectId]="project()?.id" [headingLevel]="2" />
         }
       </div>
+      }
     </div>
   `,
   styles: `
@@ -530,7 +572,18 @@ export class ProjectDetailsComponent {
   id = input.required<string>();
 
   private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
-  project = computed(() => this.projectsRes.value().find(p => p.id === this.id()) ?? null);
+  protected readonly projectLoading = computed(() =>
+    !this.auth.authReady() || this.projectsRes.isLoading(),
+  );
+  protected readonly projectReadFailed = computed(() => this.projectsRes.status() === 'error');
+  project = computed(() => this.projectReadFailed()
+    ? null
+    : this.projectsRes.value().find(p => p.id === this.id()) ?? null,
+  );
+
+  protected reloadProject(): void {
+    this.projectsRes.reload();
+  }
 
   // Data for the 360° financial rollup. Sensitive collections are loaded only
   // after authReady, and only for capabilities that can read them, so project

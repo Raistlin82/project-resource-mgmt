@@ -48,15 +48,35 @@ function stream<T>(value: T[] | Observable<T[]> | undefined, fallback: T[]): Obs
   return Array.isArray(value) ? of(value) : value;
 }
 
-/** The 6-month window the server fixes for /bench/monthly. */
-const BENCH_MONTHS = ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09'];
+/** 'YYYY-MM' `delta` months from `month`, normalising the year. */
+function shiftMonth(month: string, delta: number): string {
+  const [year, oneBasedMonth] = month.split('-').map(Number);
+  const date = new Date(Date.UTC(year, oneBasedMonth - 1 + delta, 1));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+const CURRENT_MONTH = localIsoDate(new Date()).slice(0, 7);
+/** The current-forward 6-month window Staffing explicitly requests. */
+const BENCH_MONTHS = Array.from({ length: 6 }, (_, index) => shiftMonth(CURRENT_MONTH, index));
+
+function monthLabel(month: string, length: 'short' | 'long'): string {
+  return new Intl.DateTimeFormat('en-US', {
+    month: length, year: length === 'short' ? '2-digit' : 'numeric', timeZone: 'UTC',
+  }).format(new Date(`${month}-01T00:00:00Z`));
+}
 
 /** Every month of the window in one state — enough to tell three cards apart. */
-function benchRow(resourceId: string, resourceName: string, state: 'BENCH' | 'PARTIAL' | 'ALLOCATED', kind: 'internal' | 'subco' = 'internal') {
+function benchRow(
+  resourceId: string,
+  resourceName: string,
+  state: 'BENCH' | 'PARTIAL' | 'ALLOCATED',
+  kind: 'internal' | 'subco' = 'internal',
+  months: readonly string[] = BENCH_MONTHS,
+) {
   return {
     resourceId, resourceName, kind,
-    availabilityDate: { kind: 'date' as const, date: '2026-04-01' },
-    monthly: Object.fromEntries(BENCH_MONTHS.map(m => [m, { state, upcomingUnallocated: false }])),
+    availabilityDate: { kind: 'date' as const, date: `${months[0]}-01` },
+    monthly: Object.fromEntries(months.map(m => [m, { state, upcomingUnallocated: false }])),
   };
 }
 
@@ -88,7 +108,10 @@ function setup(overrides: {
   const getSkillCatalogs = vi.fn(() => stream(overrides.skillCatalogs, SKILL_CATALOGS));
   const getProficiencySets = vi.fn(() => stream(overrides.proficiencySets, PROFICIENCY_SETS));
   // RPT "Disponibilità futura": the existing 6-month bench rollup.
-  const getBenchMonthly = vi.fn(() => overrides.bench$ ?? of(EMPTY_ROLLUP));
+  const getBenchMonthly = vi.fn((from?: string) => {
+    void from;
+    return overrides.bench$ ?? of(EMPTY_ROLLUP);
+  });
   const createAssignment = vi.fn(() => overrides.createAssignment$ ?? of({} as Assignment));
   const apiStub = {
     getRequests, getResources, getResourceOrganizations, createAssignment,
@@ -161,6 +184,25 @@ describe('StaffingComponent', () => {
     const host = fixture.nativeElement as HTMLElement;
     const names = [...host.querySelectorAll('[data-test="resource-name"]')].map(e => e.textContent?.trim());
     expect(names).toEqual(expect.arrayContaining(['Alice', 'Bob']));
+  });
+
+  it('lists only Open or Published requests with confirmed effort still to staff', async () => {
+    const requests: ResourceRequest[] = [
+      { id: 'published-gap', name: 'Published design gap', requiredRole: 'Designer', requiredEffort: 15, staffedEffort: 8, status: 'Published', skills: [] },
+      { id: 'open-gap', name: 'Open engineering gap', requiredRole: 'Developer', requiredEffort: 20, staffedEffort: 5, status: 'Open', skills: [] },
+      { id: 'published-full', name: 'Published but full', requiredRole: 'PM', requiredEffort: 10, staffedEffort: 10, status: 'Published', skills: [] },
+      { id: 'withdrawn-gap', name: 'Withdrawn gap', requiredRole: 'PM', requiredEffort: 30, staffedEffort: 0, status: 'Withdrawn', skills: [] },
+    ];
+    const { fixture } = setup({ requests });
+    await flush(fixture);
+
+    expect(fixture.componentInstance.openRequests().map(request => request.id))
+      .toStrictEqual(['published-gap', 'open-gap']);
+    const host = fixture.nativeElement as HTMLElement;
+    expect(host.textContent).toContain('Published design gap');
+    expect(host.textContent).toContain('Open engineering gap');
+    expect(host.textContent).not.toContain('Published but full');
+    expect(host.textContent).not.toContain('Withdrawn gap');
   });
 
   it('creates an empty assignment shell without sending derived assignedHours', async () => {
@@ -967,9 +1009,9 @@ describe('StaffingComponent', () => {
     });
   });
 
-  // RPT shows a 6-dot future-availability traffic light on every result card
-  // (§3.2.2). The identical 3-state, 6-month rollup already existed here — on
-  // /bench, not where the choice is made.
+  // RPT shows a current-forward future-availability traffic light on every
+  // result card (§3.2.2). Staffing explicitly requests the six-month rollup from
+  // the user's local month and defensively drops any historic prefix.
   describe('RPT future-availability strip', () => {
     const STRIP_RESOURCES: Resource[] = [
       { id: '1', name: 'Julie Armstrong', role: 'Developer', kind: 'internal', skills: [], projectRoles: [], externalExperience: [], utilization: 0, capacity: 40 },
@@ -998,6 +1040,31 @@ describe('StaffingComponent', () => {
       return [...strip.querySelectorAll('[data-test="availability-dot"]')].map(d => d.textContent?.trim() ?? '');
     }
 
+    it('requests the six-month rollup from the current local civil month', async () => {
+      const { fixture, getBenchMonthly } = setup({ resources: STRIP_RESOURCES, bench$: of(ROLLUP) });
+      await flush(fixture);
+
+      expect(getBenchMonthly).toHaveBeenCalledWith(CURRENT_MONTH);
+    });
+
+    it('uses the local month at a UTC/local boundary, never the UTC month', () => {
+      const previousTz = process.env['TZ'];
+      vi.useFakeTimers();
+      process.env['TZ'] = 'Pacific/Kiritimati';
+      // UTC is still September; locally this is 1 October in UTC+14.
+      vi.setSystemTime(new Date('2026-09-30T10:30:00.000Z'));
+      try {
+        const { fixture, getBenchMonthly } = setup();
+        fixture.detectChanges();
+        expect(getBenchMonthly).toHaveBeenCalledWith('2026-10');
+        fixture.destroy();
+      } finally {
+        vi.useRealTimers();
+        if (previousTz === undefined) delete process.env['TZ'];
+        else process.env['TZ'] = previousTz;
+      }
+    });
+
     it('gives each candidate card its OWN six months, and the three states differ', async () => {
       const { fixture } = setup({ resources: STRIP_RESOURCES, bench$: of(ROLLUP) });
       await flush(fixture);
@@ -1013,7 +1080,31 @@ describe('StaffingComponent', () => {
 
       const first = stripFor(host, 'Julie Armstrong')!
         .querySelector('[data-test="availability-dot"]')!;
-      expect(first.getAttribute('aria-label')).toBe('April 2026: Bench (free)');
+      expect(first.getAttribute('aria-label')).toBe(`${monthLabel(CURRENT_MONTH, 'long')}: Bench (free)`);
+    });
+
+    it('drops historic Open-period months if a stale API response still returns them', async () => {
+      const historicMonths = Array.from({ length: 6 }, (_, index) => shiftMonth(CURRENT_MONTH, index - 4));
+      const staleRollup: BenchRollup = {
+        months: historicMonths,
+        internalRows: [benchRow('1', 'Julie Armstrong', 'BENCH', 'internal', historicMonths)],
+        subcoRows: [],
+        hiringDemand: [],
+      };
+      const { fixture } = setup({ resources: STRIP_RESOURCES, bench$: of(staleRollup) });
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+
+      // Only current and next month survive; the label is derived from that same
+      // slice, so it cannot continue claiming the historic six-month window.
+      expect(glyphs(host, 'Julie Armstrong')).toStrictEqual(['B', 'B']);
+      const first = stripFor(host, 'Julie Armstrong')!.querySelector('[data-test="availability-dot"]')!;
+      expect(first.getAttribute('aria-label')).toBe(`${monthLabel(CURRENT_MONTH, 'long')}: Bench (free)`);
+      const legend = host.querySelector('[data-test="availability-legend"]')!;
+      expect(legend.textContent).toContain(
+        `${monthLabel(CURRENT_MONTH, 'short')} – ${monthLabel(shiftMonth(CURRENT_MONTH, 1), 'short')}`,
+      );
+      expect(legend.textContent).not.toContain(monthLabel(shiftMonth(CURRENT_MONTH, -4), 'short'));
     });
 
     it('shows a resource the rollup does not cover as NOT TRACKED, never as free', async () => {
@@ -1042,12 +1133,14 @@ describe('StaffingComponent', () => {
       expect(glyphs(host, 'Subco Dev')).toStrictEqual(['A', 'A', 'A', 'A', 'A', 'A']);
     });
 
-    it('states the legend once, for the window the SERVER chose', async () => {
+    it('states the legend once for the exact current-forward window shown', async () => {
       const { fixture } = setup({ resources: STRIP_RESOURCES, bench$: of(ROLLUP) });
       await flush(fixture);
       const host = fixture.nativeElement as HTMLElement;
       const legend = host.querySelector('[data-test="availability-legend"]')!;
-      expect(legend.textContent).toContain('Apr 26 – Sep 26');
+      expect(legend.textContent).toContain(
+        `${monthLabel(BENCH_MONTHS[0], 'short')} – ${monthLabel(BENCH_MONTHS[5], 'short')}`,
+      );
       expect(legend.textContent).toContain('bench');
       expect(legend.textContent).toContain('not tracked');
     });

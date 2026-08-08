@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { provideRouter } from '@angular/router';
+import { provideRouter, Router } from '@angular/router';
 import { PLATFORM_ID, provideZonelessChangeDetection } from '@angular/core';
 import { delay, of, throwError } from 'rxjs';
 import { HttpErrorResponse } from '@angular/common/http';
@@ -69,8 +69,7 @@ describe('SearchComponent', () => {
     return fixture;
   }
 
-  // --- Explicit-submit path (spec §6: Resources/Requests, and Enter always
-  // resolves every section immediately, including the live ones) ---
+  // Enter remains an immediate shortcut for the otherwise live-debounced search.
 
   it('a matching resource renders in the Resources section', async () => {
     const fixture = await setupAndSubmit();
@@ -110,8 +109,7 @@ describe('SearchComponent', () => {
     expect(host.querySelector('[data-test="section-resources"]')).toBeFalsy();
   });
 
-  // --- Live-debounce path (spec §6, Decision 4: Projects/Customers/Contracts/
-  // Orders auto-search 300ms after the last keystroke, WITHOUT Enter) ---
+  // Every accessible section follows the same live-debounce contract.
 
   describe('live-debounced sections (spec §6, Decision 4)', () => {
     beforeEach(() => vi.useFakeTimers());
@@ -137,22 +135,59 @@ describe('SearchComponent', () => {
       expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="section-projects"]')!.textContent).toContain('Project Alpha');
     });
 
-    it('typing into the box fires NOTHING in the Resources (explicit-submit) section until Enter, however long you wait', async () => {
+    it('typing into the box fires Resources after the same debounce as Projects', async () => {
       const getResources = vi.fn(() => of([{ id: '1', name: 'Julie Armstrong', role: 'Developer', kind: 'internal' }]));
       const fixture = await setup({ getResources });
 
       (fixture.componentInstance as unknown as { onInput(v: string): void }).onInput('Julie');
-      vi.advanceTimersByTime(10_000); // far beyond any debounce window
+      vi.advanceTimersByTime(299);
       await flush(fixture);
 
       expect(getResources).not.toHaveBeenCalled();
       expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="section-resources"]')).toBeFalsy();
 
-      // Confirm Enter is what actually releases it (rules out a broken test
-      // double that would trivially "pass" by never firing at all).
-      (fixture.componentInstance as unknown as { submitNow(): void }).submitNow();
+      vi.advanceTimersByTime(1);
       await flush(fixture);
       expect(getResources).toHaveBeenCalledWith({ q: 'Julie', limit: SEARCH_MAX_LIMIT });
+    });
+
+    it('gives the input a persistent accessible label and announces a complete result count', async () => {
+      const fixture = await setup();
+      const input = (fixture.nativeElement as HTMLElement).querySelector<HTMLInputElement>('#globalSearchQuery')!;
+      expect(input.labels?.[0]?.textContent).toContain('Search all accessible records');
+
+      (fixture.componentInstance as unknown as { onInput(v: string): void }).onInput('Julie');
+      vi.advanceTimersByTime(300);
+      await flush(fixture);
+
+      const summary = (fixture.nativeElement as HTMLElement).querySelector('[data-test="search-summary"]')!;
+      expect(summary.getAttribute('role')).toBe('status');
+      expect(summary.textContent).toContain('2 matches across 6 accessible sections');
+      expect(summary.textContent).toContain('Julie');
+    });
+
+    it('serializes the debounced query in the URL without adding a history entry per keystroke', async () => {
+      const fixture = await setup();
+      const router = TestBed.inject(Router);
+
+      (fixture.componentInstance as unknown as { onInput(v: string): void }).onInput('Project Alpha');
+      vi.advanceTimersByTime(300);
+      await flush(fixture, 8);
+
+      expect(router.url).toBe('/?q=Project%20Alpha');
+    });
+
+    it('restores a shared or back-forward query from the URL', async () => {
+      const getProjects = vi.fn(() => of([{ id: '1', name: 'Project Alpha', location: 'Berlin' }]));
+      const fixture = await setup({ getProjects });
+      const router = TestBed.inject(Router);
+
+      await router.navigateByUrl('/?q=Alpha');
+      await flush(fixture, 8);
+
+      const input = (fixture.nativeElement as HTMLElement).querySelector<HTMLInputElement>('#globalSearchQuery')!;
+      expect(input.value).toBe('Alpha');
+      expect(getProjects).toHaveBeenCalledWith({ q: 'Alpha', limit: SEARCH_MAX_LIMIT });
     });
 
     it('rapid keystrokes coalesce into ONE query, not one request per keystroke', async () => {

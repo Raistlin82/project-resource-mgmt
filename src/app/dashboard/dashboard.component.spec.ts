@@ -5,7 +5,7 @@ import { DeferBlockState, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { NEVER, of } from 'rxjs';
 import { DashboardComponent } from './dashboard.component';
-import { ABSENCE_REASON_CODES, ApiService, UserRole, type BenchCell, type BenchRollup, type Issue } from '../services/api.service';
+import { ABSENCE_REASON_CODES, ApiService, UserRole, type BenchCell, type BenchRollup, type Issue, type ResourceRequest } from '../services/api.service';
 import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
 import { todayLocalIso } from '../services/local-date.util';
 import { AuthService } from '../services/auth.service';
@@ -1019,6 +1019,39 @@ async function renderBoard(overrides: Partial<Record<(typeof DASHBOARD_METHODS)[
   await fixture.whenStable();
   return fixture;
 }
+
+describe('Dashboard — actionable staffing demand is shared with Staffing and Reporting', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('counts and queues Published residual demand, while excluding full or non-workable requests', async () => {
+    const requests: ResourceRequest[] = [
+      { id: 'published-gap', name: 'Published design gap', requiredRole: 'Designer', requiredEffort: 15, staffedEffort: 8, status: 'Published', skills: [] },
+      { id: 'open-gap', name: 'Open engineering gap', requiredRole: 'Developer', requiredEffort: 20, staffedEffort: 5, status: 'Open', skills: [] },
+      { id: 'published-full', name: 'Published but full', requiredRole: 'PM', requiredEffort: 10, staffedEffort: 10, status: 'Published', skills: [] },
+      { id: 'open-over', name: 'Open but overstaffed', requiredRole: 'PM', requiredEffort: 10, staffedEffort: 12, status: 'Open', skills: [] },
+      { id: 'draft-gap', name: 'Draft gap', requiredRole: 'PM', requiredEffort: 30, staffedEffort: 0, status: 'Not Published', skills: [] },
+    ];
+    const fixture = await renderBoard({ getRequests: vi.fn(() => of(requests)) });
+    const component = fixture.componentInstance;
+
+    expect(component.openRequests()).toBe(2);
+    expect(component.demandQueue().map(request => request.id)).toStrictEqual(['open-gap', 'published-gap']);
+
+    const host = fixture.nativeElement as HTMLElement;
+    const kpi = [...host.querySelectorAll<HTMLElement>('.command-card-muted')]
+      .find(card => card.querySelector('.command-kpi-label')?.textContent?.includes('Open Resource Requests'));
+    expect(kpi, 'the open-request KPI must render').toBeDefined();
+    expect(kpi!.textContent).toContain('2');
+
+    const demandHeading = [...host.querySelectorAll('h2')].find(h => h.textContent?.includes('Demand Queue'));
+    const queue = demandHeading?.closest('section');
+    expect(queue, 'the deferred demand queue must render').not.toBeNull();
+    expect(queue!.textContent).toContain('Published design gap');
+    expect(queue!.textContent).toContain('Open engineering gap');
+    expect(queue!.textContent).not.toContain('Published but full');
+    expect(queue!.textContent).not.toContain('Draft gap');
+  });
+});
 
 /** The control-board row whose first cell names `project`, with its margin-% cell. */
 function marginCellFor(fixture: { nativeElement: unknown }, project: string): HTMLElement {

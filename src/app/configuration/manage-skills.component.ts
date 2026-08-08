@@ -16,8 +16,9 @@ import { MultiSelectChipsComponent, type MultiSelectOption } from '../shared/mul
       <div class="command-card-header flex-wrap">
         <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Manage Skills</h2>
         <div class="flex flex-wrap gap-3">
-          <button (click)="triggerUpload()" class="command-button secondary">
-            <mat-icon class="text-[18px] w-[18px] h-[18px]">upload_file</mat-icon> Upload CSV
+          <button type="button" disabled aria-describedby="skillsImportStatus"
+                  class="command-button secondary disabled:cursor-not-allowed disabled:opacity-60">
+            <mat-icon class="text-[18px] w-[18px] h-[18px]">hourglass_top</mat-icon> CSV import coming soon
           </button>
           <button (click)="downloadCsv()" class="command-button secondary">
             <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> Download CSV
@@ -28,7 +29,9 @@ import { MultiSelectChipsComponent, type MultiSelectOption } from '../shared/mul
         </div>
       </div>
 
-      <input type="file" id="csvUpload" accept=".csv" class="hidden" aria-label="Upload skills CSV" (change)="onFileSelected($event)">
+      <p id="skillsImportStatus" class="border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)] px-5 py-3 text-sm text-[var(--cc-muted)]">
+        Download remains available. Import is disabled until preview, validation, and confirmation are implemented.
+      </p>
 
       @if (showForm()) {
         <div class="p-6 sm:p-8 border-b border-[var(--cc-line)] bg-[var(--cc-panel-muted)]">
@@ -290,20 +293,6 @@ export class ManageSkillsComponent {
       this.pendingDeleteId.set(null);
       this.dataRes.reload();
     });
-  }
-
-  triggerUpload() {
-    if (!isPlatformBrowser(this.platformId)) return;
-    document.getElementById('csvUpload')?.click();
-  }
-
-  onFileSelected(event: Event) {
-    const target = event.target as HTMLInputElement;
-    const file = target.files?.[0];
-    if (file) {
-      this.notificationService.show('CSV import is not available yet', 'info');
-      target.value = ''; // Reset
-    }
   }
 
   private escapeCsv(v: string): string {

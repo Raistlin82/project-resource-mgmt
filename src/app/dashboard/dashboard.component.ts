@@ -52,6 +52,7 @@ import {
 import { ListStateComponent } from '../shared/list-state.component';
 import { todayLocalIso, trailingMonths } from '../services/local-date.util';
 import { countsTowardDeliveryCapacity, kindOf } from '../services/resource-kind.util';
+import { isWorkableUncoveredRequest } from '../services/request-demand.util';
 import { DEFAULT_HOURS_PER_DAY } from '../services/sell-rate.util';
 
 interface DashboardData {
@@ -1057,7 +1058,9 @@ export class DashboardComponent {
   });
 
   activeProjects = computed(() => this.data().projects.filter(p => p.status !== 'Completed').length);
-  openRequests = computed(() => this.data().requests.filter(r => r.status === 'Open').length);
+  /** The same actionable-demand set Staffing lists and Reporting counts. */
+  private workableDemand = computed(() => this.data().requests.filter(isWorkableUncoveredRequest));
+  openRequests = computed(() => this.workableDemand().length);
   openChanges = computed(() => this.data().changeRequests.filter(c => c.status === 'Draft' || c.status === 'Submitted').length);
   criticalChanges = computed(() =>
     this.data().changeRequests.filter(c => (c.status === 'Draft' || c.status === 'Submitted') && (c.priority === 'High' || c.priority === 'Critical')).length,
@@ -1155,8 +1158,7 @@ export class DashboardComponent {
   );
 
   demandQueue = computed(() =>
-    this.data().requests
-      .filter(r => r.status === 'Open' && this.staffedPct(r) < 100)
+    [...this.workableDemand()]
       .sort((a, b) => this.staffedPct(a) - this.staffedPct(b))
       .slice(0, 6),
   );

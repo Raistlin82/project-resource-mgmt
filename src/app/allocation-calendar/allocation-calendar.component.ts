@@ -118,7 +118,16 @@ function daysByMonth(days: AssignmentDay[]): Record<string, Record<string, numbe
 
       <div class="p-6 sm:p-8 overflow-y-auto flex-1 space-y-8">
         @if (data.isLoading()) {
-          <div class="p-12 text-center text-sm text-[var(--cc-muted)]">Loading calendar…</div>
+          <div class="p-12 text-center text-sm text-[var(--cc-muted)]" role="status" aria-live="polite" aria-busy="true">Loading calendar…</div>
+        } @else if (data.status() === 'error') {
+          <div class="command-card border-critical! p-8 text-center" role="alert">
+            <mat-icon class="text-critical-text text-3xl">error_outline</mat-icon>
+            <h3 class="font-display text-lg font-bold text-[var(--cc-ink)] mt-3">Couldn't load allocation calendar</h3>
+            <p class="text-sm text-[var(--cc-muted)] mt-1">The assignment, planning periods, or holidays could not be retrieved. No empty calendar is being inferred.</p>
+            <button type="button" class="command-button mt-4" (click)="reloadCalendar()">
+              <mat-icon class="text-[18px] w-[18px] h-[18px]">refresh</mat-icon> Retry
+            </button>
+          </div>
         } @else if (months().length === 0) {
           <div class="p-12 text-center text-sm text-[var(--cc-muted)]">
             No months available: open a planning period or assign a date range to the assignment.
@@ -343,9 +352,20 @@ export class AllocationCalendarComponent {
     defaultValue: EMPTY_DATA,
   });
 
+  /**
+   * Resource.value() throws in an error state. Derived UI signals still run
+   * while the error panel is rendered, so they read this neutral envelope and
+   * never turn a failed request into either a template crash or fake data.
+   */
+  private calendarData = computed(() => this.data.status() === 'error' ? EMPTY_DATA : this.data.value());
+
+  protected reloadCalendar(): void {
+    this.data.reload();
+  }
+
   /** Effective daily contract cap from the envelope (guarded to a positive number). */
   protected contractHoursPerDay = computed(() => {
-    const cap = this.data.value().allocation.contractHoursPerDay;
+    const cap = this.calendarData().allocation.contractHoursPerDay;
     return typeof cap === 'number' && Number.isFinite(cap) && cap > 0 ? cap : DEFAULT_CAP;
   });
 
@@ -354,7 +374,7 @@ export class AllocationCalendarComponent {
    * fixture. Consumed only through `kindOf()` below (never compared to
    * directly), so an absent/unknown value safely resolves to 'internal'.
    */
-  protected resourceKind = computed(() => this.data.value().allocation.resourceKind);
+  protected resourceKind = computed(() => this.calendarData().allocation.resourceKind);
 
   /** Normalized kind (`kindOf` defaults an absent/unknown value to 'internal'). */
   protected kind = computed(() => kindOf({ kind: this.resourceKind() }));
@@ -389,8 +409,8 @@ export class AllocationCalendarComponent {
    */
   protected dailyCap = computed(() => dailyCapFor(this.kind(), this.contractHoursPerDay()));
 
-  private holidaysSet = computed(() => new Set(this.data.value().holidays.map(h => h.id)));
-  private holidayNames = computed(() => new Map(this.data.value().holidays.map(h => [h.id, h.name])));
+  private holidaysSet = computed(() => new Set(this.calendarData().holidays.map(h => h.id)));
+  private holidayNames = computed(() => new Map(this.calendarData().holidays.map(h => [h.id, h.name])));
 
   /**
    * Months to render: the assignment's spanned months (from its day rows) unioned
@@ -398,7 +418,7 @@ export class AllocationCalendarComponent {
    * they already carry days (spanned); open months always show so they can be filled.
    */
   protected months = computed(() => {
-    const d = this.data.value();
+    const d = this.calendarData();
     const set = new Set(d.allocation.days.map(x => monthOf(x.date)));
     for (const p of d.periods) if (p.status === 'Open') set.add(p.id);
     return Array.from(set).sort();
@@ -424,13 +444,13 @@ export class AllocationCalendarComponent {
    * in favour of the persisted rows.
    */
   protected edited = linkedSignal<AssignmentDay[], Record<string, Record<string, number>>>({
-    source: () => this.data.value().allocation.days,
+    source: () => this.calendarData().allocation.days,
     computation: daysByMonth,
   });
 
   /** Last server-confirmed hours, kept separate from the editable buffer. */
   private persisted = linkedSignal<AssignmentDay[], Record<string, Record<string, number>>>({
-    source: () => this.data.value().allocation.days,
+    source: () => this.calendarData().allocation.days,
     computation: daysByMonth,
   });
 
@@ -447,7 +467,7 @@ export class AllocationCalendarComponent {
    * is only ever rebuilt on a genuine full (re)load.
    */
   protected monthRows = linkedSignal<AssignmentMonth[], Record<string, AssignmentMonth>>({
-    source: () => this.data.value().allocation.months ?? [],
+    source: () => this.calendarData().allocation.months ?? [],
     computation: (months) => Object.fromEntries(months.map(m => [m.month, m])),
   });
 
@@ -467,7 +487,7 @@ export class AllocationCalendarComponent {
   ));
 
   protected isOpen(month: string): boolean {
-    return this.data.value().periods.find(p => p.id === month)?.status === 'Open';
+    return this.calendarData().periods.find(p => p.id === month)?.status === 'Open';
   }
 
   /** Lifecycle row of a month, when the assignment has one (created on first save). */

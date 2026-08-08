@@ -1,11 +1,11 @@
-import { ChangeDetectionStrategy, Component, DestroyRef, PLATFORM_ID, computed, effect, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, PLATFORM_ID, computed, effect, inject, signal, untracked } from '@angular/core';
 import { isPlatformBrowser } from '@angular/common';
-import { rxResource } from '@angular/core/rxjs-interop';
+import { rxResource, toSignal } from '@angular/core/rxjs-interop';
 import { HttpErrorResponse } from '@angular/common/http';
 import { catchError, forkJoin, map, of, type Observable } from 'rxjs';
 import { ApiService } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
-import { RouterLink } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { ListStateComponent } from '../shared/list-state.component';
 import { searchFocusLabel, searchTargetFor, type SearchTarget, type SearchSectionKey } from '../services/search-target.util';
 import { SEARCH_MAX_LIMIT } from '../services/search.util';
@@ -20,27 +20,11 @@ type SectionResult<T> =
 
 type SectionKey = 'resources' | 'requests' | 'projects' | 'customers' | 'contracts' | 'orders';
 
-/**
- * Design spec §6, Decision 4 (CLOSED — a deliberate product decision the human
- * owner made, not a wiring choice left to implementation): which of the six
- * sections wait for an explicit submit (Enter) versus live-search with a
- * debounce. This is the ONLY place that split is decided — every consumer
- * below reads through this map rather than re-testing entity names, so a
- * future section added here cannot silently pick up the wrong timing mode in
- * one spot while the rest of the code assumes another.
- *
- *  - 'submit' (Resources, Requests): the highest-cardinality collections in
- *    the app (hundreds of rows in production, not the seed's handful) — even
- *    a debounce still fires one request per typing pause, so these wait for
- *    an explicit Enter to keep server load predictable.
- *  - 'live' (Projects, Customers, Contracts, Orders): lower-cardinality
- *    collections — Customers/Contracts/Orders never had ANY filter before
- *    this block (spec §1) — where a per-pause request is an acceptable cost
- *    in exchange for a more fluid search experience.
- */
+/** Every accessible collection follows one visible interaction contract: a
+ * single 300ms debounce, with Enter available only as an immediate shortcut. */
 const SEARCH_TIMING: Record<SectionKey, 'submit' | 'live'> = {
-  resources: 'submit',
-  requests: 'submit',
+  resources: 'live',
+  requests: 'live',
   projects: 'live',
   customers: 'live',
   contracts: 'live',
@@ -140,14 +124,26 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
         </div>
       </header>
 
-      <input
-        class="command-input w-full"
-        type="text"
-        placeholder="Search by name..."
-        [value]="draftQuery()"
-        (input)="onInput($any($event.target).value)"
-        (keydown.enter)="submitNow()"
-      />
+      <label class="command-field" for="globalSearchQuery">
+        <span class="command-field-label">Search all accessible records</span>
+        <input
+          id="globalSearchQuery"
+          class="command-input w-full"
+          type="search"
+          autocomplete="off"
+          placeholder="Name, code, reference, or invoice number"
+          [value]="draftQuery()"
+          (input)="onInput($any($event.target).value)"
+          (keydown.enter)="submitNow()"
+          aria-describedby="globalSearchHelp searchResultSummary"
+        />
+        <span id="globalSearchHelp" class="command-field-hint">Results update automatically after a short pause. Press Enter to search immediately.</span>
+      </label>
+
+      <p id="searchResultSummary" data-test="search-summary" role="status" aria-live="polite" aria-atomic="true"
+         class="command-card-muted px-4 py-3 text-sm text-[var(--cc-muted)]">
+        {{ resultSummary() }}
+      </p>
 
       <!--
         Each section below binds its state ONCE via @if ... as state (a
@@ -167,8 +163,8 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
           @switch (state.kind) {
             @case ('forbidden') {}
             @default {
-              <section class="command-card" data-test="section-resources">
-                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Resources</h2>
+              <section class="command-card p-5 sm:p-6" data-test="section-resources">
+                <h2 class="mb-4 font-display text-xl font-bold text-[var(--cc-ink)]">Resources</h2>
                 <app-list-state [loading]="state.kind === 'loading'" [error]="state.kind === 'error'" label="resources" (retry)="reload()">
                   <ng-template>
                     @if (state.kind === 'ok') {
@@ -194,8 +190,8 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
           @switch (state.kind) {
             @case ('forbidden') {}
             @default {
-              <section class="command-card" data-test="section-projects">
-                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Projects</h2>
+              <section class="command-card p-5 sm:p-6" data-test="section-projects">
+                <h2 class="mb-4 font-display text-xl font-bold text-[var(--cc-ink)]">Projects</h2>
                 <app-list-state [loading]="state.kind === 'loading'" [error]="state.kind === 'error'" label="projects" (retry)="reload()">
                   <ng-template>
                     @if (state.kind === 'ok') {
@@ -221,8 +217,8 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
           @switch (state.kind) {
             @case ('forbidden') {}
             @default {
-              <section class="command-card" data-test="section-requests">
-                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Requests</h2>
+              <section class="command-card p-5 sm:p-6" data-test="section-requests">
+                <h2 class="mb-4 font-display text-xl font-bold text-[var(--cc-ink)]">Requests</h2>
                 <app-list-state [loading]="state.kind === 'loading'" [error]="state.kind === 'error'" label="requests" (retry)="reload()">
                   <ng-template>
                     @if (state.kind === 'ok') {
@@ -248,8 +244,8 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
           @switch (state.kind) {
             @case ('forbidden') {}
             @default {
-              <section class="command-card" data-test="section-customers">
-                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Customers</h2>
+              <section class="command-card p-5 sm:p-6" data-test="section-customers">
+                <h2 class="mb-4 font-display text-xl font-bold text-[var(--cc-ink)]">Customers</h2>
                 <app-list-state [loading]="state.kind === 'loading'" [error]="state.kind === 'error'" label="customers" (retry)="reload()">
                   <ng-template>
                     @if (state.kind === 'ok') {
@@ -275,8 +271,8 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
           @switch (state.kind) {
             @case ('forbidden') {}
             @default {
-              <section class="command-card" data-test="section-contracts">
-                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Contracts</h2>
+              <section class="command-card p-5 sm:p-6" data-test="section-contracts">
+                <h2 class="mb-4 font-display text-xl font-bold text-[var(--cc-ink)]">Contracts</h2>
                 <app-list-state [loading]="state.kind === 'loading'" [error]="state.kind === 'error'" label="contracts" (retry)="reload()">
                   <ng-template>
                     @if (state.kind === 'ok') {
@@ -302,8 +298,8 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
           @switch (state.kind) {
             @case ('forbidden') {}
             @default {
-              <section class="command-card" data-test="section-orders">
-                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Orders</h2>
+              <section class="command-card p-5 sm:p-6" data-test="section-orders">
+                <h2 class="mb-4 font-display text-xl font-bold text-[var(--cc-ink)]">Orders</h2>
                 <app-list-state [loading]="state.kind === 'loading'" [error]="state.kind === 'error'" label="orders" (retry)="reload()">
                   <ng-template>
                     @if (state.kind === 'ok') {
@@ -332,6 +328,8 @@ function sectionCall<T>(source: Observable<T[]>): Observable<SectionResult<T>> {
 export class SearchComponent {
   private api = inject(ApiService);
   protected auth = inject(AuthService);
+  private readonly route = inject(ActivatedRoute);
+  private readonly router = inject(Router);
 
   /**
    * Where this row navigates, or `null` to leave it inert text.
@@ -366,14 +364,9 @@ export class SearchComponent {
   private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
   private readonly destroyRef = inject(DestroyRef);
 
-  // Draft text (every keystroke) vs the two things that actually trigger a
-  // fetch, per spec §6, Decision 4: `submittedQuery` (Resources/Requests,
-  // explicit Enter only) and `liveQuery` (Projects/Customers/Contracts/
-  // Orders, a debounced mirror of the draft). `submitQuery` is the seam a
-  // real Enter keydown drives; exposed (not `protected`) so tests can invoke
-  // it directly without simulating a keydown event.
-  protected draftQuery = signal('');
-  protected submittedQuery = signal('');
+  private readonly initialQuery = this.route.snapshot.queryParamMap.get('q')?.trim() ?? '';
+  protected draftQuery = signal(this.initialQuery);
+  protected submittedQuery = signal(this.initialQuery);
   /**
    * Debounced mirror of `draftQuery` feeding the 'live' entities. Browser-only:
    * this project already has an established rule that a timer with no
@@ -385,11 +378,24 @@ export class SearchComponent {
    * harmless: the whole resource stays gated on `!authReady()` there anyway,
    * and `authReady()` never flips true during SSR (auth.service.ts).
    */
-  protected liveQuery = signal('');
+  protected liveQuery = signal(this.initialQuery);
+  private readonly routeQuery = toSignal(
+    this.route.queryParamMap.pipe(map(params => params.get('q')?.trim() ?? '')),
+    { initialValue: this.initialQuery },
+  );
   private liveDebounceHandle: ReturnType<typeof setTimeout> | undefined;
 
   constructor() {
     if (this.isBrowser) {
+      // Back/forward and shared URLs restore the visible input and all sections.
+      effect(() => {
+        const routeQuery = this.routeQuery();
+        if (routeQuery === untracked(() => this.draftQuery())) return;
+        this.draftQuery.set(routeQuery);
+        this.submittedQuery.set(routeQuery);
+        this.liveQuery.set(routeQuery);
+      });
+
       effect(() => {
         const value = this.draftQuery();
         if (this.liveDebounceHandle !== undefined) clearTimeout(this.liveDebounceHandle);
@@ -399,6 +405,19 @@ export class SearchComponent {
         // is needed (same reasoning as NotificationService.dismiss()'s own
         // setTimeout-deferred signal write).
         this.liveDebounceHandle = setTimeout(() => this.liveQuery.set(value), LIVE_SEARCH_DEBOUNCE_MS);
+      });
+
+      // Replace, rather than push, while typing so one search does not create a
+      // browser-history entry per pause. The latest query remains bookmarkable.
+      effect(() => {
+        const query = this.liveQuery().trim();
+        if (query === this.routeQuery()) return;
+        void this.router.navigate([], {
+          relativeTo: this.route,
+          queryParams: { q: query || null },
+          queryParamsHandling: 'merge',
+          replaceUrl: true,
+        });
       });
       this.destroyRef.onDestroy(() => {
         if (this.liveDebounceHandle !== undefined) clearTimeout(this.liveDebounceHandle);
@@ -420,9 +439,7 @@ export class SearchComponent {
     if (this.liveDebounceHandle !== undefined) { clearTimeout(this.liveDebounceHandle); this.liveDebounceHandle = undefined; }
   }
 
-  /** Which active query text a section's "No results for ..." message should
-   *  show — reads the SAME `SEARCH_TIMING` map `stream` below reads, so the
-   *  displayed term can never disagree with the term actually sent. */
+  /** The text shown in empty messages is the exact query sent on the wire. */
   protected displayQueryFor(key: SectionKey): string {
     return SEARCH_TIMING[key] === 'submit' ? this.submittedQuery() : this.liveQuery();
   }
@@ -562,7 +579,24 @@ export class SearchComponent {
   protected contractsState = computed(() => this.sectionState('contracts', this.results().contracts));
   protected ordersState = computed(() => this.sectionState('orders', this.results().orders));
 
-  protected hasActiveQuery = computed(() => !!this.submittedQuery().trim() || !!this.liveQuery().trim());
+  protected hasActiveQuery = computed(() => !!this.liveQuery().trim());
+
+  protected resultSummary = computed(() => {
+    const query = this.liveQuery().trim();
+    if (!query) return 'Start typing to search every collection available to your role.';
+    if (!this.auth.authReady() || this.searchRes.isLoading()) return `Searching all accessible records for “${query}”…`;
+
+    const states: SectionViewState<unknown>[] = [
+      this.resourcesState(), this.projectsState(), this.requestsState(),
+      this.customersState(), this.contractsState(), this.ordersState(),
+    ];
+    const resolved = states.filter((state): state is { kind: 'ok'; rows: unknown[] } => state.kind === 'ok');
+    const matches = resolved.reduce((sum, state) => sum + state.rows.length, 0);
+    const errors = states.filter(state => state.kind === 'error').length;
+    const matchLabel = `${matches} ${matches === 1 ? 'match' : 'matches'}`;
+    const sectionLabel = `${resolved.length} accessible ${resolved.length === 1 ? 'section' : 'sections'}`;
+    return `${matchLabel} across ${sectionLabel} for “${query}”${errors ? `; ${errors} ${errors === 1 ? 'section could' : 'sections could'} not be searched.` : '.'}`;
+  });
 
   /** Exposed to the template so the number in the hint and the number actually
    *  sent on the wire are the SAME constant — a hard-coded "100" in the copy

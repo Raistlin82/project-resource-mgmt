@@ -88,13 +88,21 @@ function makeApiStub(): AppApiStub {
   };
 }
 
-function makeAuthStub(initialRole: UserRole) {
+interface AuthStubOptions {
+  authenticated?: boolean;
+  authReady?: boolean;
+  hasResourceIdentity?: boolean;
+}
+
+function makeAuthStub(initialRole: UserRole, options: AuthStubOptions = {}) {
   const role = signal<UserRole>(initialRole);
   const inRoles = (roles: UserRole[]) => roles.includes(role());
+  const authenticated = signal(options.authenticated ?? true);
   return {
-    authReady: signal(true),
+    authReady: signal(options.authReady ?? true),
     role,
-    isAuthenticated: signal(true),
+    isAuthenticated: authenticated,
+    hasResourceIdentity: signal(options.hasResourceIdentity ?? authenticated()),
     displayName: signal('Test User'),
     canManageCommercial: computed(() => inRoles(['sales', 'finance', 'delivery-executive', 'admin'])),
     canApproveFinancials: computed(() => inRoles(['finance', 'delivery-executive', 'admin'])),
@@ -112,9 +120,9 @@ function makeAuthStub(initialRole: UserRole) {
   };
 }
 
-async function render(role: UserRole, routes: Routes = []) {
+async function render(role: UserRole, routes: Routes = [], authOptions: AuthStubOptions = {}) {
   const api = makeApiStub();
-  const auth = makeAuthStub(role);
+  const auth = makeAuthStub(role, authOptions);
   const notifications = { items: signal<AppNotification[]>([]), dismiss: vi.fn() };
   const theme = { theme: signal<'light' | 'dark'>('light'), toggle: vi.fn() };
 
@@ -132,7 +140,7 @@ async function render(role: UserRole, routes: Routes = []) {
   fixture.detectChanges();
   await fixture.whenStable();
   fixture.detectChanges();
-  return { fixture, app: fixture.componentInstance, api, notifications };
+  return { fixture, app: fixture.componentInstance, api, auth, notifications };
 }
 
 describe('App capability-aware shell', () => {
@@ -183,6 +191,35 @@ describe('App capability-aware shell', () => {
     expect(routes).not.toContain('/utilization');
     expect(routes).not.toContain('/reporting');
     expect(routes.some(route => route.startsWith('/config/'))).toBe(false);
+  });
+
+  it('shows an anonymous sign-in state instead of an inherited employee workspace', async () => {
+    // Capabilities intentionally remain employee-like in this stub: the shell's
+    // identity boundary, rather than a conveniently strict fake, must hide them.
+    const { fixture, app, api, auth } = await render('employee', [], { authenticated: false });
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(app.navGroups()).toEqual([]);
+    expect(host.querySelector('#primary-navigation')).toBeNull();
+    expect(host.querySelector('[data-testid="mobile-menu-toggle"]')).toBeNull();
+    expect(host.querySelector('router-outlet')).toBeNull();
+    expect(host.querySelector('[data-testid="anonymous-shell-state"]')).not.toBeNull();
+    expect(host.textContent).toContain('Sign in to Delivery Control');
+    expect(host.textContent).not.toContain('My Assignments');
+    expect(api.getProjectIssues).not.toHaveBeenCalled();
+    expect(api.getChangeRequests).not.toHaveBeenCalled();
+
+    (host.querySelector('[data-testid="sign-in-cta"]') as HTMLButtonElement).click();
+    expect(auth.login).toHaveBeenCalledOnce();
+  });
+
+  it('identifies an authenticated account whose resource profile is not linked', async () => {
+    const { fixture } = await render('employee', [], { hasResourceIdentity: false });
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(host.querySelector('#primary-navigation')).not.toBeNull();
+    expect(host.textContent).toContain('Resource profile not linked');
+    expect(host.querySelector('router-outlet')).not.toBeNull();
   });
 
   it('keeps toast notifications inside narrow viewports', async () => {

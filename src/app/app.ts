@@ -118,20 +118,33 @@ interface NavState {
             <div class="text-[11px] text-ink-muted">Portfolio command center</div>
           </div>
         </div>
-        <button
-          #mobileMenuButton
-          data-testid="mobile-menu-toggle"
-          type="button"
-          (click)="toggleMenu()"
-          class="grid size-10 place-items-center rounded-md border border-line text-ink-secondary hover:text-ink hover:bg-surface-muted transition-colors"
-          aria-label="Toggle navigation"
-          aria-controls="primary-navigation"
-          [attr.aria-expanded]="isMobileMenuOpen()">
-          <mat-icon>{{ isMobileMenuOpen() ? 'close' : 'menu' }}</mat-icon>
-        </button>
+        @if (authReady() && isAuthenticated()) {
+          <button
+            #mobileMenuButton
+            data-testid="mobile-menu-toggle"
+            type="button"
+            (click)="toggleMenu()"
+            class="grid size-10 place-items-center rounded-md border border-line text-ink-secondary hover:text-ink hover:bg-surface-muted transition-colors"
+            aria-label="Toggle navigation"
+            aria-controls="primary-navigation"
+            [attr.aria-expanded]="isMobileMenuOpen()">
+            <mat-icon>{{ isMobileMenuOpen() ? 'close' : 'menu' }}</mat-icon>
+          </button>
+        } @else if (authReady()) {
+          <button
+            data-testid="mobile-sign-in"
+            type="button"
+            (click)="signIn()"
+            class="inline-flex min-h-10 items-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-semibold text-white hover:bg-accent-strong">
+            <mat-icon class="text-[20px] w-[20px] h-[20px]">login</mat-icon>
+            Sign in
+          </button>
+        } @else {
+          <span class="text-xs text-ink-muted" role="status">Checking session…</span>
+        }
       </header>
 
-      @if (isMobileMenuOpen()) {
+      @if (isAuthenticated() && isMobileMenuOpen()) {
         <!-- Decorative scrim: tap-to-dismiss for pointer users only. It is
              aria-hidden and tabindex="-1" (programmatically focusable, never
              tab-reachable) — keyboard users close the drawer with Escape or its
@@ -160,6 +173,7 @@ interface NavState {
         sidebar, and a blanket attribute would strand desktop navigation
         entirely — the trap that left P1-23 open.
       -->
+      @if (isAuthenticated()) {
       <aside
         id="primary-navigation"
         aria-label="Primary navigation"
@@ -295,7 +309,9 @@ interface NavState {
               </span>
               <div class="min-w-0 flex-1">
                 <div class="truncate text-sm font-semibold text-ink">{{ displayName() }}</div>
-                <div class="truncate text-[11px] uppercase tracking-wide text-ink-muted">{{ role() }}</div>
+                <div class="truncate text-[11px] uppercase tracking-wide text-ink-muted">
+                  {{ hasResourceIdentity() ? (role() || 'No application role') : 'Resource profile not linked' }}
+                </div>
               </div>
               <button
                 type="button"
@@ -337,25 +353,52 @@ interface NavState {
           }
         </div>
       </aside>
+      }
 
-      <main id="main-content" tabindex="-1" [inert]="isMobileMenuOpen()" class="min-h-0 min-w-0 flex-1 overflow-y-auto outline-none lg:h-full">
-        <!-- Desktop top bar: hamburger to collapse/expand the left navigation. -->
-        <div class="hidden lg:flex items-center gap-3 sticky top-0 z-30 border-b border-line bg-canvas/85 backdrop-blur px-4 py-2">
-          <button
-            type="button"
-            (click)="toggleDesktopSidebar()"
-            class="grid size-9 place-items-center rounded-md border border-line text-ink-secondary hover:text-ink hover:bg-surface-muted transition-colors"
-            [attr.aria-label]="desktopSidebarOpen() ? 'Collapse navigation' : 'Expand navigation'"
-            [attr.aria-expanded]="desktopSidebarOpen()">
-            <mat-icon>{{ desktopSidebarOpen() ? 'menu_open' : 'menu' }}</mat-icon>
-          </button>
-          @if (!desktopSidebarOpen()) {
-            <span class="command-brand text-sm text-ink">Delivery Control</span>
-          }
-        </div>
-        <div class="command-page p-4 sm:p-6 lg:p-7">
-          <router-outlet></router-outlet>
-        </div>
+      <main id="main-content" tabindex="-1" [inert]="isAuthenticated() && isMobileMenuOpen()" class="min-h-0 min-w-0 flex-1 overflow-y-auto outline-none lg:h-full">
+        @if (!authReady()) {
+          <section class="mx-auto flex min-h-[70dvh] max-w-xl flex-col items-center justify-center px-6 text-center" aria-labelledby="sessionLoadingTitle">
+            <span class="grid size-14 place-items-center rounded-full border border-line bg-surface text-accent-text shadow-sm">
+              <mat-icon>hourglass_top</mat-icon>
+            </span>
+            <h1 id="sessionLoadingTitle" class="mt-5 font-display text-2xl font-bold text-ink">Checking your session</h1>
+            <p class="mt-2 text-sm text-ink-muted" role="status">Please wait while your sign-in status is restored.</p>
+          </section>
+        } @else if (!isAuthenticated()) {
+          <section data-testid="anonymous-shell-state" class="mx-auto flex min-h-[70dvh] max-w-xl flex-col items-center justify-center px-6 text-center" aria-labelledby="signInTitle">
+            <span class="grid size-14 place-items-center rounded-full border border-accent bg-accent-tint text-accent-text shadow-sm">
+              <mat-icon>lock</mat-icon>
+            </span>
+            <h1 id="signInTitle" class="mt-5 font-display text-3xl font-bold text-ink">Sign in to Delivery Control</h1>
+            <p class="mt-3 max-w-md text-ink-muted">Your projects, assignments and operational workspace are available after authentication.</p>
+            <button
+              data-testid="sign-in-cta"
+              type="button"
+              (click)="signIn()"
+              class="command-button mt-6">
+              <mat-icon class="text-[20px] w-[20px] h-[20px]">login</mat-icon>
+              Sign in
+            </button>
+          </section>
+        } @else {
+          <!-- Desktop top bar: hamburger to collapse/expand the left navigation. -->
+          <div class="hidden lg:flex items-center gap-3 sticky top-0 z-30 border-b border-line bg-canvas/85 backdrop-blur px-4 py-2">
+            <button
+              type="button"
+              (click)="toggleDesktopSidebar()"
+              class="grid size-9 place-items-center rounded-md border border-line text-ink-secondary hover:text-ink hover:bg-surface-muted transition-colors"
+              [attr.aria-label]="desktopSidebarOpen() ? 'Collapse navigation' : 'Expand navigation'"
+              [attr.aria-expanded]="desktopSidebarOpen()">
+              <mat-icon>{{ desktopSidebarOpen() ? 'menu_open' : 'menu' }}</mat-icon>
+            </button>
+            @if (!desktopSidebarOpen()) {
+              <span class="command-brand text-sm text-ink">Delivery Control</span>
+            }
+          </div>
+          <div class="command-page p-4 sm:p-6 lg:p-7">
+            <router-outlet></router-outlet>
+          </div>
+        }
       </main>
 
       <!--
@@ -479,7 +522,8 @@ export class App {
     // and the page must keep scrolling.
     if (this.isBrowser) {
       effect(() => {
-        document.documentElement.classList.toggle(DRAWER_OPEN_CLASS, this.isMobileMenuOpen());
+        const drawerOpen = this.isAuthenticated() && this.isMobileMenuOpen();
+        document.documentElement.classList.toggle(DRAWER_OPEN_CLASS, drawerOpen);
       });
       this.destroyRef.onDestroy(() => document.documentElement.classList.remove(DRAWER_OPEN_CLASS));
     }
@@ -576,6 +620,10 @@ export class App {
   // they would actually navigate. Finance-grade project/config pages expose
   // budget/cost data; approvals expose routed workflow items.
   readonly navGroups = computed<NavGroup[]>(() => {
+    // Identity is an independent boundary: a future capability regression must
+    // not repopulate employee/workspace navigation for an anonymous browser.
+    if (!this.auth.isAuthenticated()) return [];
+
     const canReadStaffing = this.auth.canReadStaffing();
     const canManageStaffing = this.auth.canManageStaffing();
     const canManageResources = this.auth.canManageResources();
@@ -677,7 +725,7 @@ export class App {
   // page components fixed). authReady false->true re-runs the stream.
   private navRes = rxResource<NavState, { ready: boolean; canReadStaffing: boolean }>({
     params: () => ({
-      ready: this.auth.authReady(),
+      ready: this.auth.authReady() && this.auth.isAuthenticated(),
       canReadStaffing: this.auth.canReadStaffing(),
     }),
     stream: ({ params }) =>
@@ -699,7 +747,9 @@ export class App {
   });
 
   // Auth state surfaced to the sidebar footer control.
+  readonly authReady = this.auth.authReady;
   readonly isAuthenticated = this.auth.isAuthenticated;
+  readonly hasResourceIdentity = this.auth.hasResourceIdentity;
   readonly displayName = this.auth.displayName;
   readonly role = this.auth.role;
   readonly canReadStaffing = this.auth.canReadStaffing;
@@ -841,6 +891,7 @@ export class App {
    * and a paint have actually revealed it.
    */
   focusNavSearch(): void {
+    if (!this.isAuthenticated()) return;
     if (this.isDesktopViewport()) {
       this.desktopSidebarOpen.set(true);
     } else {

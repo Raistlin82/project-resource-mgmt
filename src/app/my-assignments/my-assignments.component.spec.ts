@@ -64,6 +64,10 @@ function setup(overrides: {
   failing?: boolean;
   /** false reproduces the pre-OIDC-bootstrap window (and the SSR document). */
   authReady?: boolean;
+  /** Signed-in state is independent from bootstrap readiness. */
+  authenticated?: boolean;
+  /** Whether the OIDC principal maps to a resource profile. */
+  hasResourceIdentity?: boolean;
   /** Override the /self/profile row — `capacity` is the utilization divisor. */
   profile?: Resource;
 } = {}) {
@@ -82,8 +86,10 @@ function setup(overrides: {
   } as unknown as ApiService;
   const auth = {
     authReady: signal(overrides.authReady ?? true),
-    hasResourceIdentity: signal(true),
+    isAuthenticated: signal(overrides.authenticated ?? true),
+    hasResourceIdentity: signal(overrides.hasResourceIdentity ?? true),
     canSubmitOwnTime: signal(overrides.canSubmitOwnTime ?? true),
+    login: vi.fn(),
   } as unknown as AuthService;
   const notifications = {
     show: vi.fn(),
@@ -360,8 +366,8 @@ describe('MyAssignmentsComponent read-state boundary', () => {
 
     expect(pending.fixture.componentInstance['dataRes'].isLoading()).toBe(true);
     expect(kpiValues(pendingHost)).toEqual([]);
-    expect(pendingHost.textContent).not.toContain('Active Assignments');
-    expect(pendingHost.textContent).not.toContain('Total Assigned Hours');
+    expect(pendingHost.textContent).not.toContain('Assignments (selected week)');
+    expect(pendingHost.textContent).not.toContain('Estimated hours (selected week)');
     expect(skeleton(pendingHost)).not.toBeNull();
 
     TestBed.resetTestingModule();
@@ -372,7 +378,8 @@ describe('MyAssignmentsComponent read-state boundary', () => {
     await flush(resolved.fixture);
     const resolvedHost = resolved.fixture.nativeElement as HTMLElement;
 
-    expect(resolvedHost.textContent).toContain('Active Assignments');
+    expect(resolvedHost.textContent).toContain('Assignments (selected week)');
+    expect(resolvedHost.textContent).toContain('Estimated hours (selected week)');
     expect(skeleton(resolvedHost)).toBeNull();
     const values = kpiValues(resolvedHost);
     expect(values.length).toBe(3);
@@ -406,7 +413,7 @@ describe('MyAssignmentsComponent read-state boundary', () => {
     // A failed read is not "no bookings": no zeros, and no empty-state copy.
     expect(kpiValues(host)).toEqual([]);
     expect(host.textContent).not.toContain('No assignments found for this period.');
-    expect(host.textContent).not.toContain("You don't have any active assignments.");
+    expect(host.textContent).not.toContain("You don't have any assignments.");
   });
 
   it('does not claim the period is empty before authReady, and does say so once a resolved read is empty', async () => {
@@ -419,7 +426,7 @@ describe('MyAssignmentsComponent read-state boundary', () => {
     const earlyHost = early.fixture.nativeElement as HTMLElement;
 
     expect(earlyHost.textContent).not.toContain('No assignments found for this period.');
-    expect(earlyHost.textContent).not.toContain("You don't have any active assignments.");
+    expect(earlyHost.textContent).not.toContain("You don't have any assignments.");
     expect(kpiValues(earlyHost)).toEqual([]);
     expect(skeleton(earlyHost)).not.toBeNull();
 
@@ -433,7 +440,22 @@ describe('MyAssignmentsComponent read-state boundary', () => {
 
     expect(skeleton(emptyHost)).toBeNull();
     expect(emptyHost.textContent).toContain('No assignments found for this period.');
-    expect(emptyHost.textContent).toContain("You don't have any active assignments.");
+    expect(emptyHost.textContent).toContain("You don't have any assignments.");
+  });
+
+  it('shows an explicit account-not-linked state without zero KPIs or empty-data claims', async () => {
+    const { fixture, api } = setup({ hasResourceIdentity: false, authenticated: true });
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(host.querySelector('[data-test="account-not-linked"]')).not.toBeNull();
+    expect(host.textContent).toContain('Account not linked');
+    expect(host.textContent).toContain('not linked to a resource profile');
+    expect(kpiValues(host)).toEqual([]);
+    expect(host.textContent).not.toContain('No assignments found for this period.');
+    expect(host.textContent).not.toContain("You don't have any assignments.");
+    expect(api.getMyAssignments).not.toHaveBeenCalled();
+    expect(api.getMyProfile).not.toHaveBeenCalled();
   });
 });
 
@@ -607,10 +629,11 @@ describe('MyAssignmentsComponent utilization is scoped to the displayed period',
     await flush(fixture);
     const component = fixture.componentInstance;
 
-    // Positive control on the fixture itself: the booking exists and is counted
-    // as active, so a 0% here is about the PERIOD, not about missing data.
-    expect(component.activeAssignmentsCount()).toBe(1);
-    expect(component.totalAssignedHours()).toBe(40);
+    // The booking exists in the lifetime detail feed but is outside the selected
+    // window, so all three period-scoped KPIs must move together to zero.
+    expect(component.myAssignments()).toHaveLength(1);
+    expect(component.activeAssignmentsCount()).toBe(0);
+    expect(component.totalAssignedHours()).toBe(0);
 
     expect(component.periodAssignedHours()).toBe(0);
     expect(component.currentUtilization()).toBe(0);

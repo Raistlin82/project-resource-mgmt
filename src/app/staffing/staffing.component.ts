@@ -47,6 +47,7 @@ import {
   type CandidateFacetValues,
 } from '../services/candidate-filter.util';
 import { RESOURCE_KINDS, RESOURCE_KIND_LABELS, type ResourceKind } from '../services/resource-kind.util';
+import { isWorkableUncoveredRequest } from '../services/request-demand.util';
 import { ListStateComponent } from '../shared/list-state.component';
 import { ResourceKindBadgeComponent } from '../shared/resource-kind-badge.component';
 import { AvailabilityStripComponent, type AvailabilityReadState } from './availability-strip.component';
@@ -590,7 +591,7 @@ export class StaffingComponent {
   );
 
   openRequests = computed(() =>
-    this.pool().requests.filter(r => r.status === 'Open' || r.status === 'Published')
+    this.pool().requests.filter(isWorkableUncoveredRequest)
   );
   allResources = computed(() => this.pool().resources);
   selectedRequest = signal<ResourceRequest | null>(null);
@@ -876,9 +877,15 @@ export class StaffingComponent {
   // gated to exactly the roles that may read `/resources`, so no role can reach
   // this screen's candidate list and be refused its availability.
   // ---------------------------------------------------------------------------
+  /** Local civil month: using UTC here advances/retards the window around local
+   *  midnight at the month boundary. The API accepts this as its explicit start. */
+  private readonly currentAvailabilityMonth = todayLocalIso().slice(0, 7);
+
   private benchRes = rxResource<BenchRollup, boolean>({
     params: () => this.auth.authReady(),
-    stream: ({ params: ready }) => (ready ? this.api.getBenchMonthly() : of(EMPTY_BENCH)),
+    stream: ({ params: ready }) => (ready
+      ? this.api.getBenchMonthly(this.currentAvailabilityMonth)
+      : of(EMPTY_BENCH)),
     defaultValue: EMPTY_BENCH,
   });
 
@@ -903,8 +910,19 @@ export class StaffingComponent {
     return 'ready';
   });
 
-  /** The rollup's own months — server-fixed at six, never re-derived here. */
-  protected readonly availabilityMonths = computed<string[]>(() => this.benchRollup().months);
+  /**
+   * The current-forward slice of the rollup. Passing `from` above gives a current
+   * six-month window on the modern API; this filter is the defensive half for a
+   * stale cache/legacy response still anchored on an old Open planning period.
+   * The label and every per-resource strip consume this exact array, so they can
+   * never disagree about which months are being described.
+   */
+  protected readonly availabilityMonths = computed<string[]>(() =>
+    [...new Set(this.benchRollup().months)]
+      .filter(month => month >= this.currentAvailabilityMonth)
+      .sort()
+      .slice(0, 6),
+  );
 
   /** Rollup rows by resource id. Internal and subco rows are one lookup: which
    *  half a candidate came from is a /bench grouping, not a fact about their
@@ -925,7 +943,7 @@ export class StaffingComponent {
   }
 
   private static readonly MONTH_FMT = new Intl.DateTimeFormat('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' });
-  /** Window label for the legend, e.g. "Apr 26 – Sep 26". */
+  /** Window label for the exact current-forward months rendered in every strip. */
   protected readonly availabilityWindowLabel = computed(() => {
     const months = this.availabilityMonths();
     if (months.length === 0) return '';

@@ -11,6 +11,7 @@ import { NotificationService } from '../services/notification.service';
 import { toCsv, downloadCsv, downloadXlsx, XlsxSheet } from '../services/export.util';
 import { allocationSheets, planningSheet, RptOpts, RptPlanData } from '../services/rpt-xlsx.util';
 import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
+import { isWorkableUncoveredRequest } from '../services/request-demand.util';
 import { DEFAULT_HOURS_PER_DAY } from '../services/sell-rate.util';
 import { CommandBarChartComponent, CommandTrendChartComponent, CommandDonutChartComponent, BarSeries, TrendSeries } from '../shared/charts';
 import { ListStateComponent } from '../shared/list-state.component';
@@ -1407,7 +1408,7 @@ export class Reporting {
   );
 
   private openRequestsCount = computed(() =>
-    this.envelope().requests.filter(r => ['open', 'published'].includes((r.status ?? '').toLowerCase())).length
+    this.envelope().requests.filter(isWorkableUncoveredRequest).length
   );
 
   /**

@@ -5,7 +5,6 @@ import { of } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, Resource } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
-import { NotificationService } from '../services/notification.service';
 
 @Component({
   selector: 'app-maintain-availability-data',
@@ -16,22 +15,22 @@ import { NotificationService } from '../services/notification.service';
       <div class="command-card-header">
         <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Maintain Availability Data</h2>
         <div class="flex gap-3">
-          <button (click)="triggerUpload()" class="command-button">
-            <mat-icon class="text-[18px] w-[18px] h-[18px]">upload_file</mat-icon> Upload CSV
+          <button type="button" disabled aria-describedby="availabilityImportStatus"
+                  class="command-button secondary disabled:cursor-not-allowed disabled:opacity-60">
+            <mat-icon class="text-[18px] w-[18px] h-[18px]">hourglass_top</mat-icon> CSV import coming soon
           </button>
         </div>
       </div>
-
-      <input type="file" id="csvUploadAvail" accept=".csv" class="hidden" aria-label="Upload availability CSV" (change)="onFileSelected($event)">
 
       <div class="p-6 sm:p-8">
         <div class="bg-accent-tint border border-accent rounded-lg p-5 mb-8">
           <div class="flex items-start gap-3">
             <mat-icon class="text-accent-text mt-0.5">info</mat-icon>
             <p class="text-sm text-[var(--cc-muted)] font-medium leading-relaxed">
-              Maintain the workforce person availability data that is used in resource management. Download a template, edit it, and upload it back.
+              Maintain the workforce person availability data used in resource management. Templates can be downloaded now; CSV import is not available in this release.
             </p>
           </div>
+          <p id="availabilityImportStatus" class="mt-3 text-sm font-semibold text-accent-text">Import is visibly disabled so selecting a local file never ends in an unsupported flow.</p>
         </div>
 
         <div class="overflow-x-auto">
@@ -74,7 +73,6 @@ import { NotificationService } from '../services/notification.service';
 export class MaintainAvailabilityDataComponent {
   private api = inject(ApiService);
   private auth = inject(AuthService);
-  private notificationService = inject(NotificationService);
   private platformId = inject(PLATFORM_ID);
 
   private resourcesRes = rxResource<Resource[], boolean>({
@@ -83,20 +81,6 @@ export class MaintainAvailabilityDataComponent {
     defaultValue: [],
   });
   resources = computed(() => this.resourcesRes.value());
-
-  triggerUpload() {
-    if (!isPlatformBrowser(this.platformId)) return;
-    document.getElementById('csvUploadAvail')?.click();
-  }
-
-  onFileSelected(event: Event) {
-    const target = event.target as HTMLInputElement;
-    const file = target.files?.[0];
-    if (file) {
-      this.notificationService.show('Availability upload is not available yet', 'info');
-      target.value = '';
-    }
-  }
 
   private escapeCsv(value: string): string {
     let escaped = value;

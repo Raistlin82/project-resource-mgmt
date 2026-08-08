@@ -1,7 +1,7 @@
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { of, Subject, throwError } from 'rxjs';
+import { Observable, of, Subject, throwError } from 'rxjs';
 import { ContractDetails } from './contract-details';
 import {
   ApiService,
@@ -35,6 +35,76 @@ async function tick(fixture: { detectChanges: () => void }, microtasks = 5): Pro
   for (let i = 0; i < microtasks; i++) await Promise.resolve();
   fixture.detectChanges();
 }
+
+describe('ContractDetails — primary page state', () => {
+  function apiWithContracts(source: Observable<Contract[]>) {
+    return {
+      getContracts: () => source,
+      getCustomers: () => of([]),
+      getProjects: () => of([]),
+      getOrders: () => of([]),
+      getOrderLines: () => of([]),
+      getRequests: () => of([]),
+      getAssignments: () => of([]),
+      getResources: () => of([]),
+      getProjectFinancials: () => of([]),
+      getTimeEntries: () => of([]),
+      getBillingPlanItems: () => of([]),
+      getMilestones: () => of([]),
+      getFxRates: () => of([]),
+      getNegotiatedRates: () => of([]),
+      getHoursPerDay: () => of({ value: 8 }),
+      getProjectRoles: () => of([]),
+    } as unknown as ApiService;
+  }
+
+  async function render(api: ApiService): Promise<ComponentFixture<ContractDetails>> {
+    TestBed.configureTestingModule({
+      imports: [ContractDetails],
+      providers: [
+        provideRouter([]),
+        { provide: ApiService, useValue: api },
+        {
+          provide: AuthService,
+          useValue: { authReady: signal(true), canApproveFinancials: signal(true) } as unknown as AuthService,
+        },
+        { provide: NotificationService, useValue: { show: vi.fn() } },
+      ],
+    });
+    await TestBed.compileComponents();
+    const fixture = TestBed.createComponent(ContractDetails);
+    fixture.componentRef.setInput('id', 'missing-contract');
+    await tick(fixture);
+    return fixture;
+  }
+
+  it('keeps dependent content hidden while the contract read is pending', async () => {
+    const contracts$ = new Subject<Contract[]>();
+    const fixture = await render(apiWithContracts(contracts$));
+
+    expect(host(fixture).textContent).toContain('Loading contract details');
+    expect(host(fixture).textContent).not.toContain('Contract not found');
+    expect(host(fixture).textContent).not.toContain('Projects under this contract');
+  });
+
+  it('shows a definitive not-found state only after a successful empty lookup', async () => {
+    const fixture = await render(apiWithContracts(of<Contract[]>([])));
+
+    expect(host(fixture).textContent).toContain('Contract not found');
+    expect(host(fixture).textContent).toContain('No contract matches this identifier');
+    expect(host(fixture).textContent).not.toContain('still loading');
+    expect(host(fixture).textContent).not.toContain('Projects under this contract');
+  });
+
+  it('shows an error with Retry instead of converting a failed read into not-found', async () => {
+    const fixture = await render(apiWithContracts(throwError(() => new Error('network failure'))));
+
+    expect(host(fixture).textContent).toContain("Couldn't load contract");
+    expect(host(fixture).textContent).toContain('Retry');
+    expect(host(fixture).textContent).not.toContain('Contract not found');
+    expect(host(fixture).textContent).not.toContain('Projects under this contract');
+  });
+});
 
 describe('ContractDetails — recognition figure gating (Task 4, round 3)', () => {
   it('does not render Total Recognized while negotiatedRates is still pending, and renders the correct figure once every dependency has resolved', async () => {

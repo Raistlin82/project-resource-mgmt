@@ -11,6 +11,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { authGatedResource } from '../../services/auth-gated-resource.util';
 import { endNotBeforeStart } from '../../services/date-range.validator';
 import { SearchFilterBarComponent } from '../../shared/search-filter-bar.component';
+import { ListStateComponent } from '../../shared/list-state.component';
 
 /** Allowed location sentinel for fully-remote projects (mirrors the server + seed). */
 const REMOTE_LOCATION = 'Remote';
@@ -18,7 +19,7 @@ const REMOTE_LOCATION = 'Remote';
 @Component({
   selector: 'app-projects',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DatePipe, ReactiveFormsModule, FormsModule, RouterLink, ModalDialogDirective, SearchFilterBarComponent],
+  imports: [MatIconModule, DatePipe, ReactiveFormsModule, FormsModule, RouterLink, ModalDialogDirective, SearchFilterBarComponent, ListStateComponent],
   template: `
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -34,25 +35,61 @@ const REMOTE_LOCATION = 'Remote';
         }
       </div>
 
-      <!-- Search and Filter -->
-      <div class="command-card p-4 flex flex-col sm:flex-row gap-4">
-        <app-search-filter-bar
-          class="flex-1"
-          [query]="searchValue() ?? ''"
-          placeholder="Search projects by name, ID, or location..."
-          (queryChange)="searchControl.setValue($event)"
-          (clearAll)="searchControl.setValue('')"
-        />
-      </div>
+      <section aria-labelledby="projectListHeading">
+        <h2 id="projectListHeading" class="sr-only">Project list</h2>
+        <app-list-state
+          [loading]="projectsLoading()"
+          [error]="projectsReadFailed()"
+          skeleton="cards"
+          [rows]="6"
+          label="projects"
+          (retry)="reloadProjects()">
+          <ng-template>
+          @if (!projects().length) {
+            <div data-test="projects-source-empty" class="command-card p-10 sm:p-12 text-center border-2 border-dashed">
+              <div class="w-20 h-20 bg-[var(--cc-panel-muted)] ring-1 ring-line/5 rounded-full flex items-center justify-center mx-auto mb-4">
+                <mat-icon class="text-ink-muted text-4xl">folder_off</mat-icon>
+              </div>
+              <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-2">No projects available</h3>
+              @if (canManageProjects()) {
+                <p class="text-[var(--cc-muted)] mb-5">Create the first collaborative project to start planning delivery.</p>
+                <button type="button" (click)="openCreateForm()" class="command-button mx-auto">
+                  <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon> Create Project
+                </button>
+              } @else {
+                <p class="text-[var(--cc-muted)]">There are no projects available for your role yet.</p>
+              }
+            </div>
+          } @else {
+            <!-- Search only filters a successfully loaded source collection. -->
+            <div class="command-card p-4 flex flex-col sm:flex-row gap-4 mb-6">
+              <app-search-filter-bar
+                class="flex-1"
+                [query]="searchValue() ?? ''"
+                placeholder="Search projects by name, ID, or location..."
+                (queryChange)="searchControl.setValue($event)"
+                (clearAll)="clearFilters()"
+              />
+            </div>
 
-      <!-- Projects Grid -->
-      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-        @for (project of filteredProjects(); track project.id) {
-          <div class="command-card overflow-hidden group relative flex flex-col h-full">
-            <div class="p-6 sm:p-8 flex-1 flex flex-col">
-              <div class="flex justify-between items-start mb-4 gap-4">
-                <div class="flex-1 min-w-0">
-                  <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-1 truncate group-hover:text-accent-text transition-colors">
+            @if (!filteredProjects().length) {
+              <div data-test="projects-filtered-empty" class="command-card p-10 sm:p-12 text-center border-2 border-dashed">
+                <div class="w-20 h-20 bg-[var(--cc-panel-muted)] ring-1 ring-line/5 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <mat-icon class="text-ink-muted text-4xl">search_off</mat-icon>
+                </div>
+                <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-2">No projects match your filters</h3>
+                <p class="text-[var(--cc-muted)] mb-5">Try another name, ID, or location, or clear the current search.</p>
+                <button type="button" (click)="clearFilters()" class="command-button secondary mx-auto">Clear filters</button>
+              </div>
+            } @else {
+            <!-- Projects Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+              @for (project of filteredProjects(); track project.id) {
+                <article class="command-card overflow-hidden group relative flex flex-col h-full">
+                  <div class="p-6 sm:p-8 flex-1 flex flex-col">
+                    <div class="flex justify-between items-start mb-4 gap-4">
+                      <div class="flex-1 min-w-0">
+                        <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-1 break-words group-hover:text-accent-text transition-colors" [attr.title]="project.name">
                     <!--
                       LINK ONLY WHERE THE ROUTE WILL ACTUALLY OPEN. /projects/:id is
                       guarded by roleGuard(a => a.canReadStaffing()) (app.routes.ts:21),
@@ -64,15 +101,15 @@ const REMOTE_LOCATION = 'Remote';
                       anchor takes the stretched pseudo-element with it, so the card
                       stops advertising itself as clickable.
                     -->
-                    @if (canReadStaffing()) {
-                      <a [routerLink]="['/projects', project.id]" class="focus:outline-none before:absolute before:inset-0">{{ project.name }}</a>
-                    } @else {
-                      <span>{{ project.name }}</span>
-                    }
-                  </h3>
-                  <p class="text-xs text-accent-text font-mono bg-accent-tint ring-1 ring-accent inline-block px-2 py-0.5 rounded-md">{{ project.id }}</p>
-                </div>
-                <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-wide shrink-0 ring-1"
+                          @if (canReadStaffing()) {
+                            <a [routerLink]="['/projects', project.id]" class="focus:outline-none before:absolute before:inset-0">{{ project.name }}</a>
+                          } @else {
+                            <span>{{ project.name }}</span>
+                          }
+                        </h3>
+                        <p class="text-xs text-accent-text font-mono bg-accent-tint ring-1 ring-accent inline-block max-w-full px-2 py-0.5 rounded-md break-all">{{ project.id }}</p>
+                      </div>
+                      <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-wide shrink-0 ring-1"
                       [class.bg-accent-tint]="project.status === 'In Planning'"
                       [class.text-accent-text]="project.status === 'In Planning'"
                       [class.ring-accent]="project.status === 'In Planning'"
@@ -82,13 +119,13 @@ const REMOTE_LOCATION = 'Remote';
                       [class.bg-surface-muted]="project.status === 'Completed'"
                       [class.text-ink-secondary]="project.status === 'Completed'"
                       [class.ring-line]="project.status === 'Completed'">
-                  {{ project.status }}
-                </span>
-              </div>
+                        {{ project.status }}
+                      </span>
+                    </div>
 
-              <p class="text-sm text-[var(--cc-muted)] mb-6 line-clamp-3 flex-1">{{ project.description || 'No description provided.' }}</p>
+                    <p class="text-sm text-[var(--cc-muted)] mb-6 line-clamp-3 flex-1">{{ project.description || 'No description provided.' }}</p>
 
-              <div class="space-y-3 mt-auto pt-4 border-t border-[var(--cc-line)]">
+                    <div class="space-y-3 mt-auto pt-4 border-t border-[var(--cc-line)]">
                 <div class="flex items-center gap-3 text-sm text-[var(--cc-muted)] font-medium">
                   <div class="w-8 h-8 rounded-full bg-surface-muted flex items-center justify-center text-ink-muted group-hover:bg-accent-tint group-hover:text-accent-text transition-colors">
                     <mat-icon class="text-[18px] w-[18px] h-[18px]">location_on</mat-icon>
@@ -107,31 +144,33 @@ const REMOTE_LOCATION = 'Remote';
                   </div>
                   <span class="truncate">{{ contractName(project.contractId) }}</span>
                 </div>
-              </div>
-            </div>
+                    </div>
+                  </div>
 
-            @if (canManageProjects()) {
-              <div class="px-6 py-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-2 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 relative z-10">
-                <button (click)="editProject(project); $event.stopPropagation()" class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-colors" aria-label="Edit project">
-                  <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
-                </button>
-                <button (click)="deleteProject(project.id); $event.stopPropagation()" class="p-2 text-ink-muted hover:text-critical-text hover:bg-critical-tint rounded-lg transition-colors" aria-label="Delete project">
-                  <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
-                </button>
-              </div>
-            }
-          </div>
-        }
-        @if (!filteredProjects().length) {
-          <div class="col-span-full command-card p-12 text-center border-2 border-dashed">
-            <div class="w-20 h-20 bg-[var(--cc-panel-muted)] ring-1 ring-line/5 rounded-full flex items-center justify-center mx-auto mb-4">
-              <mat-icon class="text-ink-muted text-4xl">folder_off</mat-icon>
+                  @if (canManageProjects()) {
+                    <div class="px-6 py-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-2 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 relative z-10">
+                      <button type="button" (click)="editProject(project); $event.stopPropagation()"
+                              class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-colors"
+                              [attr.aria-label]="'Edit project ' + project.name + ' (' + project.id + ')'"
+                              [attr.title]="'Edit project ' + project.name + ' (' + project.id + ')'">
+                        <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
+                      </button>
+                      <button type="button" (click)="deleteProject(project.id); $event.stopPropagation()"
+                              class="p-2 text-ink-muted hover:text-critical-text hover:bg-critical-tint rounded-lg transition-colors"
+                              [attr.aria-label]="'Delete project ' + project.name + ' (' + project.id + ')'"
+                              [attr.title]="'Delete project ' + project.name + ' (' + project.id + ')'">
+                        <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
+                      </button>
+                    </div>
+                  }
+                </article>
+              }
             </div>
-            <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-2">No projects found</h3>
-            <p class="text-[var(--cc-muted)]">Get started by creating a new collaborative project.</p>
-          </div>
-        }
-      </div>
+            }
+          }
+          </ng-template>
+        </app-list-state>
+      </section>
     </div>
 
     <!-- Create/Edit Modal -->
@@ -283,7 +322,7 @@ const REMOTE_LOCATION = 'Remote';
     }
 
     <!-- Delete Confirmation Modal -->
-    @if (deletingId() && canManageProjects()) {
+    @if (deletingProject(); as projectToDelete) {
       <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
            appModal ariaLabelledby="projectDeleteTitle" (dismiss)="cancelDelete()">
         <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col transform transition-all">
@@ -291,12 +330,17 @@ const REMOTE_LOCATION = 'Remote';
             <div class="w-20 h-20 bg-critical-tint ring-1 ring-critical rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner">
               <mat-icon class="text-critical-text text-4xl">warning</mat-icon>
             </div>
-            <h3 id="projectDeleteTitle" class="font-display text-2xl font-bold text-[var(--cc-ink)] mb-2 tracking-tight">Delete Project</h3>
-            <p class="text-[var(--cc-muted)] text-sm">Are you sure you want to delete this project? This action cannot be undone.</p>
+            <h2 id="projectDeleteTitle" class="font-display text-2xl font-bold text-[var(--cc-ink)] mb-2 tracking-tight break-words">Delete {{ projectToDelete.name }}?</h2>
+            <p class="text-[var(--cc-muted)] text-sm break-words">
+              You are deleting <strong class="text-[var(--cc-ink)]">{{ projectToDelete.name }}</strong>
+              (<span class="font-mono break-all">{{ projectToDelete.id }}</span>). This action cannot be undone.
+            </p>
           </div>
           <div class="p-5 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
             <button (click)="cancelDelete()" class="command-button secondary">Cancel</button>
-            <button (click)="confirmDelete()" class="px-6 py-2.5 bg-critical text-white rounded-xl text-sm font-semibold hover:bg-critical-strong hover:shadow-lg hover:-translate-y-0.5 transition-all">Delete</button>
+            <button type="button" (click)="confirmDelete()"
+                    [attr.aria-label]="'Confirm delete project ' + projectToDelete.name + ' (' + projectToDelete.id + ')'"
+                    class="px-6 py-2.5 bg-critical text-white rounded-xl text-sm font-semibold hover:bg-critical-strong hover:shadow-lg hover:-translate-y-0.5 transition-all">Delete project</button>
           </div>
         </div>
       </div>
@@ -316,7 +360,11 @@ export class ProjectsComponent {
     stream: ({ params: canLoad }) => (canLoad ? this.api.getContracts() : of<Contract[]>([])),
     defaultValue: [] as Contract[],
   });
-  projects = this.projectsRes.value;
+  protected readonly projectsLoading = computed(() =>
+    !this.auth.authReady() || this.projectsRes.isLoading(),
+  );
+  protected readonly projectsReadFailed = computed(() => this.projectsRes.status() === 'error');
+  projects = computed(() => this.projectsReadFailed() ? [] : this.projectsRes.value());
   contracts = this.contractsRes.value;
   readonly canManageProjects = this.auth.canManageProjects;
   readonly canReadCommercial = this.auth.canReadCommercial;
@@ -325,6 +373,11 @@ export class ProjectsComponent {
   showForm = signal(false);
   editingId = signal<string | null>(null);
   deletingId = signal<string | null>(null);
+  protected readonly deletingProject = computed(() => {
+    if (!this.canManageProjects()) return null;
+    const id = this.deletingId();
+    return id ? this.projects().find(project => project.id === id) ?? null : null;
+  });
 
   // The project owner is a PERSON reference. ownerId is an ID field, so the SELECT
   // stores the resource id (label = resource name) bound to the resources (people)
@@ -410,7 +463,7 @@ export class ProjectsComponent {
   }
 
   filteredProjects = computed(() => {
-    const search = (this.searchValue() ?? '').toLowerCase();
+    const search = (this.searchValue() ?? '').trim().toLowerCase();
     return this.projects().filter(p => {
       if (!search) return true;
       return p.name.toLowerCase().includes(search) || 
@@ -418,6 +471,14 @@ export class ProjectsComponent {
              p.location.toLowerCase().includes(search);
     });
   });
+
+  protected clearFilters(): void {
+    this.searchControl.setValue('');
+  }
+
+  protected reloadProjects(): void {
+    this.projectsRes.reload();
+  }
 
   private contractsById = computed(() => new Map(this.contracts().map(c => [c.id, c.name])));
 

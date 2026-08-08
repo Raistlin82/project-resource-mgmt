@@ -2,7 +2,7 @@ import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { of, throwError } from 'rxjs';
 import { Reporting } from './reporting';
-import { ABSENCE_REASON_CODES, ApiService, BillingPlanItem, Contract, NegotiatedRate, Project, Resource, TimeEntry, type BenchCell, type BenchRollup } from '../services/api.service';
+import { ABSENCE_REASON_CODES, ApiService, BillingPlanItem, Contract, NegotiatedRate, Project, Resource, TimeEntry, type BenchCell, type BenchRollup, type ResourceRequest } from '../services/api.service';
 import { EMPTY_BENCH_ROLLUP } from '../services/bench.util';
 import { todayLocalIso } from '../services/local-date.util';
 import { AuthService } from '../services/auth.service';
@@ -97,6 +97,27 @@ function utilizationKpi(fixture: { componentInstance: Reporting }): string {
   expect(kpi, 'the Avg Resource Utilization tile must exist').toBeDefined();
   return kpi!.value;
 }
+
+function openRequestsKpi(fixture: { componentInstance: Reporting }): string {
+  const kpi = fixture.componentInstance.kpis().find(item => item.label === 'Open Resource Requests');
+  expect(kpi, 'the Open Resource Requests tile must exist').toBeDefined();
+  return kpi!.value;
+}
+
+describe('Reporting — actionable staffing demand uses the shared definition', () => {
+  it('counts residual Open and Published requests, not full or non-workable rows', async () => {
+    const requests: ResourceRequest[] = [
+      { id: 'published-gap', name: 'Published gap', requiredRole: 'Designer', requiredEffort: 15, staffedEffort: 8, status: 'Published', skills: [] },
+      { id: 'open-gap', name: 'Open gap', requiredRole: 'Developer', requiredEffort: 20, staffedEffort: 5, status: 'Open', skills: [] },
+      { id: 'published-full', name: 'Published full', requiredRole: 'PM', requiredEffort: 10, staffedEffort: 10, status: 'Published', skills: [] },
+      { id: 'withdrawn-gap', name: 'Withdrawn gap', requiredRole: 'PM', requiredEffort: 30, staffedEffort: 0, status: 'Withdrawn', skills: [] },
+    ];
+    const fixture = await setup([], { getRequests: () => of(requests) } as Partial<ApiService>);
+    await flush(fixture);
+
+    expect(openRequestsKpi(fixture)).toBe('2');
+  });
+});
 
 /**
  * The "Recognised Revenue Trend" card, located by its own heading rather than
