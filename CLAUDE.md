@@ -152,8 +152,13 @@ the in-memory adapter and the Postgres seeder, so they never drift. Money column
 
 Two additive columns on `projects` — `billable` (the SINGLE source of truth) and
 `type` (a LABEL, never read by the arithmetic) — split the portfolio into work that
-earns customer revenue and work that only consumes cost (a Lutech "BASKET": AMS duty,
-internal presidio, technical groups). Four rules are load-bearing:
+earns customer revenue and work that only consumes cost. A **BASKET** is the
+narrower of the two: a STANDING container with no deliverable and no end date
+(AMS duty roster, presidio, practice communities), as opposed to a non-billable
+**Delivery** project, which is a real initiative that simply has no external
+customer. Neither is an absence — that is a person not working at all.
+`docs/functional/project-delivery.md` carries the decision table and what each
+wrong choice silently breaks. Four rules are load-bearing:
 
 - **`billable`/`type` are NOT in `PROJECT_FIELDS`.** They move only through
   `PUT /projects/:id/classification` (delivery-executive/admin — `pm` is excluded

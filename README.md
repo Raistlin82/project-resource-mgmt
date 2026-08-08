@@ -25,7 +25,7 @@ Full documentation lives in [`docs/`](docs/README.md) — start there.
 | **Keycloak setup** (step-by-step) | [`docs/functional/keycloak-setup.md`](docs/functional/keycloak-setup.md) |
 | **Install & deploy (incl. Docker)** | [`docs/architecture/06-deployment-operations.md`](docs/architecture/06-deployment-operations.md) |
 | Glossary | [`docs/glossary.md`](docs/glossary.md) |
-| **Gap register** vs Lutech RPT (56 capabilities, graded) | [`docs/rpt-comparison.md`](docs/rpt-comparison.md) |
+| **Gap register** vs RPT (56 capabilities, graded) | [`docs/rpt-comparison.md`](docs/rpt-comparison.md) |
 | Current defect register (26 lenses, 140 findings) | [`docs/audits/2026-08-05-full-audit.md`](docs/audits/2026-08-05-full-audit.md) |
 
 ---
@@ -38,7 +38,7 @@ Full documentation lives in [`docs/`](docs/README.md) — start there.
 | **Bench & availability** | Who is unallocated, for how long (aging buckets), the 6-month availability outlook, hiring/subco demand, and the Unchargeable workbook |
 | **Absences** | Recorded periods when a person cannot be staffed. An absence is an HR fact: no customer, no allocation approval, no cost. Reasons are special-category data and never leave the register |
 | **Project delivery** | Projects, plans and work packages, tasks, issues, milestones, documents, partners, change control |
-| **Engagement classification** | Billable delivery vs **non-billable** work (a "BASKET": AMS duty, internal presidio) — carried in the cost base, excluded from customer profitability |
+| **Engagement classification** | Billable delivery vs **non-billable** work — including the **BASKET**, a standing container for AMS duty, presidio, practice communities and other work no customer ever pays for. Its cost is carried in the fully-loaded portfolio margin and excluded from customer profitability. [When to use one](docs/functional/project-delivery.md#classify-an-engagement-billable-delivery-vs-non-billable-basket) |
 | **Commercial chain** | Customers → contracts → orders → order lines, with negotiated sell rates |
 | **Billing & revenue** | Billing plans, invoice issuance, revenue recognition (POC and as-incurred), AR aging and DSO |
 | **Budget & baseline** | Financial plans, cost baselines frozen per period (PCP), baseline-vs-planned variance |

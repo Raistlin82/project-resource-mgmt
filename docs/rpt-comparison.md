@@ -1,4 +1,4 @@
-# Lutech RPT vs Delivery Control — comparativa side by side
+# RPT vs Delivery Control — comparativa side by side
 
 _Fonte lato RPT: **Manuale Utente Resource Planning Tool (RPT), v04 del 07/07/2026**, 49 pagine, letto integralmente._
 _Fonte lato nostro: **il codice su `main`**, verificato riga per riga il 2026-08-06, riverificato dopo la wave di chiusura il 2026-08-07 e riallineato ai conteggi il 2026-08-08 — **2479 test unitari** su 115 file (verdi anche a UTC+14 e UTC−8), 790 check smoke API (792 e un solo skip, che solo Postgres può esercitare). 46 tabelle, 20 migrazioni, 51 rotte. Non la roadmap, non la memoria di sessione (che su due punti si è rivelata già superata)._
@@ -72,7 +72,7 @@ Quindi la domanda "chi è meglio" ha **tre risposte diverse** a seconda di cosa 
 |---|---|---|---|
 | 25 | catalogo Dummy precaricato per practice / tariffa giornaliera / livello professionale | `kind: 'dummy'`, dummy seedati esattamente su quello schema | PARI |
 | 26 | wizard **Crea risorsa Dummy** (ruolo principale, data fine validità, tariffa giornaliera, nome, cognome, email, sede, capability, practice, competence, people manager) + codice automatico + riepilogo di conferma | creazione via `/resources` (admin / resource-manager); nessun wizard dedicato con quel set di campi | PARZIALE |
-| 27 | catalogo Subco precaricato; **per un nuovo fornitore bisogna scrivere a `rpt.wfm@lutech.it`** | `kind: 'subco'` + `vendor_id` → tabella `vendors` + schermata `config/vendors` in self-service | **AVANTI** |
+| 27 | catalogo Subco precaricato; **per un nuovo fornitore bisogna scrivere a un indirizzo interno di supporto** | `kind: 'subco'` + `vendor_id` → tabella `vendors` + schermata `config/vendors` in self-service | **AVANTI** |
 | 28 | wizard **Crea risorsa Subco** (seniority, data fine validità, tariffa, società, skill matrix max 3, job role max 3, …), solo per Monitoring / Delivery Excellence | via `/resources`; nessun wizard dedicato | PARZIALE |
 | 29 | **ServiceNow Requester Portal**: dal dummy si apre la demand di hiring/subco e si inserisce il **codice RES**; il codice del dummy viene riscritto includendo la RES (`RES0005555 - ZZ - Dummy - SAP - Associate PMO`) e il dummy passa da generico a specifico | assente | **MANCA** |
 | 30 | **sostituzione Dummy → risorsa reale** (§4.2.1): modale di approvazione, check sulla commessa, "Sostituisci", Ricerca Avanzata limitata alle risorse su cui si è abilitati, popup di conferma, commessa importata evidenziata, "Approva mese" chiude; le ore decurtate **restano sul dummy** per un'ulteriore risorsa; nota approvatore automatica | `substitution-write.util.ts`: `replaced_days` **e `replaced_baseline_days`** (ciò che la persona già aveva su quelle date, su quell'assignment, immediatamente prima del trasferimento) + `planGiveBack` con compensazione inversa e gestione del caso `demotedExistingWork` | **AVANTI** — senza la mappa di baseline il give-back distrugge silenziosamente ore già prenotate dalla persona su una data che ne porta entrambe. Il manuale non descrive nulla su questo caso |
@@ -148,7 +148,7 @@ RPT legge le commesse: tutta la catena che le genera e le monetizza è fuori dal
 | 65 | audit trail append-only con diff before/after, incluse le master data che muovono denaro (FX, rate card, ore/giorno) | — |
 | 66 | forecast rolling 8/12 settimane + **sandbox what-if** (win-deal / hire / slip-project) con delta affiancati | — |
 | 67 | schedule drag-and-drop con rilevamento conflitti di sovra-allocazione **a livello di data** (sweep-line) | — |
-| 68 | **16 schermate di master data in self-service** (skill, cataloghi, proficiency, ruoli progetto, centri di costo, org di servizio e di risorsa, sedi, industry, categorie di costo, ruoli partner, fornitori, rate card, disponibilità, integrazioni, lingua) | in RPT dummy e fornitori si aggiungono **scrivendo a `rpt.wfm@lutech.it`** |
+| 68 | **16 schermate di master data in self-service** (skill, cataloghi, proficiency, ruoli progetto, centri di costo, org di servizio e di risorsa, sedi, industry, categorie di costo, ruoli partner, fornitori, rate card, disponibilità, integrazioni, lingua) | in RPT dummy e fornitori si aggiungono **scrivendo a un indirizzo interno di supporto** |
 | 69 | rate card + **tariffe di vendita negoziate** per progetto/ruolo | — |
 | 70 | doppia persistenza (in-memory / Postgres+Drizzle) con parità garantita dagli stessi handler e migrazioni forward-only | SOLO DC — non è una feature utente: è la ragione per cui dev e prod si comportano identicamente |
 

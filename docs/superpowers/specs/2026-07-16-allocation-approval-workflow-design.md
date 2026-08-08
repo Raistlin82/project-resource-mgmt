@@ -2,7 +2,7 @@
 
 - **Data:** 2026-07-16
 - **Stato:** Design approvato (in attesa di spec review + review utente)
-- **Gap di riferimento:** «A — Workflow approvazione allocazione» della gap analysis RPT (Lutech Resource Planning Tool) vs Delivery Control.
+- **Gap di riferimento:** «A — Workflow approvazione allocazione» della gap analysis RPT (Resource Planning Tool) vs Delivery Control.
 
 ---
 

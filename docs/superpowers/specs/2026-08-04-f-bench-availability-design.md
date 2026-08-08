@@ -2,7 +2,7 @@
 
 - **Data:** 2026-08-04
 - **Stato:** Design approvato (in attesa di spec review + review utente)
-- **Origine:** allineamento al Lutech RPT — monitoraggio delle risorse non allocate o non fatturabili (bench), con anzianità A/B/C/D, segnale "si libera il mese prossimo" e domanda di hiring/subco futura.
+- **Origine:** allineamento a RPT — monitoraggio delle risorse non allocate o non fatturabili (bench), con anzianità A/B/C/D, segnale "si libera il mese prossimo" e domanda di hiring/subco futura.
 - **Riferimenti:** `docs/superpowers/specs/2026-08-01-b2-monthly-fte-capacity-design.md` (il rollup mensile che questo blocco riusa); `docs/superpowers/specs/2026-08-02-c1-dummy-subco-multi-fte-design.md` (lo split per kind e il difetto `2cb462b`); `docs/superpowers/specs/2026-08-04-negotiated-sell-rates-design.md` (blocco in corso su un altro branch, forma di riferimento per questo documento e superficie di collisione di merge, non di schema — vedi §9); `docs/roles-and-permissions.md` (i 7 ruoli e le regole RBAC citate al §8).
 
 Le quattro decisioni di prodotto che seguono sono chiuse: sono scritte come design, non come opzioni.

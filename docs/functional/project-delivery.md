@@ -120,7 +120,7 @@ flowchart TD
 **Purpose.** State whether a project **earns customer revenue** or only
 **consumes cost**. Delivery organisations run real work that no customer pays
 for directly — AMS duty rosters, internal presidio, technical practice groups,
-the platform team. Lutech's RPT calls that container a **BASKET**. Until an
+the platform team. RPT calls that container a **BASKET**. Until an
 engagement is classified, its cost is indistinguishable from billable delivery,
 and every margin, realization and customer-profitability figure in the portfolio
 quietly absorbs it.
@@ -131,6 +131,46 @@ quietly absorbs it.
   **Engagement Classification** screen.
 - *Out:* everything else about the project (the Create/Edit SOPs), and any change
   to how a project's OWN margin is computed — see the invariant below.
+
+**WHEN TO USE A BASKET — the decision, before the mechanics.**
+
+Four containers can hold work, and picking the wrong one is not a labelling
+mistake: each one sends the cost somewhere different. Ask the questions in this
+order and stop at the first yes.
+
+| Ask | If yes | Because |
+|-----|--------|---------|
+| 1. Is the person simply **not available** — leave, sickness, parental? | **Not a project at all.** Record an [absence](resource-management.md#record-an-absence-leave-sickness-parental). | An absence costs nothing and takes them off the bench. A basket would make them look *busy*, which is the opposite of the truth. |
+| 2. Is there a **contract or an order** behind the work, now or expected? | A **billable Delivery** project. | Its revenue and its cost both belong to the customer's profitability. |
+| 3. Is it a **project** — a start, an end, a deliverable — that simply has no external customer? | A **non-billable Delivery** project. | It is a real initiative to be tracked and finished. The platform team building this product is one; an internal migration is another. `billable: false`, `type: 'Delivery'`. |
+| 4. Otherwise: is it **standing, recurring work with no end date**, that absorbs many people's residual time? | A **BASKET**. | This is what a basket is for. |
+
+**A basket is a standing container, not a project.** The distinguishing marks,
+all of which normally hold at once:
+
+- **No deliverable and no end date.** It does not finish; it is turned off.
+- **No customer, now or ever.** Not "unbilled yet" — unbillable by nature.
+- **Many people, small slices.** It absorbs residual time across a practice
+  rather than being staffed as a team.
+- **The cost must stay visible**, attributed to a practice, and be excluded from
+  any question about customer profitability.
+
+Typical baskets: an **AMS duty roster**, **internal presidio**, a **technical or
+practice community**, a **pre-sales pool**, **training and certification** time.
+
+**What choosing wrong costs you.** This is the part worth reading twice, because
+every one of these is silent — nothing errors, the numbers simply lie:
+
+| Mistake | What breaks |
+|---------|-------------|
+| Real customer work marked **non-billable** | It leaves customer profitability entirely, so that customer's cost disappears from their margin while their revenue stays. The customer looks more profitable than they are, and the cost resurfaces as an unexplained lump in `nonBillableCost`. |
+| Basket work left **billable** | Its cost sits inside delivery margin with no revenue against it, dragging down the margin of engagements that did nothing wrong — and it enters customer profitability under the synthetic "unknown" customer, which then reads as a customer permanently in the red. |
+| A basket used where an **absence** belongs | The person is counted as working. Bench, availability and the Unchargeable report all overstate capacity, and their leave becomes invisible. |
+| A one-off internal project modelled as a **basket** | It never closes, because a basket has no end. Its cost accumulates forever under a practice instead of against the initiative that incurred it. |
+
+**A basket is still a real engagement.** It has an owner, it appears in the
+project list, people are booked onto it and their hours are logged normally. The
+only things it cannot do are carry a billing plan item and earn revenue.
 
 **Two fields, and only one of them is authoritative.**
 

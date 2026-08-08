@@ -4,7 +4,7 @@
  * WHY THIS EXISTS. A resource is identified internally by a UUID v4
  * (`newEntityId`), which is correct for a primary key and useless for a person:
  * nobody dictates a UUID over the phone, types one into a search box, or
- * recognises one on a printed plan. Lutech's RPT gives every resource a short
+ * recognises one on a printed plan. RPT gives every resource a short
  * code built from the name, and a planner uses it constantly. This module is
  * that convention, and ONLY that convention — the id is untouched, because it is
  * a foreign key in a dozen tables and changing it would be a migration of the

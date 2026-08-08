@@ -52,11 +52,15 @@ value still to be earned on signed commercial agreements.
 converted into (via FX rates) so multi-currency contracts can be compared and
 aggregated.
 
-**BASKET** — A **non-billable engagement**: real delivery work that no customer
-pays for directly — AMS duty rosters, internal presidio, technical practice
-groups. The term comes from Lutech's RPT. Its cost is real and stays visible on
-the engagement's own page; what changes is who consumes it. See *Engagement
-classification*.
+**BASKET** — A **standing container** for real work no customer pays for: an AMS
+duty roster, internal presidio, a technical or practice community, a pre-sales
+pool, training time. Its marks are no deliverable and no end date, no customer
+now or ever, and many people contributing small slices of residual time — which
+is what separates it from a *non-billable Delivery project* (a real initiative
+that simply has no external customer) and from an *absence* (the person is not
+working at all). Its cost is real and stays visible on its own page; what changes
+is who consumes it. **When to use one, and what choosing wrong costs:**
+[Classify an engagement](functional/project-delivery.md#classify-an-engagement-billable-delivery-vs-non-billable-basket).
 
 **Bearer token** — A JWT presented in the `Authorization: Bearer <token>` header;
 the backend verifies it against Keycloak before trusting the caller's identity.

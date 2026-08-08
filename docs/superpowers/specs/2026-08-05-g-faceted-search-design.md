@@ -2,7 +2,7 @@
 
 - **Data:** 2026-08-05
 - **Stato:** Design approvato (in attesa di spec review + review utente)
-- **Origine:** allineamento al Lutech RPT — dopo E (budget/PCP baseline) e F (bench/disponibilità), G è la ricerca a faccette: un'unica superficie che trova record fra tipi di entità diversi, con facce di filtro, invece dei filtri locali reinventati schermo per schermo.
+- **Origine:** allineamento a RPT — dopo E (budget/PCP baseline) e F (bench/disponibilità), G è la ricerca a faccette: un'unica superficie che trova record fra tipi di entità diversi, con facce di filtro, invece dei filtri locali reinventati schermo per schermo.
 - **Riferimenti:** `.superpowers/design-drafts/g-facts.md` (ricognizione a codice — ogni citazione file:line di questo documento è stata riverificata leggendo il file sul commit `f2b6edd`, non ereditata dal draft); `docs/roles-and-permissions.md` (RBAC, da aggiornare — §12); `docs/superpowers/specs/2026-08-04-f-bench-availability-design.md` (forma di riferimento per questo documento); `src/server/authz-policy.util.ts` (il primitivo di autorizzazione già esistente che questo blocco riusa, non re-implementa).
 
 Le quattro decisioni di prodotto che seguono sono chiuse: sono scritte come design, non come opzioni. La sezione "Domande aperte" del draft è stata risolta e non compare più in questo documento.

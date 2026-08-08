@@ -2,7 +2,7 @@
 
 - **Data:** 2026-08-02
 - **Stato:** Design approvato (in attesa di spec review + review utente)
-- **Gap di riferimento:** «C — Risorse DUMMY / SUBCO + Multi-FTE» della gap analysis RPT (Lutech Resource Planning Tool) vs Delivery Control. C è **decomposto in 2 fasi**; questa spec copre **C1**.
+- **Gap di riferimento:** «C — Risorse DUMMY / SUBCO + Multi-FTE» della gap analysis RPT (Resource Planning Tool) vs Delivery Control. C è **decomposto in 2 fasi**; questa spec copre **C1**.
 - **Fonte funzionale:** `Manuale utente RPT (ITA) v4.pdf`, §3.2.3 (Nuova Pianificazione risorsa DUMMY), §3.2.3.1 (elenco dummy a sistema), §3.2.5 (Nuova Pianificazione risorsa SUBCO), §4.1.2 (tipologia stati risorse), §4.2.2 (creazione dummy).
 
 ---
