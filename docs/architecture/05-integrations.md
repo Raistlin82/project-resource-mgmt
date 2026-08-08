@@ -56,7 +56,7 @@ instance process-wide is safe. An env var naming an **unknown** key falls back t
 the default with a `console.warn` rather than failing boot (there is exactly one
 implementation per kind today, so any other value is a misconfiguration).
 
-## The four adapters (reference)
+## The seven adapters (reference)
 
 ### ERP — `GenericLedgerExport`
 
@@ -130,6 +130,77 @@ for a deterministic artifact. Non-finite numbers and `undefined` normalize to
 `null` (valid JSON). The BI feed is consumed **inline** (preview/ingestion), not
 as a file download.
 
+### Upstream masters — `DeclaredSources` (kind `inbound`)
+
+The first adapter that points **inwards**, and the only one whose contract is a
+report rather than an artifact. RPT does not own its masters — resources and the
+company organisation come from Zucchetti, commesse from PCP and InforLN, skills
+from the People Portal and the Skill Matrix, hiring demand from ServiceNow — and
+we hold the same masters locally. That makes the useful question not "can we
+parse their file" but **what would this file DO to our data**.
+
+| Method | Answers |
+| --- | --- |
+| `sources()` | the declared landscape: every system, what it owns, which collection it lands in, and whether a normaliser exists for it |
+| `normalise()` | an upstream payload renamed onto our vocabulary |
+| `previewImport()` | per record: `create` / `update` / `unchanged` / `rejected`, with the field-level diff for an update and a reason for a rejection |
+
+**Nothing is written, and that is a property of the shape rather than a flag.**
+`previewImport` returns a report and there is no apply function to call by
+mistake; `InboundPreview.applied` is typed `false`, so an implementation that
+started writing could not quietly keep this type.
+
+**A source can be declared without being mappable.** Three are mapped today
+(Zucchetti → resources, PCP → projects, People Portal → skills); three are
+declared only, each for a stated reason — the Skill Matrix carries an assessment
+scale nobody has reconciled with `proficiencySets`, InforLN overlaps PCP on the
+same target and which wins per field is an untaken product decision, and
+ServiceNow's real seam is the demand adapter below. Inventing those mappings to
+make the list look complete is how wrong data arrives the day someone connects
+it.
+
+### Hiring demand — `ServiceNowRequesterPortal` (kind `demand`)
+
+A planner books a **dummy** — unfilled demand, the shape of a person nobody has
+hired. From it they raise a requisition, and when the portal answers with a
+**RES number** the placeholder stops being generic:
+
+```
+before   ZZ - Dummy - SAP - Associate PMO
+after    RES0005555 - ZZ - Dummy - SAP - Associate PMO
+```
+
+The plan does not move — same hours, same commessa — but the row now names a
+requisition somebody is accountable for, and two dummies for one practice and
+role stop being indistinguishable. The RES is **prefixed, never substituted**:
+the description is the half a human reads.
+
+Refusals worth knowing: a demand for a real person (they are already hired), a
+second demand for a seat that already has a requisition, and a **different** RES
+applied over an existing one — re-applying the same number is idempotent, but
+silently rewriting it would leave the row naming a requisition it was never
+raised under.
+
+`PUT /integrations/demand/:id/res-code` is **the only integration action that
+writes to a domain row**, and it therefore carries its own narrow RBAC rule
+(`resource-manager` / `delivery-executive` / `admin`) registered BEFORE the
+coarse `/integrations` rule — rewriting a person's identity code is a
+resource-management act, not a finance one. Order matters: after the coarse rule
+it would be dead code that still reads as a guard.
+
+### Notifications — `LocalMailOutbox` (kind `email`)
+
+Renders the message that would be emailed when a dummy, a subcontractor row or a
+non-billable engagement is created, and when an approval is waiting on somebody.
+No SMTP, no provider, no credentials, and **no `Sent` state** — `status` is typed
+`'Prepared'` with no other member.
+
+**Recipients are resolved by the caller, deliberately.** Turning "the responsible
+people" into addresses means reading the org tree, the approval steps and the
+role table: a server concern with real authorization in it. An adapter that did
+it would need repository access, would stop being pure, and would put an
+authorization decision inside a formatter.
+
 ### Supplier master data (e-invoice)
 
 `CedentePrestatore` (the issuer) is sourced from environment variables with demo
@@ -140,7 +211,12 @@ defaults: `INTEGRATION_SUPPLIER_NAME`, `_VAT`, `_ADDRESS`, `_CITY`, `_ZIP`,
 
 All routes are gated to **finance / delivery-executive / admin** — on both reads
 and writes — via the integration RBAC rules in `roleGate`
-(see [`04-security-identity.md`](./04-security-identity.md)). The list, ERP, and
+(see [`04-security-identity.md`](./04-security-identity.md)), with **one
+deliberate exception**: applying a RES requisition number takes the `/resources`
+audience instead, because it rewrites a person's identity code. Its narrow rule
+is registered BEFORE the coarse `/integrations` one, and the order is
+load-bearing — after it, the narrow rule would be dead code that still reads as a
+guard. The list, ERP, and
 FatturaPA artifacts are sent as **file downloads** (sanitized
 `Content-Disposition` filename); the BI feed and CRM outbox are returned inline.
 
@@ -152,6 +228,12 @@ FatturaPA artifacts are sent as **file downloads** (sanitized
 | `/integrations/crm/outbox` | GET | finance / delivery-executive / admin | The ephemeral prepared-outbox list (newest first) |
 | `/integrations/crm/outbox` | POST | finance / delivery-executive / admin | Build a `Prepared` CRM sync payload and push it to the outbox |
 | `/integrations/bi/feed` | GET | finance / delivery-executive / admin | Flat per-project financial feed (JSON, returned inline) |
+| `/integrations/inbound/sources` | GET | finance / delivery-executive / admin | The declared upstream landscape: six systems, what each owns, and whether it is mapped |
+| `/integrations/inbound/:system/preview` | POST | finance / delivery-executive / admin | What the payload WOULD change: per-record create / update / unchanged / rejected. **Writes nothing** — a POST because it carries a body, not because it mutates. `400` for a declared-but-unmapped system, never a `500` |
+| `/integrations/demand/:resourceId` | POST | finance / delivery-executive / admin | The requisition a demand portal would receive. `400` for a real person or a seat that already has one |
+| `/integrations/demand/:resourceId/res-code` | PUT | **resource-manager** / delivery-executive / admin | Applies the RES number and prefixes the code. **The only integration action that writes to a domain row**; taken under the same `resource-code` lock as resource creation |
+| `/integrations/email/outbox` | GET | finance / delivery-executive / admin | The prepared notification outbox |
+| `/integrations/email/outbox` | POST | finance / delivery-executive / admin | Render a notification. `400` with no recipient, or for an event with no template |
 
 **GL export window.** The handler derives the recognition window from the min/max
 months across time-entry and billing-item dates (`deriveJournalWindow`), so the

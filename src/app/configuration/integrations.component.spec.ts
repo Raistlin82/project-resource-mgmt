@@ -14,9 +14,22 @@ const INFO: IntegrationsInfo = {
     { kind: 'einvoice', key: 'fatturapa-fpr12', name: 'FatturaPA e-invoice', description: 'FPR12 XML.', connected: false, mode: 'local-artifact' },
     { kind: 'crm', key: 'crm-outbox', name: 'CRM Sync Outbox', description: 'Prepared payloads.', connected: false, mode: 'local-artifact' },
     { kind: 'bi', key: 'bi-flat-json', name: 'BI Feed', description: 'Flat JSON dataset.', connected: false, mode: 'local-artifact' },
+    { kind: 'inbound', key: 'declared-sources', name: 'DeclaredSources', description: 'Upstream masters; preview only.', connected: false, mode: 'local-artifact' },
+    { kind: 'demand', key: 'servicenow-requester-portal', name: 'ServiceNowRequesterPortal', description: 'Hiring requisitions.', connected: false, mode: 'local-artifact' },
+    { kind: 'email', key: 'local-mail-outbox', name: 'LocalMailOutbox', description: 'Notifications, never sent.', connected: false, mode: 'local-artifact' },
   ],
-  active: { erp: 'gl-csv', einvoice: 'fatturapa-fpr12', crm: 'crm-outbox', bi: 'bi-flat-json' },
+  active: {
+    erp: 'gl-csv', einvoice: 'fatturapa-fpr12', crm: 'crm-outbox', bi: 'bi-flat-json',
+    inbound: 'declared-sources', demand: 'servicenow-requester-portal', email: 'local-mail-outbox',
+  },
 };
+
+/** The declared upstream landscape: two mapped, one declared only. */
+const SOURCES = [
+  { key: 'zucchetti', name: 'Zucchetti', owns: 'Resource master data', target: 'resources' as const, mappable: true, connected: false as const },
+  { key: 'pcp', name: 'PCP', owns: 'Commessa master data', target: 'projects' as const, mappable: true, connected: false as const },
+  { key: 'skill-matrix', name: 'Skill Matrix', owns: 'Assessed skills', target: 'skills' as const, mappable: false, connected: false as const },
+];
 
 /** One exportable customer invoice, so the e-invoice <select> has a real option. */
 const ORDERS = [
@@ -33,15 +46,18 @@ function setup(overrides: {
   getIntegrations?: ReturnType<typeof vi.fn>;
   getOrders?: ReturnType<typeof vi.fn>;
   getCrmOutbox?: ReturnType<typeof vi.fn>;
+  getInboundSources?: ReturnType<typeof vi.fn>;
 } = {}) {
   const ready = overrides.ready ?? true;
   const getIntegrations = overrides.getIntegrations ?? vi.fn(() => of(INFO));
   const getOrders = overrides.getOrders ?? vi.fn(() => of(ORDERS));
   const getCrmOutbox = overrides.getCrmOutbox ?? vi.fn(() => of(OUTBOX));
+  const getInboundSources = overrides.getInboundSources ?? vi.fn(() => of({ sources: SOURCES }));
   const apiStub = {
     getIntegrations,
     getOrders,
     getCrmOutbox,
+    getInboundSources,
     prepareCrmSync: vi.fn(() => of(OUTBOX[0])),
     getBiFeedPreview: vi.fn(() => of({ generatedAt: '2026-08-01T10:00:00.000Z', rowCount: 0, rows: [] })),
     erpJournalExportUrl: vi.fn((f: string) => `/api/integrations/erp/journal.${f}`),
@@ -268,5 +284,71 @@ describe('IntegrationsComponent — a failed read reaches an error panel and its
     expect(host.querySelector('[role="status"][aria-busy="true"]')).toBeNull();
     expect(host.textContent).toContain(EMPTY_OUTBOX_COPY);
     expect(host.textContent).toContain('Active adapter:');
+  });
+});
+
+// -----------------------------------------------------------------------------
+// The declared-but-not-connected seams (RPT rows 29, 43, 56).
+//
+// These three have no action to offer, and the surface must not pretend
+// otherwise: the four cards above each DO something, these describe what WOULD
+// happen. What is worth asserting is that the honesty survives rendering — the
+// "declared only" state is shown as such rather than quietly dropped, which is
+// the one thing that would make the landscape look more complete than it is.
+// -----------------------------------------------------------------------------
+describe('IntegrationsComponent — declared, not connected', () => {
+  const host = (fixture: { nativeElement: unknown }) => fixture.nativeElement as HTMLElement;
+
+  it('renders the section, marked Not connected', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    const section = host(fixture).querySelector('[data-test="declared-seams"]');
+    expect(section).not.toBeNull();
+    expect(section!.textContent).toContain('Not connected');
+  });
+
+  it('lists every declared upstream source', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    const rows = host(fixture).querySelectorAll('[data-test="inbound-sources"] tbody tr');
+    expect(rows.length).toBe(SOURCES.length);
+    expect(host(fixture).querySelector('[data-test="inbound-sources"]')!.textContent).toContain('Zucchetti');
+  });
+
+  it('shows a MAPPED source and a DECLARED-ONLY source differently', async () => {
+    // The assertion the honesty rests on. A table that rendered every row the
+    // same would look like a fully mapped landscape, which is the impression
+    // the `mappable` flag exists to prevent.
+    const { fixture } = setup();
+    await flush(fixture);
+    const table = host(fixture).querySelector('[data-test="inbound-sources"]')!;
+    expect(table.querySelectorAll('[data-test="declared-only"]').length).toBe(1);
+    expect(table.textContent).toContain('Mapped');
+  });
+
+  it('puts the MAPPED sources first, so the usable ones are read first', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    const names = Array.from(host(fixture).querySelectorAll('[data-test="inbound-sources"] tbody tr td:first-child'))
+      .map(td => td.textContent?.trim());
+    expect(names).toStrictEqual(['PCP', 'Zucchetti', 'Skill Matrix']);
+  });
+
+  it('names the active adapter for the demand and email seams', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    const section = host(fixture).querySelector('[data-test="declared-seams"]')!;
+    expect(section.textContent).toContain('servicenow-requester-portal');
+    expect(section.textContent).toContain('local-mail-outbox');
+  });
+
+  it('renders NO source table when the landscape comes back empty', async () => {
+    // The pair: an always-rendered table would show an empty header strip on a
+    // failed or empty read, which reads as "there are no upstream systems".
+    const { fixture } = setup({ getInboundSources: vi.fn(() => of({ sources: [] })) });
+    await flush(fixture);
+    expect(host(fixture).querySelector('[data-test="inbound-sources"]')).toBeNull();
+    // The section itself still renders — the other two seams are unaffected.
+    expect(host(fixture).querySelector('[data-test="declared-seams"]')).not.toBeNull();
   });
 });

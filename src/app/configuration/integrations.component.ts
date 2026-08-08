@@ -3,7 +3,7 @@ import { DatePipe, DecimalPipe, isPlatformBrowser } from '@angular/common';
 import { HttpClient, HttpErrorResponse, HttpResponse } from '@angular/common/http';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
-import { forkJoin, of } from 'rxjs';
+import { forkJoin, map, of } from 'rxjs';
 import {
   ApiService,
   BiFeedCell,
@@ -11,6 +11,7 @@ import {
   CrmOutboxEntry,
   IntegrationDescriptor,
   IntegrationKind,
+  InboundSourceDescriptor,
   IntegrationsInfo,
   Order,
 } from '../services/api.service';
@@ -20,6 +21,8 @@ import { ListStateComponent } from '../shared/list-state.component';
 
 interface IntegrationsPageData {
   info: IntegrationsInfo | null;
+  /** The declared upstream landscape (row 56); empty when the read failed. */
+  sources: InboundSourceDescriptor[];
   orders: Order[];
 }
 
@@ -271,6 +274,98 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
             }
           </div>
         </section>
+
+        <!--
+          The three seams that have no action to offer, and should not pretend
+          otherwise. The four cards above each DO something (download a journal,
+          build an invoice, prepare a payload). These three exist so the mapping
+          and the rules are specified and reviewable BEFORE anyone connects a
+          transport — so the honest surface is a description of what would
+          happen, not a button that quietly does nothing.
+        -->
+        <section class="command-card overflow-hidden xl:col-span-2" data-test="declared-seams">
+          <div class="command-card-header">
+            <div class="flex items-start gap-3">
+              <mat-icon class="text-[24px] text-[var(--cc-primary)]">hub</mat-icon>
+              <div>
+                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Declared, not connected</h2>
+                <p class="mt-1 text-sm text-[var(--cc-muted)]">
+                  Systems we exchange data with on paper but not yet in code. The mapping and the rules
+                  are built and tested; only the transport is missing. Nothing here reads from or writes
+                  to an external system, and the inbound preview writes nothing at all.
+                </p>
+              </div>
+            </div>
+            <span class="command-status amber shrink-0">Not connected</span>
+          </div>
+
+          <div class="p-4 space-y-5">
+            <div>
+              <h3 class="font-display text-base font-bold text-[var(--cc-ink)]">
+                {{ inboundDescriptor()?.name ?? 'Upstream master data' }}
+              </h3>
+              <p class="mt-1 text-xs text-[var(--cc-muted)]">
+                Where our master data would come from. A payload can be dry-run against what we hold:
+                the answer is a per-record create / update / unchanged / rejected report, and nothing
+                is applied.
+              </p>
+              @if (inboundSources().length > 0) {
+                <div class="mt-3 overflow-x-auto">
+                  <table class="command-data-table" data-test="inbound-sources">
+                    <thead>
+                      <tr><th>System</th><th>Owns</th><th>Lands in</th><th>Mapping</th></tr>
+                    </thead>
+                    <tbody>
+                      @for (source of inboundSources(); track source.key) {
+                        <tr>
+                          <td class="font-bold">{{ source.name }}</td>
+                          <td class="text-[var(--cc-muted)]">{{ source.owns }}</td>
+                          <td class="font-mono text-xs">{{ source.target }}</td>
+                          <td>
+                            @if (source.mappable) {
+                              <span class="command-status green">Mapped</span>
+                            } @else {
+                              <!-- Declared without a normaliser is a REAL state, not a
+                                   gap to hide: inventing a mapping is how wrong data
+                                   arrives on the day somebody connects it. -->
+                              <span class="command-status" data-test="declared-only">Declared only</span>
+                            }
+                          </td>
+                        </tr>
+                      }
+                    </tbody>
+                  </table>
+                </div>
+              }
+            </div>
+
+            <div class="border-t border-[var(--cc-line)] pt-4">
+              <h3 class="font-display text-base font-bold text-[var(--cc-ink)]">
+                {{ demandDescriptor()?.name ?? 'Hiring demand' }}
+              </h3>
+              <p class="mt-1 text-xs text-[var(--cc-muted)]">
+                {{ demandDescriptor()?.description ??
+                   'Builds the requisition a demand portal would receive for a placeholder.' }}
+              </p>
+              <p class="mt-1 text-xs text-[var(--cc-muted)]">
+                Active adapter: <span class="font-mono">{{ activeKey('demand') }}</span>
+              </p>
+            </div>
+
+            <div class="border-t border-[var(--cc-line)] pt-4">
+              <h3 class="font-display text-base font-bold text-[var(--cc-ink)]">
+                {{ emailDescriptor()?.name ?? 'Notification outbox' }}
+              </h3>
+              <p class="mt-1 text-xs text-[var(--cc-muted)]">
+                {{ emailDescriptor()?.description ??
+                   'Renders the notification that would be emailed. No SMTP, no provider, no Sent state.' }}
+              </p>
+              <p class="mt-1 text-xs text-[var(--cc-muted)]">
+                Active adapter: <span class="font-mono">{{ activeKey('email') }}</span>
+              </p>
+            </div>
+          </div>
+        </section>
       </div>
         </ng-template>
       </app-list-state>
@@ -285,7 +380,7 @@ export class IntegrationsComponent {
   private destroyRef = inject(DestroyRef);
   private platformId = inject(PLATFORM_ID);
 
-  private static readonly EMPTY_DATA: IntegrationsPageData = { info: null, orders: [] };
+  private static readonly EMPTY_DATA: IntegrationsPageData = { info: null, orders: [], sources: [] };
 
   // Both reads are principal-gated server-side; key the load on auth readiness
   // so requests fire only once the bearer token can be attached (mirrors the
@@ -294,7 +389,11 @@ export class IntegrationsComponent {
     params: () => this.auth.authReady(),
     stream: ({ params: ready }) =>
       ready
-        ? forkJoin({ info: this.api.getIntegrations(), orders: this.api.getOrders() })
+        ? forkJoin({
+            info: this.api.getIntegrations(),
+            orders: this.api.getOrders(),
+            sources: this.api.getInboundSources().pipe(map(r => r.sources)),
+          })
         : of(IntegrationsComponent.EMPTY_DATA),
     defaultValue: IntegrationsComponent.EMPTY_DATA,
   });
@@ -402,6 +501,15 @@ export class IntegrationsComponent {
   readonly einvoiceDescriptor = computed(() => this.descriptorFor('einvoice'));
   readonly crmDescriptor = computed(() => this.descriptorFor('crm'));
   readonly biDescriptor = computed(() => this.descriptorFor('bi'));
+  readonly inboundDescriptor = computed(() => this.descriptorFor('inbound'));
+  readonly demandDescriptor = computed(() => this.descriptorFor('demand'));
+  readonly emailDescriptor = computed(() => this.descriptorFor('email'));
+
+  /** The declared upstream landscape, mapped systems first (row 56). */
+  readonly inboundSources = computed<InboundSourceDescriptor[]>(() =>
+    [...(this.data().sources ?? [])].sort((a, b) =>
+      Number(b.mappable) - Number(a.mappable) || a.name.localeCompare(b.name)),
+  );
 
   /** FatturaPA is only valid for issued customer invoices, never purchases/open orders. */
   readonly invoicedOrders = computed(() =>

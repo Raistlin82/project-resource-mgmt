@@ -151,7 +151,7 @@ import {
 import { getIntegrations, listDescriptors } from './server/integrations/registry';
 import { UnbalancedJournalError } from './server/integrations/erp-ledger.adapter';
 import { EInvoiceValidationError } from './server/integrations/fatturapa.adapter';
-import type { CrmOutboxEntry, ExportArtifact, ProjectFinancialsRow, SupplierInfo } from './server/integrations/types';
+import type { CrmOutboxEntry, ExportArtifact, OutboundMessage, ProjectFinancialsRow, SourceSystemKey, SupplierInfo } from './server/integrations/types';
 
 const serverDistFolder = dirname(fileURLToPath(import.meta.url));
 const browserDistFolder = resolve(serverDistFolder, '../browser');
@@ -833,6 +833,16 @@ async function roleGate(req: Request, res: Response, next: NextFunction): Promis
     { test: p => p.startsWith('/allocation-approvals'), roles: ['pm', 'resource-manager', 'delivery-executive', 'finance', 'admin'] },
     // C2: substituting a dummy is an approver action — the same roles that decide allocations.
     { test: p => p.startsWith('/assignment-months'), roles: ['resource-manager', 'delivery-executive', 'admin'] },
+    // NARROW RULE FIRST, and the order is load-bearing exactly as it is for
+    // /projects/:id/classification. Applying a RES requisition number is the one
+    // integration action that WRITES to a domain row — it rewrites a resource's
+    // identity code, turning a generic placeholder into a specific one. That is a
+    // resource-management act, so it takes the /resources audience
+    // (resource-manager / delivery-executive / admin) and NOT the finance-grade
+    // one every other integration action mirrors. Registered before the coarse
+    // /integrations rule below, or `finance` would reach it through that rule and
+    // this one would be dead code that still reads as a guard.
+    { test: p => /^\/integrations\/demand\/[^/]+\/res-code$/.test(p), roles: ['resource-manager', 'delivery-executive', 'admin'] },
     // Integration actions (prepare CRM sync payloads, ...) mirror the read gate.
     { test: p => p.startsWith('/integrations'), roles: ['finance', 'delivery-executive', 'admin'] },
   ];
@@ -8019,6 +8029,9 @@ apiRouter.get('/integrations', async (_req, res) => {
       einvoice: integrations.einvoice.describe().key,
       crm: integrations.crm.describe().key,
       bi: integrations.bi.describe().key,
+      inbound: integrations.inbound.describe().key,
+      demand: integrations.demand.describe().key,
+      email: integrations.email.describe().key,
     },
   });
 });
@@ -8136,6 +8149,98 @@ apiRouter.get('/integrations/bi/feed', async (_req, res) => {
   // The feed is consumed inline (preview/ingestion), not as a download.
   res.setHeader('Content-Type', artifact.mimeType);
   res.send(artifact.content);
+});
+
+// --- Declared-but-not-connected seams (RPT rows 29, 43, 56) -----------------
+//
+// Three surfaces whose upstream/downstream system we do NOT talk to. They are
+// built rather than left empty because the MAPPING and the RULES are the part
+// worth reviewing now: connecting one later is a transport change, not a design
+// exercise. Every response says `connected: false`, and the inbound one says
+// `applied: false` as well.
+
+// INBOUND (row 56): the declared upstream landscape.
+apiRouter.get('/integrations/inbound/sources', async (_req, res) => {
+  res.json({ sources: getIntegrations().inbound.sources() });
+});
+
+// INBOUND: what a payload WOULD change. A POST because it carries a body, NOT
+// because it writes — it writes nothing, and there is no apply endpoint to
+// follow it with.
+apiRouter.post('/integrations/inbound/:system/preview', async (req, res) => {
+  const inbound = getIntegrations().inbound;
+  const system = req.params.system as SourceSystemKey;
+  const payload = Array.isArray(req.body?.payload) ? req.body.payload : undefined;
+  if (payload === undefined) {
+    res.status(400).json({ error: 'payload must be an array of upstream records' });
+    return;
+  }
+  try {
+    const records = inbound.normalise(system, payload);
+    const descriptor = inbound.sources().find(entry => entry.key === system);
+    // The rows the preview diffs against. Reading them here (rather than in the
+    // adapter) is what keeps the adapter pure and repository-free.
+    const current =
+      descriptor?.target === 'projects' ? await repos.projects.list()
+      : descriptor?.target === 'skills' ? await repos.skills.list()
+      : await repos.resources.list();
+    res.json(inbound.previewImport(system, records, current as unknown as Record<string, unknown>[]));
+  } catch (err) {
+    // A named refusal ('no normaliser', 'unknown source system') is a 400 the
+    // caller can act on, not a 500.
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// DEMAND (row 29): the requisition a portal would receive for a placeholder.
+apiRouter.post('/integrations/demand/:resourceId', async (req, res) => {
+  const resource = await repos.resources.get(req.params.resourceId);
+  if (resource === undefined) { res.status(404).json({ error: 'Not found' }); return; }
+  try {
+    res.json(getIntegrations().demand.buildDemand(resource, new Date().toISOString()));
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// DEMAND: apply the RES number, which turns a GENERIC placeholder into a
+// SPECIFIC one. This one DOES write — it is the only endpoint in this block
+// that does, and it writes a code, never a plan. Under the same
+// 'resource-code' lock the create path uses, for the same reason.
+apiRouter.put('/integrations/demand/:resourceId/res-code', async (req, res) => {
+  const resCode = typeof req.body?.resCode === 'string' ? req.body.resCode : '';
+  const outcome = await withLock('resource-code', async () => {
+    const resource = await repos.resources.get(req.params.resourceId);
+    if (resource === undefined) return { status: 404, body: { error: 'Not found' } };
+    try {
+      const fulfilment = getIntegrations().demand.applyResCode(resource, resCode);
+      const updated = await repos.resources.update(req.params.resourceId, { code: fulfilment.specificCode });
+      return { status: 200, body: { ...fulfilment, resource: updated } };
+    } catch (err) {
+      return { status: 400, body: { error: err instanceof Error ? err.message : String(err) } };
+    }
+  });
+  res.status(outcome.status).json(outcome.body);
+});
+
+// EMAIL (row 43): the notification outbox. Prepared, never sent.
+const notificationOutbox: OutboundMessage[] = [];
+apiRouter.get('/integrations/email/outbox', async (_req, res) => { res.json(notificationOutbox); });
+apiRouter.post('/integrations/email/outbox', async (req, res) => {
+  try {
+    const message = getIntegrations().email.buildMessage({
+      event: req.body?.event,
+      to: Array.isArray(req.body?.to) ? req.body.to : [],
+      preparedAt: new Date().toISOString(),
+      subjectName: String(req.body?.subjectName ?? ''),
+      detail: typeof req.body?.detail === 'string' ? req.body.detail : undefined,
+    });
+    const stored = { ...message, id: newId() };
+    notificationOutbox.push(stored);
+    res.status(201).json(stored);
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 await initPersistence();

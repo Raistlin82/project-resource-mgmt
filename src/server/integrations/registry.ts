@@ -24,12 +24,18 @@ import { GenericLedgerExportAdapter } from './erp-ledger.adapter';
 import { FatturaPaAdapter } from './fatturapa.adapter';
 import { WebhookJsonOutboxCrmAdapter } from './crm-outbox.adapter';
 import { JsonFeedBiAdapter } from './bi-feed.adapter';
+import { DeclaredSourcesInboundAdapter } from './inbound-source.adapter';
+import { ServiceNowRequesterPortalAdapter } from './servicenow-demand.adapter';
+import { LocalMailOutboxAdapter } from './email-outbox.adapter';
 import type {
   BiFeedAdapter,
   CrmSyncAdapter,
+  DemandAdapter,
   EInvoiceAdapter,
   ErpExportAdapter,
+  InboundSourceAdapter,
   IntegrationDescriptor,
+  NotificationAdapter,
 } from './types';
 
 /** The active adapter per integration kind. */
@@ -38,6 +44,12 @@ export interface Integrations {
   einvoice: EInvoiceAdapter;
   crm: CrmSyncAdapter;
   bi: BiFeedAdapter;
+  /** Upstream masters (row 56): declared, mapped where we can, never applied. */
+  inbound: InboundSourceAdapter;
+  /** Hiring / subcontractor requisitions and the RES answer (row 29). */
+  demand: DemandAdapter;
+  /** Notifications that would be emailed (row 43). */
+  email: NotificationAdapter;
 }
 
 /** Available implementations per kind, keyed by their descriptor `key`. */
@@ -52,6 +64,15 @@ const CRM_IMPLS: Readonly<Record<string, () => CrmSyncAdapter>> = {
 };
 const BI_IMPLS: Readonly<Record<string, () => BiFeedAdapter>> = {
   'json-feed': () => new JsonFeedBiAdapter(),
+};
+const INBOUND_IMPLS: Readonly<Record<string, () => InboundSourceAdapter>> = {
+  'declared-sources': () => new DeclaredSourcesInboundAdapter(),
+};
+const DEMAND_IMPLS: Readonly<Record<string, () => DemandAdapter>> = {
+  'servicenow-requester-portal': () => new ServiceNowRequesterPortalAdapter(),
+};
+const EMAIL_IMPLS: Readonly<Record<string, () => NotificationAdapter>> = {
+  'local-mail-outbox': () => new LocalMailOutboxAdapter(),
 };
 
 /**
@@ -84,12 +105,15 @@ export function getIntegrations(): Integrations {
       einvoice: select(EINVOICE_IMPLS, 'INTEGRATION_EINVOICE_ADAPTER', 'fatturapa'),
       crm: select(CRM_IMPLS, 'INTEGRATION_CRM_ADAPTER', 'crm-webhook-json-outbox'),
       bi: select(BI_IMPLS, 'INTEGRATION_BI_ADAPTER', 'json-feed'),
+      inbound: select(INBOUND_IMPLS, 'INTEGRATION_INBOUND_ADAPTER', 'declared-sources'),
+      demand: select(DEMAND_IMPLS, 'INTEGRATION_DEMAND_ADAPTER', 'servicenow-requester-portal'),
+      email: select(EMAIL_IMPLS, 'INTEGRATION_EMAIL_ADAPTER', 'local-mail-outbox'),
     };
   }
   return cached;
 }
 
-/** Self-descriptions of the four ACTIVE adapters (one per kind). */
+/** Self-descriptions of every ACTIVE adapter (one per kind). */
 export function listDescriptors(): IntegrationDescriptor[] {
   const integrations = getIntegrations();
   return [
@@ -97,5 +121,8 @@ export function listDescriptors(): IntegrationDescriptor[] {
     integrations.einvoice.describe(),
     integrations.crm.describe(),
     integrations.bi.describe(),
+    integrations.inbound.describe(),
+    integrations.demand.describe(),
+    integrations.email.describe(),
   ];
 }
