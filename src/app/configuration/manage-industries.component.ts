@@ -86,7 +86,7 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
              panel at the top on short viewports, and the panel's max-h-[90vh] plus the
              scrolling body below keep the footer reachable. -->
         <div data-test="industry-form-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
-             appModal ariaLabelledby="industryModalTitle" (dismiss)="closeForm()" (click)="onFormBackdrop($event)">
+             appModal ariaLabelledby="industryModalTitle" (dismiss)="closeForm()">
           <div data-test="industry-form-panel" class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="industryModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Industry' : 'Add Industry' }}</h2>
@@ -200,10 +200,6 @@ export class ManageIndustriesComponent {
     this.editingId.set(null);
     this.saveError.set(null);
     this.form.reset();
-  }
-
-  onFormBackdrop(event: MouseEvent) {
-    if (event.target === event.currentTarget) this.closeForm();
   }
 
   clearSearch() { this.search.set(''); }

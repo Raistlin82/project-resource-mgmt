@@ -100,7 +100,7 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
              and the panel's max-h-[90vh] plus the scrolling body below keep the
              footer reachable. -->
         <div data-test="cost-center-form-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
-             appModal ariaLabelledby="costCenterModalTitle" (dismiss)="closeForm()" (click)="onFormBackdrop($event)">
+             appModal ariaLabelledby="costCenterModalTitle" (dismiss)="closeForm()">
           <div data-test="cost-center-form-panel" class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="costCenterModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Cost Center' : 'Add Cost Center' }}</h2>
@@ -285,10 +285,6 @@ export class ManageCostCentersComponent {
     this.form.reset();
   }
 
-  onFormBackdrop(event: MouseEvent) {
-    if (event.target === event.currentTarget) this.closeForm();
-  }
-
   clearSearch() { this.search.set(''); }
 
   invalid(controlName: keyof typeof this.form.controls): boolean {
@@ -297,7 +293,7 @@ export class ManageCostCentersComponent {
   }
 
   private focusFirstInvalidControl() {
-    const controls: Array<[keyof typeof this.form.controls, string]> = [
+    const controls: [keyof typeof this.form.controls, string][] = [
       ['name', 'costCenterName'],
       ['manager', 'costCenterManager'],
       ['allocated', 'costCenterAllocated'],

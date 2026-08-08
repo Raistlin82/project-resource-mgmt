@@ -198,3 +198,86 @@ describe('ModalDialogDirective', () => {
     expect(document.activeElement).toBe(outerTrigger);
   });
 });
+
+// -----------------------------------------------------------------------------
+// Backdrop-to-dismiss.
+//
+// This behaviour used to be five identical `(click)="onXBackdrop($event)"`
+// handlers on five bare overlay divs — which the a11y lint rules refuse, because
+// such a div is neither focusable nor keyboard-operable. Centralising it here
+// removed all five, and NO test went red: the behaviour had never been covered
+// anywhere. These are that coverage.
+//
+// Both directions in every case. "Clicking the backdrop dismisses" passes just
+// as well against a directive that dismisses on ANY click, which would close the
+// dialog the moment a user clicked a field inside it.
+// -----------------------------------------------------------------------------
+describe('ModalDialogDirective — backdrop dismissal', () => {
+  async function open() {
+    TestBed.resetTestingModule();
+    TestBed.configureTestingModule({ imports: [HostComponent] });
+    const fixture = TestBed.createComponent(HostComponent);
+    fixture.componentInstance.open.set(true);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    const host = (fixture.nativeElement as HTMLElement).querySelector<HTMLElement>('[role="dialog"]')!;
+    return { fixture, host };
+  }
+
+  it('dismisses when the click lands on the backdrop ITSELF', async () => {
+    const { fixture, host } = await open();
+    host.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    fixture.detectChanges();
+    expect(fixture.componentInstance.dismissed).toBe(1);
+  });
+
+  it('does NOT dismiss when the click lands inside the panel', async () => {
+    // The paired direction, and the one that matters in use: a click on a field,
+    // a label or a button inside the dialog must not close it. The target test is
+    // what separates the two, and it is the only thing that does.
+    const { fixture, host } = await open();
+    const inner = host.querySelector<HTMLElement>('[data-test="first"]')!;
+    inner.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    fixture.detectChanges();
+    expect(fixture.componentInstance.dismissed).toBe(0);
+  });
+
+  it('does not dismiss on a click that bubbles from the heading either', async () => {
+    // A second inside-target, non-interactive this time: bubbling alone must
+    // never be enough.
+    const { fixture, host } = await open();
+    host.querySelector<HTMLElement>('#dlgTitle')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    fixture.detectChanges();
+    expect(fixture.componentInstance.dismissed).toBe(0);
+  });
+
+  it('keeps the keyboard path working alongside it', async () => {
+    // Escape and backdrop are two routes to the same output. A change that wired
+    // one would be caught here if it broke the other.
+    const { fixture, host } = await open();
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    fixture.detectChanges();
+    expect(fixture.componentInstance.dismissed).toBe(1);
+  });
+
+  it('only the TOP-MOST dialog reacts to a backdrop click', async () => {
+    // With a nested dialog open, a click on the PARENT backdrop must not close
+    // the parent from under the child — the same top-most rule Escape follows.
+    TestBed.resetTestingModule();
+    TestBed.configureTestingModule({ imports: [NestedHostComponent] });
+    const fixture = TestBed.createComponent(NestedHostComponent);
+    const host = fixture.componentInstance;
+    host.parentOpen.set(true);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    host.nestedOpen.set(true);
+    fixture.detectChanges();
+    await fixture.whenStable();
+
+    const dialogs = (fixture.nativeElement as HTMLElement).querySelectorAll<HTMLElement>('[role="dialog"]');
+    expect(dialogs.length, 'both dialogs must be open for this to mean anything').toBe(2);
+    dialogs[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    fixture.detectChanges();
+    expect(host.parentDismissed, 'the parent must not dismiss while a child is open').toBe(0);
+  });
+});

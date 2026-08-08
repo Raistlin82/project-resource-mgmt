@@ -146,13 +146,29 @@ function focusIfAvailable(element: HTMLElement | null): boolean {
     '[attr.aria-labelledby]': 'ariaLabelledby() || null',
     tabindex: '-1',
     '(keydown.escape)': 'onEscape($event)',
+    // Backdrop-to-dismiss lives HERE, not in five identical template handlers.
+    //
+    // Why the directive and not the template: a bare `div` carrying `(click)` is
+    // neither focusable nor keyboard-operable, which the a11y lint rules
+    // correctly refuse — and the obvious silencer, `tabindex="0"` on a backdrop,
+    // would put a phantom tab stop on a decorative surface and make the problem
+    // worse. On the host the handler sits on an element that already declares
+    // `role="dialog"` and `tabindex="-1"`, and the keyboard equivalent is the
+    // Escape binding directly above.
+    '(click)': 'onBackdropClick($event)',
   },
 })
 export class ModalDialogDirective implements AfterViewInit, OnDestroy {
   /** id of the element labelling the dialog (wired to aria-labelledby). */
   readonly ariaLabelledby = input<string | undefined>(undefined);
 
-  /** Emitted when the user presses Escape; the host should close the dialog. */
+  /**
+   * Emitted when the user asks to close: Escape, or a click on the backdrop
+   * itself. The host decides what that MEANS — every consumer wires this to its
+   * own `closeForm()`, which is where the dirty-state confirm and the
+   * "refuse while saving" guard already live. The directive deliberately knows
+   * nothing about either.
+   */
   readonly dismiss = output<void>();
 
   private readonly host = inject(ElementRef<HTMLElement>);
@@ -179,6 +195,18 @@ export class ModalDialogDirective implements AfterViewInit, OnDestroy {
         focusIfAvailable(host);
       }
     });
+  }
+
+  /**
+   * A click on the BACKDROP dismisses; a click anywhere inside the panel does
+   * not. The test is `target === host`: the panel is a descendant, so its clicks
+   * arrive with a different target and are left alone. Without that check, every
+   * click inside the form would close it.
+   */
+  onBackdropClick(event: MouseEvent): void {
+    if (event.target !== this.host.nativeElement) return;
+    if (this.platform.isBrowser && !isTopModal(this.document, this.host.nativeElement)) return;
+    this.dismiss.emit();
   }
 
   onEscape(event: Event): void {

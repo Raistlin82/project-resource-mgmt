@@ -76,7 +76,7 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
     @if (showForm()) {
       <div data-test="skill-catalog-form-overlay"
            class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
-           appModal ariaLabelledby="skillCatalogModalTitle" (dismiss)="closeForm()" (click)="onFormBackdrop($event)">
+           appModal ariaLabelledby="skillCatalogModalTitle" (dismiss)="closeForm()">
         <div class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
           <div class="command-card-header">
             <h2 id="skillCatalogModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">Create Skill Catalog</h2>
@@ -156,10 +156,6 @@ export class ManageSkillCatalogsComponent {
     this.showForm.set(false);
     this.saveError.set(null);
     this.catalogForm.reset({ name: '', description: '' });
-  }
-
-  onFormBackdrop(event: MouseEvent) {
-    if (event.target === event.currentTarget) this.closeForm();
   }
 
   invalid(controlName: 'name' | 'description'): boolean {

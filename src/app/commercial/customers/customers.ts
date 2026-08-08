@@ -97,7 +97,7 @@ import { SearchFilterBarComponent } from '../../shared/search-filter-bar.compone
     <!-- Create Modal -->
     @if (showForm()) {
       <div data-test="customer-form-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
-           appModal ariaLabelledby="customerModalTitle" (dismiss)="closeForm()" (click)="onBackdropClick($event)">
+           appModal ariaLabelledby="customerModalTitle" (dismiss)="closeForm()">
         <div data-test="customer-form-panel" class="command-card w-full max-w-xl overflow-hidden flex flex-col max-h-[90vh]" [attr.aria-busy]="saving()">
           <div class="command-card-header">
             <h2 id="customerModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">New Customer</h2>
@@ -370,10 +370,6 @@ export class Customers {
         this.notifications.show(message, 'error');
       }
     });
-  }
-
-  protected onBackdropClick(event: MouseEvent): void {
-    if (event.target === event.currentTarget) this.closeForm();
   }
 
   closeForm(discard = false): void {

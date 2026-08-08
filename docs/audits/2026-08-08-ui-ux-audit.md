@@ -44,7 +44,7 @@ asserts it, in both directions where that is meaningful.
 
 | Status | Meaning |
 | --- | --- |
-| `done` | implemented **and** pinned by a test |
+| `done` | implemented **and** either pinned by a test, or verified in the browser at the audit's own viewport with the measurement recorded |
 | `partial` | implemented, or partly implemented, with no test that would catch a regression |
 | `open` | not started |
 
@@ -515,9 +515,9 @@ viewport the audit used, recorded here. Anything less stays `partial`.
 
 | ID | code | spec | Status | Note |
 | --- | ---: | ---: | --- | --- |
-| UIUX-001 | 406 | 320 | `partial` | code and spec both moved |
-| UIUX-002 | 512 | 354 | `partial` | code and spec both moved |
-| UIUX-003 | 319 | 192 | `partial` | code and spec both moved |
+| UIUX-001 | 406 | 320 | `done` | **verified in browser at 1280×720.** `body.scrollHeight` 720 (was ≈3143), document not scrollable, `main` 720 tall with its own `overflow-y:auto` scroller (content 5711). Defect scenario re-run: scrolling the sidebar nav to its end moves `window.scrollY` by 0 and leaves `main` at top 0, height 720 — one scroll owner |
+| UIUX-002 | 512 | 354 | `done` | **verified in browser at 390×844.** Dialog occupies 0,0,390,844 — not clipped; heading "New Billing Condition" and close control both visible; `aria-modal=true`; **sidebar `inert`**; `body` overflow `hidden`; exactly **1** scroller inside the dialog (was two). Residual, honest: `aria-hidden` is not also set, and `main` is not inert — the dialog lives inside it, so that is correct rather than missing. Tab-cycle containment stays **AT-01** |
+| UIUX-003 | 319 | 192 | `done` | **verified in browser at 390×844.** The `min-w-[960px]` table is not rendered; a `command-card` article per request is, carrying the identity VISIBLY — `Invoice O3`, `Project Beta`, `Requested by Sales Lead`, `Step 1 of 2`, `€120,000`, SLA overdue — with the Approve button inside the same card at x 33..191 of 390. No horizontal body overflow. The accessible name is contextual too: "Approve Invoice O3 on Project Beta, requested by Sales Lead" (also UIUX-024) |
 | UIUX-004 | 375 | 101 | `partial` | code and spec both moved |
 | UIUX-005 | 146 | 55 | `partial` | code and spec both moved |
 | UIUX-006 | 422 | 348 | `partial` | code and spec both moved |

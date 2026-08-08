@@ -120,7 +120,7 @@ type ContractField = 'customerId' | 'name' | 'type' | 'status' | 'totalValue' | 
     -->
     @if (showForm()) {
       <div data-test="contract-form-overlay" class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-start sm:items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto"
-           appModal ariaLabelledby="contractModalTitle" (dismiss)="closeForm()" (click)="onBackdropClick($event)">
+           appModal ariaLabelledby="contractModalTitle" (dismiss)="closeForm()">
         <div data-test="contract-form-panel" class="command-card w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]" [attr.aria-busy]="saving()">
           <div class="command-card-header">
             <h2 id="contractModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">New Contract</h2>
@@ -444,10 +444,6 @@ export class Contracts {
         this.notification.show(message, 'error');
       }
     });
-  }
-
-  protected onBackdropClick(event: MouseEvent): void {
-    if (event.target === event.currentTarget) this.closeForm();
   }
 
   closeForm(discard = false): void {
