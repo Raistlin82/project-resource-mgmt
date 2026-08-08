@@ -83,22 +83,45 @@ describe('assignment write integrity', () => {
     )).toBeNull();
   });
 
-  it('requires an effective complete window and a finite allocation in (0, 100]', () => {
-    expect(assignmentProposalError({}, { id: 'NO-WINDOW' }, '2026-08-08')).toContain('startDate is required');
-    expect(assignmentProposalError({ startDate: '2026-09-01' }, { id: 'HALF' }, '2026-08-08'))
-      .toContain('endDate is required');
+  it('validates a finite allocation in (0, 100] whether or not a window exists', () => {
+    // The allocation rule ALWAYS applies — it does not depend on dates.
     for (const allocationPct of [0, -1, 101, Number.NaN, Number.POSITIVE_INFINITY, '50']) {
       expect(assignmentProposalError({ allocationPct }, futureRequest, '2026-08-08'))
+        .toContain('greater than 0');
+      // ...including on a request that carries no window at all.
+      expect(assignmentProposalError({ allocationPct }, { id: 'NO-WINDOW' }, '2026-08-08'))
         .toContain('greater than 0');
     }
   });
 
-  it('rejects changed proposals that are past, reversed, or outside the request', () => {
+  it('treats a MISSING window as nothing to validate, not as an error', () => {
+    // A missing window is not an invalid one, and this is the case that decides
+    // it. `schema.ts` documents assignment startDate/endDate as nullable with a
+    // fallback to the request's; requiring them here made an ordinary
+    // `POST /assignments` a 400 and turned 13 smoke checks red while every unit
+    // test stayed green — the new rule was being asserted against itself.
+    expect(assignmentProposalError({}, { id: 'NO-WINDOW' }, '2026-08-08')).toBeNull();
+    // Half a window is still no window: there is nothing to order or bound.
+    expect(assignmentProposalError({ startDate: '2026-09-01' }, { id: 'HALF' }, '2026-08-08')).toBeNull();
+    // And the pair, so this is not satisfied by a function that returns null
+    // always: a COMPLETE window that is invalid is still refused.
+    expect(assignmentProposalError(
+      { startDate: '2026-09-20', endDate: '2026-09-10' }, futureRequest, '2026-08-08',
+    )).toContain('on or after startDate');
+  });
+
+  it('rejects changed proposals that are reversed or outside the request — but NOT merely past', () => {
+    // The API deliberately accepts a window that STARTED before today: staffing
+    // somebody onto a project that began in June is ordinary work, and recording
+    // history is a legitimate operation the smoke suite has always asserted. The
+    // past-date rule belongs to the PROPOSAL FORM, and lives there
+    // (`staffing.component.ts` refuses it with an inline error). See the comment
+    // on `assignmentProposalError` for the full reasoning.
     expect(assignmentProposalError(
       { startDate: '2026-08-07', endDate: '2026-08-20' },
       { id: 'R' },
       '2026-08-08',
-    )).toContain('before today');
+    )).toBeNull();
     expect(assignmentProposalError(
       { startDate: '2026-09-20', endDate: '2026-09-10' },
       futureRequest,
@@ -131,9 +154,15 @@ describe('assignment write integrity', () => {
     const historicalRequest = { id: 'HIST', startDate: '2025-01-01', endDate: '2025-01-31' };
     const historical = { requestId: 'HIST', allocationPct: 100 };
     expect(assignmentProposalError({}, historicalRequest, '2026-08-08', historical, historicalRequest)).toBeNull();
+    // Re-allocating a HISTORICAL assignment is allowed: the window is in the past,
+    // which is a fact about the work, not a defect in the proposal. What is still
+    // refused is an allocation outside (0, 100] — asserted just above.
     expect(assignmentProposalError(
       { allocationPct: 80 }, historicalRequest, '2026-08-08', historical, historicalRequest,
-    )).toContain('before today');
+    )).toBeNull();
+    expect(assignmentProposalError(
+      { allocationPct: 150 }, historicalRequest, '2026-08-08', historical, historicalRequest,
+    )).toContain('greater than 0');
   });
 
   it.each([

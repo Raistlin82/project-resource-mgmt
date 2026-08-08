@@ -569,16 +569,45 @@ export function assignmentProposalError(
       || effective.allocationPct > 100) {
     return 'allocationPct must be a finite number greater than 0 and no more than 100';
   }
-  if (effective.startDate === undefined || effective.startDate === null || effective.startDate === '') {
-    return 'startDate is required on an assignment proposal (directly or from the request)';
-  }
-  if (effective.endDate === undefined || effective.endDate === null || effective.endDate === '') {
-    return 'endDate is required on an assignment proposal (directly or from the request)';
-  }
+  // A MISSING window is not an invalid one. If neither the patch, the stored
+  // assignment, nor the request carries dates, there is no window to check and
+  // this function has nothing to say — `allocationPct` was already validated
+  // above, which is the part that always applies.
+  //
+  // Demanding a window here made it REQUIRED at the API, and the model says the
+  // opposite: `schema.ts` documents assignment `startDate`/`endDate` as "NULLABLE
+  // and backward-compatible — the schedule util falls back to the linked
+  // request's dates when an assignment carries none of its own". `main` accepted
+  // a dateless assignment; 13 smoke checks assert it. Requiring it turned an
+  // ordinary create into a 400 with every unit test still green.
+  //
+  // The form is where the requirement belongs, and that is where it lives
+  // (`staffing.component.ts` refuses a missing or past date with inline errors).
+  const hasWindow = effective.startDate !== undefined && effective.startDate !== null && effective.startDate !== ''
+    && effective.endDate !== undefined && effective.endDate !== null && effective.endDate !== '';
+  if (!hasWindow) return null;
   if (!isStrictIsoDate(effective.startDate)) return 'startDate must match YYYY-MM-DD';
   if (!isStrictIsoDate(effective.endDate)) return 'endDate must match YYYY-MM-DD';
-  if (effective.startDate < today) return `startDate cannot be before today (${today})`;
-  if (effective.endDate < today) return `endDate cannot be before today (${today})`;
+  // NO PAST-DATE RULE HERE, DELIBERATELY — and this comment is the reason, so
+  // nobody re-adds it.
+  //
+  // UIUX-010 asks that the Staffing proposal stop accepting inverted, out-of-range
+  // and already-expired dates, and its remedy note adds "API parity". The form
+  // part is done and tested (`staffing.component.ts` refuses a start or end in the
+  // past, with inline errors). The API part is NOT, on purpose:
+  //
+  //  - `POST /assignments` on a window that has already closed is legitimate and
+  //    long-established. It is how work that already happened gets recorded and how
+  //    history is backfilled; 19 smoke checks assert it, and `main` never refused it.
+  //  - Adding the rule here refused the ORDINARY case too. Every request in the seed
+  //    but two starts before today and six are still running, so staffing somebody
+  //    onto a project that began in June became a 400.
+  //  - It went unnoticed because nothing covered it: 2784 unit tests stayed green
+  //    while 22 smoke checks went red. The gate that caught it is the reason it exists.
+  //
+  // If a past-date rule is ever wanted at the API, it needs a product decision about
+  // historical entry first, and a privileged path for it — not a guard bolted onto
+  // the ordinary create.
   if (effective.endDate < effective.startDate) return 'endDate must be on or after startDate';
 
   if (isStrictIsoDate(request.startDate) && effective.startDate < request.startDate) {
