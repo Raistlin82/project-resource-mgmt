@@ -17,7 +17,10 @@ import { forkJoin, of } from 'rxjs';
   template: `
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">My Project Experience</h1>
+        <div>
+          <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">My Profile</h1>
+          <p class="mt-1 text-sm text-[var(--cc-muted)]">Project experience, skills, availability and profile documents.</p>
+        </div>
         <!-- The utilization card sits ABOVE the app-list-state below, so it is gated
              on its own resolved check rather than on the wrapper. Two reasons, both
              load-bearing: (1) profile() dereferences dataRes.value(), which THROWS
@@ -51,7 +54,7 @@ import { forkJoin, of } from 'rxjs';
         <!-- Profile Details -->
         <div class="command-card overflow-hidden">
           <div class="p-8 sm:p-10 flex flex-col sm:flex-row items-center sm:items-start gap-6 sm:gap-8 bg-gradient-to-br from-surface-muted to-transparent">
-            <div class="relative group shrink-0">
+            <div class="relative shrink-0">
               <div class="w-28 h-28 sm:w-32 sm:h-32 bg-gradient-to-br from-accent to-accent rounded-full flex items-center justify-center text-white text-4xl font-bold overflow-hidden shadow-inner border-4 border-line">
                 @if (profile()?.profilePicture) {
                   <img [src]="profile()?.profilePicture" alt="Profile" class="w-full h-full object-cover">
@@ -59,9 +62,9 @@ import { forkJoin, of } from 'rxjs';
                   {{ profile()?.name?.charAt(0) }}
                 }
               </div>
-              <label class="absolute inset-0 bg-ink/40 backdrop-blur-sm rounded-full flex items-center justify-center opacity-100 transition-all duration-300 text-white cursor-pointer scale-100 sm:opacity-0 sm:scale-95 sm:group-hover:opacity-100 sm:group-hover:scale-100 sm:group-focus-within:opacity-100 sm:group-focus-within:scale-100" aria-label="Upload profile picture">
+              <label class="absolute bottom-0 right-0 inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-full border-2 border-[var(--cc-panel)] bg-accent text-white shadow-md transition-colors hover:bg-accent-strong focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-accent" aria-label="Upload profile picture">
                 <input type="file" class="sr-only" accept="image/*" aria-label="Upload profile picture" [disabled]="busy()" (change)="onProfilePictureSelected($event)">
-                <mat-icon class="text-[28px] w-[28px] h-[28px]">photo_camera</mat-icon>
+                <mat-icon class="text-[22px] w-[22px] h-[22px]">photo_camera</mat-icon>
               </label>
             </div>
             <div class="text-center sm:text-left flex-1">
@@ -157,7 +160,7 @@ import { forkJoin, of } from 'rxjs';
             }
             <div class="flex flex-wrap gap-3">
               @for (skill of profile()?.skills; track skill.name) {
-                <div class="command-card group flex items-center gap-2 px-4 py-2 hover:shadow-md transition-all">
+                <div class="command-card flex items-center gap-2 py-1 pl-4 pr-1 hover:shadow-md transition-all">
                   <span class="font-bold text-ink-secondary text-sm tracking-wide">{{ skill.name }}</span>
                   <div class="flex gap-0.5 ml-2">
                     @for (i of [1, 2, 3]; track i) {
@@ -167,7 +170,7 @@ import { forkJoin, of } from 'rxjs';
                       </div>
                     }
                   </div>
-                  <button type="button" (click)="removeSkill(skill.name)" [disabled]="busy()" [attr.aria-label]="'Remove ' + skill.name" [attr.title]="'Remove ' + skill.name" class="ml-2 text-ink-muted hover:text-critical-text opacity-100 transition-all sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 disabled:opacity-50 disabled:cursor-not-allowed">
+                  <button type="button" (click)="removeSkill(skill.name)" [disabled]="busy()" [attr.aria-label]="'Remove ' + skill.name" [attr.title]="'Remove ' + skill.name" class="ml-1 inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-critical-tint hover:text-critical-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-critical disabled:cursor-not-allowed disabled:opacity-50">
                     <mat-icon class="text-[16px] w-[16px] h-[16px]">close</mat-icon>
                   </button>
                 </div>
@@ -270,8 +273,8 @@ import { forkJoin, of } from 'rxjs';
                    key is both an Angular @for hazard and what let removeExtExp() delete by
                    name and wipe the sibling the user never touched. -->
               @for (exp of profile()?.externalExperience; track $index; let i = $index) {
-                <div class="command-card-muted p-4 relative group">
-                  <button type="button" (click)="removeExtExp(i)" [disabled]="busy()" [attr.aria-label]="'Remove ' + exp.projectName + ' at ' + exp.company" [attr.title]="'Remove ' + exp.projectName + ' at ' + exp.company" class="absolute top-4 right-4 text-ink-muted hover:text-critical-text opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 disabled:cursor-not-allowed">
+                <div class="command-card-muted relative p-4 pr-16">
+                  <button type="button" (click)="removeExtExp(i)" [disabled]="busy()" [attr.aria-label]="'Remove ' + exp.projectName + ' at ' + exp.company" [attr.title]="'Remove ' + exp.projectName + ' at ' + exp.company" class="absolute right-2 top-2 inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg bg-surface text-ink-muted transition-colors hover:bg-critical-tint hover:text-critical-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-critical disabled:cursor-not-allowed disabled:opacity-50">
                     <mat-icon>delete</mat-icon>
                   </button>
                   <h4 class="font-medium text-[var(--cc-ink)]">{{ exp.projectName }}</h4>

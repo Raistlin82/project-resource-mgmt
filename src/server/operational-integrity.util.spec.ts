@@ -5,6 +5,7 @@ import {
   CHANGE_REQUEST_PRIORITIES,
   MONEY_DEFINING_AUDIT_SEGMENTS,
   assignmentDeleteBlockError,
+  assignmentProposalError,
   assignmentRetargetError,
   assignmentServerOwnedFieldError,
   auditRegistryGaps,
@@ -17,15 +18,18 @@ import {
   contractHoursPerDayError,
   deleteOrgNodeWrite,
   documentProvenance,
+  effectiveAssignmentProposal,
   employmentWindowError,
   isNotNullViolation,
   issuedOrderLineStructureError,
   issuedOrderLineWriteError,
   milestoneStatusError,
+  orderCreateStatusError,
   percentFieldError,
   referencedChildMessage,
   referentialViolationMessage,
   requestDeleteBlockError,
+  requestStatusTransitionError,
   requiredFieldError,
   resourceRequestUpdateError,
   retargetDailyCapacityError,
@@ -61,6 +65,104 @@ describe('assignment write integrity', () => {
     expect(assignmentServerOwnedFieldError({ assignedHours: 12 }))
       .toBe('assignedHours is derived from assignmentDays and cannot be set on an assignment');
     expect(assignmentServerOwnedFieldError({ requestId: 'REQ1' })).toBeNull();
+  });
+
+  const futureRequest = {
+    id: 'REQ-FUTURE', startDate: '2026-09-01', endDate: '2026-09-30',
+  };
+
+  it('resolves a complete create proposal from payload/request with the documented 100% default', () => {
+    expect(effectiveAssignmentProposal({}, futureRequest)).toEqual({
+      startDate: '2026-09-01', endDate: '2026-09-30', allocationPct: 100,
+    });
+    expect(assignmentProposalError({}, futureRequest, '2026-08-08')).toBeNull();
+    expect(assignmentProposalError(
+      { startDate: '2026-09-05', endDate: '2026-09-20', allocationPct: 40 },
+      futureRequest,
+      '2026-08-08',
+    )).toBeNull();
+  });
+
+  it('validates a finite allocation in (0, 100] whether or not a window exists', () => {
+    // The allocation rule ALWAYS applies — it does not depend on dates.
+    for (const allocationPct of [0, -1, 101, Number.NaN, Number.POSITIVE_INFINITY, '50']) {
+      expect(assignmentProposalError({ allocationPct }, futureRequest, '2026-08-08'))
+        .toContain('greater than 0');
+      // ...including on a request that carries no window at all.
+      expect(assignmentProposalError({ allocationPct }, { id: 'NO-WINDOW' }, '2026-08-08'))
+        .toContain('greater than 0');
+    }
+  });
+
+  it('treats a MISSING window as nothing to validate, not as an error', () => {
+    // A missing window is not an invalid one, and this is the case that decides
+    // it. `schema.ts` documents assignment startDate/endDate as nullable with a
+    // fallback to the request's; requiring them here made an ordinary
+    // `POST /assignments` a 400 and turned 13 smoke checks red while every unit
+    // test stayed green — the new rule was being asserted against itself.
+    expect(assignmentProposalError({}, { id: 'NO-WINDOW' }, '2026-08-08')).toBeNull();
+    // Half a window is still no window: there is nothing to order or bound.
+    expect(assignmentProposalError({ startDate: '2026-09-01' }, { id: 'HALF' }, '2026-08-08')).toBeNull();
+    // And the pair, so this is not satisfied by a function that returns null
+    // always: a COMPLETE window that is invalid is still refused.
+    expect(assignmentProposalError(
+      { startDate: '2026-09-20', endDate: '2026-09-10' }, futureRequest, '2026-08-08',
+    )).toContain('on or after startDate');
+  });
+
+  it('rejects changed proposals that are reversed or outside the request — but NOT merely past', () => {
+    // The API deliberately accepts a window that STARTED before today: staffing
+    // somebody onto a project that began in June is ordinary work, and recording
+    // history is a legitimate operation the smoke suite has always asserted. The
+    // past-date rule belongs to the PROPOSAL FORM, and lives there
+    // (`staffing.component.ts` refuses it with an inline error). See the comment
+    // on `assignmentProposalError` for the full reasoning.
+    expect(assignmentProposalError(
+      { startDate: '2026-08-07', endDate: '2026-08-20' },
+      { id: 'R' },
+      '2026-08-08',
+    )).toBeNull();
+    expect(assignmentProposalError(
+      { startDate: '2026-09-20', endDate: '2026-09-10' },
+      futureRequest,
+      '2026-08-08',
+    )).toContain('on or after startDate');
+    expect(assignmentProposalError(
+      { startDate: '2026-08-31', endDate: '2026-09-20' },
+      futureRequest,
+      '2026-08-08',
+    )).toContain('before request startDate');
+    expect(assignmentProposalError(
+      { startDate: '2026-09-10', endDate: '2026-10-01' },
+      futureRequest,
+      '2026-08-08',
+    )).toContain('after request endDate');
+  });
+
+  it('validates partial PUTs on effective values but preserves an unchanged legacy schedule', () => {
+    const current = {
+      requestId: 'REQ-FUTURE', startDate: '2026-09-10', endDate: '2026-09-20', allocationPct: 50,
+    };
+    expect(assignmentProposalError(
+      { endDate: '2026-09-05' }, futureRequest, '2026-08-08', current, futureRequest,
+    )).toContain('on or after startDate');
+
+    const legacyRequest = { id: 'LEGACY' };
+    const legacy = { requestId: 'LEGACY' };
+    expect(assignmentProposalError({}, legacyRequest, '2026-08-08', legacy, legacyRequest)).toBeNull();
+
+    const historicalRequest = { id: 'HIST', startDate: '2025-01-01', endDate: '2025-01-31' };
+    const historical = { requestId: 'HIST', allocationPct: 100 };
+    expect(assignmentProposalError({}, historicalRequest, '2026-08-08', historical, historicalRequest)).toBeNull();
+    // Re-allocating a HISTORICAL assignment is allowed: the window is in the past,
+    // which is a fact about the work, not a defect in the proposal. What is still
+    // refused is an allocation outside (0, 100] — asserted just above.
+    expect(assignmentProposalError(
+      { allocationPct: 80 }, historicalRequest, '2026-08-08', historical, historicalRequest,
+    )).toBeNull();
+    expect(assignmentProposalError(
+      { allocationPct: 150 }, historicalRequest, '2026-08-08', historical, historicalRequest,
+    )).toContain('greater than 0');
   });
 
   it.each([
@@ -187,7 +289,8 @@ describe('fully merged resource-request PUT validation', () => {
   });
 
   it('rejects client attempts to write derived/unknown status and invalid stored aggregates', () => {
-    expect(resourceRequestUpdateError(request, { status: 'Fulfilled' })).toContain('status must be one of');
+    expect(resourceRequestUpdateError(request, { status: 'Fulfilled' })).toContain('cannot transition');
+    expect(resourceRequestUpdateError(request, { status: 'Bogus' })).toContain('status must be one of');
     expect(resourceRequestUpdateError({ ...request, staffedEffort: -1 }, {})).toContain('staffedEffort');
     expect(resourceRequestUpdateError({ ...request, staffedEffort: 60, staffedEffortPlanned: 40 }, {}))
       .toContain('staffedEffortPlanned');
@@ -197,6 +300,35 @@ describe('fully merged resource-request PUT validation', () => {
     expect(resourceRequestUpdateError(request, { description: 'Updated' })).toBeNull();
     expect(resourceRequestUpdateError(request, { status: 'Withdrawn' })).toBeNull();
     expect(resourceRequestUpdateError(request, { requiredEffort: 100, endDate: '2026-09-30' })).toBeNull();
+  });
+});
+
+describe('resource-request client lifecycle matrix', () => {
+  it.each([
+    ['Not Published', 'Published'],
+    ['Withdrawn', 'Published'],
+    ['Published', 'Withdrawn'],
+    ['Open', 'Withdrawn'],
+    ['Fulfilled', 'Withdrawn'],
+  ])('allows %s -> %s', (from, to) => {
+    expect(requestStatusTransitionError(from, to)).toBeNull();
+  });
+
+  it('allows every valid same-state request as an idempotent no-op', () => {
+    for (const status of ['Not Published', 'Published', 'Open', 'Withdrawn', 'Fulfilled']) {
+      expect(requestStatusTransitionError(status, status)).toBeNull();
+    }
+  });
+
+  it.each([
+    ['Not Published', 'Withdrawn'],
+    ['Published', 'Open'],
+    ['Published', 'Not Published'],
+    ['Open', 'Published'],
+    ['Fulfilled', 'Published'],
+    ['Withdrawn', 'Open'],
+  ])('rejects arbitrary %s -> %s', (from, to) => {
+    expect(requestStatusTransitionError(from, to)).toContain('cannot transition');
   });
 });
 
@@ -210,6 +342,15 @@ const issuedOrder = {
 } as unknown as Order;
 const openOrder = { ...issuedOrder, id: 'O10', status: 'Open', invoiceNumber: undefined } as Order;
 const issuedLine = { id: 'L9', orderId: 'O9', projectId: 'P1', description: 'Phase 1', amount: 120000 };
+
+describe('order create lifecycle', () => {
+  it('accepts exactly Open and rejects omitted/downstream statuses', () => {
+    expect(orderCreateStatusError('Open')).toBeNull();
+    for (const status of [undefined, 'Confirmed', 'Invoiced', 'Paid', 'Bogus']) {
+      expect(orderCreateStatusError(status)).toContain("status 'Open'");
+    }
+  });
+});
 
 describe('issued order-line locks', () => {
   it('refuses a rewrite of the money, the imputation or the parent of an issued line', () => {

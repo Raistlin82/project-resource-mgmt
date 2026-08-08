@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, inject, signal, computed, DestroyRef } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, signal, computed, DestroyRef, ElementRef } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { DatePipe } from '@angular/common';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
@@ -11,6 +11,7 @@ import { ModalDialogDirective } from '../../directives/modal-dialog.directive';
 import { authGatedResource } from '../../services/auth-gated-resource.util';
 import { endNotBeforeStart } from '../../services/date-range.validator';
 import { SearchFilterBarComponent } from '../../shared/search-filter-bar.component';
+import { ListStateComponent } from '../../shared/list-state.component';
 
 /** Allowed location sentinel for fully-remote projects (mirrors the server + seed). */
 const REMOTE_LOCATION = 'Remote';
@@ -18,7 +19,7 @@ const REMOTE_LOCATION = 'Remote';
 @Component({
   selector: 'app-projects',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [MatIconModule, DatePipe, ReactiveFormsModule, FormsModule, RouterLink, ModalDialogDirective, SearchFilterBarComponent],
+  imports: [MatIconModule, DatePipe, ReactiveFormsModule, FormsModule, RouterLink, ModalDialogDirective, SearchFilterBarComponent, ListStateComponent],
   template: `
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -34,25 +35,61 @@ const REMOTE_LOCATION = 'Remote';
         }
       </div>
 
-      <!-- Search and Filter -->
-      <div class="command-card p-4 flex flex-col sm:flex-row gap-4">
-        <app-search-filter-bar
-          class="flex-1"
-          [query]="searchValue() ?? ''"
-          placeholder="Search projects by name, ID, or location..."
-          (queryChange)="searchControl.setValue($event)"
-          (clearAll)="searchControl.setValue('')"
-        />
-      </div>
+      <section aria-labelledby="projectListHeading">
+        <h2 id="projectListHeading" class="sr-only">Project list</h2>
+        <app-list-state
+          [loading]="projectsLoading()"
+          [error]="projectsReadFailed()"
+          skeleton="cards"
+          [rows]="6"
+          label="projects"
+          (retry)="reloadProjects()">
+          <ng-template>
+          @if (!projects().length) {
+            <div data-test="projects-source-empty" class="command-card p-10 sm:p-12 text-center border-2 border-dashed">
+              <div class="w-20 h-20 bg-[var(--cc-panel-muted)] ring-1 ring-line/5 rounded-full flex items-center justify-center mx-auto mb-4">
+                <mat-icon class="text-ink-muted text-4xl">folder_off</mat-icon>
+              </div>
+              <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-2">No projects available</h3>
+              @if (canManageProjects()) {
+                <p class="text-[var(--cc-muted)] mb-5">Create the first collaborative project to start planning delivery.</p>
+                <button type="button" (click)="openCreateForm()" class="command-button mx-auto">
+                  <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon> Create Project
+                </button>
+              } @else {
+                <p class="text-[var(--cc-muted)]">There are no projects available for your role yet.</p>
+              }
+            </div>
+          } @else {
+            <!-- Search only filters a successfully loaded source collection. -->
+            <div class="command-card p-4 flex flex-col sm:flex-row gap-4 mb-6">
+              <app-search-filter-bar
+                class="flex-1"
+                [query]="searchValue() ?? ''"
+                placeholder="Search projects by name, ID, or location..."
+                (queryChange)="searchControl.setValue($event)"
+                (clearAll)="clearFilters()"
+              />
+            </div>
 
-      <!-- Projects Grid -->
-      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-        @for (project of filteredProjects(); track project.id) {
-          <div class="command-card overflow-hidden group relative flex flex-col h-full">
-            <div class="p-6 sm:p-8 flex-1 flex flex-col">
-              <div class="flex justify-between items-start mb-4 gap-4">
-                <div class="flex-1 min-w-0">
-                  <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-1 truncate group-hover:text-accent-text transition-colors">
+            @if (!filteredProjects().length) {
+              <div data-test="projects-filtered-empty" class="command-card p-10 sm:p-12 text-center border-2 border-dashed">
+                <div class="w-20 h-20 bg-[var(--cc-panel-muted)] ring-1 ring-line/5 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <mat-icon class="text-ink-muted text-4xl">search_off</mat-icon>
+                </div>
+                <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-2">No projects match your filters</h3>
+                <p class="text-[var(--cc-muted)] mb-5">Try another name, ID, or location, or clear the current search.</p>
+                <button type="button" (click)="clearFilters()" class="command-button secondary mx-auto">Clear filters</button>
+              </div>
+            } @else {
+            <!-- Projects Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+              @for (project of filteredProjects(); track project.id) {
+                <article class="command-card overflow-hidden group relative flex flex-col h-full">
+                  <div class="p-6 sm:p-8 flex-1 flex flex-col">
+                    <div class="flex justify-between items-start mb-4 gap-4">
+                      <div class="flex-1 min-w-0">
+                        <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-1 break-words group-hover:text-accent-text transition-colors" [attr.title]="project.name">
                     <!--
                       LINK ONLY WHERE THE ROUTE WILL ACTUALLY OPEN. /projects/:id is
                       guarded by roleGuard(a => a.canReadStaffing()) (app.routes.ts:21),
@@ -64,15 +101,15 @@ const REMOTE_LOCATION = 'Remote';
                       anchor takes the stretched pseudo-element with it, so the card
                       stops advertising itself as clickable.
                     -->
-                    @if (canReadStaffing()) {
-                      <a [routerLink]="['/projects', project.id]" class="focus:outline-none before:absolute before:inset-0">{{ project.name }}</a>
-                    } @else {
-                      <span>{{ project.name }}</span>
-                    }
-                  </h3>
-                  <p class="text-xs text-accent-text font-mono bg-accent-tint ring-1 ring-accent inline-block px-2 py-0.5 rounded-md">{{ project.id }}</p>
-                </div>
-                <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-wide shrink-0 ring-1"
+                          @if (canReadStaffing()) {
+                            <a [routerLink]="['/projects', project.id]" class="focus:outline-none before:absolute before:inset-0">{{ project.name }}</a>
+                          } @else {
+                            <span>{{ project.name }}</span>
+                          }
+                        </h3>
+                        <p class="text-xs text-accent-text font-mono bg-accent-tint ring-1 ring-accent inline-block max-w-full px-2 py-0.5 rounded-md break-all">{{ project.id }}</p>
+                      </div>
+                      <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold tracking-wide shrink-0 ring-1"
                       [class.bg-accent-tint]="project.status === 'In Planning'"
                       [class.text-accent-text]="project.status === 'In Planning'"
                       [class.ring-accent]="project.status === 'In Planning'"
@@ -82,13 +119,13 @@ const REMOTE_LOCATION = 'Remote';
                       [class.bg-surface-muted]="project.status === 'Completed'"
                       [class.text-ink-secondary]="project.status === 'Completed'"
                       [class.ring-line]="project.status === 'Completed'">
-                  {{ project.status }}
-                </span>
-              </div>
+                        {{ project.status }}
+                      </span>
+                    </div>
 
-              <p class="text-sm text-[var(--cc-muted)] mb-6 line-clamp-3 flex-1">{{ project.description || 'No description provided.' }}</p>
+                    <p class="text-sm text-[var(--cc-muted)] mb-6 line-clamp-3 flex-1">{{ project.description || 'No description provided.' }}</p>
 
-              <div class="space-y-3 mt-auto pt-4 border-t border-[var(--cc-line)]">
+                    <div class="space-y-3 mt-auto pt-4 border-t border-[var(--cc-line)]">
                 <div class="flex items-center gap-3 text-sm text-[var(--cc-muted)] font-medium">
                   <div class="w-8 h-8 rounded-full bg-surface-muted flex items-center justify-center text-ink-muted group-hover:bg-accent-tint group-hover:text-accent-text transition-colors">
                     <mat-icon class="text-[18px] w-[18px] h-[18px]">location_on</mat-icon>
@@ -107,51 +144,56 @@ const REMOTE_LOCATION = 'Remote';
                   </div>
                   <span class="truncate">{{ contractName(project.contractId) }}</span>
                 </div>
-              </div>
-            </div>
+                    </div>
+                  </div>
 
-            @if (canManageProjects()) {
-              <div class="px-6 py-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-2 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus-within:opacity-100 relative z-10">
-                <button (click)="editProject(project); $event.stopPropagation()" class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-colors" aria-label="Edit project">
-                  <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
-                </button>
-                <button (click)="deleteProject(project.id); $event.stopPropagation()" class="p-2 text-ink-muted hover:text-critical-text hover:bg-critical-tint rounded-lg transition-colors" aria-label="Delete project">
-                  <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
-                </button>
-              </div>
-            }
-          </div>
-        }
-        @if (!filteredProjects().length) {
-          <div class="col-span-full command-card p-12 text-center border-2 border-dashed">
-            <div class="w-20 h-20 bg-[var(--cc-panel-muted)] ring-1 ring-line/5 rounded-full flex items-center justify-center mx-auto mb-4">
-              <mat-icon class="text-ink-muted text-4xl">folder_off</mat-icon>
+                  @if (canManageProjects()) {
+                    <div class="relative z-10 flex flex-wrap justify-end gap-2 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] px-4 py-3 sm:px-6 sm:py-4">
+                      <button type="button" (click)="editProject(project); $event.stopPropagation()"
+                              class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-accent-tint hover:text-accent-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                              [attr.aria-label]="'Edit project ' + project.name + ' (' + project.id + ')'"
+                              [attr.title]="'Edit project ' + project.name + ' (' + project.id + ')'">
+                        <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
+                      </button>
+                      <button type="button" (click)="deleteProject(project.id); $event.stopPropagation()"
+                              class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-critical-tint hover:text-critical-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-critical"
+                              [attr.aria-label]="'Delete project ' + project.name + ' (' + project.id + ')'"
+                              [attr.title]="'Delete project ' + project.name + ' (' + project.id + ')'">
+                        <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
+                      </button>
+                    </div>
+                  }
+                </article>
+              }
             </div>
-            <h3 class="font-display text-xl font-bold text-[var(--cc-ink)] mb-2">No projects found</h3>
-            <p class="text-[var(--cc-muted)]">Get started by creating a new collaborative project.</p>
-          </div>
-        }
-      </div>
+            }
+          }
+          </ng-template>
+        </app-list-state>
+      </section>
     </div>
 
     <!-- Create/Edit Modal -->
     @if (showForm()) {
       <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 sm:p-6"
            appModal ariaLabelledby="projectModalTitle" (dismiss)="closeForm()">
-        <div class="command-card shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] transform transition-all">
+        <div class="command-card shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] transform transition-all"
+             [attr.aria-busy]="saving() ? 'true' : null">
           <div class="command-card-header">
             <h2 id="projectModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Project' : 'Create Collaborative Project' }}</h2>
-            <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors">
+            <button type="button" (click)="closeForm()" [disabled]="saving()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary hover:bg-surface-muted p-2 rounded-full transition-colors disabled:opacity-50">
               <mat-icon>close</mat-icon>
             </button>
           </div>
 
           <div class="p-6 sm:p-8 overflow-y-auto flex-1">
             <form [formGroup]="projectForm" (ngSubmit)="saveProject()" class="space-y-6">
+              <fieldset [disabled]="saving()" class="contents">
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div class="sm:col-span-2">
                   <label for="projectName" class="block text-sm font-semibold text-ink-secondary mb-1.5">Project Name *</label>
                   <input id="projectName" type="text" formControlName="name" class="command-input" placeholder="e.g. Project Alpha"
+                         required aria-required="true"
                          [attr.aria-invalid]="projectForm.controls.name.invalid && (projectForm.controls.name.touched || projectForm.controls.name.dirty)"
                          [attr.aria-describedby]="projectForm.controls.name.invalid && (projectForm.controls.name.touched || projectForm.controls.name.dirty) ? 'projectNameError' : null">
                   @if (projectForm.controls.name.invalid && (projectForm.controls.name.touched || projectForm.controls.name.dirty)) {
@@ -163,7 +205,7 @@ const REMOTE_LOCATION = 'Remote';
                   <label for="projectCountry" class="block text-sm font-semibold text-ink-secondary mb-1.5">Country *</label>
                   <!-- Location = Country + City. Country filters the City list; the stored
                        value is the City NAME ('location'). 'Remote' is a sentinel location. -->
-                  <select id="projectCountry" [ngModel]="locationCountry()" (ngModelChange)="onCountryChange($event)" [ngModelOptions]="{ standalone: true }" class="command-select">
+                  <select id="projectCountry" [ngModel]="locationCountry()" (ngModelChange)="onCountryChange($event)" [ngModelOptions]="{ standalone: true }" class="command-select" required aria-required="true">
                     <option value="" disabled>Select a country...</option>
                     <option value="__REMOTE__">Remote</option>
                     @for (c of countryOptions(); track c.code) {
@@ -178,6 +220,7 @@ const REMOTE_LOCATION = 'Remote';
                     <input id="projectLocation" type="text" class="command-input" value="Remote (no city)" disabled>
                   } @else {
                     <select id="projectLocation" formControlName="location" class="command-select"
+                            required aria-required="true"
                             [attr.aria-invalid]="projectForm.controls.location.invalid && (projectForm.controls.location.touched || projectForm.controls.location.dirty)"
                             [attr.aria-describedby]="projectForm.controls.location.invalid && (projectForm.controls.location.touched || projectForm.controls.location.dirty) ? 'projectLocationError' : null">
                       <option value="" disabled>{{ locationCountry() ? 'Select a city...' : 'Select a country first' }}</option>
@@ -197,6 +240,7 @@ const REMOTE_LOCATION = 'Remote';
                 <div>
                   <label for="projectStartDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">Start Date *</label>
                   <input id="projectStartDate" type="date" formControlName="startDate" class="command-input"
+                         required aria-required="true"
                          [attr.aria-invalid]="projectForm.controls.startDate.invalid && (projectForm.controls.startDate.touched || projectForm.controls.startDate.dirty)"
                          [attr.aria-describedby]="projectForm.controls.startDate.invalid && (projectForm.controls.startDate.touched || projectForm.controls.startDate.dirty) ? 'projectStartDateError' : null">
                   @if (projectForm.controls.startDate.invalid && (projectForm.controls.startDate.touched || projectForm.controls.startDate.dirty)) {
@@ -207,6 +251,7 @@ const REMOTE_LOCATION = 'Remote';
                 <div>
                   <label for="projectEndDate" class="block text-sm font-semibold text-ink-secondary mb-1.5">End Date *</label>
                   <input id="projectEndDate" type="date" formControlName="endDate" class="command-input"
+                         required aria-required="true"
                          [attr.aria-invalid]="projectForm.controls.endDate.invalid && (projectForm.controls.endDate.touched || projectForm.controls.endDate.dirty)"
                          [attr.aria-describedby]="projectForm.controls.endDate.invalid && (projectForm.controls.endDate.touched || projectForm.controls.endDate.dirty) ? 'projectEndDateError' : null">
                   @if (projectForm.controls.endDate.invalid && (projectForm.controls.endDate.touched || projectForm.controls.endDate.dirty)) {
@@ -219,6 +264,7 @@ const REMOTE_LOCATION = 'Remote';
                 <div class="sm:col-span-2">
                   <label for="projectStatus" class="block text-sm font-semibold text-ink-secondary mb-1.5">Status *</label>
                   <select id="projectStatus" formControlName="status" class="command-select"
+                          required aria-required="true"
                           [attr.aria-invalid]="projectForm.controls.status.invalid && (projectForm.controls.status.touched || projectForm.controls.status.dirty)"
                           [attr.aria-describedby]="projectForm.controls.status.invalid && (projectForm.controls.status.touched || projectForm.controls.status.dirty) ? 'projectStatusError' : null">
                     <option value="In Planning">In Planning</option>
@@ -237,6 +283,7 @@ const REMOTE_LOCATION = 'Remote';
                        SELECT stores the resource id (label = resource name) bound to the
                        resources (people) catalog. -->
                   <select id="projectOwner" formControlName="ownerId" class="command-select"
+                          required aria-required="true"
                           [attr.aria-invalid]="projectForm.controls.ownerId.invalid && (projectForm.controls.ownerId.touched || projectForm.controls.ownerId.dirty)"
                           [attr.aria-describedby]="projectForm.controls.ownerId.invalid && (projectForm.controls.ownerId.touched || projectForm.controls.ownerId.dirty) ? 'projectOwnerError' : null">
                     <option value="" disabled>Select an owner...</option>
@@ -269,21 +316,41 @@ const REMOTE_LOCATION = 'Remote';
                   <textarea id="projectDescription" formControlName="description" rows="3" class="command-textarea" placeholder="Brief project description..."></textarea>
                 </div>
               </div>
+              </fieldset>
+              @if (saveError()) {
+                <p class="command-field-error" role="alert" data-test="project-save-error">{{ saveError() }}</p>
+              }
             </form>
           </div>
 
           <div class="px-6 sm:px-8 py-5 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
-            <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
-            <button type="button" (click)="saveProject()" [disabled]="!projectForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
-              {{ editingId() ? 'Update Project' : 'Create Project' }}
+            <button type="button" (click)="closeForm()" [disabled]="saving()" class="command-button secondary disabled:opacity-50">Cancel</button>
+            <button type="button" (click)="saveProject()" [disabled]="saving()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+              {{ saving() ? 'Saving…' : (editingId() ? 'Update Project' : 'Create Project') }}
             </button>
           </div>
         </div>
       </div>
     }
 
+    @if (discardConfirmation()) {
+      <div class="fixed inset-0 z-[60] flex items-center justify-center bg-scrim/40 p-4 backdrop-blur-sm"
+           appModal ariaLabelledby="projectDiscardTitle" (dismiss)="cancelDiscard()">
+        <div class="command-card w-full max-w-md overflow-hidden shadow-2xl" data-test="project-discard-confirm">
+          <div class="p-6 text-center">
+            <h2 id="projectDiscardTitle" class="font-display text-xl font-bold text-ink">Discard project changes?</h2>
+            <p class="mt-3 text-sm text-ink-muted">Your unsaved project changes will be lost.</p>
+          </div>
+          <div class="flex justify-end gap-3 border-t border-line bg-surface-muted p-4">
+            <button type="button" (click)="cancelDiscard()" class="command-button secondary">Keep editing</button>
+            <button type="button" (click)="confirmDiscard()" class="command-button">Discard changes</button>
+          </div>
+        </div>
+      </div>
+    }
+
     <!-- Delete Confirmation Modal -->
-    @if (deletingId() && canManageProjects()) {
+    @if (deletingProject(); as projectToDelete) {
       <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
            appModal ariaLabelledby="projectDeleteTitle" (dismiss)="cancelDelete()">
         <div class="command-card shadow-2xl w-full max-w-sm overflow-hidden flex flex-col transform transition-all">
@@ -291,12 +358,17 @@ const REMOTE_LOCATION = 'Remote';
             <div class="w-20 h-20 bg-critical-tint ring-1 ring-critical rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner">
               <mat-icon class="text-critical-text text-4xl">warning</mat-icon>
             </div>
-            <h3 id="projectDeleteTitle" class="font-display text-2xl font-bold text-[var(--cc-ink)] mb-2 tracking-tight">Delete Project</h3>
-            <p class="text-[var(--cc-muted)] text-sm">Are you sure you want to delete this project? This action cannot be undone.</p>
+            <h2 id="projectDeleteTitle" class="font-display text-2xl font-bold text-[var(--cc-ink)] mb-2 tracking-tight break-words">Delete {{ projectToDelete.name }}?</h2>
+            <p class="text-[var(--cc-muted)] text-sm break-words">
+              You are deleting <strong class="text-[var(--cc-ink)]">{{ projectToDelete.name }}</strong>
+              (<span class="font-mono break-all">{{ projectToDelete.id }}</span>). This action cannot be undone.
+            </p>
           </div>
           <div class="p-5 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
             <button (click)="cancelDelete()" class="command-button secondary">Cancel</button>
-            <button (click)="confirmDelete()" class="px-6 py-2.5 bg-critical text-white rounded-xl text-sm font-semibold hover:bg-critical-strong hover:shadow-lg hover:-translate-y-0.5 transition-all">Delete</button>
+            <button type="button" (click)="confirmDelete()"
+                    [attr.aria-label]="'Confirm delete project ' + projectToDelete.name + ' (' + projectToDelete.id + ')'"
+                    class="px-6 py-2.5 bg-critical text-white rounded-xl text-sm font-semibold hover:bg-critical-strong hover:shadow-lg hover:-translate-y-0.5 transition-all">Delete project</button>
           </div>
         </div>
       </div>
@@ -307,6 +379,7 @@ export class ProjectsComponent {
   private api = inject(ApiService);
   private auth = inject(AuthService);
   private destroyRef = inject(DestroyRef);
+  private host = inject<ElementRef<HTMLElement>>(ElementRef);
 
   private projectsRes = authGatedResource(() => this.api.getProjects(), [] as Project[]);
   // /contracts is principal-gated in READ_RULES; wait for the restored bearer
@@ -316,7 +389,11 @@ export class ProjectsComponent {
     stream: ({ params: canLoad }) => (canLoad ? this.api.getContracts() : of<Contract[]>([])),
     defaultValue: [] as Contract[],
   });
-  projects = this.projectsRes.value;
+  protected readonly projectsLoading = computed(() =>
+    !this.auth.authReady() || this.projectsRes.isLoading(),
+  );
+  protected readonly projectsReadFailed = computed(() => this.projectsRes.status() === 'error');
+  projects = computed(() => this.projectsReadFailed() ? [] : this.projectsRes.value());
   contracts = this.contractsRes.value;
   readonly canManageProjects = this.auth.canManageProjects;
   readonly canReadCommercial = this.auth.canReadCommercial;
@@ -325,6 +402,14 @@ export class ProjectsComponent {
   showForm = signal(false);
   editingId = signal<string | null>(null);
   deletingId = signal<string | null>(null);
+  protected saving = signal(false);
+  protected saveError = signal<string | null>(null);
+  protected discardConfirmation = signal(false);
+  protected readonly deletingProject = computed(() => {
+    if (!this.canManageProjects()) return null;
+    const id = this.deletingId();
+    return id ? this.projects().find(project => project.id === id) ?? null : null;
+  });
 
   // The project owner is a PERSON reference. ownerId is an ID field, so the SELECT
   // stores the resource id (label = resource name) bound to the resources (people)
@@ -410,7 +495,7 @@ export class ProjectsComponent {
   }
 
   filteredProjects = computed(() => {
-    const search = (this.searchValue() ?? '').toLowerCase();
+    const search = (this.searchValue() ?? '').trim().toLowerCase();
     return this.projects().filter(p => {
       if (!search) return true;
       return p.name.toLowerCase().includes(search) || 
@@ -418,6 +503,14 @@ export class ProjectsComponent {
              p.location.toLowerCase().includes(search);
     });
   });
+
+  protected clearFilters(): void {
+    this.searchControl.setValue('');
+  }
+
+  protected reloadProjects(): void {
+    this.projectsRes.reload();
+  }
 
   private contractsById = computed(() => new Map(this.contracts().map(c => [c.id, c.name])));
 
@@ -439,11 +532,30 @@ export class ProjectsComponent {
       contractId: project.contractId || '',
       description: project.description
     });
+    this.projectForm.markAsPristine();
+    this.saveError.set(null);
+    this.discardConfirmation.set(false);
     this.showForm.set(true);
   }
 
   saveProject() {
-    if (!this.canManageProjects() || this.projectForm.invalid) return;
+    if (!this.canManageProjects() || this.saving()) return;
+    this.saveError.set(null);
+    if (this.projectForm.invalid) {
+      this.projectForm.markAllAsTouched();
+      const order = [
+        ['name', 'projectName'],
+        ['location', 'projectLocation'],
+        ['startDate', 'projectStartDate'],
+        ['endDate', 'projectEndDate'],
+        ['status', 'projectStatus'],
+        ['ownerId', 'projectOwner'],
+      ] as const;
+      const first = order.find(([control]) => this.projectForm.controls[control].invalid);
+      if (first) queueMicrotask(() => this.host.nativeElement.querySelector<HTMLElement>(`#${first[1]}`)?.focus());
+      return;
+    }
+    this.saving.set(true);
 
     // ownerId is a real resource-id reference chosen in the Owner SELECT (no longer a
     // hardcoded mock id). The required validator guarantees it is set here.
@@ -452,16 +564,30 @@ export class ProjectsComponent {
     if (this.editingId()) {
       this.api.updateProject(this.editingId()!, projectData)
         .pipe(takeUntilDestroyed(this.destroyRef))
-        .subscribe(() => {
-          this.projectsRes.reload();
-          this.closeForm();
+        .subscribe({
+          next: () => {
+            this.saving.set(false);
+            this.projectsRes.reload();
+            this.closeForm(true);
+          },
+          error: error => {
+            this.saving.set(false);
+            this.saveError.set(this.projectSaveError(error));
+          },
         });
     } else {
       this.api.createProject(projectData)
         .pipe(takeUntilDestroyed(this.destroyRef))
-        .subscribe(() => {
-          this.projectsRes.reload();
-          this.closeForm();
+        .subscribe({
+          next: () => {
+            this.saving.set(false);
+            this.projectsRes.reload();
+            this.closeForm(true);
+          },
+          error: error => {
+            this.saving.set(false);
+            this.saveError.set(this.projectSaveError(error));
+          },
         });
     }
   }
@@ -494,13 +620,38 @@ export class ProjectsComponent {
     this.editingId.set(null);
     this.countryOverride.set('');
     this.projectForm.reset({ status: 'In Planning', ownerId: this.auth.userId(), contractId: '', location: '' });
+    this.saveError.set(null);
+    this.discardConfirmation.set(false);
     this.showForm.set(true);
   }
 
-  closeForm() {
+  closeForm(force = false) {
+    if (this.saving()) return;
+    if (!force && this.projectForm.dirty) {
+      this.discardConfirmation.set(true);
+      return;
+    }
     this.showForm.set(false);
     this.editingId.set(null);
+    this.discardConfirmation.set(false);
+    this.saveError.set(null);
     this.countryOverride.set('');
     this.projectForm.reset({ status: 'In Planning', ownerId: '', contractId: '', location: '' });
+  }
+
+  protected cancelDiscard(): void {
+    this.discardConfirmation.set(false);
+  }
+
+  protected confirmDiscard(): void {
+    this.closeForm(true);
+  }
+
+  private projectSaveError(error: unknown): string {
+    const candidate = error as { error?: { error?: unknown }; message?: unknown };
+    const detail = candidate?.error?.error ?? candidate?.message;
+    return typeof detail === 'string' && detail.trim()
+      ? `Project could not be saved: ${detail}`
+      : 'Project could not be saved. Review the fields and try again.';
   }
 }

@@ -20,14 +20,14 @@ const BASE_CURRENCY = 'EUR';
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective, DecimalPipe],
   template: `
-    <div class="max-w-5xl mx-auto space-y-8">
-      <div class="flex items-center justify-between">
-        <div>
+    <div class="command-page max-w-5xl mx-auto space-y-8">
+      <div data-test="rate-cards-header" class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div class="min-w-0">
           <div class="command-section-label">Configuration</div>
           <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Rate Cards</h1>
           <p class="mt-1 text-sm text-[var(--cc-muted)]">Default cost &amp; bill rates per role, in <strong>€ / day</strong>. A resource inherits the matching card unless it sets a per-resource override; an organization-specific card overrides the generic one.</p>
         </div>
-        <button (click)="openForm()" class="command-button">
+        <button (click)="openForm()" class="command-button w-full sm:w-auto">
           <mat-icon class="text-sm">add</mat-icon> Add Rate Card
         </button>
       </div>
@@ -61,30 +61,41 @@ const BASE_CURRENCY = 'EUR';
           </div>
         </div>
 
-        <table class="command-data-table">
+        <p id="rateCardsTableHint" class="border-b border-[var(--cc-line)] bg-surface-muted px-4 py-2 text-xs font-semibold text-[var(--cc-muted)] lg:hidden">
+          Swipe horizontally to view every rate. Role and Actions stay visible.
+        </p>
+        <div data-test="rate-cards-table-scroll" class="overflow-x-auto overscroll-x-contain outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent" role="region"
+             aria-label="Rate cards table" aria-describedby="rateCardsTableHint" tabindex="0">
+        <table class="command-data-table min-w-[48rem]">
           <thead>
             <tr>
-              <th>Role</th>
+              <th class="sticky left-0 z-10 w-44 max-w-44 bg-surface-muted!">Role</th>
               <th>Organization</th>
               <th>Currency</th>
               <th class="text-right">Cost rate (€/day)</th>
               <th class="text-right">Bill rate (€/day)</th>
-              <th class="text-right">Actions</th>
+              <th class="sticky right-0 z-10 bg-surface-muted! text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             @for (it of filtered(); track it.id) {
               <tr>
-                <td class="font-bold">{{ it.role }}</td>
+                <td class="sticky left-0 z-[1] w-44 max-w-44 break-words bg-surface! font-bold">{{ it.role }}</td>
                 <td>{{ it.organization || 'All organizations' }}</td>
                 <td><span class="font-mono text-[var(--cc-muted)]">{{ it.currency }}</span></td>
                 <td class="text-right tabular-nums">{{ it.costRate | number:'1.0-2' }}</td>
                 <td class="text-right tabular-nums">{{ it.billRate | number:'1.0-2' }}</td>
-                <td class="text-right">
-                  <button type="button" (click)="openForm(it)" [attr.aria-label]="'Edit ' + it.role" [attr.title]="'Edit ' + it.role" class="text-ink-muted hover:text-accent-text transition-colors p-1">
+                <td class="sticky right-0 z-[1] whitespace-nowrap bg-surface! text-right">
+                  <button type="button" (click)="openForm(it)"
+                          [attr.aria-label]="'Edit rate card for ' + it.role + ', ' + (it.organization || 'all organizations')"
+                          [attr.title]="'Edit ' + it.role + ' — ' + (it.organization || 'all organizations')"
+                          class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-accent-tint hover:text-accent-text">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                   </button>
-                  <button type="button" (click)="deleteItem(it.id)" [attr.aria-label]="'Delete rate card for ' + it.role" [attr.title]="'Delete'" class="text-ink-muted hover:text-critical-text transition-colors p-1 ml-2">
+                  <button type="button" (click)="deleteItem(it.id)"
+                          [attr.aria-label]="'Delete rate card for ' + it.role + ', ' + (it.organization || 'all organizations')"
+                          [attr.title]="'Delete ' + it.role + ' — ' + (it.organization || 'all organizations')"
+                          class="ml-1 inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-critical-tint hover:text-critical-text">
                     <mat-icon class="text-[20px] w-[20px] h-[20px]">delete</mat-icon>
                   </button>
                 </td>
@@ -97,6 +108,7 @@ const BASE_CURRENCY = 'EUR';
             }
           </tbody>
         </table>
+        </div>
       </div>
 
       @if (showForm()) {
@@ -114,7 +126,7 @@ const BASE_CURRENCY = 'EUR';
           <div data-test="rate-card-form-panel" class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="rateCardModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Rate Card' : 'Add Rate Card' }}</h2>
-              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary transition-colors">
+              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" data-test="rate-card-close" class="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-surface-muted hover:text-ink-secondary">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
@@ -156,7 +168,7 @@ const BASE_CURRENCY = 'EUR';
                     }
                   </select>
                 </div>
-                <div class="grid grid-cols-2 gap-4">
+                <div data-test="rate-card-rate-grid" class="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div>
                     <label for="rc-cost" class="block text-sm font-medium text-ink-secondary mb-1">Cost rate (€/day) *</label>
                     <input id="rc-cost" type="number" min="0" step="1" formControlName="costRate" class="command-input" placeholder="e.g. 600">
@@ -170,7 +182,7 @@ const BASE_CURRENCY = 'EUR';
                   <p role="alert" class="text-xs text-critical-text">A rate card already exists for this role / organization / currency. Edit that card instead of creating a duplicate.</p>
                 }
               </div>
-              <div class="px-6 py-4 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
+              <div data-test="rate-card-form-actions" class="flex flex-wrap justify-end gap-3 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] px-6 py-4">
                 <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
                 <button type="submit" [disabled]="!form.valid || duplicateExists()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save Rate Card</button>
               </div>

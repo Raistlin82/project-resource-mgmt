@@ -19,8 +19,8 @@ import { AuthRuntimeMetadata, resolveAuthRuntimeConfig, safeOAuthReturnPath } fr
  *   synchronous signal reads — safe to call inside interceptors and per-request.
  *   IMPORTANT: read them REACTIVELY (inside a computed / rxResource params /
  *   getter), NEVER snapshot at field-init: until {@link authReady} flips true the
- *   OAuth bootstrap hasn't settled, so userId()/role() return the anonymous
- *   defaults — a captured value freezes the wrong identity for the component's
+ *   OAuth bootstrap hasn't settled, so userId()/roles() return no identity — a
+ *   captured value freezes the wrong identity for the component's
  *   life (e.g. loading another user's data on a deep-link/reload).
  * - SSR-safe: on the server the user is anonymous and OAuth is never touched.
  * - Demo/loopback fallback: if discovery or login fails (e.g. Keycloak is
@@ -104,38 +104,50 @@ export class AuthService {
 
   readonly hasResourceIdentity = computed(() => this.userId() !== '');
 
+  /** Whether a user is currently signed in (always false on the server). */
+  readonly isAuthenticated = computed(() => this._claims() !== null);
+
   /** Every recognized application role carried by the verified principal. */
   readonly roles = computed<readonly UserRole[]>(() => {
     const claims = this._claims();
-    if (!claims) return ['employee'];
+    if (!claims) return [];
     const recognized = this.realmRoles(claims)
       .filter((role): role is UserRole => ROLE_PRIORITY.includes(role as UserRole));
-    return recognized.length ? [...new Set(recognized)] : ['employee'];
+    return [...new Set(recognized)];
   });
 
-  /** Primary role is display-only; authorization uses the additive role set. */
+  /**
+   * Primary role is display-only; authorization uses the additive role set.
+   * The public signal retains its historical `UserRole` type for consumers, but
+   * returns an empty string at runtime when there is no authenticated app role.
+   * An empty/anonymous principal must never masquerade as an employee.
+   */
   readonly role = computed<UserRole>(() => {
-    return this.highestRole(this.roles());
+    return this.highestRole(this.roles()) ?? ('' as UserRole);
   });
 
-  private readonly capabilities = computed(() => capabilitiesForRoles(this.roles()));
+  // capabilitiesForRoles([]) intentionally supports a legacy employee default
+  // for direct callers. Auth must be stricter: no verified app role means no
+  // capability, whether the principal is anonymous or simply misconfigured.
+  private readonly capabilities = computed(() => {
+    const roles = this.roles();
+    return roles.length ? capabilitiesForRoles(roles) : null;
+  });
 
-  readonly isManager = computed(() => this.capabilities().canManageResources);
-  readonly canReadStaffing = computed(() => this.capabilities().canReadStaffing);
-  readonly canManageStaffing = computed(() => this.capabilities().canManageStaffing);
-  readonly canManageResources = computed(() => this.capabilities().canManageResources);
-  readonly canReadCommercial = computed(() => this.capabilities().canReadCommercial);
-  readonly canManageCommercial = computed(() => this.capabilities().canManageCommercial);
-  readonly canReadFinancials = computed(() => this.capabilities().canReadFinancials);
-  readonly canManageProjects = computed(() => this.capabilities().canManageProjects);
-  readonly canManageConfiguration = computed(() => this.capabilities().canManageConfiguration);
-  readonly canViewPortfolioDashboard = computed(() => this.capabilities().canViewPortfolioDashboard);
-  readonly canSubmitOwnTime = computed(() => this.capabilities().canSubmitOwnTime && this.hasResourceIdentity());
-  readonly canApproveFinancials = computed(() => this.capabilities().canReadFinancials);
+  readonly isManager = computed(() => this.capabilities()?.canManageResources ?? false);
+  readonly canReadStaffing = computed(() => this.capabilities()?.canReadStaffing ?? false);
+  readonly canManageStaffing = computed(() => this.capabilities()?.canManageStaffing ?? false);
+  readonly canManageResources = computed(() => this.capabilities()?.canManageResources ?? false);
+  readonly canReadCommercial = computed(() => this.capabilities()?.canReadCommercial ?? false);
+  readonly canManageCommercial = computed(() => this.capabilities()?.canManageCommercial ?? false);
+  readonly canReadFinancials = computed(() => this.capabilities()?.canReadFinancials ?? false);
+  readonly canManageProjects = computed(() => this.capabilities()?.canManageProjects ?? false);
+  readonly canManageConfiguration = computed(() => this.capabilities()?.canManageConfiguration ?? false);
+  readonly canViewPortfolioDashboard = computed(() => this.capabilities()?.canViewPortfolioDashboard ?? false);
+  readonly canSubmitOwnTime = computed(() =>
+    (this.capabilities()?.canSubmitOwnTime ?? false) && this.hasResourceIdentity());
+  readonly canApproveFinancials = computed(() => this.capabilities()?.canReadFinancials ?? false);
   readonly canApproveDelivery = computed(() => this.hasAnyRole(['pm', 'delivery-executive', 'admin']));
-
-  /** Whether a user is currently signed in (always false on the server). */
-  readonly isAuthenticated = computed(() => this._claims() !== null);
 
   /** Human-readable display name for the auth control; empty when anonymous. */
   readonly displayName = computed<string>(() => {
@@ -316,11 +328,11 @@ export class AuthService {
     return roles.filter((r): r is string => typeof r === 'string');
   }
 
-  private highestRole(roles: readonly string[]): UserRole {
+  private highestRole(roles: readonly string[]): UserRole | undefined {
     const set = new Set(roles);
     for (const candidate of ROLE_PRIORITY) {
       if (set.has(candidate)) return candidate;
     }
-    return 'employee';
+    return undefined;
   }
 }

@@ -1,11 +1,15 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { provideRouter } from '@angular/router';
+import { Component } from '@angular/core';
+import { provideRouter, Router } from '@angular/router';
 import { of, Subject, throwError } from 'rxjs';
 import { ProjectDetailsComponent } from './project-details';
 import { ApiService, AssignmentDay, AssignmentMonth, CostBaseline, FinancialItem, FxRate, Issue, Order, OrderLine, Project, Resource, ResourceRequest, Assignment, TimeEntry } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { NotificationService } from '../../services/notification.service';
 import { capabilitiesForRole } from '../../services/access-policy.util';
+
+@Component({ template: '' })
+class RouterTargetComponent {}
 
 function host(fixture: { nativeElement: unknown }): HTMLElement {
   return fixture.nativeElement as HTMLElement;
@@ -162,7 +166,9 @@ function createFixture(role: StubRole, apiOverrides: Partial<Record<string, unkn
   TestBed.configureTestingModule({
     imports: [ProjectDetailsComponent],
     providers: [
-      provideRouter([]),
+      // A catch-all lets the URL-state tests exercise real Router navigation;
+      // the ProjectDetails fixture itself is still created directly below.
+      provideRouter([{ path: '**', component: RouterTargetComponent }]),
       { provide: ApiService, useValue: api },
       { provide: AuthService, useValue: makeAuthStub(role, authReady) },
       { provide: NotificationService, useValue: { show: vi.fn(), error: vi.fn() } },
@@ -178,6 +184,209 @@ async function render(role: StubRole, apiOverrides: Partial<Record<string, unkno
   await tick(fixture);
   return { fixture, api };
 }
+
+describe('ProjectDetailsComponent — core project states gate the workspace', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('shows an explicit retryable error without mounting tabs, panels, or KPIs', async () => {
+    const getProjects = vi.fn(() => throwError(() => new Error('offline')));
+    const { fixture } = await render('delivery-executive', { getProjects });
+
+    expect(host(fixture).querySelector('h1')?.textContent?.trim()).toBe('Project details');
+    expect(host(fixture).textContent).toContain("Couldn't load project");
+    expect(host(fixture).textContent).toContain('The project record could not be loaded');
+    expect(host(fixture).querySelector('.project-tab-active')).toBeNull();
+    expect(host(fixture).querySelector('.command-kpi')).toBeNull();
+    expect(headings(fixture).map(heading => heading.level)).toEqual([1, 2, 3]);
+
+    const retry = Array.from(host(fixture).querySelectorAll('button'))
+      .find(button => button.textContent?.includes('Retry')) as HTMLButtonElement;
+    retry.click();
+    await tick(fixture);
+    expect(getProjects).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows a contextual not-found state for an unknown project ID and no workspace chrome', async () => {
+    const { fixture } = await render('delivery-executive', {
+      getProjects: () => of([]),
+    });
+
+    const state = host(fixture).querySelector('[data-test="project-not-found"]');
+    expect(state).not.toBeNull();
+    expect(state?.querySelector('h1')?.textContent?.trim()).toBe('Project not found');
+    expect(state?.textContent).toContain('P1');
+    expect(state?.querySelector('a[href="/projects"]')).not.toBeNull();
+    expect(host(fixture).querySelector('.project-tab-active')).toBeNull();
+    expect(host(fixture).querySelector('.command-kpi')).toBeNull();
+  });
+
+  it('keeps a long resolved project name complete and introduces the overview h2 before card h3s', async () => {
+    const longName = 'A project name that must remain completely readable even when the viewport becomes very narrow';
+    const longProject: Project = { ...PROJECT, id: 'PROJECT-2026-LONG-ID', name: longName };
+    const { fixture } = createFixture('delivery-executive', {
+      getProjects: () => of([longProject]),
+    });
+    fixture.componentRef.setInput('id', longProject.id);
+    await tick(fixture);
+
+    const title = host(fixture).querySelector('h1') as HTMLElement;
+    expect(title.textContent?.trim()).toBe(longName);
+    expect(title.classList.contains('truncate')).toBe(false);
+    expect(title.classList.contains('line-clamp-3')).toBe(false);
+    expect(host(fixture).textContent).toContain(longProject.id);
+
+    const outline = headings(fixture);
+    expect(outline[0]).toEqual({ level: 1, text: longName });
+    expect(outline[1]).toEqual({ level: 2, text: 'Project overview' });
+    for (let index = 1; index < outline.length; index++) {
+      expect(outline[index].level - outline[index - 1].level).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
+describe('ProjectDetailsComponent — project workspace navigation', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  function tab(fixture: ComponentFixture<unknown>, label: string): HTMLButtonElement {
+    const match = Array.from(host(fixture).querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+      .find(candidate => candidate.textContent?.trim() === label);
+    expect(match, `the "${label}" project tab must exist`).toBeDefined();
+    return match!;
+  }
+
+  async function settle(fixture: ComponentFixture<unknown>): Promise<void> {
+    await fixture.whenStable();
+    await tick(fixture);
+  }
+
+  it('exposes a complete, contextual ARIA tab contract with one roving tab stop', async () => {
+    const { fixture } = await render('delivery-executive');
+    const root = host(fixture);
+    const tablist = root.querySelector<HTMLElement>('[role="tablist"]');
+    const renderedTabs = Array.from(root.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+
+    expect(tablist?.getAttribute('aria-label')).toBe('Project sections for Project One');
+    expect(tablist?.getAttribute('aria-orientation')).toBe('horizontal');
+    expect(tablist?.getAttribute('aria-describedby')).toBe('projectTabsOverflowHint');
+    expect(renderedTabs.length).toBeGreaterThan(1);
+    expect(renderedTabs.filter(candidate => candidate.tabIndex === 0)).toHaveLength(1);
+
+    const overview = tab(fixture, 'Overview');
+    expect(overview.getAttribute('aria-selected')).toBe('true');
+    expect(overview.tabIndex).toBe(0);
+    expect(overview.id).toBe('project-tab-overview');
+    expect(overview.getAttribute('aria-controls')).toBe('project-tabpanel-overview');
+
+    const tasks = tab(fixture, 'Tasks');
+    expect(tasks.getAttribute('aria-selected')).toBe('false');
+    expect(tasks.tabIndex).toBe(-1);
+
+    for (const renderedTab of renderedTabs) {
+      const controlledPanel = root.querySelector<HTMLElement>(`#${renderedTab.getAttribute('aria-controls')}`);
+      expect(controlledPanel, `${renderedTab.textContent?.trim()} must control a real tabpanel`).not.toBeNull();
+      expect(controlledPanel?.hasAttribute('hidden')).toBe(renderedTab !== overview);
+    }
+
+    const panel = root.querySelector<HTMLElement>('[role="tabpanel"]:not([hidden])');
+    expect(panel?.id).toBe('project-tabpanel-overview');
+    expect(panel?.getAttribute('aria-labelledby')).toBe(overview.id);
+    expect(panel?.tabIndex).toBe(0);
+  });
+
+  it('supports automatic activation with Arrow keys plus Home and End, including wraparound', async () => {
+    const { fixture } = await render('delivery-executive');
+    let current = tab(fixture, 'Overview');
+    current.focus();
+
+    const press = async (key: string) => {
+      const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+      current.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      await settle(fixture);
+      current = host(fixture).querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')!;
+      expect(document.activeElement).toBe(current);
+      expect(current.tabIndex).toBe(0);
+      expect(Array.from(host(fixture).querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+        .filter(candidate => candidate.tabIndex === 0)).toHaveLength(1);
+    };
+
+    await press('ArrowRight');
+    expect(current.textContent?.trim()).toBe('Partners');
+    await press('End');
+    expect(current.textContent?.trim()).toBe('Changes');
+    await press('Home');
+    expect(current.textContent?.trim()).toBe('Overview');
+    await press('ArrowLeft');
+    expect(current.textContent?.trim()).toBe('Changes');
+  });
+
+  it('writes tab selection to the URL, preserves other query state, and consumes later URL changes', async () => {
+    const { fixture } = await render('delivery-executive');
+    const router = TestBed.inject(Router);
+    await router.navigate([], { queryParams: { view: 'compact' } });
+    await settle(fixture);
+
+    tab(fixture, 'Tasks').click();
+    await settle(fixture);
+    expect(router.parseUrl(router.url).queryParams).toEqual({ view: 'compact', tab: 'tasks' });
+    expect(tab(fixture, 'Tasks').getAttribute('aria-selected')).toBe('true');
+    expect(host(fixture).querySelector('[role="tabpanel"]:not([hidden])')?.id).toBe('project-tabpanel-tasks');
+
+    // Browser back/forward feeds the same queryParamMap stream as these URL
+    // transitions; the active tab must follow it rather than becoming stale.
+    await router.navigate([], { queryParams: { view: 'compact', tab: 'issues' } });
+    await settle(fixture);
+    expect(tab(fixture, 'Issues').getAttribute('aria-selected')).toBe('true');
+    expect(host(fixture).querySelector('[role="tabpanel"]:not([hidden])')?.id).toBe('project-tabpanel-issues');
+
+    await router.navigate([], { queryParams: { view: 'compact' } });
+    await settle(fixture);
+    expect(tab(fixture, 'Overview').getAttribute('aria-selected')).toBe('true');
+    expect(host(fixture).querySelector('[role="tabpanel"]:not([hidden])')?.id).toBe('project-tabpanel-overview');
+  });
+
+  it('opens a valid deep-linked tab and safely canonicalises a role-inaccessible tab', async () => {
+    const deepLink = createFixture('delivery-executive');
+    let router = TestBed.inject(Router);
+    await router.navigate([], { queryParams: { tab: 'tasks', source: 'notification' } });
+    await tick(deepLink.fixture);
+    expect(tab(deepLink.fixture, 'Tasks').getAttribute('aria-selected')).toBe('true');
+    expect(router.parseUrl(router.url).queryParams).toEqual({ tab: 'tasks', source: 'notification' });
+
+    TestBed.resetTestingModule();
+
+    const unavailable = createFixture('pm');
+    router = TestBed.inject(Router);
+    await router.navigate([], { queryParams: { tab: 'financials', source: 'bookmark' } });
+    await settle(unavailable.fixture);
+    expect(tab(unavailable.fixture, 'Overview').getAttribute('aria-selected')).toBe('true');
+    expect(host(unavailable.fixture).textContent).not.toContain('Financials');
+    expect(router.parseUrl(router.url).queryParams).toEqual({ source: 'bookmark' });
+  });
+
+  it('keeps the Projects breadcrumb and the back control as distinct navigation affordances', async () => {
+    const { fixture } = await render('delivery-executive');
+    const root = host(fixture);
+    const breadcrumb = root.querySelector<HTMLElement>('nav[aria-label="Breadcrumb"]');
+    const back = root.querySelector<HTMLAnchorElement>('a[aria-label="Back to projects"]');
+
+    expect(breadcrumb?.querySelector<HTMLAnchorElement>('a[href="/projects"]')?.textContent?.trim()).toBe('Projects');
+    expect(breadcrumb?.querySelector('[aria-current="page"]')?.textContent?.trim()).toBe(PROJECT.name);
+    expect(back).not.toBeNull();
+    expect(breadcrumb?.contains(back!)).toBe(false);
+  });
+
+  it('makes horizontal overflow discoverable without hiding the native scrollbar', async () => {
+    const { fixture } = await render('delivery-executive');
+    const tablist = host(fixture).querySelector<HTMLElement>('[role="tablist"]');
+    const hint = host(fixture).querySelector<HTMLElement>('#projectTabsOverflowHint');
+
+    expect(tablist?.classList.contains('overflow-x-auto')).toBe(true);
+    expect(tablist?.classList.contains('hide-scrollbar')).toBe(false);
+    expect(hint?.textContent).toContain('More project sections are available horizontally');
+    expect(hint?.textContent).toContain('arrow keys');
+  });
+});
 
 describe('ProjectDetailsComponent — Baseline vs Planned card (design spec, block E)', () => {
   afterEach(() => TestBed.resetTestingModule());
@@ -533,34 +742,24 @@ describe('ProjectDetailsComponent — a withheld commercial/financial read is NO
 describe('ProjectDetailsComponent — the money grid sits behind a readiness gate', () => {
   afterEach(() => TestBed.resetTestingModule());
 
-  it('pre-authReady it renders a skeleton, never EUR 0 tiles and never a confident "On Track"', async () => {
+  it('pre-authReady it holds the whole workspace behind the core-project skeleton', async () => {
     const { fixture, api } = await render('delivery-executive', moneyProject(), /* authReady */ false);
 
-    // Scoped to the MONEY grid. The Baseline card is skeletonised in this state
-    // too (it always was), so a bare `.command-skeleton` count is green before
-    // and after the fix and proves nothing.
-    const region = moneySkeleton(fixture);
-    expect(region, 'the money grid must have its own loading region').not.toBeNull();
+    const region = host(fixture).querySelector('[role="status"]');
+    expect(region, 'the core project must have an explicit loading region').not.toBeNull();
     expect(region!.getAttribute('role')).toBe('status');
     expect(region!.getAttribute('aria-live')).toBe('polite');
     expect(region!.getAttribute('aria-busy')).toBe('true');
-    expect(region!.querySelector('.sr-only')?.textContent).toContain('Loading project financials');
+    expect(region!.querySelector('.sr-only')?.textContent).toContain('Loading project');
     expect(region!.querySelectorAll('.command-skeleton').length).toBeGreaterThan(0);
+    expect(moneySkeleton(fixture), 'the financial panel must not mount before the project record').toBeNull();
+    expect(host(fixture).querySelector('.project-tab-active')).toBeNull();
 
-    // Where the red sits: before the fix this shipped a full strip of zero
-    // tiles plus a verdict, in the SSR HTML and through the whole pre-hydration
-    // window, and every number then jumped.
+    // No secondary KPI can mount from empty pre-auth envelopes.
     expect(findKpi(fixture, 'Budget'), 'no Budget tile may render before authReady').toBeNull();
     expect(findKpi(fixture, 'Contract Revenue')).toBeNull();
     expect(findKpi(fixture, 'Delivery Health')).toBeNull();
     expect(host(fixture).textContent).not.toContain('On Track');
-    // NOT asserted here: that the header chip is absent. It would be — the whole
-    // header sits inside `@if (project(); as p)` and projectsRes is itself
-    // pre-readiness — so the assertion would pass with the pill's own gate torn
-    // out, i.e. it would be vacuous. The chip's real red lives in the errored
-    // case below, where project() HAS resolved and the pill must read
-    // "Health unavailable" instead of throwing.
-
     // And the gate is not "fetch anyway, hide the result".
     expect(api.getOrders).not.toHaveBeenCalled();
     expect(api.getProjectFinancials).not.toHaveBeenCalled();
@@ -789,34 +988,30 @@ describe('ProjectDetailsComponent — exactly ONE h1 on the page, whichever tab 
     });
   }
 
-  it('the level is passed by the PARENT, not inferred from projectId, so no h1 appears while the project is still loading', async () => {
-    // `[projectId]="project()?.id"` is undefined until projectsRes resolves. A
-    // child that keyed its heading off "do I have an id" — the discriminator
-    // these panels already use for their project picker — would render its
-    // standalone h1 inside this page for that whole window. Here the project
-    // never resolves at all, so the state is held open and observable.
+  it('does not mount a selected tab panel until the core project has resolved', async () => {
     const pending = new Subject<Project[]>();
-    const { fixture } = await render('delivery-executive', moneyProject({
+    const { fixture, api } = await render('delivery-executive', moneyProject({
       getProjects: () => pending.asObservable(),
     }));
     fixture.componentInstance.activeTab.set('tasks');
     await tick(fixture);
 
-    // The page's own h1 is inside `@if (project(); as p)`, so it is absent too:
-    // zero h1 elements is the honest count here, and the panel must not supply
-    // one of its own.
-    expect(host(fixture).querySelectorAll('h1')).toHaveLength(0);
-    // The panel IS rendered — this is not a vacuous count over an empty page.
-    const panelTitle = headings(fixture).find(h => h.text === 'Tasks');
-    expect(panelTitle, 'the tasks panel must be on screen in this state').toBeDefined();
-    expect(panelTitle!.level).toBe(2);
+    expect(host(fixture).querySelector('h1')?.textContent?.trim()).toBe('Project details');
+    expect(host(fixture).textContent).toContain('Loading project');
+    expect(headings(fixture).find(h => h.text === 'Tasks')).toBeUndefined();
+    expect(host(fixture).querySelector('.project-tab-active')).toBeNull();
+    expect(host(fixture).querySelector('.command-kpi')).toBeNull();
+    expect(api.getProjectTasks).not.toHaveBeenCalled();
 
     pending.next([PROJECT]);
     pending.complete();
     await tick(fixture);
-    // MIRROR: once the project lands, the page h1 appears — exactly one of it.
     expect(host(fixture).querySelectorAll('h1')).toHaveLength(1);
     expect(host(fixture).querySelector('h1')?.textContent?.trim()).toBe(PROJECT.name);
+    const panelTitle = headings(fixture).find(h => h.text === 'Tasks');
+    expect(panelTitle, 'the tasks panel mounts only after the project resolves').toBeDefined();
+    expect(panelTitle!.level).toBe(2);
+    expect(api.getProjectTasks).toHaveBeenCalledOnce();
   });
 });
 

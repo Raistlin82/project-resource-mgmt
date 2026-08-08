@@ -1,7 +1,7 @@
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
-import { AllocationCalendarComponent } from './allocation-calendar.component';
+import { Observable, of, throwError } from 'rxjs';
+import { AllocationCalendarComponent, calendarFocusScrollBehavior } from './allocation-calendar.component';
 import {
   ApiService,
   AssignmentAllocation,
@@ -29,8 +29,12 @@ function allocationFor(kind: ResourceKind): AssignmentAllocation {
 const PERIODS: PlanningPeriod[] = [{ id: '2026-09', status: 'Open' }];
 const HOLIDAYS: Holiday[] = [];
 
-function setup(kind: ResourceKind, overrides: Partial<AssignmentAllocation> = {}) {
-  const getAssignmentAllocation = vi.fn(() => of({ ...allocationFor(kind), ...overrides }));
+function setup(
+  kind: ResourceKind,
+  overrides: Partial<AssignmentAllocation> = {},
+  allocationSource?: () => Observable<AssignmentAllocation>,
+) {
+  const getAssignmentAllocation = vi.fn(() => allocationSource?.() ?? of({ ...allocationFor(kind), ...overrides }));
   const getPlanningPeriods = vi.fn(() => of(PERIODS));
   const getHolidays = vi.fn(() => of(HOLIDAYS));
   const saveAssignmentAllocation = vi.fn((_id: string, month: string, dailyHours: Record<string, number>) =>
@@ -75,7 +79,7 @@ function setup(kind: ResourceKind, overrides: Partial<AssignmentAllocation> = {}
   });
   const fixture = TestBed.createComponent(AllocationCalendarComponent);
   fixture.componentRef.setInput('assignmentId', 'A1');
-  return { fixture, api, saveAssignmentAllocation, submitAssignmentMonth };
+  return { fixture, api, getAssignmentAllocation, saveAssignmentAllocation, submitAssignmentMonth };
 }
 
 async function flush(fixture: { detectChanges: () => void; whenStable: () => Promise<unknown> }) {
@@ -85,6 +89,23 @@ async function flush(fixture: { detectChanges: () => void; whenStable: () => Pro
 }
 
 describe('AllocationCalendarComponent', () => {
+  it('shows a retryable error instead of treating a failed load as an empty calendar', async () => {
+    const { fixture, getAssignmentAllocation } = setup(
+      'internal',
+      {},
+      () => throwError(() => new Error('network failure')),
+    );
+    await flush(fixture);
+
+    const element = fixture.nativeElement as HTMLElement;
+    expect(element.textContent).toContain("Couldn't load allocation calendar");
+    expect(element.textContent).not.toContain('No months available');
+
+    element.querySelector<HTMLButtonElement>('.command-button')?.click();
+    fixture.detectChanges();
+    expect(getAssignmentAllocation).toHaveBeenCalledTimes(2);
+  });
+
   it('offers the FTE selector for a dummy', async () => {
     const { fixture } = setup('dummy');
     await flush(fixture);
@@ -238,5 +259,10 @@ describe('AllocationCalendarComponent', () => {
 
     expect(closed).not.toHaveBeenCalled();
     expect((fixture.nativeElement as HTMLElement).textContent).toContain('Unsaved changes');
+  });
+
+  it('uses instant focus scrolling when reduced motion is requested', () => {
+    expect(calendarFocusScrollBehavior(true)).toBe('auto');
+    expect(calendarFocusScrollBehavior(false)).toBe('smooth');
   });
 });

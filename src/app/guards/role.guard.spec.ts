@@ -35,6 +35,8 @@ import {
 class FakeAuth {
   readonly _ready = signal(false);
   readonly authReady = this._ready.asReadonly();
+  readonly _authenticated = signal(true);
+  readonly isAuthenticated = this._authenticated.asReadonly();
   allowed = false;
   capability(): boolean {
     return this.allowed;
@@ -49,6 +51,7 @@ class FakeAuth {
 class RoleAuth {
   readonly _ready = signal(false);
   readonly authReady = this._ready.asReadonly();
+  readonly isAuthenticated = signal(true);
   constructor(private readonly role: UserRole) {}
   hasAnyRole(roles: UserRole[]): boolean {
     return roles.includes(this.role);
@@ -108,6 +111,26 @@ describe('roleGuard', () => {
     const value = await firstValueFrom(result as Observable<GuardResult>);
     expect(value).toBeInstanceOf(UrlTree);
     expect(router.serializeUrl(value as UrlTree)).toBe(router.serializeUrl(router.parseUrl('/')));
+  });
+
+  it('in the browser, redirects an anonymous user even if a capability predicate is permissive', async () => {
+    const auth = new FakeAuth();
+    auth._authenticated.set(false);
+    auth.allowed = true;
+    const injector = configure('browser', auth);
+    const router = TestBed.inject(Router);
+    const predicate = vi.fn(() => true);
+    const guard = roleGuard(() => predicate(), '/');
+
+    const result = runInInjectionContext(injector, () => guard({} as never, []));
+    auth._ready.set(true);
+    const value = await firstValueFrom(result as Observable<GuardResult>);
+
+    expect(value).toBeInstanceOf(UrlTree);
+    expect(router.serializeUrl(value as UrlTree)).toBe('/');
+    // The identity barrier short-circuits before a capability can accidentally
+    // turn an anonymous principal into a workspace user.
+    expect(predicate).not.toHaveBeenCalled();
   });
 
   it('evaluates the predicate AFTER authReady (sees the resolved role, not the anonymous default)', async () => {

@@ -63,6 +63,7 @@ function setup(
     requests?: ResourceRequest[] | Observable<ResourceRequest[]>;
     projects?: Project[] | Observable<Project[]>;
   } = {},
+  writes: { createResource$?: Observable<Resource>; updateResource$?: Observable<Resource> } = {},
 ) {
   const getResources = vi.fn(() => (Array.isArray(resources) ? of(resources) : resources));
   const getProjectRoles = vi.fn(() => of([]));
@@ -76,8 +77,8 @@ function setup(
   const projects = join.projects ?? [];
   const getRequests = vi.fn(() => (Array.isArray(requests) ? of(requests) : requests));
   const getProjects = vi.fn(() => (Array.isArray(projects) ? of(projects) : projects));
-  const createResource = vi.fn(() => of({} as Resource));
-  const updateResource = vi.fn(() => of({} as Resource));
+  const createResource = vi.fn(() => writes.createResource$ ?? of({} as Resource));
+  const updateResource = vi.fn(() => writes.updateResource$ ?? of({} as Resource));
   const apiStub = {
     getResources, getProjectRoles, getResourceOrganizations, getCountries, getCities,
     getRateCards, getVendors, getAssignments, getRequests, getProjects, createResource, updateResource,
@@ -232,6 +233,90 @@ describe('ResourcesComponent', () => {
     expect(fixture.componentInstance.form.valid).toBe(true);
     fixture.componentInstance.save();
     expect(createResource).toHaveBeenCalledWith(expect.objectContaining({ kind: 'subco', vendorId: 'V4' }));
+  });
+
+  it('associates every visible validation message with its invalid field', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    fixture.componentInstance.openForm();
+    fixture.componentInstance.form.controls.kind.setValue('subco');
+    fixture.componentInstance.form.patchValue({ name: '', role: '', capacity: 0, hireDate: '', vendorId: '' });
+    fixture.componentInstance.form.markAllAsTouched();
+    fixture.detectChanges();
+
+    const host = fixture.nativeElement as HTMLElement;
+    const associations = [
+      ['res-name', 'res-name-error'],
+      ['res-role', 'res-role-error'],
+      ['res-vendor', 'res-vendor-error'],
+      ['res-capacity', 'res-capacity-error'],
+      ['res-hire', 'res-hire-error'],
+    ];
+    for (const [fieldId, errorId] of associations) {
+      const field = host.querySelector<HTMLElement>(`#${fieldId}`)!;
+      expect(field.getAttribute('aria-invalid')).toBe('true');
+      expect(field.getAttribute('aria-describedby')).toBe(errorId);
+      expect(host.querySelector(`#${errorId}`)).not.toBeNull();
+    }
+  });
+
+  it('keeps invalid submit operable and focuses the first invalid employee field', async () => {
+    const { fixture, createResource } = setup();
+    await flush(fixture);
+    fixture.componentInstance.openForm();
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+    const submit = [...host.querySelectorAll<HTMLButtonElement>('button')]
+      .find(button => button.textContent?.includes('Create employee'))!;
+
+    expect(submit.disabled).toBe(false);
+    submit.click();
+    await Promise.resolve();
+    fixture.detectChanges();
+    expect(createResource).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(host.querySelector('#res-name'));
+  });
+
+  it('asks before discarding a dirty employee form', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    fixture.componentInstance.openForm();
+    await flush(fixture);
+    fixture.componentInstance.form.controls.name.setValue('Unsaved employee');
+    fixture.componentInstance.form.controls.name.markAsDirty();
+    fixture.componentInstance.closeForm();
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.showForm()).toBe(true);
+    expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="resource-discard-confirm"]')).not.toBeNull();
+  });
+
+  it('blocks duplicate employee saves and keeps a write failure inside the form', async () => {
+    const pending = new Subject<Resource>();
+    const { fixture, createResource } = setup(
+      RESOURCES, [], [], of([]), true, {}, { createResource$: pending.asObservable() },
+    );
+    await flush(fixture);
+    fixture.componentInstance.openForm();
+    await flush(fixture);
+    fixture.componentInstance.form.patchValue({
+      name: 'New employee', role: 'Consultant', capacity: 40,
+      hireDate: '2099-01-01', kind: 'internal',
+    });
+    fixture.componentInstance.save();
+    fixture.componentInstance.save();
+    fixture.detectChanges();
+
+    expect(createResource).toHaveBeenCalledOnce();
+    const saving = [...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('button')]
+      .find(button => button.textContent?.includes('Saving'))!;
+    expect(saving.disabled).toBe(true);
+
+    pending.error({ error: { error: 'Employee code already exists' } });
+    fixture.detectChanges();
+    expect(fixture.componentInstance.showForm()).toBe(true);
+    expect((fixture.nativeElement as HTMLElement).querySelector('[data-test="resource-save-error"]')?.textContent)
+      .toContain('Employee code already exists');
   });
 
   it('loads an existing subco with its vendor pre-filled, valid, and the vendor field shown', async () => {
@@ -1071,6 +1156,26 @@ describe('ResourcesComponent', () => {
       // A width floor, so the port engages deterministically instead of relying
       // on the table's min-content exceeding the card.
       expect(table!.className).toMatch(/min-w-\[/);
+    });
+
+    it('keeps record identity and actions sticky and exposes a keyboard-focusable pan hint', async () => {
+      const { fixture } = setup(ORG_RESOURCES, ORG_NODES);
+      await flush(fixture);
+      const host = fixture.nativeElement as HTMLElement;
+      const port = host.querySelector<HTMLElement>('[role="region"][aria-label="Resources table"]')!;
+      const headers = port.querySelectorAll<HTMLTableCellElement>('thead th');
+      const firstRowCells = port.querySelectorAll<HTMLTableCellElement>('tbody tr:first-child td');
+
+      expect(port.tabIndex).toBe(0);
+      expect(port.getAttribute('aria-describedby')).toBe('resourcesTablePanHint');
+      expect(headers[0].className).toContain('sticky left-0');
+      expect(headers[headers.length - 1].className).toContain('sticky right-0');
+      expect(firstRowCells[0].className).toContain('sticky left-0');
+      expect(firstRowCells[firstRowCells.length - 1].className).toContain('sticky right-0');
+      for (const action of firstRowCells[firstRowCells.length - 1].querySelectorAll<HTMLButtonElement>('button')) {
+        expect(action.className).toContain('min-h-11');
+        expect(action.className).toContain('min-w-11');
+      }
     });
 
     it('the pan-port walk reports false for the pre-fix shape, so the green above is not a vacuous query', () => {

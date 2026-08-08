@@ -30,9 +30,11 @@ import { UserRole } from '../services/api.service';
  * {@link AuthService.authReady}). A synchronous check at hydration would run
  * against the anonymous default role and wrongly redirect an authorized user
  * who hard-refreshed / deep-linked / bookmarked a guarded route. We therefore
- * return an Observable that WAITS for `authReady` before evaluating `check`,
- * so the predicate sees the real (post-login) role. `CanMatchFn` natively
- * accepts an `Observable<GuardResult>`.
+ * return an Observable that WAITS for `authReady` before requiring BOTH an
+ * authenticated identity and the route-specific capability. The explicit
+ * identity check is intentional defence in depth: a permissive/default
+ * capability must never admit an anonymous browser session. `CanMatchFn`
+ * natively accepts an `Observable<GuardResult>`.
  */
 export function roleGuard(check: (auth: AuthService) => boolean, redirect = '/'): CanMatchFn {
   return (): GuardResult | Observable<GuardResult> => {
@@ -45,7 +47,7 @@ export function roleGuard(check: (auth: AuthService) => boolean, redirect = '/')
     return toObservable(auth.authReady).pipe(
       filter(ready => ready),
       take(1),
-      map(() => (check(auth) ? true : router.parseUrl(redirect))),
+      map(() => (auth.isAuthenticated() && check(auth) ? true : router.parseUrl(redirect))),
     );
   };
 }

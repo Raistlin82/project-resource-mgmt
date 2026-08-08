@@ -1,4 +1,13 @@
-import { ChangeDetectionStrategy, Component, inject, signal, computed } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  ElementRef,
+  afterRenderEffect,
+  computed,
+  inject,
+  signal,
+  viewChild,
+} from '@angular/core';
 import { rxResource, takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService, ResourceRequest, Assignment, Resource, ProjectRole, Skill } from '../services/api.service';
@@ -57,7 +66,8 @@ interface RequestsData {
             </button>
           </div>
           @if (currentView() === 'requests') {
-            <button (click)="openCreateForm()" class="command-button w-full sm:w-auto">
+            <button type="button" (click)="openCreateForm()" class="command-button w-full sm:w-auto"
+                    aria-controls="requestEditor" [attr.aria-expanded]="showForm()">
               <mat-icon class="text-[20px] w-[20px] h-[20px]">add</mat-icon> Create Request
             </button>
           }
@@ -66,18 +76,28 @@ interface RequestsData {
 
       @if (currentView() === 'requests') {
         @if (showForm()) {
-          <div class="command-card p-8 relative overflow-hidden">
+          <section id="requestEditor" class="command-card p-8 relative overflow-hidden" aria-labelledby="requestEditorTitle">
             <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-accent to-accent"></div>
-            <h2 class="font-display text-2xl font-bold text-[var(--cc-ink)] mb-8">{{ editingId() ? 'Edit Request' : 'New Resource Request' }}</h2>
+            <h2 #requestFormHeading id="requestEditorTitle" tabindex="-1"
+                class="font-display text-2xl font-bold text-[var(--cc-ink)] mb-8 outline-none">
+              {{ editingId() ? 'Edit Request' : 'New Resource Request' }}
+            </h2>
             <form [formGroup]="requestForm" (ngSubmit)="saveRequest()" class="space-y-6">
               <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div class="space-y-1.5">
                   <label for="name" class="block text-sm font-semibold text-ink-secondary">Project Name <span class="text-critical">*</span></label>
-                  <input id="name" formControlName="name" class="command-input">
+                  <input id="name" formControlName="name" class="command-input" required aria-required="true"
+                         [attr.aria-invalid]="showFieldError('name') ? 'true' : null"
+                         [attr.aria-describedby]="showFieldError('name') ? 'requestNameError' : null">
+                  @if (showFieldError('name')) {
+                    <p id="requestNameError" class="command-field-error" role="alert">Project name is required.</p>
+                  }
                 </div>
                 <div class="space-y-1.5">
                   <label for="requiredRole" class="block text-sm font-semibold text-ink-secondary">Required Role <span class="text-critical">*</span></label>
-                  <select id="requiredRole" formControlName="requiredRole" class="command-select">
+                  <select id="requiredRole" formControlName="requiredRole" class="command-select" required aria-required="true"
+                          [attr.aria-invalid]="showFieldError('requiredRole') ? 'true' : null"
+                          [attr.aria-describedby]="showFieldError('requiredRole') ? 'requestRoleError' : null">
                     <option value="" disabled>Select a role...</option>
                     @for (role of roleOptions(); track role.id) {
                       <option [value]="role.name">{{ role.name }}</option>
@@ -89,10 +109,19 @@ interface RequestsData {
                       <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
                     }
                   </select>
+                  @if (showFieldError('requiredRole')) {
+                    <p id="requestRoleError" class="command-field-error" role="alert">Select a required role.</p>
+                  }
                 </div>
                 <div class="space-y-1.5">
                   <label for="requiredEffort" class="block text-sm font-semibold text-ink-secondary">Required Effort (Hours) <span class="text-critical">*</span></label>
-                  <input id="requiredEffort" type="number" formControlName="requiredEffort" class="command-input">
+                  <input id="requiredEffort" type="number" formControlName="requiredEffort" class="command-input"
+                         min="1" required aria-required="true"
+                         [attr.aria-invalid]="showFieldError('requiredEffort') ? 'true' : null"
+                         [attr.aria-describedby]="showFieldError('requiredEffort') ? 'requestEffortError' : null">
+                  @if (showFieldError('requiredEffort')) {
+                    <p id="requestEffortError" class="command-field-error" role="alert">Required effort must be at least 1 hour.</p>
+                  }
                 </div>
                 <div class="space-y-1.5">
                   <label for="skills" class="block text-sm font-semibold text-ink-secondary">Required Skills</label>
@@ -136,7 +165,7 @@ interface RequestsData {
                              picking up the remove button's mat-icon ligature text. -->
                         <span data-test="selected-skill-label">{{ skill }}@if (isOrphanSkill(skill)) {<span class="text-ink-muted italic"> (not in catalog)</span>}</span>
                         <button type="button" (click)="removeSkill(skill)" [attr.aria-label]="'Remove ' + skill" [attr.title]="'Remove ' + skill"
-                                class="text-ink-muted hover:text-critical-text transition-colors">
+                                class="inline-flex size-6 shrink-0 items-center justify-center rounded text-ink-muted hover:text-critical-text transition-colors">
                           <mat-icon class="text-[14px] w-[14px] h-[14px]">close</mat-icon>
                         </button>
                       </span>
@@ -152,21 +181,60 @@ interface RequestsData {
                 </div>
                 <div class="space-y-1.5">
                   <label for="endDate" class="block text-sm font-semibold text-ink-secondary">End Date</label>
-                  <input id="endDate" type="date" formControlName="endDate" class="command-input">
+                  <input id="endDate" type="date" formControlName="endDate" class="command-input"
+                         [min]="requestForm.controls.startDate.value || null"
+                         [attr.aria-invalid]="showFieldError('endDate') ? 'true' : null"
+                         [attr.aria-describedby]="showFieldError('endDate') ? 'requestEndDateError' : null">
+                  @if (showFieldError('endDate')) {
+                    <p id="requestEndDateError" class="command-field-error" role="alert">End date must be on or after the start date.</p>
+                  }
                 </div>
               </div>
               <div class="space-y-1.5">
                 <label for="description" class="block text-sm font-semibold text-ink-secondary">Description</label>
                 <textarea id="description" formControlName="description" rows="4" placeholder="Provide details about the project and the role..." class="command-textarea"></textarea>
               </div>
-              <div class="flex justify-end gap-3 pt-6 border-t border-[var(--cc-line)]">
-                <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
-                <button type="submit" [disabled]="!requestForm.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save Request</button>
+              <div class="pt-6 border-t border-[var(--cc-line)]">
+                @if (confirmingFormDiscard()) {
+                  <div role="alert" class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div>
+                      <p class="font-semibold text-ink">Discard unsaved request changes?</p>
+                      <p class="text-sm text-ink-muted">Your edits have not been saved.</p>
+                    </div>
+                    <div class="flex justify-end gap-3">
+                      <button type="button" (click)="confirmingFormDiscard.set(false)" class="command-button secondary">Continue editing</button>
+                      <button type="button" (click)="closeForm(true)" class="command-button">Discard changes</button>
+                    </div>
+                  </div>
+                } @else {
+                  <div class="flex justify-end gap-3">
+                    <button type="button" (click)="closeForm()" [disabled]="savingRequest()" class="command-button secondary disabled:opacity-50">Cancel</button>
+                    <button type="submit" [disabled]="savingRequest()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                      {{ savingRequest() ? 'Saving request…' : 'Save Request' }}
+                    </button>
+                  </div>
+                }
               </div>
             </form>
-          </div>
+          </section>
         }
 
+        @if (requestsLoading()) {
+          <div class="space-y-3" role="status" aria-live="polite" aria-busy="true" aria-label="Loading resource requests">
+            @for (row of [1, 2, 3, 4]; track row) {
+              <div class="command-skeleton h-14"></div>
+            }
+          </div>
+        } @else if (requestsReadFailed()) {
+          <div class="command-card border-critical! p-10 text-center" role="alert">
+            <mat-icon class="text-critical-text text-3xl">error_outline</mat-icon>
+            <h2 class="mt-3 font-display text-lg font-bold text-ink">Couldn't load resource requests</h2>
+            <p class="mt-1 text-sm text-ink-muted">Requests, assignments, or resource data could not be retrieved.</p>
+            <button type="button" (click)="reloadRequests()" class="command-button mt-4">
+              <mat-icon class="text-[18px] w-[18px] h-[18px]">refresh</mat-icon> Retry
+            </button>
+          </div>
+        } @else {
         <div class="command-card overflow-hidden">
           <div class="overflow-x-auto">
             <table class="command-data-table min-w-[800px]">
@@ -244,7 +312,7 @@ interface RequestsData {
                         <button (click)="openEditForm(req)" class="p-2 text-ink-muted hover:text-accent-text hover:bg-accent-tint rounded-lg transition-all" [attr.aria-label]="'Edit request ' + req.name" [attr.title]="'Edit request ' + req.name">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">edit</mat-icon>
                         </button>
-                        <button (click)="publishRequest(req)" class="p-2 text-ink-muted hover:text-positive-text hover:bg-positive-tint rounded-lg transition-all" [attr.aria-label]="'Publish request ' + req.name" [attr.title]="'Publish request ' + req.name">
+                        <button type="button" (click)="askRequestTransition(req, 'Published')" class="p-2 text-ink-muted hover:text-positive-text hover:bg-positive-tint rounded-lg transition-all" [attr.aria-label]="'Publish request ' + req.name + ' (' + req.id + ')'" [attr.title]="'Publish request ' + req.name">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">publish</mat-icon>
                         </button>
                         <!-- Arms the confirm below; nothing is deleted from here. -->
@@ -253,7 +321,7 @@ interface RequestsData {
                         </button>
                       }
                       @if (req.status === 'Published' || req.status === 'Open' || req.status === 'Fulfilled') {
-                        <button (click)="withdrawRequest(req)" class="p-2 text-ink-muted hover:text-caution-text hover:bg-caution-tint rounded-lg transition-all" [attr.aria-label]="'Withdraw request ' + req.name" [attr.title]="'Withdraw request ' + req.name">
+                        <button type="button" (click)="askRequestTransition(req, 'Withdrawn')" class="p-2 text-ink-muted hover:text-caution-text hover:bg-caution-tint rounded-lg transition-all" [attr.aria-label]="'Withdraw request ' + req.name + ' (' + req.id + ')'" [attr.title]="'Withdraw request ' + req.name">
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">undo</mat-icon>
                         </button>
                       }
@@ -275,8 +343,25 @@ interface RequestsData {
             </table>
           </div>
         </div>
+        }
       } @else {
         <!-- Resource Availability View -->
+        @if (requestsLoading()) {
+          <div class="space-y-3" role="status" aria-live="polite" aria-busy="true" aria-label="Loading resource availability">
+            @for (row of [1, 2, 3, 4]; track row) {
+              <div class="command-skeleton h-14"></div>
+            }
+          </div>
+        } @else if (requestsReadFailed()) {
+          <div class="command-card border-critical! p-10 text-center" role="alert">
+            <mat-icon class="text-critical-text text-3xl">error_outline</mat-icon>
+            <h2 class="mt-3 font-display text-lg font-bold text-ink">Couldn't load resource availability</h2>
+            <p class="mt-1 text-sm text-ink-muted">Resource capacity could not be retrieved.</p>
+            <button type="button" (click)="reloadRequests()" class="command-button mt-4">
+              <mat-icon class="text-[18px] w-[18px] h-[18px]">refresh</mat-icon> Retry
+            </button>
+          </div>
+        } @else {
         <div class="command-card overflow-hidden flex flex-col">
           <div class="p-6 border-b border-[var(--cc-line)] flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[var(--cc-panel-muted)]">
             <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Resource Availability</h2>
@@ -357,8 +442,14 @@ interface RequestsData {
                   <tr>
                     <td colspan="5" class="text-center text-[var(--cc-muted)]">
                       <div class="flex flex-col items-center justify-center px-6 py-12">
-                        <mat-icon class="text-4xl mb-3 opacity-50">search_off</mat-icon>
-                        <p class="font-medium">No resources found matching your search.</p>
+                        <mat-icon class="text-4xl mb-3 opacity-50">{{ resources().length ? 'search_off' : 'group_off' }}</mat-icon>
+                        @if (resources().length) {
+                          <p class="font-medium">No resources match “{{ searchValue().trim() }}”.</p>
+                          <button type="button" (click)="clearAvailabilitySearch()" class="command-button secondary mt-3">Clear search</button>
+                        } @else {
+                          <p class="font-medium">No resource availability data yet.</p>
+                          <p class="text-sm mt-1">Resources will appear here after they are added.</p>
+                        }
                       </div>
                     </td>
                   </tr>
@@ -367,6 +458,7 @@ interface RequestsData {
             </table>
           </div>
         </div>
+        }
       }
 
       @if (trackingDetails() && !calendarTarget()) {
@@ -509,6 +601,52 @@ interface RequestsData {
         </div>
       }
 
+      @if (pendingTransition(); as transition) {
+        <div class="fixed inset-0 bg-scrim/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+             appModal ariaLabelledby="requestTransitionTitle" (dismiss)="cancelRequestTransition()">
+          <div class="command-card shadow-2xl w-full max-w-lg overflow-hidden flex flex-col" data-test="request-transition-confirm">
+            <div class="p-6 sm:p-8">
+              <div class="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 ring-1"
+                   [class.bg-positive-tint]="transition.target === 'Published'"
+                   [class.ring-positive]="transition.target === 'Published'"
+                   [class.bg-caution-tint]="transition.target === 'Withdrawn'"
+                   [class.ring-caution]="transition.target === 'Withdrawn'">
+                <mat-icon [class.text-positive-text]="transition.target === 'Published'"
+                          [class.text-caution-text]="transition.target === 'Withdrawn'">
+                  {{ transition.target === 'Published' ? 'publish' : 'undo' }}
+                </mat-icon>
+              </div>
+              <h2 id="requestTransitionTitle" class="font-display text-xl font-bold text-center text-[var(--cc-ink)] break-words">
+                {{ transition.target === 'Published' ? 'Publish' : 'Withdraw' }} {{ transition.request.name }}?
+              </h2>
+              <div class="command-card-muted mt-5 p-4 text-sm text-[var(--cc-muted)] space-y-2">
+                <p><strong class="text-ink">Request:</strong> {{ transition.request.name }} (<span class="font-mono break-all">{{ transition.request.id }}</span>)</p>
+                <p><strong class="text-ink">Role and effort:</strong> {{ transition.request.requiredRole }}, {{ transition.request.requiredEffort | number:'1.0-2' }}h total, {{ transitionRemainingEffort() | number:'1.0-2' }}h remaining</p>
+                <p><strong class="text-ink">Window:</strong> {{ transition.request.startDate || 'TBD' }} to {{ transition.request.endDate || 'TBD' }}</p>
+                @if (transition.target === 'Published') {
+                  <p>Publishing makes this request available to staffing and matching workflows.</p>
+                } @else {
+                  <p data-test="withdraw-consequence">
+                    Withdrawing removes the request from active staffing. It does not remove
+                    {{ transitionAssignmentCount() | number:'1.0-0' }} existing assignment(s) or their recorded hours.
+                  </p>
+                  @if (transition.request.status === 'Fulfilled') {
+                    <p class="font-semibold text-caution-text">This request is fulfilled; withdrawing it changes its visible lifecycle while staffed work remains linked.</p>
+                  }
+                }
+              </div>
+            </div>
+            <div class="p-4 bg-[var(--cc-panel-muted)] border-t border-[var(--cc-line)] flex justify-end gap-3">
+              <button type="button" (click)="cancelRequestTransition()" [disabled]="transitionPending()" class="command-button secondary disabled:opacity-50">Cancel</button>
+              <button type="button" (click)="confirmRequestTransition()" [disabled]="transitionPending()"
+                      data-test="request-transition-confirm-action" class="command-button disabled:opacity-50">
+                {{ transitionPending() ? 'Updating…' : (transition.target === 'Published' ? 'Publish request' : 'Withdraw request') }}
+              </button>
+            </div>
+          </div>
+        </div>
+      }
+
       <!-- Time-phased allocation calendar (B1). Rendered as its own modal overlay;
            while it is open the tracking modal above is hidden so only one focus trap
            is active. The panel content lives in AllocationCalendarComponent. -->
@@ -527,6 +665,7 @@ interface RequestsData {
 export class ResourceRequestsComponent {
   private api = inject(ApiService);
   private auth = inject(AuthService);
+  private hostEl = inject<ElementRef<HTMLElement>>(ElementRef);
 
   // Read LIVE, never snapshot at field-init (see auth.service note): a captured
   // value freezes the anonymous default and shows the wrong user's data on reload.
@@ -549,9 +688,18 @@ export class ResourceRequestsComponent {
     defaultValue: { requests: [], assignments: [], resources: [] }
   });
 
-  requests = computed(() => this.res.value().requests);
-  assignments = computed(() => this.res.value().assignments);
-  resources = computed(() => this.res.value().resources);
+  protected requestsLoading = computed(() => !this.auth.authReady() || this.res.isLoading());
+  protected requestsReadFailed = computed(() => this.res.status() === 'error');
+  private requestData = computed<RequestsData>(() => this.requestsReadFailed()
+    ? { requests: [], assignments: [], resources: [] }
+    : this.res.value());
+  requests = computed(() => this.requestData().requests);
+  assignments = computed(() => this.requestData().assignments);
+  resources = computed(() => this.requestData().resources);
+
+  protected reloadRequests(): void {
+    this.res.reload();
+  }
 
   // Required-role option source: the canonical /project-roles catalog. Stored value
   // = name (Phase A), which is what match-scoring compares against. Keyed on
@@ -588,6 +736,13 @@ export class ResourceRequestsComponent {
 
   showForm = signal(false);
   editingId = signal<string | null>(null);
+  savingRequest = signal(false);
+  formSubmitAttempted = signal(false);
+  confirmingFormDiscard = signal(false);
+  private requestFormHeading = viewChild<ElementRef<HTMLElement>>('requestFormHeading');
+  private focusEditorOnRender = false;
+  private focusInvalidVersion = signal(0);
+  private handledInvalidVersion = 0;
   trackingRequestId = signal<string | null>(null);
   currentView = signal<'requests' | 'availability'>('requests');
 
@@ -598,13 +753,31 @@ export class ResourceRequestsComponent {
     this.availabilitySearch.valueChanges
       .pipe(takeUntilDestroyed())
       .subscribe(v => this.searchValue.set(v || ''));
+
+    afterRenderEffect(() => {
+      const heading = this.requestFormHeading()?.nativeElement;
+      const invalidVersion = this.focusInvalidVersion();
+      if (this.showForm() && this.focusEditorOnRender && heading) {
+        this.focusEditorOnRender = false;
+        heading.focus();
+      }
+      if (this.showForm() && invalidVersion > this.handledInvalidVersion) {
+        const invalid = this.hostEl.nativeElement.querySelector<HTMLElement>(
+          '#requestEditor input.ng-invalid, #requestEditor select.ng-invalid, #requestEditor textarea.ng-invalid',
+        );
+        if (invalid) {
+          this.handledInvalidVersion = invalidVersion;
+          invalid.focus();
+        }
+      }
+    });
   }
 
   // Authorization: Only show requests created by the current user
   myRequests = computed(() => this.requests().filter(r => r.requesterId === this.currentUserId));
 
   filteredAvailability = computed(() => {
-    const search = this.searchValue().toLowerCase();
+    const search = this.searchValue().trim().toLowerCase();
     return this.resources().filter(res => {
       if (!search) return true;
       const matchesName = res.name.toLowerCase().includes(search);
@@ -613,6 +786,10 @@ export class ResourceRequestsComponent {
       return matchesName || matchesRole || matchesSkills;
     });
   });
+
+  protected clearAvailabilitySearch(): void {
+    this.availabilitySearch.setValue('');
+  }
 
   getAvailableHours(res: Resource): number {
     const utilizedHours = (res.capacity * res.utilization) / 100;
@@ -729,6 +906,9 @@ export class ResourceRequestsComponent {
     this.editingRole.set('');
     this.skillToAdd.set('');
     this.requestForm.reset({ requiredEffort: 0, skills: [] });
+    this.formSubmitAttempted.set(false);
+    this.confirmingFormDiscard.set(false);
+    this.focusEditorOnRender = true;
     this.showForm.set(true);
   }
 
@@ -747,17 +927,41 @@ export class ResourceRequestsComponent {
       startDate: req.startDate || '',
       endDate: req.endDate || ''
     });
+    this.requestForm.markAsPristine();
+    this.formSubmitAttempted.set(false);
+    this.confirmingFormDiscard.set(false);
+    this.focusEditorOnRender = true;
     this.showForm.set(true);
   }
 
-  closeForm() {
+  closeForm(discard = false) {
+    if (this.savingRequest()) return;
+    if (!discard && this.requestForm.dirty) {
+      this.confirmingFormDiscard.set(true);
+      return;
+    }
     this.showForm.set(false);
     this.editingId.set(null);
+    this.editingRole.set('');
+    this.formSubmitAttempted.set(false);
+    this.confirmingFormDiscard.set(false);
     this.requestForm.reset();
   }
 
+  showFieldError(controlName: 'name' | 'requiredRole' | 'requiredEffort' | 'endDate'): boolean {
+    const control = this.requestForm.controls[controlName];
+    return control.invalid && (control.touched || this.formSubmitAttempted());
+  }
+
   saveRequest() {
-    if (this.requestForm.valid) {
+    this.formSubmitAttempted.set(true);
+    if (this.requestForm.invalid) {
+      this.requestForm.markAllAsTouched();
+      this.focusInvalidVersion.update(version => version + 1);
+      return;
+    }
+    if (!this.savingRequest()) {
+      this.savingRequest.set(true);
       const val = this.requestForm.value;
       const reqData: Partial<ResourceRequest> = {
         name: val.name || '',
@@ -773,29 +977,63 @@ export class ResourceRequestsComponent {
       };
 
       if (this.editingId()) {
-        this.api.updateRequest(this.editingId()!, reqData).subscribe(() => {
-          this.res.reload();
-          this.closeForm();
+        this.api.updateRequest(this.editingId()!, reqData).subscribe({
+          next: () => {
+            this.savingRequest.set(false);
+            this.res.reload();
+            this.closeForm(true);
+          },
+          error: () => this.savingRequest.set(false),
         });
       } else {
-        this.api.createRequest(reqData).subscribe(() => {
-          this.res.reload();
-          this.closeForm();
+        this.api.createRequest(reqData).subscribe({
+          next: () => {
+            this.savingRequest.set(false);
+            this.res.reload();
+            this.closeForm(true);
+          },
+          error: () => this.savingRequest.set(false),
         });
       }
     }
   }
 
-  publishRequest(req: ResourceRequest) {
-    this.api.updateRequest(req.id, { status: 'Published' }).subscribe(() => {
-      this.res.reload();
-    });
+  pendingTransition = signal<{ request: ResourceRequest; target: 'Published' | 'Withdrawn' } | null>(null);
+  transitionPending = signal(false);
+
+  transitionAssignmentCount = computed(() => {
+    const transition = this.pendingTransition();
+    return transition
+      ? this.assignments().filter(assignment => assignment.requestId === transition.request.id).length
+      : 0;
+  });
+
+  transitionRemainingEffort = computed(() => {
+    const request = this.pendingTransition()?.request;
+    return request ? Math.max(0, request.requiredEffort - (request.staffedEffort ?? 0)) : 0;
+  });
+
+  /** Publishing and withdrawing are consequential lifecycle changes, never row-level one-click actions. */
+  askRequestTransition(request: ResourceRequest, target: 'Published' | 'Withdrawn'): void {
+    if (this.transitionPending()) return;
+    this.pendingTransition.set({ request, target });
   }
 
-  withdrawRequest(req: ResourceRequest) {
-    // Can only withdraw if unstaffed or partially staffed, but let's allow it generally for the demo
-    this.api.updateRequest(req.id, { status: 'Withdrawn' }).subscribe(() => {
-      this.res.reload();
+  cancelRequestTransition(): void {
+    if (!this.transitionPending()) this.pendingTransition.set(null);
+  }
+
+  confirmRequestTransition(): void {
+    const transition = this.pendingTransition();
+    if (!transition || this.transitionPending()) return;
+    this.transitionPending.set(true);
+    this.api.updateRequest(transition.request.id, { status: transition.target }).subscribe({
+      next: () => {
+        this.transitionPending.set(false);
+        this.pendingTransition.set(null);
+        this.res.reload();
+      },
+      error: () => this.transitionPending.set(false),
     });
   }
 

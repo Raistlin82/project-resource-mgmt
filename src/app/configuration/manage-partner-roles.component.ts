@@ -12,7 +12,7 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective],
   template: `
-    <div class="max-w-5xl mx-auto space-y-8">
+    <div class="command-page max-w-5xl mx-auto space-y-8">
       <div class="flex items-center justify-between">
         <div>
           <div class="command-section-label">Configuration</div>

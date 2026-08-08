@@ -1,6 +1,6 @@
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 import { ManageSkillCatalogsComponent } from './manage-skill-catalogs.component';
 import { ApiService, SkillCatalog } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
@@ -35,7 +35,7 @@ function setup(catalogs: SkillCatalog[] = CATALOGS) {
   });
 
   const fixture = TestBed.createComponent(ManageSkillCatalogsComponent);
-  return { fixture, deleteSkillCatalog, notifyStub };
+  return { fixture, createSkillCatalog, deleteSkillCatalog, notifyStub };
 }
 
 async function flush(fixture: { detectChanges: () => void; whenStable: () => Promise<unknown> }) {
@@ -192,5 +192,135 @@ describe('ManageSkillCatalogsComponent delete confirmation', () => {
     const message = lastToast(notifyStub);
     expect(message).toContain('Cloud Platforms');
     expect(message).not.toContain('ESCO Core');
+  });
+});
+
+describe('ManageSkillCatalogsComponent resilient create flow', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    TestBed.resetTestingModule();
+  });
+
+  it('preserves the Configuration shell and exposes a labelled modal form', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    fixture.componentInstance.openCreateForm();
+    fixture.detectChanges();
+    const host = fixture.nativeElement as HTMLElement;
+    const dialog = host.querySelector<HTMLElement>('[data-test="skill-catalog-form-overlay"]')!;
+
+    expect(host.querySelectorAll('h1')).toHaveLength(1);
+    expect(host.querySelector('h1')?.textContent).toContain('Manage Skill Catalogs');
+    expect(dialog.getAttribute('role')).toBe('dialog');
+    expect(dialog.getAttribute('aria-labelledby')).toBe('skillCatalogModalTitle');
+  });
+
+  it('keeps invalid submit actionable, describes the required error and focuses Name', async () => {
+    const { fixture, createSkillCatalog } = setup();
+    await flush(fixture);
+    fixture.componentInstance.openCreateForm();
+    fixture.detectChanges();
+    const host = fixture.nativeElement as HTMLElement;
+    const submit = host.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+
+    expect(submit.disabled).toBe(false);
+    submit.click();
+    await flush(fixture);
+
+    const name = host.querySelector<HTMLInputElement>('#catalogName')!;
+    expect(fixture.componentInstance.catalogForm.controls['name'].touched).toBe(true);
+    expect(name.required).toBe(true);
+    expect(name.getAttribute('aria-required')).toBe('true');
+    expect(name.getAttribute('aria-describedby')).toBe('catalogNameError');
+    expect(host.querySelector('#catalogNameError')?.textContent).toContain('required');
+    expect(document.activeElement).toBe(name);
+    expect(createSkillCatalog).not.toHaveBeenCalled();
+  });
+
+  it('asks before Cancel, backdrop or Escape can discard dirty values', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    fixture.componentInstance.openCreateForm();
+    fixture.componentInstance.catalogForm.controls['name'].setValue('Changed');
+    fixture.componentInstance.catalogForm.controls['name'].markAsDirty();
+    fixture.detectChanges();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const overlay = (fixture.nativeElement as HTMLElement)
+      .querySelector<HTMLElement>('[data-test="skill-catalog-form-overlay"]')!;
+
+    overlay.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    fixture.detectChanges();
+    overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    fixture.detectChanges();
+    const cancel = Array.from(overlay.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === 'Cancel')!;
+    cancel.click();
+    fixture.detectChanges();
+
+    expect(confirm).toHaveBeenCalledTimes(3);
+    expect(fixture.componentInstance.showForm()).toBe(true);
+    confirm.mockReturnValue(true);
+    cancel.click();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.showForm()).toBe(false);
+  });
+
+  it('blocks duplicate submit and dismiss while the create is pending', async () => {
+    const pending = new Subject<SkillCatalog>();
+    const { fixture, createSkillCatalog } = setup();
+    createSkillCatalog.mockReturnValue(pending);
+    await flush(fixture);
+    fixture.componentInstance.openCreateForm();
+    fixture.componentInstance.catalogForm.setValue({ name: 'Delivery', description: 'Delivery skills' });
+    fixture.detectChanges();
+
+    fixture.componentInstance.onSubmit();
+    fixture.componentInstance.onSubmit();
+    fixture.componentInstance.closeForm();
+    fixture.detectChanges();
+    const overlay = (fixture.nativeElement as HTMLElement)
+      .querySelector<HTMLElement>('[data-test="skill-catalog-form-overlay"]')!;
+    overlay.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    fixture.detectChanges();
+
+    expect(createSkillCatalog).toHaveBeenCalledTimes(1);
+    expect(fixture.componentInstance.saving()).toBe(true);
+    expect(fixture.componentInstance.showForm()).toBe(true);
+    expect(overlay.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
+
+    pending.next({ id: 'C3', name: 'Delivery', description: 'Delivery skills', skills: [] });
+    pending.complete();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.showForm()).toBe(false);
+  });
+
+  it('keeps API error and values in the form, then allows a retry', async () => {
+    const { fixture, createSkillCatalog } = setup();
+    createSkillCatalog
+      .mockReturnValueOnce(throwError(() => ({ error: { error: 'Catalog name already exists.' } })))
+      .mockReturnValueOnce(of({ id: 'C3', name: 'Delivery', description: 'Delivery skills', skills: [] }));
+    await flush(fixture);
+    fixture.componentInstance.openCreateForm();
+    fixture.componentInstance.catalogForm.setValue({ name: 'Delivery', description: 'Delivery skills' });
+
+    fixture.componentInstance.onSubmit();
+    fixture.detectChanges();
+    const host = fixture.nativeElement as HTMLElement;
+    expect(fixture.componentInstance.showForm()).toBe(true);
+    expect(fixture.componentInstance.catalogForm.controls['name'].value).toBe('Delivery');
+    expect(host.querySelector('#skillCatalogSaveError')?.textContent).toContain('already exists');
+    expect(fixture.componentInstance.saving()).toBe(false);
+
+    fixture.componentInstance.onSubmit();
+    fixture.detectChanges();
+    expect(createSkillCatalog).toHaveBeenCalledTimes(2);
+    expect(fixture.componentInstance.showForm()).toBe(false);
+  });
+
+  it('renders an explicit source-empty state', async () => {
+    const { fixture } = setup([]);
+    await flush(fixture);
+    expect((fixture.nativeElement as HTMLElement).textContent).toContain('No skill catalogs defined yet.');
   });
 });

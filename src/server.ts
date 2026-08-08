@@ -13,6 +13,8 @@ import type { AuditLog, Resource, ResourceRequest, Assignment, AssignmentDay, As
 import { utilizationContribution, requestStatusFor, isAllowedTimeEntryTransition, decisionToAssignmentStatus, allocationApproverStep } from './app/services/staffing.util';
 import { deriveAssignmentStatus, monthRowId, parseMonthRowId, monthlyAggregateHours, type MonthStatus } from './app/services/allocation-month.util';
 import { monthOf, isWorkingDay, sumHoursByDate, exceedsDailyCapacity, monthlyTargetHours } from './app/services/calendar.util';
+import { todayLocalIso } from './app/services/local-date.util';
+import { validateTimeEntry } from './app/services/time-entry-validation.util';
 import { planSubstitution, planGiveBack, planSubstitutionBooking, type SubstitutionPlan } from './app/services/substitution.util';
 import { rollupMonthly, monthsInRange } from './app/services/capacity.util';
 import { benchRollup, unallocatedHistoryFor } from './app/services/bench.util';
@@ -94,6 +96,7 @@ import {
 } from './server/allocation-lifecycle.util';
 import {
   assignmentDeleteBlockError,
+  assignmentProposalError,
   assignmentRetargetError,
   assignmentServerOwnedFieldError,
   auditRegistryGaps,
@@ -107,11 +110,13 @@ import {
   contractHoursPerDayError,
   deleteOrgNodeWrite,
   documentProvenance,
+  effectiveAssignmentProposal,
   employmentWindowError,
   isNotNullViolation,
   issuedOrderLineStructureError,
   issuedOrderLineWriteError,
   milestoneStatusError,
+  orderCreateStatusError,
   percentFieldError,
   referencedChildMessage,
   referentialViolationMessage,
@@ -210,37 +215,6 @@ function isIsoDateString(v: unknown): v is string {
  */
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
-}
-
-/**
- * Resource Schedule: validate the optional booking fields on an assignment body.
- * Returns an error message when invalid, or null when valid/absent. Light and
- * backward-compatible — when all three are omitted this passes unchanged:
- *   - startDate/endDate, if provided, must be ISO-parseable.
- *   - when BOTH are provided, end must be >= start.
- *   - allocationPct, if provided, must be a finite number in [0, 100].
- */
-function validateAssignmentSchedule(body: Partial<Assignment>): string | null {
-  if (body.startDate !== undefined && !isIsoDateString(body.startDate)) {
-    return 'startDate must be an ISO date string';
-  }
-  if (body.endDate !== undefined && !isIsoDateString(body.endDate)) {
-    return 'endDate must be an ISO date string';
-  }
-  if (
-    body.startDate !== undefined &&
-    body.endDate !== undefined &&
-    Date.parse(body.endDate) < Date.parse(body.startDate)
-  ) {
-    return 'endDate must be on or after startDate';
-  }
-  if (
-    body.allocationPct !== undefined &&
-    !(typeof body.allocationPct === 'number' && Number.isFinite(body.allocationPct) && body.allocationPct >= 0 && body.allocationPct <= 100)
-  ) {
-    return 'allocationPct must be a number between 0 and 100';
-  }
-  return null;
 }
 
 /**
@@ -2484,12 +2458,8 @@ apiRouter.post('/self/time-entries', async (req, res) => {
   }
 
   const body = pick<TimeEntry>(req.body, ['assignmentId', 'date', 'hours', 'notes']);
-  if (!body.assignmentId || !body.date || !(isNonNegNumber(body.hours) && body.hours > 0)) {
-    res.status(400).json({ error: 'assignmentId, date and positive hours are required' });
-    return;
-  }
-  if (!isIsoDateString(body.date)) {
-    res.status(400).json({ error: 'date must be an ISO date string' });
+  if (typeof body.assignmentId !== 'string' || body.assignmentId.length === 0) {
+    res.status(400).json({ error: 'assignmentId is required' });
     return;
   }
   // IDEMPOTENCY (P1-21). The key is the id's uuid segment, so a replayed request
@@ -2536,23 +2506,49 @@ apiRouter.post('/self/time-entries', async (req, res) => {
       }
       return { status: 200, body: existing };
     }
+
+    const resource = await repos.resources.get(resourceId);
+    if (!resource) {
+      return { status: 400, body: { error: 'The signed-in resource profile no longer exists' } };
+    }
+    const baseCap = await resolveBaseCap(resource);
+    const validation = validateTimeEntry({
+      assignment,
+      request,
+      date: body.date,
+      hours: body.hours,
+      today: todayLocalIso(),
+      dailyCap: dailyCapFor(kindOf(resource), baseCap),
+      existingEntries: (await repos.timeEntries.list()).filter(entry => entry.resourceId === resourceId),
+    });
+    if (!validation.valid) {
+      return { status: 400, body: { error: validation.message } };
+    }
+
     const created = await repos.timeEntries.create({
       id: entryId,
       assignmentId: assignment.id,
       requestId: request.id,
       resourceId,
       projectId: request.projectId,
-      date: body.date,
-      hours: body.hours,
+      // validateTimeEntry proves these are a real ISO date and finite > 0 hours.
+      date: body.date as string,
+      hours: body.hours as number,
       notes: body.notes,
       status: 'Submitted',
     } as TimeEntry);
     return { status: 201, body: created };
   };
   // Serialize the get-then-create against a concurrent double submit of the SAME
-  // key (a double click, or a retry racing the original): without it both callers
-  // read "absent" and both create.
-  const result = await withLock(`self-time-entry:${entryId}`, submit);
+  // key (a double click, or a retry racing the original), then serialize every
+  // submission for the same resource/day. The inner lock makes the daily-total
+  // read and create atomic: two distinct idempotency keys cannot both observe the
+  // same pre-submit total and push the resource beyond its policy cap.
+  const dayLockDate = typeof body.date === 'string' ? body.date : 'invalid-date';
+  const result = await withLock(
+    `self-time-entry:${entryId}`,
+    () => withLock(`self-time-entry-day:${resourceId}:${dayLockDate}`, submit),
+  );
   res.status(result.status).json(result.body);
 });
 
@@ -2607,8 +2603,11 @@ apiRouter.put('/requests/:id', async (req, res) => {
   const skillErr = await validateSkillRefs(body, 'names');
   if (skillErr) { res.status(400).json({ error: skillErr }); return; }
   // A required-effort edit can invalidate a previously derived Fulfilled state.
-  // Re-derive when the client did not explicitly choose a publish/withdraw state.
-  if (body.requiredEffort !== undefined && body.status === undefined) {
+  // Re-derive unless the same command performs a REAL publish/withdraw
+  // transition. Re-sending the stored status is an idempotent status no-op and
+  // must not become a way to pin stale Fulfilled/Open after changing effort.
+  if (body.requiredEffort !== undefined
+      && (body.status === undefined || body.status === existing.status)) {
     const merged = { ...existing, ...body };
     body.status = requestStatusFor(merged, merged.staffedEffort ?? 0);
   }
@@ -2649,9 +2648,6 @@ apiRouter.post('/assignments', async (req, res) => {
   const ownedFieldErr = assignmentServerOwnedFieldError((req.body ?? {}) as object);
   if (ownedFieldErr) { res.status(400).json({ error: ownedFieldErr }); return; }
   const body = pick<Assignment>(req.body, ['requestId', 'resourceId', 'startDate', 'endDate', 'allocationPct']);
-  // Resource Schedule: validate the optional booking window + allocation (no-op when omitted).
-  const scheduleErr = validateAssignmentSchedule(body);
-  if (scheduleErr) { res.status(400).json({ error: scheduleErr }); return; }
   // B-DATA: an assignment must reference an existing request and resource.
   const [targetRequest, targetResource] = await Promise.all([
     typeof body.requestId === 'string' ? repos.requests.get(body.requestId) : Promise.resolve(undefined),
@@ -2659,9 +2655,12 @@ apiRouter.post('/assignments', async (req, res) => {
   ]);
   if (!targetRequest) { res.status(400).json({ error: 'requestId must reference an existing request' }); return; }
   if (!targetResource) { res.status(400).json({ error: 'resourceId must reference an existing resource' }); return; }
+  const proposalErr = assignmentProposalError(body, targetRequest, todayLocalIso());
+  if (proposalErr) { res.status(400).json({ error: proposalErr }); return; }
+  const effectiveProposal = effectiveAssignmentProposal(body, targetRequest);
   const employmentBookingErr = bookingWindowOutsideEmploymentError({
-    startDate: body.startDate ?? targetRequest.startDate,
-    endDate: body.endDate ?? targetRequest.endDate,
+    startDate: effectiveProposal.startDate as string,
+    endDate: effectiveProposal.endDate as string,
   }, targetResource);
   if (employmentBookingErr) { res.status(400).json({ error: employmentBookingErr }); return; }
 
@@ -2704,19 +2703,17 @@ apiRouter.put('/assignments/:id', async (req, res) => {
 
     const effectiveRequestId = body.requestId ?? current.requestId;
     const effectiveResourceId = body.resourceId ?? current.resourceId;
-    const [targetRequest, targetResource] = await Promise.all([
+    const [targetRequest, targetResource, currentRequest] = await Promise.all([
       repos.requests.get(effectiveRequestId),
       repos.resources.get(effectiveResourceId),
+      repos.requests.get(current.requestId),
     ]);
     if (!targetRequest) return { status: 400, error: 'requestId must reference an existing request' };
     if (!targetResource) return { status: 400, error: 'resourceId must reference an existing resource' };
 
-    const scheduleErr = validateAssignmentSchedule({
-      startDate: body.startDate ?? current.startDate,
-      endDate: body.endDate ?? current.endDate,
-      allocationPct: body.allocationPct ?? current.allocationPct,
-    });
-    if (scheduleErr) return { status: 400, error: scheduleErr };
+    const proposalErr = assignmentProposalError(body, targetRequest, todayLocalIso(), current, currentRequest ?? {});
+    if (proposalErr) return { status: 400, error: proposalErr };
+    const effectiveProposal = effectiveAssignmentProposal(body, targetRequest, current);
 
     const changesTarget = effectiveRequestId !== current.requestId || effectiveResourceId !== current.resourceId;
     if (changesTarget) {
@@ -2769,8 +2766,8 @@ apiRouter.put('/assignments/:id', async (req, res) => {
     }
 
     const employmentBookingErr = bookingWindowOutsideEmploymentError({
-      startDate: body.startDate ?? current.startDate ?? targetRequest.startDate,
-      endDate: body.endDate ?? current.endDate ?? targetRequest.endDate,
+      startDate: effectiveProposal.startDate as string | undefined,
+      endDate: effectiveProposal.endDate as string | undefined,
     }, targetResource);
     if (employmentBookingErr) return { status: 400, error: employmentBookingErr };
 
@@ -5840,23 +5837,16 @@ apiRouter.post('/orders', async (req, res) => {
   const body = pick<OrderEntry>(req.body, ORDER_FIELDS);
   const bad = findInvalidNumericField(body, ['amount']);
   if (bad) { res.status(400).json({ error: `${bad} must be a non-negative number` }); return; }
-  // The PUT path validated `status` against the enum; CREATE did not, so
-  // `POST /orders {status:'Cancelled'}` (or the lowercase 'paid') persisted verbatim
-  // on both adapters — an order that matches no status filter anywhere: absent from
-  // invoiced and from Paid, still counted in customerRevenue by the unfiltered
-  // lineSum, and rendered as an unknown chip label.
-  if (body.status !== undefined && !(ORDER_STATUSES as readonly string[]).includes(body.status)) {
-    res.status(400).json({ error: `status must be one of: ${ORDER_STATUSES.join(', ')}` });
-    return;
-  }
+  const createStatusErr = orderCreateStatusError(body.status);
+  if (createStatusErr) { res.status(400).json({ error: createStatusErr }); return; }
   const fkError = await validateOrder(body);
   if (fkError) { res.status(400).json({ error: fkError }); return; }
   // Phase G: orderDate must be ISO when supplied.
   const dateErr = validateDateFields(body as Record<string, unknown>, ['orderDate']);
   if (dateErr) { res.status(400).json({ error: dateErr }); return; }
   const item = { id: newId(), partnerId: '', ...body } as OrderEntry;
-  // INVOICE NUMBERING: an order created directly as 'Invoiced' gets a number now.
-  // Allocation and persistence share the per-year transaction boundary.
+  // The transaction-compatible creator is retained even though every direct
+  // create now starts Open; later lifecycle actions own invoice numbering.
   const invoiceDate = new Date().toISOString();
   const created = await withCommercialWriteTransaction(invoiceDate, (_transactionRepos, createOrder) =>
     createOrder(item as unknown as Order));
@@ -5957,10 +5947,8 @@ apiRouter.post('/orders/with-line', async (req, res, next) => {
     res.status(400).json({ error: 'type must be Customer or Purchase' });
     return;
   }
-  if (!['Open', 'Confirmed', 'Invoiced', 'Paid'].includes(orderBody.status as string)) {
-    res.status(400).json({ error: 'status is invalid' });
-    return;
-  }
+  const createStatusErr = orderCreateStatusError(orderBody.status);
+  if (createStatusErr) { res.status(400).json({ error: createStatusErr }); return; }
   const badOrderField = findInvalidNumericField(orderBody, ['amount']);
   if (badOrderField) { res.status(400).json({ error: `${badOrderField} must be a non-negative number` }); return; }
   const badLineField = findInvalidNumericField(lineBody, ['amount']);

@@ -4,11 +4,17 @@ import { MatIconModule } from '@angular/material/icon';
 import { ApiService, Assignment, ResourceRequest, Resource, TimeEntry } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { DecimalPipe } from '@angular/common';
-import { forkJoin, of } from 'rxjs';
+import { forkJoin, map, of } from 'rxjs';
 import { FormsModule } from '@angular/forms';
 import { ListStateComponent } from '../shared/list-state.component';
 import { NotificationService } from '../services/notification.service';
 import { localIsoDate, todayLocalIso } from '../services/local-date.util';
+import { dailyCapFor, kindOf } from '../services/resource-kind.util';
+import {
+  timeEntryDateBounds,
+  validateTimeEntry,
+  type TimeEntryValidationResult,
+} from '../services/time-entry-validation.util';
 
 interface CalendarAssignment {
   id: string;
@@ -50,6 +56,7 @@ const BUSINESS_DAYS_PER_WEEK = 5;
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">My Assignments</h1>
+        @if (auth.authReady() && auth.isAuthenticated() && auth.hasResourceIdentity()) {
         <div class="command-card flex items-center gap-2 p-1.5">
           <button type="button"
                   (click)="setViewMode('week')"
@@ -78,6 +85,7 @@ const BUSINESS_DAYS_PER_WEEK = 5;
             Month
           </button>
         </div>
+        }
       </div>
 
       <!-- ONE READ-STATE BOUNDARY OWNS THE WHOLE BODY.
@@ -101,6 +109,23 @@ const BUSINESS_DAYS_PER_WEEK = 5;
            SSR-rendered document, telling a person with five live bookings
            "Active Assignments 0", "0h", a 0% utilization tile and "No
            assignments found for this period.". Withheld is not zero. -->
+      @if (auth.authReady() && !auth.isAuthenticated()) {
+        <section class="command-card p-8 text-center" aria-labelledby="assignmentsSignInTitle">
+          <mat-icon class="text-accent-text">lock</mat-icon>
+          <h2 id="assignmentsSignInTitle" class="mt-3 font-display text-xl font-bold text-ink">Sign in required</h2>
+          <p class="mx-auto mt-2 max-w-lg text-ink-muted">Sign in to view assignments associated with your resource profile.</p>
+          <button type="button" (click)="auth.login()" class="command-button mt-5">Sign in</button>
+        </section>
+      } @else if (auth.authReady() && auth.isAuthenticated() && !auth.hasResourceIdentity()) {
+        <section data-test="account-not-linked" role="status" class="command-card p-8 text-center" aria-labelledby="accountNotLinkedTitle">
+          <mat-icon class="text-caution-text">link_off</mat-icon>
+          <h2 id="accountNotLinkedTitle" class="mt-3 font-display text-xl font-bold text-ink">Account not linked</h2>
+          <p class="mx-auto mt-2 max-w-lg text-ink-muted">
+            You are signed in, but this account is not linked to a resource profile.
+            Ask an administrator to link the account before viewing assignments or logging time.
+          </p>
+        </section>
+      } @else {
       <app-list-state [loading]="!auth.authReady() || dataRes.isLoading()"
                       [error]="dataRes.status() === 'error'"
                       label="assignments" [rows]="5" (retry)="dataRes.reload()">
@@ -114,7 +139,7 @@ const BUSINESS_DAYS_PER_WEEK = 5;
                     <mat-icon class="text-[28px] w-[28px] h-[28px]">assignment</mat-icon>
                   </div>
                   <div>
-                    <p class="command-kpi-label">Active Assignments</p>
+                    <p class="command-kpi-label">Assignments (selected {{ viewMode() }})</p>
                     <p class="command-kpi-value">{{ activeAssignmentsCount() }}</p>
                   </div>
                 </div>
@@ -125,7 +150,7 @@ const BUSINESS_DAYS_PER_WEEK = 5;
                     <mat-icon class="text-[28px] w-[28px] h-[28px]">schedule</mat-icon>
                   </div>
                   <div>
-                    <p class="command-kpi-label">Total Assigned Hours</p>
+                    <p class="command-kpi-label">Estimated hours (selected {{ viewMode() }})</p>
                     <p class="command-kpi-value">{{ totalAssignedHours() | number:'1.0-2' }}h</p>
                   </div>
                 </div>
@@ -323,7 +348,9 @@ const BUSINESS_DAYS_PER_WEEK = 5;
                         </div>
                       </div>
                       @if (timeEntryAssignmentId() === assignment.id) {
-                        <form (ngSubmit)="saveTimeEntry(assignment)" class="mt-5 rounded-2xl border border-positive ring-1 ring-positive bg-positive-tint p-4">
+                        <form (ngSubmit)="saveTimeEntry(assignment)"
+                              [attr.aria-busy]="savingTimeEntryAssignmentId() === assignment.id ? 'true' : null"
+                              class="mt-5 rounded-2xl border border-positive ring-1 ring-positive bg-positive-tint p-4">
                           <div class="grid grid-cols-1 sm:grid-cols-[160px_120px_1fr_auto] gap-3 items-end">
                             <div>
                               <label for="timeEntryDate" class="block text-xs font-bold uppercase tracking-wider text-ink-muted mb-1">Date</label>
@@ -332,16 +359,19 @@ const BUSINESS_DAYS_PER_WEEK = 5;
                                    control: aria-describedby names the live region and
                                    aria-invalid marks which control it is about. -->
                               <input id="timeEntryDate" name="timeEntryDate" type="date" required
-                                     aria-describedby="timeEntryMessage"
-                                     [attr.aria-invalid]="timeEntryDateInvalid()"
+                                     aria-describedby="timeEntryConstraints timeEntryMessage"
+                                     [attr.min]="timeEntryDateBoundsFor(assignment).minDate ?? null"
+                                     [attr.max]="timeEntryDateBoundsFor(assignment).maxDate"
+                                     [attr.aria-invalid]="timeEntryDateError(assignment) ? 'true' : null"
                                      [disabled]="savingTimeEntryAssignmentId() !== null"
                                      [ngModel]="timeEntryDate()" (ngModelChange)="timeEntryDate.set($event)" class="command-input">
                             </div>
                             <div>
                               <label for="timeEntryHours" class="block text-xs font-bold uppercase tracking-wider text-ink-muted mb-1">Hours</label>
-                              <input id="timeEntryHours" name="timeEntryHours" type="number" min="0.25" step="0.25" required
-                                     aria-describedby="timeEntryMessage"
-                                     [attr.aria-invalid]="timeEntryHoursInvalid()"
+                              <input id="timeEntryHours" name="timeEntryHours" type="number" min="0" step="any" required
+                                     aria-describedby="timeEntryConstraints timeEntryMessage"
+                                     [attr.max]="timeEntryHoursMax(assignment)"
+                                     [attr.aria-invalid]="timeEntryHoursError(assignment) ? 'true' : null"
                                      [disabled]="savingTimeEntryAssignmentId() !== null"
                                      [ngModel]="timeEntryHours()" (ngModelChange)="timeEntryHours.set($event)" class="command-input font-mono tabular-nums">
                             </div>
@@ -353,6 +383,7 @@ const BUSINESS_DAYS_PER_WEEK = 5;
                             </div>
                             <div class="flex gap-2">
                               <button type="submit" data-test="submit-time-entry"
+                                      aria-describedby="timeEntryMessage"
                                       [disabled]="!!timeEntryValidationMessage(assignment) || savingTimeEntryAssignmentId() !== null"
                                       class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
                                 {{ savingTimeEntryAssignmentId() === assignment.id ? 'Submitting…' : 'Submit' }}
@@ -363,6 +394,8 @@ const BUSINESS_DAYS_PER_WEEK = 5;
                                       class="p-2 rounded-lg text-ink-muted hover:bg-surface-muted disabled:opacity-50"><mat-icon>close</mat-icon></button>
                             </div>
                           </div>
+                          <p id="timeEntryConstraints" data-test="time-entry-constraints"
+                             class="mt-3 text-xs text-ink-muted">{{ timeEntryConstraintText(assignment) }}</p>
                           <!-- A LIVE REGION MUST EXIST BEFORE ITS CONTENT CHANGES.
                                This paragraph used to be created by an "@if" in the same
                                change-detection pass that produced its text, so screen
@@ -407,7 +440,7 @@ const BUSINESS_DAYS_PER_WEEK = 5;
                   }
                   @if (!myAssignments().length) {
                     <div class="text-center py-8 text-ink-muted">
-                      You don't have any active assignments.
+                      You don't have any assignments.
                     </div>
                   }
                 </div>
@@ -416,6 +449,7 @@ const BUSINESS_DAYS_PER_WEEK = 5;
           </div>
         </ng-template>
       </app-list-state>
+      }
     </div>
   `
 })
@@ -434,23 +468,34 @@ export class MyAssignmentsComponent {
   // restores async; firing the forkJoin immediately 401s and the rxResource latches
   // on the error (page shows zeros forever). Key the load on auth readiness so it
   // fires only AFTER the OAuth bootstrap has settled and the bearer token is attached.
-  protected dataRes = rxResource<{ assignments: Assignment[]; requests: ResourceRequest[]; profile: Resource | null; timeEntries: TimeEntry[] }, boolean>({
-    params: () => this.auth.authReady() && this.auth.hasResourceIdentity(),
+  protected dataRes = rxResource<{ assignments: Assignment[]; requests: ResourceRequest[]; profile: Resource | null; timeEntries: TimeEntry[]; hoursPerDay: number }, boolean>({
+    params: () => this.auth.authReady() && this.auth.isAuthenticated() && this.auth.hasResourceIdentity(),
     stream: ({ params: ready }) => ready
       ? forkJoin({
           assignments: this.api.getMyAssignments(),
           requests: this.api.getMyRequests(),
           profile: this.api.getMyProfile(),
           timeEntries: this.api.getMyTimeEntries(),
+          hoursPerDay: this.api.getHoursPerDay().pipe(map(result => result.value)),
         })
-      : of({ assignments: [], requests: [], profile: null, timeEntries: [] }),
-    defaultValue: { assignments: [], requests: [], profile: null, timeEntries: [] },
+      : of({ assignments: [], requests: [], profile: null, timeEntries: [], hoursPerDay: 0 }),
+    defaultValue: { assignments: [], requests: [], profile: null, timeEntries: [], hoursPerDay: 0 },
   });
 
   myAssignments = computed(() => this.dataRes.value().assignments);
   allRequests = computed(() => this.dataRes.value().requests);
   profile = computed(() => this.dataRes.value().profile);
   timeEntries = computed(() => this.dataRes.value().timeEntries);
+  private configuredHoursPerDay = computed(() => this.dataRes.value().hoursPerDay);
+  private effectiveTimeEntryDailyCap = computed(() => {
+    const profile = this.profile();
+    if (!profile) return 0;
+    const contracted = profile.contractHoursPerDay;
+    const baseCap = typeof contracted === 'number' && Number.isFinite(contracted) && contracted > 0
+      ? contracted
+      : this.configuredHoursPerDay();
+    return dailyCapFor(kindOf(profile), baseCap);
+  });
 
   viewMode = signal<'week' | 'month'>('week');
   timeEntryAssignmentId = signal<string | null>(null);
@@ -506,7 +551,7 @@ export class MyAssignmentsComponent {
 
   periodAssignments = computed(() => {
     const { start, end } = this.periodRange();
-    return this.myAssignments().filter(a => {
+    return this.myAssignments().filter(a => a.status !== 'Rejected').filter(a => {
       const win = this.assignmentWindow(a);
       if (!win) return this.periodOffset() === 0;
       return this.rangesOverlap(win.start, win.end, start, end);
@@ -546,11 +591,6 @@ export class MyAssignmentsComponent {
     return days;
   });
 
-  // An assignment counts as "active" when it isn't Rejected — i.e. Draft,
-  // Requested or Allocated (the allocation-approval workflow states).
-  activeAssignmentsCount = computed(() => this.myAssignments().filter(a => a.status !== 'Rejected').length);
-  totalAssignedHours = computed(() => this.myAssignments().reduce((sum, a) => sum + a.assignedHours, 0));
-
   /** Every business-day ISO inside the displayed period. Both halves of the
    *  utilization ratio are derived from this ONE list, so the numerator and the
    *  denominator can never be scoped to different windows. */
@@ -576,6 +616,10 @@ export class MyAssignmentsComponent {
     }
     return this.roundHours(total);
   });
+
+  /** KPI pair scoped to exactly the selected week/month shown by the calendar. */
+  activeAssignmentsCount = computed(() => this.periodAssignments().length);
+  totalAssignedHours = computed(() => this.periodAssignedHours());
 
   /**
    * Utilization over the DISPLAYED PERIOD — booked hours in the period against
@@ -797,8 +841,10 @@ export class MyAssignmentsComponent {
   startTimeEntry(assignment: Assignment) {
     if (!this.canSubmitOwnTime()) return;
     this.timeEntryAssignmentId.set(assignment.id);
-    this.timeEntryHours.set(Math.min(8, assignment.assignedHours || 8));
-    this.timeEntryDate.set(todayLocalIso());
+    const bounds = timeEntryDateBounds(assignment, this.requestForAssignment(assignment), this.todayIso);
+    this.timeEntryDate.set(bounds.emptyIntersection ? this.todayIso : bounds.maxDate);
+    const remainingHours = this.timeEntryValidation(assignment).remainingHours;
+    this.timeEntryHours.set(Math.min(8, assignment.assignedHours || 8, remainingHours));
     this.timeEntryNotes.set('');
     this.timeEntrySubmissionError.set('');
   }
@@ -820,17 +866,51 @@ export class MyAssignmentsComponent {
    * marking a control invalid while the message says otherwise is the failure
    * mode that makes assistive output contradict the screen.
    */
-  protected timeEntryDateInvalid = computed(() => this.parseIso(this.timeEntryDate()) === null);
-  protected timeEntryHoursInvalid = computed(() => {
-    const hours = this.timeEntryHours();
-    return typeof hours !== 'number' || !Number.isFinite(hours) || hours <= 0;
-  });
+  private requestForAssignment(assignment: Assignment): ResourceRequest | undefined {
+    return this.allRequests().find(request => request.id === assignment.requestId);
+  }
+
+  private timeEntryValidation(assignment: Assignment): TimeEntryValidationResult {
+    return validateTimeEntry({
+      assignment,
+      request: this.requestForAssignment(assignment),
+      date: this.timeEntryDate(),
+      hours: this.timeEntryHours(),
+      today: this.todayIso,
+      dailyCap: this.effectiveTimeEntryDailyCap(),
+      // /self/time-entries is already scoped to the signed-in resource.
+      existingEntries: this.timeEntries(),
+    });
+  }
+
+  protected timeEntryDateBoundsFor(assignment: Assignment) {
+    return this.timeEntryValidation(assignment).bounds;
+  }
+
+  protected timeEntryDateError(assignment: Assignment): string {
+    return this.timeEntryValidation(assignment).dateError;
+  }
+
+  protected timeEntryHoursError(assignment: Assignment): string {
+    return this.timeEntryValidation(assignment).hoursError;
+  }
+
+  protected timeEntryHoursMax(assignment: Assignment): number {
+    return this.timeEntryValidation(assignment).remainingHours;
+  }
+
+  protected timeEntryConstraintText(assignment: Assignment): string {
+    const validation = this.timeEntryValidation(assignment);
+    if (validation.bounds.emptyIntersection) return 'No date is available because the assignment and request windows do not overlap.';
+    const dateRange = validation.bounds.minDate
+      ? `${validation.bounds.minDate} to ${validation.bounds.maxDate}`
+      : `up to ${validation.bounds.maxDate}`;
+    return `Allowed dates: ${dateRange}. Daily limit: ${this.effectiveTimeEntryDailyCap()}h across all assignments; ${validation.remainingHours}h remaining on the selected date.`;
+  }
 
   protected timeEntryValidationMessage(assignment: Assignment): string {
-    if (!assignment.id || this.timeEntryDateInvalid() || this.timeEntryHoursInvalid()) {
-      return 'Enter a valid date and hours greater than zero.';
-    }
-    return '';
+    if (!assignment.id) return 'Choose a valid assignment.';
+    return this.timeEntryValidation(assignment).message;
   }
 
   saveTimeEntry(assignment: Assignment) {

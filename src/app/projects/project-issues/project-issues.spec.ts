@@ -96,6 +96,65 @@ function statusChip(fixture: ComponentFixture<ProjectIssues>, title: string): HT
   return chip!;
 }
 
+describe('ProjectIssues — responsive table and form structure', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('keeps every column in a labelled keyboard-scrollable region with issue identity visible', async () => {
+    const { fixture } = await render();
+    const rendered = host(fixture);
+    const region = rendered.querySelector<HTMLElement>('[data-test="issues-table-scroll"]')!;
+    const table = region.querySelector<HTMLTableElement>('table')!;
+    const hint = rendered.querySelector<HTMLElement>(`#${region.getAttribute('aria-describedby')}`)!;
+    const identityHeader = table.querySelector<HTMLElement>('thead th:first-child')!;
+    const identityCell = table.querySelector<HTMLElement>('[data-test="issue-title"]')!;
+    const status = table.querySelector<HTMLElement>('[data-test="issue-status"]')!;
+
+    expect(region.getAttribute('role')).toBe('region');
+    expect(region.getAttribute('aria-label')).toBe('Project issues table');
+    expect(region.tabIndex).toBe(0);
+    expect(classTokens(region)).toEqual(expect.arrayContaining([
+      'overflow-x-auto', 'overscroll-x-contain', 'outline-none', 'focus-visible:ring-2',
+    ]));
+    expect(hint.textContent).toContain('Swipe horizontally');
+    expect(classTokens(hint)).toContain('lg:hidden');
+    expect(table.className).toContain('min-w-[');
+    expect(table.querySelectorAll('thead th')).toHaveLength(7);
+    expect(classTokens(identityHeader)).toEqual(expect.arrayContaining(['sticky', 'left-0', 'bg-surface-muted!']));
+    expect(classTokens(identityCell)).toEqual(expect.arrayContaining(['sticky', 'left-0', 'bg-surface!']));
+    expect(classTokens(status)).toContain('min-h-11');
+  });
+
+  it('stacks the header and both paired field groups at 320px and keeps the long dialog scroll-safe', async () => {
+    const { fixture } = await render();
+    const rendered = host(fixture);
+    const header = rendered.querySelector<HTMLElement>('[data-test="issues-header"]')!;
+    expect(classTokens(header)).toEqual(expect.arrayContaining(['flex-col', 'sm:flex-row']));
+    expect(classTokens(header)).not.toContain('flex-row');
+
+    fixture.componentInstance.openForm();
+    await tick(fixture);
+
+    const overlay = rendered.querySelector<HTMLElement>('[data-test="issue-form-overlay"]')!;
+    const panel = rendered.querySelector<HTMLElement>('[data-test="issue-form-panel"]')!;
+    const body = rendered.querySelector<HTMLElement>('[data-test="issue-form-body"]')!;
+    const typeGrid = rendered.querySelector<HTMLElement>('[data-test="issue-type-grid"]')!;
+    const ownerGrid = rendered.querySelector<HTMLElement>('[data-test="issue-owner-grid"]')!;
+    const actions = rendered.querySelector<HTMLElement>('[data-test="issue-form-actions"]')!;
+    const close = rendered.querySelector<HTMLElement>('[data-test="issue-form-close"]')!;
+
+    expect(classTokens(overlay)).toEqual(expect.arrayContaining(['items-start', 'sm:items-center', 'overflow-y-auto']));
+    expect(classTokens(overlay)).not.toContain('items-center');
+    expect(classTokens(panel)).toEqual(expect.arrayContaining(['max-h-[90vh]', 'overflow-hidden']));
+    expect(classTokens(body)).toEqual(expect.arrayContaining(['min-h-0', 'flex-1', 'overflow-y-auto']));
+    for (const grid of [typeGrid, ownerGrid]) {
+      expect(classTokens(grid)).toEqual(expect.arrayContaining(['grid-cols-1', 'sm:grid-cols-2']));
+      expect(classTokens(grid)).not.toContain('grid-cols-2');
+    }
+    expect(classTokens(actions)).toContain('flex-wrap');
+    expect(classTokens(close)).toEqual(expect.arrayContaining(['min-h-11', 'min-w-11']));
+  });
+});
+
 /**
  * The status <select> is a one-way `[ngModel]` binding: when the server refuses
  * the PUT the model never moves, so Angular re-renders nothing and the control

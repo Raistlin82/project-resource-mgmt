@@ -21,6 +21,37 @@ export interface EmploymentWindow {
 export const CLIENT_REQUEST_STATUSES = ['Not Published', 'Published', 'Open', 'Withdrawn'] as const;
 const ALL_REQUEST_STATUSES = [...CLIENT_REQUEST_STATUSES, 'Fulfilled'] as const;
 
+/** A user-created order is always a proposal; downstream actions advance it. */
+export function orderCreateStatusError(requestedStatus: unknown): string | null {
+  return requestedStatus === 'Open'
+    ? null
+    : "a new order must be created in status 'Open'";
+}
+
+/**
+ * Client-visible request lifecycle. `Open`/`Fulfilled` may be produced by
+ * staffing recomputation, but a client PATCH may only publish or withdraw.
+ * Re-sending the stored state is an idempotent no-op for every valid state.
+ */
+export function requestStatusTransitionError(
+  currentStatus: string,
+  requestedStatus: unknown,
+): string | null {
+  if (requestedStatus === undefined || requestedStatus === currentStatus) return null;
+  if (typeof requestedStatus !== 'string'
+      || !(ALL_REQUEST_STATUSES as readonly string[]).includes(requestedStatus)) {
+    return `status must be one of: ${ALL_REQUEST_STATUSES.join(', ')}`;
+  }
+  const allowed = requestedStatus === 'Published'
+    ? currentStatus === 'Not Published' || currentStatus === 'Withdrawn'
+    : requestedStatus === 'Withdrawn'
+      ? currentStatus === 'Published' || currentStatus === 'Open' || currentStatus === 'Fulfilled'
+      : false;
+  return allowed
+    ? null
+    : `request status cannot transition from '${currentStatus}' to '${requestedStatus}'`;
+}
+
 function owns(value: object, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
@@ -472,6 +503,122 @@ export function assignmentServerOwnedFieldError(body: object): string | null {
   return null;
 }
 
+export interface AssignmentProposalValues {
+  requestId?: unknown;
+  startDate?: unknown;
+  endDate?: unknown;
+  allocationPct?: unknown;
+}
+
+export interface AssignmentRequestWindow {
+  id?: unknown;
+  startDate?: unknown;
+  endDate?: unknown;
+}
+
+/** Effective schedule values: patch, then stored assignment, then request. */
+export function effectiveAssignmentProposal(
+  patch: AssignmentProposalValues,
+  request: AssignmentRequestWindow,
+  current?: AssignmentProposalValues,
+): { startDate: unknown; endDate: unknown; allocationPct: unknown } {
+  return {
+    startDate: patch.startDate ?? current?.startDate ?? request.startDate,
+    endDate: patch.endDate ?? current?.endDate ?? request.endDate,
+    // The model's documented backward-compatible default is a full allocation.
+    allocationPct: patch.allocationPct ?? current?.allocationPct ?? 100,
+  };
+}
+
+/**
+ * Validate a create/update proposal against its effective request window.
+ *
+ * Existing optional schedule fields predate this guard. An idempotent PUT whose
+ * effective proposal did not change remains allowed, even when that historical
+ * window is now in the past or incomplete; any NEW/changed proposal must satisfy
+ * the complete current contract below.
+ */
+export function assignmentProposalError(
+  patch: AssignmentProposalValues,
+  request: AssignmentRequestWindow,
+  today: string,
+  current?: AssignmentProposalValues,
+  currentRequest: AssignmentRequestWindow = request,
+): string | null {
+  const effective = effectiveAssignmentProposal(patch, request, current);
+  const previous = current === undefined
+    ? undefined
+    : effectiveAssignmentProposal({}, currentRequest, current);
+  const requestChanged = current !== undefined
+    && request.id !== undefined
+    && current.requestId !== undefined
+    && request.id !== current.requestId;
+  const proposalChanged = previous === undefined
+    || requestChanged
+    || effective.startDate !== previous.startDate
+    || effective.endDate !== previous.endDate
+    || effective.allocationPct !== previous.allocationPct;
+
+  // Backward-compatible idempotence for legacy/history. GET is unaffected, and
+  // a resource retarget does not become a forced rewrite of an old schedule.
+  if (!proposalChanged) return null;
+
+  if (typeof effective.allocationPct !== 'number'
+      || !Number.isFinite(effective.allocationPct)
+      || effective.allocationPct <= 0
+      || effective.allocationPct > 100) {
+    return 'allocationPct must be a finite number greater than 0 and no more than 100';
+  }
+  // A MISSING window is not an invalid one. If neither the patch, the stored
+  // assignment, nor the request carries dates, there is no window to check and
+  // this function has nothing to say — `allocationPct` was already validated
+  // above, which is the part that always applies.
+  //
+  // Demanding a window here made it REQUIRED at the API, and the model says the
+  // opposite: `schema.ts` documents assignment `startDate`/`endDate` as "NULLABLE
+  // and backward-compatible — the schedule util falls back to the linked
+  // request's dates when an assignment carries none of its own". `main` accepted
+  // a dateless assignment; 13 smoke checks assert it. Requiring it turned an
+  // ordinary create into a 400 with every unit test still green.
+  //
+  // The form is where the requirement belongs, and that is where it lives
+  // (`staffing.component.ts` refuses a missing or past date with inline errors).
+  const hasWindow = effective.startDate !== undefined && effective.startDate !== null && effective.startDate !== ''
+    && effective.endDate !== undefined && effective.endDate !== null && effective.endDate !== '';
+  if (!hasWindow) return null;
+  if (!isStrictIsoDate(effective.startDate)) return 'startDate must match YYYY-MM-DD';
+  if (!isStrictIsoDate(effective.endDate)) return 'endDate must match YYYY-MM-DD';
+  // NO PAST-DATE RULE HERE, DELIBERATELY — and this comment is the reason, so
+  // nobody re-adds it.
+  //
+  // UIUX-010 asks that the Staffing proposal stop accepting inverted, out-of-range
+  // and already-expired dates, and its remedy note adds "API parity". The form
+  // part is done and tested (`staffing.component.ts` refuses a start or end in the
+  // past, with inline errors). The API part is NOT, on purpose:
+  //
+  //  - `POST /assignments` on a window that has already closed is legitimate and
+  //    long-established. It is how work that already happened gets recorded and how
+  //    history is backfilled; 19 smoke checks assert it, and `main` never refused it.
+  //  - Adding the rule here refused the ORDINARY case too. Every request in the seed
+  //    but two starts before today and six are still running, so staffing somebody
+  //    onto a project that began in June became a 400.
+  //  - It went unnoticed because nothing covered it: 2784 unit tests stayed green
+  //    while 22 smoke checks went red. The gate that caught it is the reason it exists.
+  //
+  // If a past-date rule is ever wanted at the API, it needs a product decision about
+  // historical entry first, and a privileged path for it — not a guard bolted onto
+  // the ordinary create.
+  if (effective.endDate < effective.startDate) return 'endDate must be on or after startDate';
+
+  if (isStrictIsoDate(request.startDate) && effective.startDate < request.startDate) {
+    return `startDate cannot be before request startDate ${request.startDate}`;
+  }
+  if (isStrictIsoDate(request.endDate) && effective.endDate > request.endDate) {
+    return `endDate cannot be after request endDate ${request.endDate}`;
+  }
+  return null;
+}
+
 /**
  * Retargeting an assignment's requestId/resourceId is refused only when the move
  * would orphan LOGGED ACTUALS.
@@ -614,10 +761,9 @@ export function resourceRequestUpdateError(
   existing: ResourceRequest,
   patch: Partial<ResourceRequest>,
 ): string | null {
-  if (owns(patch, 'status')
-      && patch.status !== undefined
-      && !(CLIENT_REQUEST_STATUSES as readonly string[]).includes(patch.status)) {
-    return `status must be one of: ${CLIENT_REQUEST_STATUSES.join(', ')}`;
+  if (owns(patch, 'status')) {
+    const statusError = requestStatusTransitionError(existing.status, patch.status);
+    if (statusError) return statusError;
   }
   const merged = { ...existing, ...patch };
   if (typeof merged.name !== 'string' || merged.name.trim() === '') return 'name is required';

@@ -12,6 +12,7 @@ import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.
 import { todayLocalIso } from '../services/local-date.util';
 import { authGatedResource } from '../services/auth-gated-resource.util';
 import { MultiSelectChipsComponent, type MultiSelectOption } from '../shared/multi-select-chips.component';
+import { ConfigurationPageShellComponent } from './configuration-page-shell.component';
 
 /** One rendered tree row: the node plus its indentation depth (root = 0). */
 interface OrgTreeRow {
@@ -29,15 +30,17 @@ function todayIso(): string {
 @Component({
   selector: 'app-manage-resource-organizations',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [ReactiveFormsModule, MatIconModule, ModalDialogDirective, MultiSelectChipsComponent],
+  imports: [ReactiveFormsModule, MatIconModule, ModalDialogDirective, MultiSelectChipsComponent, ConfigurationPageShellComponent],
   template: `
-    <div class="command-page space-y-6">
+    <app-configuration-page-shell
+      title="Manage Resource Organizations"
+      subtitle="Maintain the capability, practice and competence hierarchy used for staffing and ownership.">
+      <button configuration-actions (click)="openForm()" class="command-button">
+        <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create Organization
+      </button>
     <div class="command-card overflow-hidden">
       <div class="command-card-header">
-        <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Manage Resource Organizations</h2>
-        <button (click)="openForm()" class="command-button">
-          <mat-icon class="text-[18px] w-[18px] h-[18px]">add</mat-icon> Create Organization
-        </button>
+        <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Resource organization hierarchy</h2>
       </div>
 
       @if (showForm()) {
@@ -226,7 +229,7 @@ function todayIso(): string {
         </div>
       </div>
     }
-    </div>
+    </app-configuration-page-shell>
   `
 })
 export class ManageResourceOrganizationsComponent {

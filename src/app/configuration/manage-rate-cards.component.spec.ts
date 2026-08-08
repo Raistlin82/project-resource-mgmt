@@ -261,6 +261,76 @@ describe('ManageRateCardsComponent form overlay — STRUCTURAL contract only (js
   });
 });
 
+describe('ManageRateCardsComponent responsive table pan port', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  const tokens = (element: Element): string[] => element.className.split(/\s+/).filter(Boolean);
+
+  it('keeps all columns and actions in a labelled keyboard-scrollable region', async () => {
+    const { fixture } = setup(ORG_NODES, [
+      { id: 'RC1', role: 'Developer', organization: 'Engineering', currency: 'EUR', costRate: 600, billRate: 1120 },
+    ]);
+    await flush(fixture);
+    const rendered = fixture.nativeElement as HTMLElement;
+    const region = rendered.querySelector<HTMLElement>('[data-test="rate-cards-table-scroll"]')!;
+    const table = region.querySelector<HTMLTableElement>('table')!;
+    const hint = rendered.querySelector<HTMLElement>(`#${region.getAttribute('aria-describedby')}`)!;
+    const headers = table.querySelectorAll<HTMLElement>('thead th');
+    const cells = table.querySelectorAll<HTMLElement>('tbody tr:first-child td');
+
+    expect(region.getAttribute('role')).toBe('region');
+    expect(region.getAttribute('aria-label')).toBe('Rate cards table');
+    expect(region.tabIndex).toBe(0);
+    expect(tokens(region)).toEqual(expect.arrayContaining([
+      'overflow-x-auto', 'overscroll-x-contain', 'outline-none', 'focus-visible:ring-2',
+    ]));
+    expect(hint.textContent).toContain('Swipe horizontally');
+    expect(tokens(hint)).toContain('lg:hidden');
+    expect(table.className).toContain('min-w-[');
+    expect(headers).toHaveLength(6);
+    expect(tokens(headers[0])).toEqual(expect.arrayContaining(['sticky', 'left-0', 'bg-surface-muted!']));
+    expect(tokens(headers[5])).toEqual(expect.arrayContaining(['sticky', 'right-0', 'bg-surface-muted!']));
+    expect(tokens(cells[0])).toEqual(expect.arrayContaining(['sticky', 'left-0', 'bg-surface!']));
+    expect(tokens(cells[5])).toEqual(expect.arrayContaining(['sticky', 'right-0', 'bg-surface!']));
+
+    for (const action of cells[5].querySelectorAll('button')) {
+      expect(tokens(action)).toEqual(expect.arrayContaining(['min-h-11', 'min-w-11']));
+    }
+  });
+
+  it('includes role and organization in repeated action names', async () => {
+    const { fixture } = setup(ORG_NODES, [
+      { id: 'RC1', role: 'Developer', organization: 'Engineering', currency: 'EUR', costRate: 600, billRate: 1120 },
+    ]);
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+
+    expect(host.querySelector('[aria-label="Edit rate card for Developer, Engineering"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="Delete rate card for Developer, Engineering"]')).not.toBeNull();
+  });
+
+  it('stacks the header and paired rate fields at 320px, while keeping dialog controls reachable', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    const rendered = fixture.nativeElement as HTMLElement;
+    const header = rendered.querySelector<HTMLElement>('[data-test="rate-cards-header"]')!;
+
+    expect(tokens(header)).toEqual(expect.arrayContaining(['flex-col', 'sm:flex-row']));
+    expect(tokens(header)).not.toContain('flex-row');
+
+    fixture.componentInstance.openForm();
+    fixture.detectChanges();
+
+    const rateGrid = rendered.querySelector<HTMLElement>('[data-test="rate-card-rate-grid"]')!;
+    const actions = rendered.querySelector<HTMLElement>('[data-test="rate-card-form-actions"]')!;
+    const close = rendered.querySelector<HTMLElement>('[data-test="rate-card-close"]')!;
+    expect(tokens(rateGrid)).toEqual(expect.arrayContaining(['grid-cols-1', 'sm:grid-cols-2']));
+    expect(tokens(rateGrid)).not.toContain('grid-cols-2');
+    expect(tokens(actions)).toContain('flex-wrap');
+    expect(tokens(close)).toEqual(expect.arrayContaining(['min-h-11', 'min-w-11']));
+  });
+});
+
 describe('ManageRateCardsComponent working-hours-per-day field', () => {
   afterEach(() => TestBed.resetTestingModule());
 

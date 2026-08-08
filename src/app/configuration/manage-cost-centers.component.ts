@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, DestroyRef, ElementRef, inject, signal } from '@angular/core';
 import { rxResource, toSignal, takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { of } from 'rxjs';
 import { CurrencyPipe } from '@angular/common';
@@ -13,7 +13,7 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective, CurrencyPipe],
   template: `
-    <div class="max-w-5xl mx-auto space-y-8">
+    <div class="command-page max-w-5xl mx-auto space-y-8">
       <div class="flex items-center justify-between">
         <div>
           <div class="command-section-label">Configuration</div>
@@ -36,7 +36,12 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
           </div>
         </div>
 
-        <table class="command-data-table">
+        <p id="costCentersTableHint" class="px-4 py-2 text-xs text-[var(--cc-muted)] border-b border-[var(--cc-line)] sm:hidden">
+          Scroll horizontally to view financials and actions.
+        </p>
+        <div data-test="cost-centers-table-scroll" class="overflow-x-auto overscroll-x-contain" role="region"
+             aria-label="Cost centers table" aria-describedby="costCentersTableHint" tabindex="0">
+        <table class="command-data-table min-w-[42rem]">
           <thead>
             <tr>
               <th>Name</th>
@@ -65,11 +70,21 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
             }
             @if (filteredCostCenters().length === 0) {
               <tr>
-                <td colspan="5" class="text-center"><span class="text-[var(--cc-muted)]">No cost centers defined yet.</span></td>
+                <td colspan="5" class="text-center">
+                  @if (costCenters().length === 0) {
+                    <span class="text-[var(--cc-muted)]">No cost centers defined yet.</span>
+                  } @else {
+                    <div class="inline-flex flex-col items-center gap-2">
+                      <span class="text-[var(--cc-muted)]">No cost centers match your search.</span>
+                      <button type="button" (click)="clearSearch()" class="command-button secondary">Clear filters</button>
+                    </div>
+                  }
+                </td>
               </tr>
             }
           </tbody>
         </table>
+        </div>
       </div>
 
       <!-- Form Modal -->
@@ -89,24 +104,31 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
           <div data-test="cost-center-form-panel" class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="costCenterModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Cost Center' : 'Add Cost Center' }}</h2>
-              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary transition-colors">
+              <button type="button" (click)="closeForm()" [disabled]="saving()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary transition-colors disabled:opacity-50">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
 
             <!-- The <form> stays the submit boundary (so Enter still submits) and
                  becomes a column: the fields scroll, the footer is pinned. -->
-            <form [formGroup]="form" (ngSubmit)="saveCostCenter()" class="flex flex-col flex-1 min-h-0 overflow-hidden">
+            <form [formGroup]="form" (ngSubmit)="saveCostCenter()" [attr.aria-busy]="saving()" class="flex flex-col flex-1 min-h-0 overflow-hidden">
               <div class="p-6 space-y-4 overflow-y-auto flex-1 min-h-0">
                 <div>
-                  <label for="name" class="block text-sm font-medium text-ink-secondary mb-1">Name</label>
-                  <input id="name" type="text" formControlName="name" class="command-input" placeholder="e.g. Engineering & Dev">
+                  <label for="costCenterName" class="block text-sm font-medium text-ink-secondary mb-1">Name <span aria-hidden="true">*</span><span class="sr-only"> required</span></label>
+                  <input id="costCenterName" type="text" formControlName="name" class="command-input" placeholder="e.g. Engineering & Dev"
+                         required aria-required="true" [attr.aria-invalid]="invalid('name') ? 'true' : null"
+                         [attr.aria-describedby]="invalid('name') ? 'costCenterNameError' : null">
+                  @if (invalid('name')) {
+                    <p id="costCenterNameError" role="alert" class="mt-1 text-xs text-critical-text">Name is required.</p>
+                  }
                 </div>
 
                 <div>
-                  <label for="manager" class="block text-sm font-medium text-ink-secondary mb-1">Manager</label>
+                  <label for="costCenterManager" class="block text-sm font-medium text-ink-secondary mb-1">Manager <span aria-hidden="true">*</span><span class="sr-only"> required</span></label>
                   <!-- A PERSON reference: bound to the resources (people) catalog by name. -->
-                  <select id="manager" formControlName="manager" class="command-select">
+                  <select id="costCenterManager" formControlName="manager" class="command-select"
+                          required aria-required="true" [attr.aria-invalid]="invalid('manager') ? 'true' : null"
+                          [attr.aria-describedby]="invalid('manager') ? 'costCenterManagerError' : null">
                     <option value="" disabled>Select a manager...</option>
                     @for (r of resourceOptions(); track r.id) {
                       <option [value]="r.name">{{ r.name }}</option>
@@ -115,23 +137,41 @@ import { ModalDialogDirective } from '../directives/modal-dialog.directive';
                       <option [value]="orphan" disabled>{{ orphan }} (not in catalog)</option>
                     }
                   </select>
+                  @if (invalid('manager')) {
+                    <p id="costCenterManagerError" role="alert" class="mt-1 text-xs text-critical-text">Manager is required.</p>
+                  }
                 </div>
 
                 <div>
-                  <label for="allocated" class="block text-sm font-medium text-ink-secondary mb-1">Allocated</label>
-                  <input id="allocated" type="number" formControlName="allocated" class="command-input" placeholder="e.g. 100000">
+                  <label for="costCenterAllocated" class="block text-sm font-medium text-ink-secondary mb-1">Allocated <span aria-hidden="true">*</span><span class="sr-only"> required</span></label>
+                  <input id="costCenterAllocated" type="number" formControlName="allocated" class="command-input" placeholder="e.g. 100000"
+                         required aria-required="true" [attr.aria-invalid]="invalid('allocated') ? 'true' : null"
+                         [attr.aria-describedby]="invalid('allocated') ? 'costCenterAllocatedError' : null">
+                  @if (invalid('allocated')) {
+                    <p id="costCenterAllocatedError" role="alert" class="mt-1 text-xs text-critical-text">Allocated amount is required.</p>
+                  }
                 </div>
 
                 <div>
-                  <label for="actual" class="block text-sm font-medium text-ink-secondary mb-1">Actual</label>
-                  <input id="actual" type="number" formControlName="actual" class="command-input" placeholder="e.g. 75000">
+                  <label for="costCenterActual" class="block text-sm font-medium text-ink-secondary mb-1">Actual <span aria-hidden="true">*</span><span class="sr-only"> required</span></label>
+                  <input id="costCenterActual" type="number" formControlName="actual" class="command-input" placeholder="e.g. 75000"
+                         required aria-required="true" [attr.aria-invalid]="invalid('actual') ? 'true' : null"
+                         [attr.aria-describedby]="invalid('actual') ? 'costCenterActualError' : null">
+                  @if (invalid('actual')) {
+                    <p id="costCenterActualError" role="alert" class="mt-1 text-xs text-critical-text">Actual amount is required.</p>
+                  }
                 </div>
+                @if (saveError()) {
+                  <p id="costCenterSaveError" role="alert" class="rounded-lg border border-critical bg-critical-tint px-3 py-2 text-sm text-critical-text">
+                    {{ saveError() }} You can retry without re-entering the form.
+                  </p>
+                }
               </div>
 
               <div class="px-6 py-4 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
-                <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
-                <button type="submit" [disabled]="!form.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
-                  Save Cost Center
+                <button type="button" (click)="closeForm()" [disabled]="saving()" class="command-button secondary disabled:opacity-50">Cancel</button>
+                <button type="submit" [disabled]="saving()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                  {{ saving() ? 'Saving…' : 'Save Cost Center' }}
                 </button>
               </div>
             </form>
@@ -170,6 +210,7 @@ export class ManageCostCentersComponent {
   private api = inject(ApiService);
   private auth = inject(AuthService);
   private destroyRef = inject(DestroyRef);
+  private host = inject<ElementRef<HTMLElement>>(ElementRef);
 
   private costCentersRes = rxResource<CostCenter[], boolean>({
     params: () => this.auth.authReady() && this.auth.canApproveFinancials(),
@@ -197,6 +238,8 @@ export class ManageCostCentersComponent {
   showForm = signal(false);
   editingId = signal<string | null>(null);
   deletingId = signal<string | null>(null);
+  saving = signal(false);
+  saveError = signal<string | null>(null);
 
   form = new FormGroup({
     name: new FormControl('', Validators.required),
@@ -215,9 +258,11 @@ export class ManageCostCentersComponent {
   });
 
   openForm(cc?: CostCenter) {
+    this.saveError.set(null);
+    this.saving.set(false);
     if (cc) {
       this.editingId.set(cc.id);
-      this.form.patchValue({
+      this.form.reset({
         name: cc.name,
         manager: cc.manager,
         allocated: cc.allocated,
@@ -230,35 +275,69 @@ export class ManageCostCentersComponent {
     this.showForm.set(true);
   }
 
-  closeForm() {
+  closeForm(force = false) {
+    if (this.saving()) return;
+    if (!force && this.form.dirty && typeof window !== 'undefined'
+        && !window.confirm('Discard your unsaved cost center changes?')) return;
     this.showForm.set(false);
     this.editingId.set(null);
+    this.saveError.set(null);
     this.form.reset();
   }
 
-  saveCostCenter() {
-    if (this.form.valid) {
-      const raw = this.form.getRawValue();
-      const payload: Partial<CostCenter> = {
-        name: raw.name ?? '',
-        manager: raw.manager ?? '',
-        allocated: raw.allocated ?? 0,
-        actual: raw.actual ?? 0
-      };
-      const id = this.editingId();
+  clearSearch() { this.search.set(''); }
 
-      if (id) {
-        this.api.updateCostCenter(id, payload).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => {
-          this.costCentersRes.reload();
-          this.closeForm();
-        });
-      } else {
-        this.api.createCostCenter(payload).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => {
-          this.costCentersRes.reload();
-          this.closeForm();
-        });
-      }
+  invalid(controlName: keyof typeof this.form.controls): boolean {
+    const control = this.form.controls[controlName];
+    return control.invalid && (control.touched || control.dirty);
+  }
+
+  private focusFirstInvalidControl() {
+    const controls: [keyof typeof this.form.controls, string][] = [
+      ['name', 'costCenterName'],
+      ['manager', 'costCenterManager'],
+      ['allocated', 'costCenterAllocated'],
+      ['actual', 'costCenterActual'],
+    ];
+    const id = controls.find(([name]) => this.form.controls[name].invalid)?.[1];
+    if (id) queueMicrotask(() => this.host.nativeElement.querySelector<HTMLElement>(`#${id}`)?.focus());
+  }
+
+  private apiErrorMessage(error: unknown): string {
+    const response = error as { error?: { error?: unknown }; message?: unknown } | null;
+    const detail = response?.error?.error ?? response?.message;
+    return typeof detail === 'string' && detail.trim() ? detail : 'Unable to save the cost center.';
+  }
+
+  saveCostCenter() {
+    if (this.saving()) return;
+    this.saveError.set(null);
+    if (this.form.invalid) {
+      this.form.markAllAsTouched();
+      this.focusFirstInvalidControl();
+      return;
     }
+    const raw = this.form.getRawValue();
+    const payload: Partial<CostCenter> = {
+      name: raw.name ?? '',
+      manager: raw.manager ?? '',
+      allocated: raw.allocated ?? 0,
+      actual: raw.actual ?? 0
+    };
+    const id = this.editingId();
+    this.saving.set(true);
+    const request = id ? this.api.updateCostCenter(id, payload) : this.api.createCostCenter(payload);
+    request.pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {
+        this.saving.set(false);
+        this.costCentersRes.reload();
+        this.closeForm(true);
+      },
+      error: error => {
+        this.saving.set(false);
+        this.saveError.set(this.apiErrorMessage(error));
+      },
+    });
   }
 
   deleteCostCenter(id: string) {

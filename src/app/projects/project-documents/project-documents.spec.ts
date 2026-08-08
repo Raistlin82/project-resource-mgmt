@@ -92,6 +92,15 @@ function namesObjectAndConsequence(text: string): { namesDocument: boolean; name
 describe('ProjectDocuments — deleting a register entry is confirmed, and the confirm states the loss', () => {
   afterEach(() => TestBed.resetTestingModule());
 
+  it('keeps the delete action visible with a 44px-square touch target', async () => {
+    const { fixture } = await render();
+    const button = deleteButton(fixture);
+    const tokens = button.className.split(/\s+/);
+
+    expect(tokens).toEqual(expect.arrayContaining(['min-h-11', 'min-w-11']));
+    expect(tokens.some(token => token.includes('opacity-0') || token.includes('group-hover'))).toBe(false);
+  });
+
   it('the FIRST click issues no deleteProjectDocument and arms a dialog naming the file and its author', async () => {
     // THE DEFECT: the trash icon is hover-revealed (sm:opacity-0 …
     // sm:group-hover:opacity-100) and sat directly on the DELETE. One mis-click

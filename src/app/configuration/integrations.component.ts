@@ -73,21 +73,21 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
       <div class="grid grid-cols-1 xl:grid-cols-2 gap-5">
         <!-- ERP / General ledger -->
         <section class="command-card overflow-hidden">
-          <div class="command-card-header">
-            <div class="flex items-start gap-3">
+          <div class="command-card-header flex-col items-stretch gap-3 sm:flex-row sm:items-start">
+            <div class="flex min-w-0 items-start gap-3">
               <mat-icon class="text-[24px] text-[var(--cc-primary)]">account_balance</mat-icon>
-              <div>
-                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ erpDescriptor()?.name ?? 'General Ledger Export' }}</h2>
+              <div class="min-w-0">
+                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)] break-words">{{ erpDescriptor()?.name ?? 'General Ledger Export' }}</h2>
                 <p class="mt-1 text-sm text-[var(--cc-muted)]">
                   {{ erpDescriptor()?.description ?? 'Balanced double-entry GL journal export built from the revenue-recognition schedule.' }}
                 </p>
               </div>
             </div>
-            <span class="command-status amber shrink-0">Not connected</span>
+            <span class="command-status amber shrink-0 self-start">Not connected</span>
           </div>
           <div class="p-4 space-y-3">
             <div class="text-xs font-medium text-[var(--cc-muted)]">
-              Active adapter: <span class="font-mono">{{ activeKey('erp') }}</span>
+              Active adapter: <span class="font-mono break-all">{{ activeKey('erp') }}</span>
             </div>
             <div class="flex flex-wrap items-center gap-2">
               <button type="button" class="command-button" [disabled]="busy() !== null" (click)="downloadJournal('csv')">
@@ -105,21 +105,21 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
 
         <!-- E-invoicing / FatturaPA -->
         <section class="command-card overflow-hidden">
-          <div class="command-card-header">
-            <div class="flex items-start gap-3">
+          <div class="command-card-header flex-col items-stretch gap-3 sm:flex-row sm:items-start">
+            <div class="flex min-w-0 items-start gap-3">
               <mat-icon class="text-[24px] text-[var(--cc-primary)]">receipt_long</mat-icon>
-              <div>
-                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ einvoiceDescriptor()?.name ?? 'FatturaPA e-invoice' }}</h2>
+              <div class="min-w-0">
+                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)] break-words">{{ einvoiceDescriptor()?.name ?? 'FatturaPA e-invoice' }}</h2>
                 <p class="mt-1 text-sm text-[var(--cc-muted)]">
                   {{ einvoiceDescriptor()?.description ?? 'Simplified Italian FatturaElettronica v1.2 XML (FPR12) for an invoiced order.' }}
                 </p>
               </div>
             </div>
-            <span class="command-status amber shrink-0">Not connected</span>
+            <span class="command-status amber shrink-0 self-start">Not connected</span>
           </div>
           <div class="p-4 space-y-3">
             <div class="text-xs font-medium text-[var(--cc-muted)]">
-              Active adapter: <span class="font-mono">{{ activeKey('einvoice') }}</span>
+              Active adapter: <span class="font-mono break-all">{{ activeKey('einvoice') }}</span>
             </div>
             <div>
               <label for="einvoiceOrder" class="block text-sm font-medium text-[var(--cc-muted)] mb-1">Invoiced order</label>
@@ -155,21 +155,21 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
 
         <!-- CRM sync outbox -->
         <section class="command-card overflow-hidden">
-          <div class="command-card-header">
-            <div class="flex items-start gap-3">
+          <div class="command-card-header flex-col items-stretch gap-3 sm:flex-row sm:items-start">
+            <div class="flex min-w-0 items-start gap-3">
               <mat-icon class="text-[24px] text-[var(--cc-primary)]">sync_alt</mat-icon>
-              <div>
-                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ crmDescriptor()?.name ?? 'CRM Sync Outbox' }}</h2>
+              <div class="min-w-0">
+                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)] break-words">{{ crmDescriptor()?.name ?? 'CRM Sync Outbox' }}</h2>
                 <p class="mt-1 text-sm text-[var(--cc-muted)]">
                   {{ crmDescriptor()?.description ?? 'Builds the JSON payload a CRM webhook would receive and parks it in a Prepared outbox.' }}
                 </p>
               </div>
             </div>
-            <span class="command-status amber shrink-0">Not connected</span>
+            <span class="command-status amber shrink-0 self-start">Not connected</span>
           </div>
           <div class="p-4 space-y-3">
             <div class="text-xs font-medium text-[var(--cc-muted)]">
-              Active adapter: <span class="font-mono">{{ activeKey('crm') }}</span>
+              Active adapter: <span class="font-mono break-all">{{ activeKey('crm') }}</span>
             </div>
             <button type="button" class="command-button" [disabled]="preparing()" (click)="prepareSync()" [attr.aria-label]="preparing() ? 'Preparing CRM sync payload' : 'Prepare CRM sync payload'">
               <mat-icon class="text-[20px] w-[20px] h-[20px]">outbox</mat-icon>
@@ -209,21 +209,21 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
 
         <!-- BI feed -->
         <section class="command-card overflow-hidden">
-          <div class="command-card-header">
-            <div class="flex items-start gap-3">
+          <div class="command-card-header flex-col items-stretch gap-3 sm:flex-row sm:items-start">
+            <div class="flex min-w-0 items-start gap-3">
               <mat-icon class="text-[24px] text-[var(--cc-primary)]">insights</mat-icon>
-              <div>
-                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ biDescriptor()?.name ?? 'BI Feed' }}</h2>
+              <div class="min-w-0">
+                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)] break-words">{{ biDescriptor()?.name ?? 'BI Feed' }}</h2>
                 <p class="mt-1 text-sm text-[var(--cc-muted)]">
                   {{ biDescriptor()?.description ?? 'Flat JSON dataset (one row per project, primitives only) for Power BI / Tableau ingestion.' }}
                 </p>
               </div>
             </div>
-            <span class="command-status amber shrink-0">Not connected</span>
+            <span class="command-status amber shrink-0 self-start">Not connected</span>
           </div>
           <div class="p-4 space-y-3">
             <div class="text-xs font-medium text-[var(--cc-muted)]">
-              Active adapter: <span class="font-mono">{{ activeKey('bi') }}</span>
+              Active adapter: <span class="font-mono break-all">{{ activeKey('bi') }}</span>
             </div>
             <button type="button" class="command-button" [disabled]="loadingPreview()" (click)="previewFeed()" [attr.aria-label]="loadingPreview() ? 'Loading BI feed preview' : 'Preview BI feed'">
               <mat-icon class="text-[20px] w-[20px] h-[20px]">preview</mat-icon>
@@ -284,11 +284,11 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
           happen, not a button that quietly does nothing.
         -->
         <section class="command-card overflow-hidden xl:col-span-2" data-test="declared-seams">
-          <div class="command-card-header">
-            <div class="flex items-start gap-3">
+          <div class="command-card-header flex-col items-stretch gap-3 sm:flex-row sm:items-start">
+            <div class="flex min-w-0 items-start gap-3">
               <mat-icon class="text-[24px] text-[var(--cc-primary)]">hub</mat-icon>
-              <div>
-                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)]">Declared, not connected</h2>
+              <div class="min-w-0">
+                <h2 class="font-display text-xl font-bold text-[var(--cc-ink)] break-words">Declared, not connected</h2>
                 <p class="mt-1 text-sm text-[var(--cc-muted)]">
                   Systems we exchange data with on paper but not yet in code. The mapping and the rules
                   are built and tested; only the transport is missing. Nothing here reads from or writes
@@ -296,7 +296,7 @@ type BusyAction = 'erp-csv' | 'erp-json' | 'einvoice' | null;
                 </p>
               </div>
             </div>
-            <span class="command-status amber shrink-0">Not connected</span>
+            <span class="command-status amber shrink-0 self-start">Not connected</span>
           </div>
 
           <div class="p-4 space-y-5">

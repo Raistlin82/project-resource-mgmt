@@ -18,6 +18,7 @@ import {
 import { AuthService } from '../services/auth.service';
 import { NotificationService } from '../services/notification.service';
 import { ListStateComponent } from '../shared/list-state.component';
+import { ModalDialogDirective } from '../directives/modal-dialog.directive';
 import { parseMonthRowId } from '../services/allocation-month.util';
 import { accountableApproversOf } from '../services/org-scope.util';
 import { todayLocalIso } from '../services/local-date.util';
@@ -68,6 +69,11 @@ interface ApprovalRow {
   canDecide: boolean;
 }
 
+interface DecisionDraft {
+  row: ApprovalRow;
+  decision: 'Approved' | 'Rejected';
+}
+
 /** The single empty value for both the pre-`authReady` stream and the default,
  *  so the two can never drift as fields are added to `ApprovalsData`. */
 const EMPTY_DATA: ApprovalsData = { approvals: [], projects: [], resources: [], users: [], assignments: [], orgNodes: [] };
@@ -86,7 +92,7 @@ const OUT_OF_SCOPE_TITLE = 'You do not manage this resource, so you cannot decid
 @Component({
   selector: 'app-approvals',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CurrencyPipe, DatePipe, RouterLink, MatIconModule, ListStateComponent],
+  imports: [CurrencyPipe, DatePipe, RouterLink, MatIconModule, ListStateComponent, ModalDialogDirective],
   template: `
     <div class="command-page space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -105,14 +111,14 @@ const OUT_OF_SCOPE_TITLE = 'You do not manage this resource, so you cannot decid
              control that carries it on one button only reads as a single
              stateful toggle rather than a two-option choice. Bound off the same
              filter() the classes read, so the two can never disagree. -->
-        <div class="command-card-muted p-1 flex items-center self-start sm:self-auto">
+        <div class="command-card-muted p-1 grid grid-cols-2 items-center w-full sm:w-auto self-start sm:self-auto">
           <button type="button" (click)="filter.set('mine')" data-test="filter-mine"
                   [attr.aria-pressed]="filter() === 'mine'"
                   [class.bg-surface]="filter() === 'mine'"
                   [class.shadow-sm]="filter() === 'mine'"
                   [class.text-ink]="filter() === 'mine'"
                   [class.text-ink-muted]="filter() !== 'mine'"
-                  class="px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ease-out flex items-center gap-2">
+                  class="min-w-0 px-3 sm:px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ease-out flex items-center justify-center gap-2">
             My inbox
             <!-- The count is the ONLY figure on this screen that renders OUTSIDE
                  the read-state wrapper below, so it needs its own answer for the
@@ -139,16 +145,21 @@ const OUT_OF_SCOPE_TITLE = 'You do not manage this resource, so you cannot decid
                   [class.shadow-sm]="filter() === 'all'"
                   [class.text-ink]="filter() === 'all'"
                   [class.text-ink-muted]="filter() !== 'all'"
-                  class="px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ease-out">
+                  class="min-w-0 px-3 sm:px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ease-out">
             All pending
           </button>
         </div>
       </div>
 
       <!-- [loading] folds auth readiness — see listLoading(). -->
-      <app-list-state [loading]="listLoading()" [error]="res.status() === 'error'" label="approvals" (retry)="res.reload()">
+      <app-list-state [loading]="listLoading()" [error]="res.status() === 'error'"
+                      skeleton="cards" [rows]="4" label="approvals" (retry)="res.reload()">
       <ng-template>
-      <div class="command-card overflow-hidden">
+      <!-- At narrow widths and under browser zoom the nine-column table turns
+           into cards below. Keeping the table for lg+ preserves fast scanning,
+           while the breakpoint makes zoom reflow instead of creating a two-axis
+           pan whose action column is permanently off-screen. -->
+      <div data-test="approvals-desktop" class="hidden 2xl:block command-card overflow-hidden">
         <div class="overflow-x-auto">
           <table class="command-data-table min-w-[960px]">
             <thead>
@@ -222,25 +233,10 @@ const OUT_OF_SCOPE_TITLE = 'You do not manage this resource, so you cannot decid
                   <td class="text-right">
                     @if (row.request.status === 'Pending') {
                       <div class="inline-flex items-center gap-2 justify-end">
-                        @if (row.canDecide) {
-                          <span class="inline-block w-40">
-                            <!-- UX register P3-01: the placeholder read "Nota (opzionale)"
-                                 in an app whose every other string is English — and on THIS
-                                 control the aria-label beside it was already English, so one
-                                 input carried two labels that disagreed: a screen reader
-                                 announced "Approval note for …" while the sighted user read
-                                 Italian. -->
-                            <input #noteInput type="text"
-                                   [value]="noteFor(row.request.id)"
-                                   (input)="setNote(row.request.id, noteInput.value)"
-                                   [disabled]="pendingId() === row.request.id"
-                                   placeholder="Note (optional)"
-                                   [attr.aria-label]="'Approval note for ' + row.reference"
-                                   class="command-input">
-                          </span>
-                        }
                         <button type="button"
-                                (click)="decide(row, 'Approved')"
+                                data-test="approval-approve"
+                                [attr.data-request-id]="row.request.id"
+                                (click)="requestDecision(row, 'Approved')"
                                 [disabled]="!row.canDecide || pendingId() === row.request.id"
                                 [title]="approveTitle(row)"
                                 [attr.aria-label]="approveTitle(row)"
@@ -248,7 +244,9 @@ const OUT_OF_SCOPE_TITLE = 'You do not manage this resource, so you cannot decid
                           <mat-icon class="text-[20px] w-[20px] h-[20px]">check_circle</mat-icon>
                         </button>
                         <button type="button"
-                                (click)="decide(row, 'Rejected')"
+                                data-test="approval-reject"
+                                [attr.data-request-id]="row.request.id"
+                                (click)="requestDecision(row, 'Rejected')"
                                 [disabled]="!row.canDecide || pendingId() === row.request.id"
                                 [title]="rejectTitle(row)"
                                 [attr.aria-label]="rejectTitle(row)"
@@ -280,8 +278,212 @@ const OUT_OF_SCOPE_TITLE = 'You do not manage this resource, so you cannot decid
           </table>
         </div>
       </div>
+
+      <section data-test="approvals-mobile" aria-label="Approval requests" class="space-y-3 2xl:hidden">
+        @for (row of rows(); track row.request.id) {
+          <article class="command-card p-4 sm:p-5 space-y-4 min-w-0"
+                   [attr.aria-labelledby]="'approval-card-title-' + row.request.id"
+                   [attr.data-request-id]="row.request.id">
+            <div class="flex items-start justify-between gap-3 min-w-0">
+              <div class="min-w-0">
+                <span class="command-chip is-neutral mb-2">
+                  <mat-icon class="text-[16px] w-[16px] h-[16px]">{{ kindIcon(row.kind) }}</mat-icon>
+                  {{ row.kind }}
+                </span>
+                <h2 [id]="'approval-card-title-' + row.request.id"
+                    class="font-display text-base font-bold text-[var(--cc-ink)] break-words">
+                  {{ row.label }}
+                </h2>
+                <p class="mt-1 text-xs font-mono tabular-nums text-[var(--cc-muted)] break-all">{{ row.reference }}</p>
+                @if (row.kind === 'Allocation') {
+                  <a routerLink="/allocation-approvals" class="mt-1 inline-block text-xs text-accent-text hover:underline transition-colors">Open monthly approvals</a>
+                }
+              </div>
+              <span class="command-status shrink-0"
+                    [class.amber]="row.request.status === 'Pending'"
+                    [class.green]="row.request.status === 'Approved'"
+                    [class.red]="row.request.status === 'Rejected'">
+                {{ row.request.status }}
+              </span>
+            </div>
+
+            <dl class="grid grid-cols-1 min-[360px]:grid-cols-2 gap-x-4 gap-y-3 text-sm">
+              <div class="min-w-0 min-[360px]:col-span-2">
+                <dt class="command-kpi-label">Project</dt>
+                <dd class="mt-1 text-[var(--cc-ink)] font-medium break-words">{{ row.projectLabel }}</dd>
+              </div>
+              <div class="min-w-0">
+                <dt class="command-kpi-label">Requested by</dt>
+                <dd class="mt-1 text-[var(--cc-ink)] font-medium break-words">{{ row.requestedByLabel }}</dd>
+              </div>
+              <div class="min-w-0">
+                <dt class="command-kpi-label">Current step</dt>
+                <dd class="mt-1 text-[var(--cc-ink)] font-semibold break-words">{{ row.stepRoleLabel }}</dd>
+                <dd class="text-xs text-[var(--cc-muted)]">{{ row.stepLabel }}</dd>
+              </div>
+              <div>
+                <dt class="command-kpi-label">Amount</dt>
+                <dd class="mt-1 text-[var(--cc-ink)] font-semibold">
+                  @if (row.amount !== undefined) {
+                    {{ row.amount | currency:'EUR':'symbol':'1.0-0' }}
+                  } @else {
+                    <span class="text-ink-muted">&mdash;</span>
+                  }
+                </dd>
+              </div>
+              <div>
+                <dt class="command-kpi-label">SLA</dt>
+                <dd class="mt-1">
+                  @if (row.slaDueAt) {
+                    <span class="block font-mono tabular-nums text-xs text-[var(--cc-muted)]">{{ row.slaDueAt | date:'mediumDate' }}</span>
+                    <span class="command-status mt-1" [class.red]="row.overdue" [class.green]="!row.overdue">
+                      @if (row.overdue) { Overdue } @else { On track }
+                    </span>
+                  } @else {
+                    <span class="text-ink-muted">&mdash;</span>
+                  }
+                </dd>
+              </div>
+            </dl>
+
+            @if (row.request.status === 'Pending') {
+              <div class="pt-4 border-t border-[var(--cc-line)] space-y-2">
+                <div class="grid grid-cols-2 gap-2">
+                  <button type="button"
+                          data-test="approval-approve"
+                          [attr.data-request-id]="row.request.id"
+                          (click)="requestDecision(row, 'Approved')"
+                          [disabled]="!row.canDecide || pendingId() === row.request.id"
+                          [title]="approveTitle(row)"
+                          [attr.aria-label]="approveTitle(row)"
+                          class="command-button secondary min-w-0 justify-center disabled:opacity-40 disabled:cursor-not-allowed">
+                    <mat-icon class="text-[18px] w-[18px] h-[18px]">check_circle</mat-icon>
+                    Approve
+                  </button>
+                  <button type="button"
+                          data-test="approval-reject"
+                          [attr.data-request-id]="row.request.id"
+                          (click)="requestDecision(row, 'Rejected')"
+                          [disabled]="!row.canDecide || pendingId() === row.request.id"
+                          [title]="rejectTitle(row)"
+                          [attr.aria-label]="rejectTitle(row)"
+                          class="command-button secondary min-w-0 justify-center enabled:hover:text-critical-text enabled:hover:border-critical disabled:opacity-40 disabled:cursor-not-allowed">
+                    <mat-icon class="text-[18px] w-[18px] h-[18px]">cancel</mat-icon>
+                    Reject
+                  </button>
+                </div>
+                @if (!row.canDecide) {
+                  <p class="text-xs text-[var(--cc-muted)]">{{ approveTitle(row) }}</p>
+                }
+              </div>
+            }
+          </article>
+        } @empty {
+          <div class="command-card px-5 py-12 text-center text-[var(--cc-muted)]">
+            <mat-icon class="text-4xl mb-3 opacity-50">inbox</mat-icon>
+            <h2 class="font-display font-bold text-ink-secondary">
+              {{ filter() === 'mine' ? 'Your inbox is clear.' : 'No pending approvals.' }}
+            </h2>
+            <p class="text-sm mt-1">
+              {{ filter() === 'mine' ? 'Nothing is waiting on your sign-off right now.' : 'There are no approval requests awaiting a decision.' }}
+            </p>
+          </div>
+        }
+      </section>
       </ng-template>
       </app-list-state>
+
+      @if (decisionDraft(); as draft) {
+        <div data-test="decision-dialog"
+             class="fixed inset-0 z-50 bg-scrim/40 backdrop-blur-sm flex items-center justify-center p-4"
+             appModal ariaLabelledby="approvalDecisionTitle"
+             aria-describedby="approvalDecisionContext"
+             (dismiss)="cancelDecision()">
+          <div class="command-card shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[calc(100dvh-2rem)]">
+            <div class="command-card-header gap-4">
+              <div class="min-w-0">
+                <div class="command-eyebrow">{{ draft.row.kind }} decision</div>
+                <h2 id="approvalDecisionTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">
+                  {{ draft.decision === 'Approved' ? 'Confirm approval' : 'Confirm rejection' }}
+                </h2>
+              </div>
+              <button type="button" (click)="cancelDecision()" [disabled]="decisionInFlight()"
+                      aria-label="Close decision dialog" title="Close"
+                      class="p-2 rounded-full text-ink-muted hover:text-ink-secondary hover:bg-surface-muted disabled:opacity-40">
+                <mat-icon>close</mat-icon>
+              </button>
+            </div>
+
+            <div class="p-5 sm:p-6 overflow-y-auto space-y-5">
+              <div id="approvalDecisionContext" class="command-card-muted p-4 space-y-3">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <p class="font-bold text-[var(--cc-ink)] break-words">{{ draft.row.label }}</p>
+                    <p class="mt-1 text-xs font-mono tabular-nums text-[var(--cc-muted)] break-all">{{ draft.row.reference }}</p>
+                  </div>
+                  <span class="command-chip is-neutral shrink-0">{{ draft.row.kind }}</span>
+                </div>
+                <dl class="grid grid-cols-1 min-[360px]:grid-cols-2 gap-3 text-sm">
+                  <div class="min-w-0">
+                    <dt class="command-kpi-label">Requested by</dt>
+                    <dd class="mt-1 font-semibold text-[var(--cc-ink)] break-words">{{ draft.row.requestedByLabel }}</dd>
+                  </div>
+                  <div class="min-w-0">
+                    <dt class="command-kpi-label">Project</dt>
+                    <dd class="mt-1 font-semibold text-[var(--cc-ink)] break-words">{{ draft.row.projectLabel }}</dd>
+                  </div>
+                </dl>
+              </div>
+
+              <label class="command-field" for="approvalDecisionNote">
+                <span class="command-field-label">
+                  {{ draft.decision === 'Rejected' ? 'Reason for rejection' : 'Decision note' }}
+                  @if (draft.decision === 'Rejected') { <span class="text-critical">*</span> }
+                </span>
+                <textarea #decisionNote id="approvalDecisionNote" data-test="decision-note" rows="4"
+                          [required]="draft.decision === 'Rejected'"
+                          [value]="noteFor(draft.row.request.id)"
+                          (input)="setNote(draft.row.request.id, decisionNote.value)"
+                          [disabled]="decisionInFlight()"
+                          [attr.aria-invalid]="draft.decision === 'Rejected' && decisionReasonMissing()"
+                          aria-describedby="approvalDecisionNoteHelp"
+                          [attr.aria-label]="(draft.decision === 'Rejected' ? 'Reason for rejecting ' : 'Optional note for approving ') + decisionContext(draft.row)"
+                          class="command-textarea"></textarea>
+                <span id="approvalDecisionNoteHelp"
+                      [class.command-field-error]="draft.decision === 'Rejected' && decisionReasonMissing()"
+                      [class.command-field-hint]="draft.decision !== 'Rejected' || !decisionReasonMissing()">
+                  @if (draft.decision === 'Rejected') {
+                    @if (decisionReasonMissing()) {
+                      Enter a rejection reason to continue.
+                    } @else {
+                      This reason will be recorded with the decision.
+                    }
+                  } @else {
+                    Optional context to record with the approval.
+                  }
+                </span>
+              </label>
+            </div>
+
+            <div class="px-5 sm:px-6 py-4 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex flex-col-reverse min-[360px]:flex-row justify-end gap-2">
+              <button type="button" (click)="cancelDecision()" [disabled]="decisionInFlight()"
+                      class="command-button secondary justify-center disabled:opacity-40">Cancel</button>
+              <button type="button" data-test="confirm-decision" (click)="confirmDecision()"
+                      [disabled]="decisionInFlight() || (draft.decision === 'Rejected' && decisionReasonMissing())"
+                      [attr.aria-label]="confirmDecisionLabel(draft)"
+                      class="command-button justify-center disabled:opacity-40 disabled:cursor-not-allowed"
+                      [class.bg-critical]="draft.decision === 'Rejected'"
+                      [class.hover:bg-critical-strong]="draft.decision === 'Rejected'">
+                @if (decisionInFlight()) {
+                  {{ draft.decision === 'Approved' ? 'Approving…' : 'Rejecting…' }}
+                } @else {
+                  {{ draft.decision === 'Approved' ? 'Confirm approval' : 'Confirm rejection' }}
+                }
+              </button>
+            </div>
+          </div>
+        </div>
+      }
     </div>
   `,
 })
@@ -325,7 +527,10 @@ export class Approvals {
   filter = signal<'mine' | 'all'>('mine');
   /** Id of the request whose decision is in flight, to guard against double-submit. */
   pendingId = signal<string | null>(null);
-  /** Optional approver note per request id, captured before an approve/reject. */
+  /** The explicit confirmation currently open. Keeping the enriched row means the
+   *  dialog repeats the exact record/person context the triggering action named. */
+  protected decisionDraft = signal<DecisionDraft | null>(null);
+  /** Optional approval note / mandatory rejection reason per request id. */
   private notes = signal<Record<string, string>>({});
   noteFor(id: string): string {
     return this.notes()[id] ?? '';
@@ -333,6 +538,14 @@ export class Approvals {
   setNote(id: string, value: string): void {
     this.notes.update(m => ({ ...m, [id]: value }));
   }
+  protected readonly decisionInFlight = computed(() => {
+    const draft = this.decisionDraft();
+    return !!draft && this.pendingId() === draft.row.request.id;
+  });
+  protected readonly decisionReasonMissing = computed(() => {
+    const draft = this.decisionDraft();
+    return draft?.decision === 'Rejected' && this.noteFor(draft.row.request.id).trim().length === 0;
+  });
 
   private projectsById = computed(() => new Map(this.res.value().projects.map(p => [p.id, p.name])));
   private resourcesById = computed(() => new Map(this.res.value().resources.map(r => [r.id, r.name])));
@@ -522,10 +735,40 @@ export class Approvals {
     return this.allRows().filter(r => r.approvable).length;
   });
 
-  decide(row: ApprovalRow, decision: 'Approved' | 'Rejected'): void {
+  requestDecision(row: ApprovalRow, decision: 'Approved' | 'Rejected'): void {
+    if (!row.canDecide || this.pendingId() !== null) return;
+    this.decisionDraft.set({ row, decision });
+  }
+
+  cancelDecision(): void {
+    if (this.decisionInFlight()) return;
+    this.decisionDraft.set(null);
+  }
+
+  confirmDecision(): void {
+    const draft = this.decisionDraft();
+    if (!draft || this.decisionInFlight()) return;
+    // Rejection is the one branch where a note is a business-facing reason, not
+    // optional commentary. Keep the guard here as well as on the disabled button:
+    // programmatic calls and stale DOM cannot bypass the invariant.
+    if (draft.decision === 'Rejected' && this.decisionReasonMissing()) return;
+    this.decide(draft.row, draft.decision);
+  }
+
+  protected confirmDecisionLabel(draft: DecisionDraft): string {
+    const verb = draft.decision === 'Approved' ? 'approval' : 'rejection';
+    return `Confirm ${verb} for ${this.decisionContext(draft.row)}`;
+  }
+
+  protected decisionContext(row: ApprovalRow): string {
+    return `${row.kind} ${row.reference} on ${row.projectLabel}, requested by ${row.requestedByLabel}`;
+  }
+
+  private decide(row: ApprovalRow, decision: 'Approved' | 'Rejected'): void {
     if (!row.canDecide || this.pendingId() === row.request.id) return;
     this.pendingId.set(row.request.id);
-    // Optional approver note; the deciding principal is derived server-side.
+    // The deciding principal is derived server-side. Rejection reaches this point
+    // only with a non-empty reason; approval commentary remains optional.
     const note = this.noteFor(row.request.id).trim() || undefined;
     this.api
       .decideApprovalRequest(row.request.id, decision, note)
@@ -534,6 +777,8 @@ export class Approvals {
         next: () => {
           this.res.reload();
           this.pendingId.set(null);
+          this.decisionDraft.set(null);
+          this.setNote(row.request.id, '');
           this.notifications.show(`${row.kind} ${row.reference} ${decision.toLowerCase()}`, 'success');
         },
         error: () => {
@@ -544,17 +789,19 @@ export class Approvals {
   }
 
   approveTitle(row: ApprovalRow): string {
-    if (row.selfRequested) return 'Segregation of duties: you cannot approve a request you submitted';
-    if (row.outOfScope) return OUT_OF_SCOPE_TITLE;
-    if (!row.approvable) return `Awaiting ${this.roleLabel(row.currentRole)} approval`;
-    return 'Approve this request';
+    const context = this.decisionContext(row);
+    if (row.selfRequested) return `Cannot approve ${context}. Segregation of duties: you cannot approve a request you submitted`;
+    if (row.outOfScope) return `Cannot approve ${context}: ${OUT_OF_SCOPE_TITLE}`;
+    if (!row.approvable) return `Cannot approve ${context}: awaiting ${this.roleLabel(row.currentRole)} approval`;
+    return `Approve ${context}`;
   }
 
   rejectTitle(row: ApprovalRow): string {
-    if (row.selfRequested) return 'Segregation of duties: you cannot decide a request you submitted';
-    if (row.outOfScope) return OUT_OF_SCOPE_TITLE;
-    if (!row.approvable) return `Awaiting ${this.roleLabel(row.currentRole)} decision`;
-    return 'Reject this request';
+    const context = this.decisionContext(row);
+    if (row.selfRequested) return `Cannot reject ${context}. Segregation of duties: you cannot decide a request you submitted`;
+    if (row.outOfScope) return `Cannot reject ${context}: ${OUT_OF_SCOPE_TITLE}`;
+    if (!row.approvable) return `Cannot reject ${context}: awaiting ${this.roleLabel(row.currentRole)} decision`;
+    return `Reject ${context}`;
   }
 
   kindIcon(kind: ApprovalKind): string {

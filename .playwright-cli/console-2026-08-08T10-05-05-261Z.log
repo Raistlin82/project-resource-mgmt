@@ -1,0 +1,2 @@
+[      82ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://localhost:8081/realms/psa/.well-known/openid-configuration:0
+[      82ms] [ERROR] error loading discovery document Wt @ http://localhost:4100/chunk-GERFMKFG.js:0

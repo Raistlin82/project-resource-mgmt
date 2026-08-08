@@ -1,8 +1,9 @@
 import { ChangeDetectionStrategy, Component, inject, signal, computed, PLATFORM_ID } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { isPlatformBrowser, CurrencyPipe, DecimalPipe } from '@angular/common';
-import { forkJoin, of, map } from 'rxjs';
-import { rxResource } from '@angular/core/rxjs-interop';
+import { forkJoin, of, map, distinctUntilChanged } from 'rxjs';
+import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { ActivatedRoute, Router } from '@angular/router';
 import { ApiService, Resource, ResourceRequest, Assignment, Project, Order, OrderLine, FinancialItem, TimeEntry, Issue, ChangeRequest, Milestone, BillingPlanItem, Contract, Customer, FxRate, NegotiatedRate, BASE_CURRENCY, AssignmentDay, AssignmentMonth, CostBaseline, BenchRollup } from '../services/api.service';
 import { AuthService } from '../services/auth.service';
 import { computeProjectFinancials, costBaselineComparison, FinanceData, hasMeasuredMarginPct, arAging, arAgingByCustomer, dsoOutstanding, AR_AGING_BUCKETS, ArAgingBucket, ArAgingBucketTotal, ArAgingCustomerRow, marginDrivers, portfolioAlerts, DEFAULT_ALERT_THRESHOLDS, PortfolioAlertRow, customerProfitability, customerConcentration, marginCompressionAlerts, DEFAULT_MARGIN_COMPRESSION_CONFIG, recognizedRevenueTrend, recognitionSchedule, periodDelta, PeriodDelta, CustomerConcentration, MarginCompressionAlert, AlertSeverity, portfolioMarginFullyLoaded, PortfolioMargin, portfolioRealization, PortfolioRealization } from '../services/finance.util';
@@ -11,6 +12,7 @@ import { NotificationService } from '../services/notification.service';
 import { toCsv, downloadCsv, downloadXlsx, XlsxSheet } from '../services/export.util';
 import { allocationSheets, planningSheet, RptOpts, RptPlanData } from '../services/rpt-xlsx.util';
 import { countsTowardInternalCapacity, kindOf } from '../services/resource-kind.util';
+import { isWorkableUncoveredRequest } from '../services/request-demand.util';
 import { DEFAULT_HOURS_PER_DAY } from '../services/sell-rate.util';
 import { CommandBarChartComponent, CommandTrendChartComponent, CommandDonutChartComponent, BarSeries, TrendSeries } from '../shared/charts';
 import { ListStateComponent } from '../shared/list-state.component';
@@ -88,6 +90,27 @@ interface ArAgingBarRow extends ArAgingBucketTotal {
   bucket: ArAgingBucket;
 }
 
+type TrendWindow = '30d' | 'quarter' | 'year';
+
+interface ReportExportRow {
+  id: string;
+  name: string;
+  category: 'Resource Management' | 'Project Management' | 'Cross-Functional';
+  available: boolean;
+  lastGeneratedAt: string | null;
+}
+
+const TREND_WINDOW_QUERY_PARAM = 'revenueTrendWindow';
+const TREND_WINDOW_LABELS: Record<TrendWindow, string> = {
+  '30d': '1 month',
+  quarter: '3 months',
+  year: '12 months',
+};
+
+function trendWindowFromQuery(value: string | null): TrendWindow {
+  return value === 'quarter' || value === 'year' || value === '30d' ? value : '30d';
+}
+
 /**
  * Empty envelope used until auth settles, as the resource default, and as what
  * the error-state guard below falls back to — one literal rather than three, so
@@ -113,27 +136,33 @@ const EMPTY_DATA: ReportingData = {
           <h1 class="command-title">Portfolio Analytics</h1>
           <p class="command-subtitle">Cross-functional control view across resource demand, utilization, project finance, risks, milestones and change control.</p>
         </div>
-        <div class="flex flex-col sm:flex-row items-center gap-3 w-full sm:w-auto">
-          <select [value]="period()" (change)="onPeriodChange($event)" aria-label="Reporting period" class="command-select w-full sm:w-auto">
-            <option value="30d">Last 30 Days</option>
-            <option value="quarter">This Quarter</option>
-            <option value="year">This Year</option>
-          </select>
-          <button type="button" (click)="exportReport()" class="command-button w-full sm:w-auto">
-            <mat-icon class="text-[20px] w-[20px] h-[20px]">download</mat-icon> Export Report
+        <div class="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-3 w-full lg:w-auto lg:justify-end" data-test="reporting-header-actions">
+          <div class="w-full sm:w-auto sm:min-w-[15rem]">
+            <label for="revenueTrendWindow" class="mb-1 block text-sm font-semibold text-ink">Recognised-revenue comparison window</label>
+            <select id="revenueTrendWindow" [value]="period()" (change)="onPeriodChange($event)"
+                    aria-describedby="revenueTrendWindowHelp" class="command-select w-full min-w-0">
+              <option value="30d">Current month</option>
+              <option value="quarter">Trailing 3 months</option>
+              <option value="year">Trailing 12 months</option>
+            </select>
+            <p id="revenueTrendWindowHelp" class="mt-1 max-w-[20rem] text-xs leading-snug text-ink-muted">Controls only the trend comparison in the Realization card.</p>
+          </div>
+          <button type="button" (click)="exportReport()" [disabled]="!canExportData()" data-test="export-summary"
+                  aria-label="Export portfolio KPI summary as CSV"
+                  class="command-button w-full sm:w-auto shrink-0 disabled:opacity-40 disabled:cursor-not-allowed">
+            <mat-icon class="text-[20px] w-[20px] h-[20px]">download</mat-icon> Export Summary
           </button>
           <!-- RPT parity (docs/rpt-comparison.md rows 24 + 44): the two Excel
                reports RPT's planners expect, in the workbook SHAPE RPT uses —
-               Pianificazione is one sheet, Allocazione is two. Disabled on a failed
-               read: a workbook built from an errored envelope is a file of confident
-               zeros, which is worse than no file (same reasoning as the capacity
-               screen's export gate). -->
-          <button type="button" (click)="exportPlanningXlsx()" [disabled]="dataError()" data-test="export-planning-xlsx"
-                  class="command-button secondary w-full sm:w-auto disabled:opacity-40 disabled:cursor-not-allowed">
+               Pianificazione is one sheet, Allocazione is two. Disabled until the
+               read settles successfully: a workbook built from a pending or errored
+               envelope is a file of confident zeros, which is worse than no file. -->
+          <button type="button" (click)="exportPlanningXlsx()" [disabled]="!canExportData()" data-test="export-planning-xlsx"
+                  class="command-button secondary w-full sm:w-auto shrink-0 disabled:opacity-40 disabled:cursor-not-allowed">
             <mat-icon class="text-[20px] w-[20px] h-[20px]">table_view</mat-icon> Pianificazione
           </button>
-          <button type="button" (click)="exportAllocationXlsx()" [disabled]="dataError()" data-test="export-allocation-xlsx"
-                  class="command-button secondary w-full sm:w-auto disabled:opacity-40 disabled:cursor-not-allowed">
+          <button type="button" (click)="exportAllocationXlsx()" [disabled]="!canExportData()" data-test="export-allocation-xlsx"
+                  class="command-button secondary w-full sm:w-auto shrink-0 disabled:opacity-40 disabled:cursor-not-allowed">
             <mat-icon class="text-[20px] w-[20px] h-[20px]">table_view</mat-icon> Allocazione
           </button>
         </div>
@@ -206,7 +235,7 @@ const EMPTY_DATA: ReportingData = {
                 </span>
               }
             </div>
-            <h3 class="command-kpi-label">{{ kpi.label }}</h3>
+            <h2 class="command-kpi-label">{{ kpi.label }}</h2>
             <p class="command-kpi-value">{{ kpi.value }}</p>
             <!-- Only present when the figure leaves something out (H, U6). -->
             @if (kpi.note; as note) {
@@ -338,7 +367,7 @@ const EMPTY_DATA: ReportingData = {
         <!-- Resource Utilization (bar chart) -->
         <div class="command-card p-6 sm:p-8">
           <div class="flex items-center justify-between mb-8">
-            <h3 class="text-xl font-bold text-ink tracking-tight">Current Resource Utilization</h3>
+            <h2 class="text-xl font-bold text-ink tracking-tight">Current Resource Utilization</h2>
           </div>
           @defer (hydrate on viewport) {
             <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="block" [rows]="1" label="utilization" (retry)="reloadData()">
@@ -392,7 +421,7 @@ const EMPTY_DATA: ReportingData = {
         <!-- Project Margin (real, bar chart + numbers) -->
         <div class="command-card p-6 sm:p-8">
           <div class="flex items-center justify-between mb-8">
-            <h3 class="text-xl font-bold text-ink tracking-tight">Project Margin <span class="ml-1 text-xs font-semibold text-ink-muted normal-case tracking-normal">{{ baseCurrency }} (base)</span></h3>
+            <h2 class="text-xl font-bold text-ink tracking-tight">Project Margin <span class="ml-1 text-xs font-semibold text-ink-muted normal-case tracking-normal">{{ baseCurrency }} (base)</span></h2>
           </div>
           @defer (hydrate on viewport) {
             <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="block" [rows]="1" label="project margin" (retry)="reloadData()">
@@ -433,7 +462,7 @@ const EMPTY_DATA: ReportingData = {
       <!-- Recognised-revenue trend (real monthly series, 12-month trailing) -->
       <div class="command-card p-6 sm:p-8">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-8">
-          <h3 class="text-xl font-bold text-ink tracking-tight">Recognised Revenue Trend</h3>
+          <h2 class="text-xl font-bold text-ink tracking-tight">Recognised Revenue Trend</h2>
           <span class="text-xs font-semibold uppercase tracking-wider text-ink-muted normal-case">Trailing 12 months &middot; {{ baseCurrency }} (base)</span>
         </div>
         @defer (hydrate on viewport) {
@@ -462,21 +491,23 @@ const EMPTY_DATA: ReportingData = {
       <!-- Detailed Reports Table -->
       @defer (hydrate on viewport) {
       <div class="command-card overflow-hidden">
-        <div class="p-6 sm:p-8 border-b border-line flex items-center justify-between bg-surface-muted">
-          <h3 class="text-xl font-bold text-ink tracking-tight">Available Reports</h3>
+        <div class="p-6 sm:p-8 border-b border-line bg-surface-muted">
+          <h2 class="text-xl font-bold text-ink tracking-tight">Report Exports</h2>
+          <p class="mt-1 text-sm text-ink-muted">The portfolio KPI summary is available now. Planned reports stay disabled until they have their own verified generators.</p>
         </div>
         <div class="overflow-x-auto">
-          <table class="command-data-table">
+          <table class="command-data-table min-w-[56rem]">
             <thead class="bg-surface-muted border-b border-line text-ink-muted">
               <tr>
                 <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs">Report Name</th>
                 <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs">Category</th>
-                <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs">Last Generated</th>
-                <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs text-right">Actions</th>
+                <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs">Availability</th>
+                <th class="px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs">Last generated this session</th>
+                <th class="sticky right-0 bg-surface-muted px-6 sm:px-8 py-4 font-semibold uppercase tracking-wider text-xs text-right">Action</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-line">
-              @for (report of reports(); track report.name) {
+              @for (report of reports(); track report.id) {
                 <tr class="hover:bg-surface-muted transition-colors group">
                   <td class="px-6 sm:px-8 py-5 font-bold text-ink flex items-center gap-3">
                     <div class="w-8 h-8 rounded-lg bg-accent-tint ring-1 ring-accent flex items-center justify-center text-accent-text">
@@ -492,11 +523,29 @@ const EMPTY_DATA: ReportingData = {
                       {{ report.category }}
                     </span>
                   </td>
-                  <td class="px-6 sm:px-8 py-5 text-ink-secondary font-medium">{{ report.lastGenerated }}</td>
-                  <td class="px-6 sm:px-8 py-5 text-right">
-                    <button type="button" (click)="exportReport()" class="text-accent-text hover:text-accent-strong hover:underline font-semibold text-sm transition-colors opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 flex items-center justify-end gap-1 ml-auto">
-                      Export <mat-icon class="text-[16px] w-[16px] h-[16px]">download</mat-icon>
-                    </button>
+                  <td class="px-6 sm:px-8 py-5 text-sm font-semibold" [class.text-positive-text]="report.available" [class.text-ink-muted]="!report.available">
+                    {{ report.available ? 'Available' : 'Unavailable' }}
+                  </td>
+                  <td class="px-6 sm:px-8 py-5 text-ink-secondary font-medium">
+                    @if (report.available) {
+                      {{ report.lastGeneratedAt ? formatGeneratedAt(report.lastGeneratedAt) : 'Not generated in this session' }}
+                    } @else {
+                      Not available
+                    }
+                  </td>
+                  <td class="sticky right-0 bg-surface px-6 sm:px-8 py-5 text-right group-hover:bg-surface-muted">
+                    @if (report.available) {
+                      <button type="button" (click)="exportReport()" [disabled]="!canExportData()"
+                              data-test="export-summary-row" [attr.aria-label]="'Export ' + report.name + ' as CSV'"
+                              class="command-button secondary ml-auto disabled:opacity-40 disabled:cursor-not-allowed">
+                        Export <mat-icon class="text-[16px] w-[16px] h-[16px]">download</mat-icon>
+                      </button>
+                    } @else {
+                      <button type="button" disabled [attr.aria-label]="report.name + ' export unavailable'"
+                              class="command-button secondary ml-auto disabled:opacity-60 disabled:cursor-not-allowed">
+                        Unavailable
+                      </button>
+                    }
                   </td>
                 </tr>
               }
@@ -517,7 +566,7 @@ const EMPTY_DATA: ReportingData = {
       <ng-template>
       <div class="command-card overflow-hidden">
         <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-muted">
-          <h3 class="text-xl font-bold text-ink tracking-tight">Project Margin &amp; Variance</h3>
+          <h2 class="text-xl font-bold text-ink tracking-tight">Project Margin &amp; Variance</h2>
           <div class="flex items-center gap-4">
             <div class="hidden sm:flex items-center gap-4 text-xs font-semibold text-ink-muted">
               <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-sm bg-accent"></span>Labor</span>
@@ -627,7 +676,7 @@ const EMPTY_DATA: ReportingData = {
       <ng-template>
       <div class="command-card overflow-hidden">
         <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-surface-muted">
-          <h3 class="text-xl font-bold text-ink tracking-tight">Portfolio Alerts</h3>
+          <h2 class="text-xl font-bold text-ink tracking-tight">Portfolio Alerts</h2>
           <span class="text-xs font-semibold text-ink-muted">Margin &le; {{ alertThresholds.marginTargetPct }}% &middot; Burn &ge; {{ alertThresholds.burnWarnPct }}% &middot; EAC &gt; budget</span>
         </div>
         <ul class="divide-y divide-line">
@@ -671,7 +720,7 @@ const EMPTY_DATA: ReportingData = {
       <div class="command-card overflow-hidden">
         <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-muted">
           <div>
-            <h3 class="text-xl font-bold text-ink tracking-tight">Margin-Compression Alerts</h3>
+            <h2 class="text-xl font-bold text-ink tracking-tight">Margin-Compression Alerts</h2>
             <span class="text-xs font-semibold text-ink-muted">Margin &le; {{ marginCompressionThresholds.marginTargetPct }}% or thin bill-vs-cost spread &middot; project &amp; customer</span>
           </div>
           <button type="button" (click)="exportMarginCompressionCsv()" [disabled]="compressionAlerts().length === 0" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
@@ -785,7 +834,7 @@ const EMPTY_DATA: ReportingData = {
         <ng-template>
         <div class="command-card p-6 sm:p-8">
           <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-8">
-            <h3 class="text-xl font-bold text-ink tracking-tight">Top Customers by Revenue</h3>
+            <h2 class="text-xl font-bold text-ink tracking-tight">Top Customers by Revenue</h2>
             <span class="text-xs font-semibold uppercase tracking-wider text-ink-muted normal-case">Top {{ customerChartCategories().length }} &middot; {{ baseCurrency }} (base)</span>
           </div>
           @if (customerChartCategories().length > 0) {
@@ -814,7 +863,7 @@ const EMPTY_DATA: ReportingData = {
       <ng-template>
       <div class="command-card overflow-hidden">
         <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-muted">
-          <h3 class="text-xl font-bold text-ink tracking-tight">Top Customers by Margin <span class="ml-1 text-xs font-semibold text-ink-muted normal-case tracking-normal">{{ baseCurrency }} (base)</span></h3>
+          <h2 class="text-xl font-bold text-ink tracking-tight">Top Customers by Margin <span class="ml-1 text-xs font-semibold text-ink-muted normal-case tracking-normal">{{ baseCurrency }} (base)</span></h2>
           <button type="button" (click)="exportCustomerProfitabilityCsv()" [disabled]="customerRows().length === 0" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
             <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> Export CSV
           </button>
@@ -930,7 +979,7 @@ const EMPTY_DATA: ReportingData = {
       <ng-template>
       <div class="command-card p-6 sm:p-8">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-8">
-          <h3 class="text-xl font-bold text-ink tracking-tight">A/R Aging</h3>
+          <h2 class="text-xl font-bold text-ink tracking-tight">A/R Aging</h2>
           <div class="flex items-center gap-4">
             <span class="text-xs font-semibold uppercase tracking-wider text-ink-muted">Days overdue &middot; {{ baseCurrency }} (base)</span>
             <button type="button" (click)="exportArAgingCsv()" class="command-button secondary">
@@ -981,7 +1030,7 @@ const EMPTY_DATA: ReportingData = {
       <ng-template>
       <div class="command-card overflow-hidden">
         <div class="p-6 sm:p-8 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-surface-muted">
-          <h3 class="text-xl font-bold text-ink tracking-tight">A/R by Customer <span class="ml-1 text-xs font-semibold text-ink-muted normal-case">{{ baseCurrency }} (base)</span></h3>
+          <h2 class="text-xl font-bold text-ink tracking-tight">A/R by Customer <span class="ml-1 text-xs font-semibold text-ink-muted normal-case">{{ baseCurrency }} (base)</span></h2>
           <button type="button" (click)="exportArByCustomerCsv()" [disabled]="arByCustomer().length === 0" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
             <mat-icon class="text-[18px] w-[18px] h-[18px]">download</mat-icon> Export CSV
           </button>
@@ -1031,16 +1080,32 @@ export class Reporting {
   private auth = inject(AuthService);
   private notificationService = inject(NotificationService);
   private platformId = inject(PLATFORM_ID);
+  private route = inject(ActivatedRoute);
+  private router = inject(Router);
 
   /**
    * Selected reporting period. Drives the length of the recognised-revenue trend
    * window (1 / 3 / 12 months) — the real prior-period comparison shown on the
    * Realization strip. It no longer scales any fabricated KPI trend figures (#15).
    */
-  period = signal<'30d' | 'quarter' | 'year'>('30d');
+  period = signal<TrendWindow>(
+    trendWindowFromQuery(this.route.snapshot.queryParamMap.get(TREND_WINDOW_QUERY_PARAM)),
+  );
 
   /** Months in the current trend window for each period selection (prior block is equal-length). */
   private periodMonths = computed(() => (this.period() === 'year' ? 12 : this.period() === 'quarter' ? 3 : 1));
+  protected readonly trendWindowLabel = computed(() => TREND_WINDOW_LABELS[this.period()]);
+
+  constructor() {
+    // Keep a deep link and browser back/forward in sync with the visible control.
+    this.route.queryParamMap
+      .pipe(
+        map(params => trendWindowFromQuery(params.get(TREND_WINDOW_QUERY_PARAM))),
+        distinctUntilChanged(),
+        takeUntilDestroyed(),
+      )
+      .subscribe(window => this.period.set(window));
+  }
 
   /**
    * Hours that constitute one FTE over the trend window, used to convert approved
@@ -1156,6 +1221,7 @@ export class Reporting {
     || this.dataRes.isLoading()
     || this.fxRes.isLoading());
   protected dataError = computed(() => this.dataRes.status() === 'error' || this.fxRes.status() === 'error');
+  protected canExportData = computed(() => !this.dataLoading() && !this.dataError());
 
   /** Reload both gated resources behind the ListState Retry affordance. */
   protected reloadData(): void {
@@ -1407,7 +1473,7 @@ export class Reporting {
   );
 
   private openRequestsCount = computed(() =>
-    this.envelope().requests.filter(r => ['open', 'published'].includes((r.status ?? '').toLowerCase())).length
+    this.envelope().requests.filter(isWorkableUncoveredRequest).length
   );
 
   /**
@@ -1779,16 +1845,60 @@ export class Reporting {
     { name: 'Recognised Revenue', values: this.recognizedSchedule().map(r => r.recognized) },
   ]);
 
-  reports = signal([
-    { name: 'Monthly Resource Utilization', category: 'Resource Management', lastGenerated: '2 days ago' },
-    { name: 'Project Financial Summary', category: 'Project Management', lastGenerated: '1 week ago' },
-    { name: 'Skills Gap Analysis', category: 'Resource Management', lastGenerated: '3 weeks ago' },
-    { name: 'Cross-Project Issue Tracking', category: 'Project Management', lastGenerated: 'Yesterday' },
+  private readonly lastSummaryGeneratedAt = signal<string | null>(null);
+
+  /**
+   * Honest export catalogue: only the summary has an implemented generator.
+   * Planned rows remain visible for discoverability, but cannot masquerade as
+   * four differently named downloads of the same summary CSV.
+   */
+  reports = computed<ReportExportRow[]>(() => [
+    {
+      id: 'portfolio-kpi-summary',
+      name: 'Portfolio KPI Summary',
+      category: 'Cross-Functional',
+      available: true,
+      lastGeneratedAt: this.lastSummaryGeneratedAt(),
+    },
+    {
+      id: 'resource-utilization',
+      name: 'Monthly Resource Utilization',
+      category: 'Resource Management',
+      available: false,
+      lastGeneratedAt: null,
+    },
+    {
+      id: 'skills-gap',
+      name: 'Skills Gap Analysis',
+      category: 'Resource Management',
+      available: false,
+      lastGeneratedAt: null,
+    },
+    {
+      id: 'issue-tracking',
+      name: 'Cross-Project Issue Tracking',
+      category: 'Project Management',
+      available: false,
+      lastGeneratedAt: null,
+    },
   ]);
 
+  formatGeneratedAt(value: string): string {
+    return new Intl.DateTimeFormat('en-US', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(new Date(value));
+  }
+
   onPeriodChange(event: Event): void {
-    const value = (event.target as HTMLSelectElement).value as '30d' | 'quarter' | 'year';
+    const value = trendWindowFromQuery((event.target as HTMLSelectElement).value);
     this.period.set(value);
+    void this.router.navigate([], {
+      relativeTo: this.route,
+      queryParams: { [TREND_WINDOW_QUERY_PARAM]: value },
+      queryParamsHandling: 'merge',
+      replaceUrl: true,
+    });
   }
 
   private escapeCsv(v: string): string {
@@ -1813,26 +1923,26 @@ export class Reporting {
     // Trend column carries the REAL period delta % (or blank when not derivable) — never a fabricated figure (#15).
     const trendCell = (t: PeriodDelta | null): string =>
       t && t.deltaPct !== null && t.direction !== null ? `${t.deltaPct > 0 ? '+' : ''}${t.deltaPct.toFixed(0)}%` : '';
-    return 'KPI,Value,Trend,Note\n' +
+    const periods = this.recentPeriods(this.periodMonths());
+    const from = periods.length > 0 ? `${periods[0]}-01` : this.today;
+    const trendWindow = `${from} through ${this.today} (${this.trendWindowLabel()})`;
+    return 'KPI,Value,Trend,Note,Recognised Revenue Trend Window,As Of\n' +
       this.kpis()
-        .map(k => [k.label, k.value, trendCell(k.trend), k.note ?? ''].map(c => this.escapeCsv(c)).join(','))
+        .map(k => [k.label, k.value, trendCell(k.trend), k.note ?? '', trendWindow, this.today]
+          .map(c => this.escapeCsv(c)).join(','))
         .join('\n');
   }
 
-  exportReport(): void {
-    if (!isPlatformBrowser(this.platformId)) return;
-    const csvContent = this.buildSummaryCsv();
+  private summaryFilename(): string {
+    const windowToken: Record<TrendWindow, string> = { '30d': '1m', quarter: '3m', year: '12m' };
+    return `Reporting_Summary_${windowToken[this.period()]}_as-of_${this.today}.csv`;
+  }
 
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    const url = URL.createObjectURL(blob);
-    link.setAttribute('href', url);
-    link.setAttribute('download', 'Reporting_Summary.csv');
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    this.notificationService.show('Report exported successfully', 'success');
+  exportReport(): void {
+    if (!isPlatformBrowser(this.platformId) || !this.canExportData()) return;
+    downloadCsv(this.summaryFilename(), this.buildSummaryCsv());
+    this.lastSummaryGeneratedAt.set(new Date().toISOString());
+    this.notificationService.show('Summary exported successfully', 'success');
   }
 
   /** Export the A/R aging buckets (amounts in base currency) as CSV. */
@@ -1965,12 +2075,12 @@ export class Reporting {
   }
 
   async exportPlanningXlsx(): Promise<void> {
-    if (!isPlatformBrowser(this.platformId) || this.dataError()) return;
+    if (!isPlatformBrowser(this.platformId) || !this.canExportData()) return;
     await this.writeWorkbook('Pianificazione.xlsx', this.buildPlanningSheet(), 'Pianificazione');
   }
 
   async exportAllocationXlsx(): Promise<void> {
-    if (!isPlatformBrowser(this.platformId) || this.dataError()) return;
+    if (!isPlatformBrowser(this.platformId) || !this.canExportData()) return;
     await this.writeWorkbook('Allocazione.xlsx', this.buildAllocationSheets(), 'Allocazione');
   }
 

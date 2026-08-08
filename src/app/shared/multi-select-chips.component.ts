@@ -69,7 +69,7 @@ export interface MultiSelectOption {
             <span data-test="chip-label">{{ labelFor(value) }}@if (isOrphan(value)) {<span class="text-ink-muted italic"> (not in catalog)</span>}</span>
             <button type="button" (click)="remove(value)" [disabled]="isDisabled()"
                     [attr.aria-label]="'Remove ' + labelFor(value)" [attr.title]="'Remove ' + labelFor(value)"
-                    class="text-ink-muted hover:text-critical-text transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                    class="inline-flex size-6 shrink-0 items-center justify-center rounded text-ink-muted hover:text-critical-text transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
               <mat-icon class="text-[14px] w-[14px] h-[14px]">close</mat-icon>
             </button>
           </span>

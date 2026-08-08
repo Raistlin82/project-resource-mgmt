@@ -125,108 +125,139 @@ function shiftMonth(month: string, delta: number): string {
   imports: [MatIconModule, DecimalPipe, ListStateComponent, ModalDialogDirective, ApprovalModalComponent, AllocationCalendarComponent],
   template: `
     <div class="command-page space-y-6">
-      <div class="command-header">
+      <header class="command-header">
         <div>
-          <div class="command-eyebrow">Allocation Approvals</div>
-          <h1 class="command-title">Allocation Approvals</h1>
-          <p class="command-subtitle">Per-month allocation requests awaiting a People Manager decision, by resource. Booked-hours totals always reflect the full month regardless of the status filter below.</p>
+          <div class="command-eyebrow">People Manager workflow</div>
+          <h1 class="command-title">Monthly Allocation Approval</h1>
+          <p class="command-subtitle">Review every loaded month for each resource, then approve one resource or a selected group. Booked hours always show the full month; the status filter only changes which requests are listed.</p>
         </div>
-        <!-- F4: the whole control cluster is gated on the feed's error state, and
-             the gate is load-bearing twice over. It stops a failed read from
-             offering filters and an "Approve selected (0)" button over rows that
-             were never fetched; and it is the half that keeps feed()'s error
-             short-circuit honest, since an EMPTY envelope must never be
-             *rendered* as though there were simply nothing pending. A 401/403
-             gets the notice below plus the ListState error panel and its Retry. -->
-        @if (!dataError()) {
-          <div class="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-3 w-full sm:w-auto">
-            <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
-              <span class="text-ink-muted">Status</span>
-              <select [value]="statusFilter()" (change)="onStatusChange($event)" aria-label="Status filter" data-test="status-filter" class="command-select">
+      </header>
+
+      <!-- F4: the whole filter cluster is gated on the feed's error state. It
+           must not offer controls or bulk actions over rows that never loaded.
+           On narrow viewports the single disclosure keeps seven filters from
+           pushing the approvals below several screens of controls; at sm+ the
+           same panel is always visible, so there is only one set of form fields
+           and one source of truth for their accessible names. -->
+      @if (!dataError()) {
+        <section class="command-card overflow-hidden" aria-labelledby="allocationFiltersTitle">
+          <h2 id="allocationFiltersTitle" class="sr-only">Approval filters and month range</h2>
+          <div class="p-3 sm:hidden">
+            <button type="button" data-test="filters-toggle"
+                    class="command-button secondary w-full"
+                    aria-controls="allocationApprovalFilters"
+                    [attr.aria-expanded]="filtersExpanded()"
+                    (click)="toggleFilters()">
+              <span class="flex w-full min-w-0 items-center gap-3 text-left">
+                <mat-icon class="text-[18px] w-[18px] h-[18px] shrink-0">filter_list</mat-icon>
+                <span class="min-w-0 flex-1">
+                  <span class="block font-semibold">Filters &amp; range</span>
+                  <span class="block truncate text-xs font-normal text-ink-muted" data-test="filter-summary">{{ filterSummary() }}</span>
+                </span>
+                <mat-icon class="text-[18px] w-[18px] h-[18px] shrink-0">{{ filtersExpanded() ? 'expand_less' : 'expand_more' }}</mat-icon>
+              </span>
+            </button>
+          </div>
+
+          <div id="allocationApprovalFilters" data-test="filters-panel"
+               class="allocation-filter-panel border-t border-line p-4 sm:border-t-0 sm:p-5"
+               [class.is-open]="filtersExpanded()">
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <label class="min-w-0 text-sm font-semibold text-ink-secondary">
+                <span class="mb-1.5 block text-xs text-ink-muted">Status</span>
+                <select [value]="statusFilter()" (change)="onStatusChange($event)" aria-label="Status filter" data-test="status-filter" class="command-select w-full">
                 <option value="Requested">Pending</option>
                 <option value="Allocated">Approved</option>
                 <option value="all">All</option>
-              </select>
-            </label>
-            <!-- Capability / Practice / Competence / People Manager filters (D, Task 8).
-                 Derived through dimensionsOf, so a capability filter also matches a
-                 resource attached BELOW it (e.g. a competence two levels down) — never
-                 a raw equality check against the resource's organization. These
-                 <select>s load their <option>s from an async rxResource, so per the
-                 established trap they use (change) + per-option [selected] rather
-                 than [value]/[ngModel] on the <select> itself. Explicit min-widths
-                 (this row now packs 7 controls + a button) so the label text never
-                 shrink-wraps down to an unreadable sliver — the sm:flex-wrap above
-                 lets the row spill onto a second line rather than fight them for space. -->
-            <!-- F4: the three dimension filters hang off orgsRes, a SEPARATE read
-                 from the feed with its own error state. When the org tree fails we
-                 withdraw them and say so, rather than render three <select>s whose
-                 only option is "All capabilities" — an empty option list asserts
-                 "this organization has no capabilities", which is a different and
-                 worse claim than "the tree could not be loaded". The feed is
-                 unaffected, so the approvals themselves stay reviewable. -->
-            @if (orgsError()) {
-              <p role="alert" data-test="org-filters-unavailable"
-                 class="flex items-center gap-2 text-sm font-medium text-[var(--cc-ink)]">
-                <mat-icon class="text-[18px] w-[18px] h-[18px] text-[var(--cc-amber-text)] shrink-0">filter_alt_off</mat-icon>
-                Capability / practice / competence filters unavailable — the organization tree could not be loaded.
-              </p>
-            } @else {
-              <select (change)="onCapabilityChange($event)" aria-label="Filter by capability"
-                      data-test="capability-filter" class="command-select sm:min-w-[9rem]">
-                <option value="" [selected]="capabilityFilter() === ''">All capabilities</option>
-                @for (name of capabilityOptions(); track name) {
-                  <option [value]="name" [selected]="name === capabilityFilter()">{{ name }}</option>
-                }
-              </select>
-              <select (change)="onPracticeChange($event)" aria-label="Filter by practice"
-                      data-test="practice-filter" class="command-select sm:min-w-[9rem]">
-                <option value="" [selected]="practiceFilter() === ''">All practices</option>
-                @for (name of practiceOptions(); track name) {
-                  <option [value]="name" [selected]="name === practiceFilter()">{{ name }}</option>
-                }
-              </select>
-              <select (change)="onCompetenceChange($event)" aria-label="Filter by competence"
-                      data-test="competence-filter" class="command-select sm:min-w-[9rem]">
-                <option value="" [selected]="competenceFilter() === ''">All competences</option>
-                @for (name of competenceOptions(); track name) {
-                  <option [value]="name" [selected]="name === competenceFilter()">{{ name }}</option>
-                }
-              </select>
-            }
-            <select (change)="onManagerFilterChange($event)" aria-label="Filter by People Manager"
-                    data-test="manager-filter" class="command-select sm:min-w-[10rem]">
-              <option value="" [selected]="managerFilter() === ''">All people managers</option>
-              @for (m of managerFilterOptions(); track m.id) {
-                <option [value]="m.id" [selected]="m.id === managerFilter()">{{ m.name }}</option>
+                </select>
+              </label>
+
+              <!-- Capability / Practice / Competence filters still derive
+                   through dimensionsOf, so a parent dimension includes rows
+                   attached below it. Visible labels replace option text as the
+                   only clue to each field when the controls stack on mobile. -->
+              @if (orgsError()) {
+                <p role="alert" data-test="org-filters-unavailable"
+                   class="flex items-start gap-2 rounded-md border border-caution bg-caution-tint p-3 text-sm font-medium text-[var(--cc-ink)] sm:col-span-2 xl:col-span-3">
+                  <mat-icon class="text-[18px] w-[18px] h-[18px] text-caution-text shrink-0">filter_alt_off</mat-icon>
+                  Capability, practice and competence filters are unavailable because the organization tree could not be loaded.
+                </p>
+              } @else {
+                <label class="min-w-0 text-sm font-semibold text-ink-secondary">
+                  <span class="mb-1.5 block text-xs text-ink-muted">Capability</span>
+                  <select (change)="onCapabilityChange($event)" aria-label="Filter by capability"
+                          data-test="capability-filter" class="command-select w-full">
+                    <option value="" [selected]="capabilityFilter() === ''">All capabilities</option>
+                    @for (name of capabilityOptions(); track name) {
+                      <option [value]="name" [selected]="name === capabilityFilter()">{{ name }}</option>
+                    }
+                  </select>
+                </label>
+                <label class="min-w-0 text-sm font-semibold text-ink-secondary">
+                  <span class="mb-1.5 block text-xs text-ink-muted">Practice</span>
+                  <select (change)="onPracticeChange($event)" aria-label="Filter by practice"
+                          data-test="practice-filter" class="command-select w-full">
+                    <option value="" [selected]="practiceFilter() === ''">All practices</option>
+                    @for (name of practiceOptions(); track name) {
+                      <option [value]="name" [selected]="name === practiceFilter()">{{ name }}</option>
+                    }
+                  </select>
+                </label>
+                <label class="min-w-0 text-sm font-semibold text-ink-secondary">
+                  <span class="mb-1.5 block text-xs text-ink-muted">Competence</span>
+                  <select (change)="onCompetenceChange($event)" aria-label="Filter by competence"
+                          data-test="competence-filter" class="command-select w-full">
+                    <option value="" [selected]="competenceFilter() === ''">All competences</option>
+                    @for (name of competenceOptions(); track name) {
+                      <option [value]="name" [selected]="name === competenceFilter()">{{ name }}</option>
+                    }
+                  </select>
+                </label>
               }
-            </select>
-            @if (monthOptions().length > 0) {
-              <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
-                <span class="text-ink-muted">From</span>
-                <select (change)="onFromChange($event)" aria-label="Range start month" class="command-select">
+
+              <label class="min-w-0 text-sm font-semibold text-ink-secondary">
+                <span class="mb-1.5 block text-xs text-ink-muted">People Manager</span>
+                <select (change)="onManagerFilterChange($event)" aria-label="Filter by People Manager"
+                        data-test="manager-filter" class="command-select w-full">
+                  <option value="" [selected]="managerFilter() === ''">All people managers</option>
+                  @for (m of managerFilterOptions(); track m.id) {
+                    <option [value]="m.id" [selected]="m.id === managerFilter()">{{ m.name }}</option>
+                  }
+                </select>
+              </label>
+
+              @if (monthOptions().length > 0) {
+                <label class="min-w-0 text-sm font-semibold text-ink-secondary">
+                  <span class="mb-1.5 block text-xs text-ink-muted">From month</span>
+                  <select (change)="onFromChange($event)" aria-label="Range start month" class="command-select w-full">
                   @for (m of monthOptions(); track m) {
                     <option [value]="m" [selected]="m === from()">{{ monthLabel(m) }}</option>
                   }
-                </select>
-              </label>
-              <label class="flex items-center gap-2 text-sm font-semibold text-ink-secondary">
-                <span class="text-ink-muted">To</span>
-                <select (change)="onToChange($event)" aria-label="Range end month" class="command-select">
+                  </select>
+                </label>
+                <label class="min-w-0 text-sm font-semibold text-ink-secondary">
+                  <span class="mb-1.5 block text-xs text-ink-muted">To month</span>
+                  <select (change)="onToChange($event)" aria-label="Range end month" class="command-select w-full">
                   @for (m of monthOptions(); track m) {
                     <option [value]="m" [selected]="m === to()">{{ monthLabel(m) }}</option>
                   }
-                </select>
-              </label>
-            }
-            <button type="button" (click)="openMultiApprove()" [disabled]="selectedResourceIds().size <= 1"
-                    data-test="multi-approve" class="command-button secondary disabled:opacity-40 disabled:cursor-not-allowed">
-              <mat-icon class="text-[18px] w-[18px] h-[18px]">done_all</mat-icon>
-              Approve selected ({{ selectedResourceIds().size }})
-            </button>
+                  </select>
+                </label>
+              }
+            </div>
+
+            <div class="mt-4 flex flex-col gap-2 border-t border-line pt-4 sm:flex-row sm:items-center sm:justify-between">
+              <p class="text-xs text-ink-muted">{{ filterSummary() }}</p>
+              <button type="button" (click)="openMultiApprove()" [disabled]="selectedResourceIds().size <= 1"
+                      [attr.aria-label]="'Approve ' + selectedResourceIds().size + ' selected resources across ' + months().length + (months().length === 1 ? ' month' : ' months')"
+                      data-test="multi-approve" class="command-button secondary w-full disabled:opacity-40 disabled:cursor-not-allowed sm:w-auto">
+                <mat-icon class="text-[18px] w-[18px] h-[18px]">done_all</mat-icon>
+                Approve selected ({{ selectedResourceIds().size }})
+              </button>
+            </div>
           </div>
-        }
-      </div>
+        </section>
+      }
 
       @if (accessNotice(); as notice) {
         <div class="command-card-muted p-4 flex items-start gap-3" role="alert">
@@ -272,17 +303,108 @@ function shiftMonth(month: string, delta: number): string {
       <app-list-state [loading]="dataLoading()" [error]="dataError()" skeleton="table-rows" [rows]="6" [columns]="4" label="allocation approvals" (retry)="reload()">
         <ng-template>
         @if (rows().length > 0) {
-          <div class="command-card overflow-hidden">
-            <div class="overflow-x-auto">
-              <table class="command-data-table">
+          <div class="space-y-4">
+          <div class="command-card-muted flex flex-col gap-1 p-3 text-xs text-ink-muted sm:flex-row sm:items-center sm:justify-between" data-test="approval-context">
+            <p>
+              <strong class="text-ink">{{ rows().length }}</strong> {{ rows().length === 1 ? 'resource' : 'resources' }}
+              <span aria-hidden="true">&middot;</span>
+              <strong class="text-ink">{{ months().length }}</strong> {{ months().length === 1 ? 'month' : 'months' }}
+              @if (loadedRangeLabel()) {
+                <span aria-hidden="true">&middot;</span> {{ loadedRangeLabel() }}
+              }
+            </p>
+            <p>Each month shows booked / target hours.</p>
+          </div>
+
+          <!-- Mobile/zoom layout: the resource identity, bulk selection and
+               review action stay outside the horizontal month strip, so a
+               320px viewport never has to scroll to reach an action. Every
+               loaded month is still rendered; the visible hint and focusable
+               region make that overflow discoverable and keyboard reachable. -->
+          <div class="space-y-4 md:hidden" data-test="approval-mobile-list">
+            @for (row of rows(); track row.resourceId) {
+              <article class="command-card overflow-hidden" data-test="approval-card"
+                       [attr.aria-labelledby]="'approvalCardTitle-' + row.resourceId">
+                <div class="flex items-start gap-3 border-b border-line bg-surface-muted p-4">
+                  <input type="checkbox" data-test="select-resource-mobile"
+                         [checked]="selectedResourceIds().has(row.resourceId)"
+                         (change)="toggleResource(row.resourceId)"
+                         [attr.aria-label]="'Select ' + row.resourceName + ' for bulk monthly approval'"
+                         class="command-checkbox mt-1 shrink-0">
+                  <div class="min-w-0 flex-1">
+                    <h2 class="truncate text-base font-bold text-ink" [id]="'approvalCardTitle-' + row.resourceId"
+                        data-test="resource-name-mobile">{{ row.resourceName }}</h2>
+                    <div class="mt-2 flex flex-wrap gap-2">
+                      @if (row.hasPending) {
+                        <span class="command-status amber uppercase text-[10px]">Pending</span>
+                      }
+                      @if (row.kind !== 'internal') {
+                        <span class="command-status uppercase text-[10px]">{{ row.kind }}</span>
+                      }
+                    </div>
+                  </div>
+                </div>
+
+                <div class="p-4">
+                  <p class="flex items-center gap-1.5 text-xs text-ink-muted"
+                     [id]="'mobileMonthsHint-' + row.resourceId">
+                    <mat-icon class="text-[16px] w-[16px] h-[16px] shrink-0">swipe</mat-icon>
+                    Swipe or scroll to review all {{ row.cells.length }} {{ row.cells.length === 1 ? 'month' : 'months' }}.
+                  </p>
+                  <div class="mt-3 overflow-x-auto overscroll-x-contain pb-2" data-test="mobile-month-scroll"
+                       role="region" tabindex="0"
+                       [attr.aria-label]="'Monthly allocation totals for ' + row.resourceName"
+                       [attr.aria-describedby]="'mobileMonthsHint-' + row.resourceId">
+                    <div class="flex w-max gap-2">
+                      @for (c of row.cells; track c.month) {
+                        <div class="w-[7.5rem] shrink-0 rounded-lg ring-1 p-3 text-center {{ c.meta.cell }} {{ c.meta.ring }}"
+                             [attr.data-test]="'mobile-cell-' + row.resourceId + '-' + c.month"
+                             [attr.data-band]="c.tracksSaturation ? c.band : null">
+                          <span class="sr-only">{{ c.aria }}</span>
+                          <div class="mb-2 text-[10px] font-bold uppercase tracking-wide text-ink-muted">{{ monthLabel(c.month) }}</div>
+                          <div class="text-sm font-bold font-mono tabular-nums {{ c.meta.text }}">
+                            {{ c.total | number:'1.0-1' }}
+                            <span class="block text-[10px] font-normal text-ink-muted">of {{ c.target | number:'1.0-1' }}h</span>
+                          </div>
+                          @if (c.tracksSaturation) {
+                            <div class="mt-1 text-[10px] font-bold uppercase tracking-wide {{ c.meta.text }}">{{ c.meta.label }}</div>
+                          }
+                        </div>
+                      }
+                    </div>
+                  </div>
+
+                  <button type="button" (click)="openModal(row.resourceId)" data-test="open-modal-mobile"
+                          [attr.aria-label]="'Review monthly approvals for ' + row.resourceName + ' across ' + row.cells.length + (row.cells.length === 1 ? ' month' : ' months')"
+                          class="command-button secondary mt-4 w-full">
+                    Review months
+                  </button>
+                </div>
+              </article>
+            }
+          </div>
+
+          <!-- Desktop table: resource and action columns stay pinned while all
+               months remain in the scrollable middle. The cue is intentionally
+               always present because browser zoom can create overflow even on
+               a nominally wide viewport. -->
+          <div class="command-card hidden overflow-hidden md:block" data-test="approval-desktop-grid">
+            <p id="allocationApprovalsTableHint" class="flex items-center gap-1.5 border-b border-line px-4 py-2 text-xs text-ink-muted">
+              <mat-icon class="text-[16px] w-[16px] h-[16px] shrink-0">swap_horiz</mat-icon>
+              Scroll horizontally to review all {{ months().length }} {{ months().length === 1 ? 'month' : 'months' }}. Resource and actions stay pinned.
+            </p>
+            <div class="overflow-x-auto overscroll-x-contain" data-test="approval-table-scroll"
+                 role="region" tabindex="0" aria-label="Monthly allocation approvals table"
+                 aria-describedby="allocationApprovalsTableHint">
+              <table class="command-data-table min-w-max">
                 <thead class="bg-surface-muted border-b border-line text-ink-muted">
                   <tr>
-                    <th class="px-3 py-4 text-left sticky left-0 bg-surface-muted z-10"></th>
-                    <th class="px-4 sm:px-6 py-4 font-semibold uppercase tracking-wider text-xs text-left sticky left-10 bg-surface-muted z-10">Resource</th>
+                    <th scope="col" class="px-3 py-4 text-left sticky left-0 bg-surface-muted z-20"><span class="sr-only">Select resource</span></th>
+                    <th scope="col" class="px-4 sm:px-6 py-4 font-semibold uppercase tracking-wider text-xs text-left sticky left-10 bg-surface-muted z-20">Resource</th>
                     @for (m of months(); track m) {
-                      <th class="px-3 py-4 font-semibold uppercase tracking-wider text-xs text-center min-w-[7rem]">{{ monthLabel(m) }}</th>
+                      <th scope="col" data-test="month-heading" class="px-3 py-4 font-semibold uppercase tracking-wider text-xs text-center min-w-[7rem]">{{ monthLabel(m) }}</th>
                     }
-                    <th class="px-3 py-4 font-semibold uppercase tracking-wider text-xs text-center">Actions</th>
+                    <th scope="col" class="px-3 py-4 font-semibold uppercase tracking-wider text-xs text-center sticky right-0 bg-surface-muted z-20 border-l border-line">Actions</th>
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-line">
@@ -292,7 +414,7 @@ function shiftMonth(month: string, delta: number): string {
                         <input type="checkbox" data-test="select-resource"
                                [checked]="selectedResourceIds().has(row.resourceId)"
                                (change)="toggleResource(row.resourceId)"
-                               [attr.aria-label]="'Select ' + row.resourceName"
+                               [attr.aria-label]="'Select ' + row.resourceName + ' for bulk monthly approval'"
                                class="command-checkbox">
                       </td>
                       <td class="px-4 sm:px-6 py-4 font-bold text-ink whitespace-nowrap sticky left-10 bg-surface z-10">
@@ -337,9 +459,11 @@ function shiftMonth(month: string, delta: number): string {
                           </div>
                         </td>
                       }
-                      <td class="px-3 py-2 text-center">
-                        <button type="button" (click)="openModal(row.resourceId)" data-test="open-modal" class="command-button secondary text-xs px-3 py-1.5 whitespace-nowrap">
-                          Approve month
+                      <td class="px-3 py-2 text-center sticky right-0 z-10 border-l border-line bg-surface">
+                        <button type="button" (click)="openModal(row.resourceId)" data-test="open-modal"
+                                [attr.aria-label]="'Review monthly approvals for ' + row.resourceName + ' across ' + row.cells.length + (row.cells.length === 1 ? ' month' : ' months')"
+                                class="command-button secondary text-xs px-3 py-1.5 whitespace-nowrap">
+                          Review months
                         </button>
                       </td>
                     </tr>
@@ -347,6 +471,7 @@ function shiftMonth(month: string, delta: number): string {
                 </tbody>
               </table>
             </div>
+          </div>
           </div>
         } @else if (!dataLoading() && !dataError()) {
           <div class="command-card p-12 text-center">
@@ -392,6 +517,21 @@ function shiftMonth(month: string, delta: number): string {
       }
     </div>
   `,
+  styles: `
+    .allocation-filter-panel {
+      display: none;
+    }
+
+    .allocation-filter-panel.is-open {
+      display: block;
+    }
+
+    @media (min-width: 640px) {
+      .allocation-filter-panel {
+        display: block;
+      }
+    }
+  `,
 })
 export class AllocationApprovalsComponent {
   private api = inject(ApiService);
@@ -417,6 +557,34 @@ export class AllocationApprovalsComponent {
   practiceFilter = signal('');
   competenceFilter = signal('');
   managerFilter = signal('');
+
+  /** Mobile-only disclosure state. Desktop CSS keeps the panel visible
+   * regardless, so resizing never creates a second set of controls. */
+  protected filtersExpanded = signal(false);
+
+  /** Compact context that remains visible on the collapsed mobile control. */
+  protected filterSummary = computed(() => {
+    const status = this.statusFilter() === 'Requested'
+      ? 'Pending'
+      : this.statusFilter() === 'Allocated' ? 'Approved' : 'All statuses';
+    const from = this.from();
+    const to = this.to();
+    const range = from && to
+      ? from === to ? this.monthLabel(from) : `${this.monthLabel(from)} – ${this.monthLabel(to)}`
+      : 'Default month range';
+    const scopedFilters = [
+      this.capabilityFilter(),
+      this.practiceFilter(),
+      this.competenceFilter(),
+      this.managerFilter(),
+    ].filter(Boolean).length;
+    const scope = scopedFilters === 0 ? 'All teams' : `${scopedFilters} scoped ${scopedFilters === 1 ? 'filter' : 'filters'}`;
+    return `${status} · ${range} · ${scope}`;
+  });
+
+  protected toggleFilters(): void {
+    this.filtersExpanded.update(open => !open);
+  }
 
   // The org tree (D). Gated on authReady like every other principal-gated read
   // here. This is the ONLY extra read this task needs: `AllocationApprovalRow`
@@ -570,6 +738,13 @@ export class AllocationApprovalsComponent {
     this.feedRes.status() === 'error' ? EMPTY : this.feedRes.value(),
   );
   protected months = computed(() => this.feed().months);
+  protected loadedRangeLabel = computed(() => {
+    const months = this.months();
+    if (months.length === 0) return '';
+    const first = this.monthLabel(months[0]);
+    const last = this.monthLabel(months[months.length - 1]);
+    return first === last ? first : `${first} – ${last}`;
+  });
 
   protected dataLoading = computed(() => this.feedRes.isLoading());
   protected dataError = computed(() => this.feedRes.status() === 'error');

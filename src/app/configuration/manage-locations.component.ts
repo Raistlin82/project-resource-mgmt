@@ -15,7 +15,7 @@ type PendingDelete = { kind: 'country'; code: string } | { kind: 'city'; id: str
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective],
   template: `
-    <div class="max-w-6xl mx-auto space-y-8">
+    <div class="command-page max-w-6xl mx-auto space-y-8">
       <div>
         <div class="command-section-label">Configuration</div>
         <h1 class="font-display text-2xl sm:text-3xl font-bold text-[var(--cc-ink)] tracking-tight">Locations</h1>

@@ -188,6 +188,24 @@ describe('ManageSkillsComponent delete confirmation', () => {
   });
 });
 
+describe('ManageSkillsComponent CSV import availability', () => {
+  afterEach(() => TestBed.resetTestingModule());
+
+  it('does not expose a file picker for an unsupported import flow', async () => {
+    const { fixture } = setup();
+    await flush(fixture);
+    const host = fixture.nativeElement as HTMLElement;
+    const button = Array.from(host.querySelectorAll<HTMLButtonElement>('button'))
+      .find(item => item.textContent?.includes('CSV import coming soon'))!;
+
+    expect(button).toBeTruthy();
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute('aria-describedby')).toBe('skillsImportStatus');
+    expect(host.querySelector('input[type="file"]')).toBeNull();
+    expect(host.querySelector('#skillsImportStatus')?.textContent).toContain('preview, validation, and confirmation');
+  });
+});
+
 /**
  * The restrict toggle used to PUT on a SINGLE click — no arming, no confirmation, no
  * undo — while the delete beside it on the SAME row had already been given the

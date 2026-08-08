@@ -410,7 +410,7 @@ kbd {
 
 /* Confident accent a11y focus ring on every interactive surface */
 :focus-visible {
-  outline: 2px solid color-mix(in oklch, var(--color-accent) 65%, transparent);
+  outline: 3px solid var(--color-accent);
   outline-offset: 2px;
   border-radius: 4px;
 }
@@ -423,9 +423,33 @@ textarea:focus-visible,
 [tabindex]:focus-visible,
 .command-button:focus-visible,
 .command-nav-link:focus-visible {
-  outline: 2px solid color-mix(in oklch, var(--color-accent) 70%, transparent);
+  outline: 3px solid var(--color-accent);
   outline-offset: 2px;
   box-shadow: 0 0 0 4px color-mix(in oklch, var(--color-accent) 18%, transparent);
+}
+
+@media (forced-colors: active) {
+  :focus-visible,
+  a:focus-visible,
+  button:focus-visible,
+  select:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
+    box-shadow: none;
+  }
+
+  .command-button,
+  .command-input,
+  .command-select,
+  .command-textarea,
+  .command-card,
+  .command-status,
+  .command-chip {
+    border-color: CanvasText;
+  }
 }
 
 /* Thin custom scrollbars */
@@ -462,6 +486,23 @@ textarea:focus-visible,
 .command-shell {
   background: transparent;
   color: var(--color-ink);
+}
+
+/* The desktop app is a two-pane workspace: the viewport itself never becomes
+   a second scroll container. The sidebar/footer stay fixed in the 100dvh shell,
+   while its nav and main content own their independent scrolling. */
+@media (min-width: 64rem) {
+  .command-shell {
+    block-size: 100dvh;
+    min-block-size: 0;
+    overflow: hidden;
+  }
+
+  .command-drawer,
+  .command-shell > main {
+    block-size: 100%;
+    min-block-size: 0;
+  }
 }
 
 .command-sidebar {
@@ -790,7 +831,6 @@ textarea:focus-visible,
   box-shadow: var(--cc-shadow-sm);
   position: relative;
   transition:
-    transform 220ms var(--ease-out-quint),
     box-shadow 220ms var(--ease-out-quint),
     border-color 220ms ease;
 }
@@ -826,7 +866,6 @@ textarea:focus-visible,
   box-shadow: var(--cc-shadow-sm);
   padding: var(--space-sm);
   transition:
-    transform 220ms var(--ease-out-quint),
     box-shadow 220ms var(--ease-out-quint),
     border-color 220ms ease;
 }
@@ -1046,6 +1085,8 @@ textarea:focus-visible,
   background: transparent;
   color: inherit;
   cursor: pointer;
+  min-width: 1.5rem;
+  min-height: 1.5rem;
   padding: 0;
   font-size: 0.875rem;
   line-height: 1;
@@ -1335,11 +1376,9 @@ textarea:focus-visible,
   @keyframes cc-reveal {
     from {
       opacity: 0;
-      transform: translateY(var(--reveal-distance));
     }
     to {
       opacity: 1;
-      transform: translateY(0);
     }
   }
 
@@ -1381,15 +1420,14 @@ textarea:focus-visible,
   .command-page > *:nth-child(7) { animation-delay: 340ms; }
   .command-page > *:nth-child(8) { animation-delay: 390ms; }
 
-  /* Card / KPI hover lift — soft elevation, no glow */
+  /* Elevation without transform: a transformed card/section becomes the
+     containing block for any fixed modal backdrop rendered inside it. */
   .command-card:hover {
-    transform: translateY(-2px);
     border-color: var(--cc-line-strong);
     box-shadow: var(--cc-shadow);
   }
 
   .command-kpi:hover {
-    transform: translateY(-2px);
     box-shadow: var(--cc-shadow);
   }
 

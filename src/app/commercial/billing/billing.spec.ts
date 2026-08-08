@@ -175,6 +175,159 @@ async function setupSparse(overrides: Partial<Record<keyof ApiService, unknown>>
   return TestBed.createComponent(Billing);
 }
 
+describe('Billing — reviewed invoice and payment transitions', () => {
+  const CONTRACT: Contract = {
+    id: 'CT-ACTION', customerId: 'C-ACTION', name: 'Action Framework', type: 'T&M', totalValue: 10_000,
+    currency: 'EUR', status: 'Active', startDate: '2026-01-01', endDate: '2026-12-31',
+  };
+  const READY: BillingPlanItem = {
+    id: 'BP-READY', contractId: CONTRACT.id, type: 'Milestone', label: 'Phase 1 acceptance',
+    amount: 1_000, taxRatePct: 22, retentionPct: 0, currency: 'EUR', status: 'Ready',
+  };
+  const INVOICED: BillingPlanItem = {
+    ...READY, id: 'BP-INVOICED', label: 'Phase 1 invoice', status: 'Invoiced',
+    orderId: 'ORD-1', issuedDate: '2026-08-05',
+  };
+  const ORDER: Order = {
+    id: 'ORD-1', contractId: CONTRACT.id, type: 'Customer', amount: 1_000, currency: 'EUR',
+    status: 'Invoiced', orderDate: '2026-08-05', invoiceNumber: 'INV-2026-0042', invoiceDate: '2026-08-05',
+  };
+
+  async function actionFixture(
+    items: BillingPlanItem[],
+    overrides: Partial<Record<keyof ApiService, unknown>> = {},
+    orders: Order[] = [],
+  ): Promise<ComponentFixture<Billing>> {
+    const fixture = await setupSparse({
+      getBillingPlanItems: () => of(items),
+      getContracts: () => of([CONTRACT]),
+      getOrders: () => of(orders),
+      ...overrides,
+    });
+    await tick(fixture);
+    return fixture;
+  }
+
+  it('reviews a named invoice and required date before calling the API, guards double-submit, and keeps an API error in the dialog', async () => {
+    const pending = new Subject<unknown>();
+    const generate = vi.fn(() => pending);
+    const fixture = await actionFixture([READY], { generateBillingInvoice: generate });
+    const page = host(fixture);
+
+    page.querySelector<HTMLButtonElement>('[aria-label="Review issue invoice for Phase 1 acceptance"]')!.click();
+    await tick(fixture);
+
+    expect(generate).not.toHaveBeenCalled();
+    const dialog = page.querySelector('[data-test="billing-action-review"]')!;
+    expect(dialog.textContent).toContain('Issue invoice — Phase 1 acceptance');
+    expect(dialog.textContent).toContain('Created after confirmation');
+    expect(dialog.textContent).toContain('Assigned by the server');
+    expect(dialog.textContent).toContain('1,220.00');
+    expect(dialog.querySelector('[data-test="billing-reference-gap"]')?.textContent)
+      .toContain('no client-supplied invoice-reference field');
+
+    fixture.componentInstance.actionEffectiveDate.setValue('');
+    fixture.componentInstance.confirmActionReview();
+    await tick(fixture);
+    expect(generate).not.toHaveBeenCalled();
+    expect(dialog.textContent).toContain('Choose an effective date');
+
+    fixture.componentInstance.actionEffectiveDate.setValue('2026-08-08');
+    fixture.componentInstance.confirmActionReview();
+    fixture.componentInstance.confirmActionReview();
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(generate).toHaveBeenCalledWith('BP-READY', '2026-08-08');
+    expect(fixture.componentInstance.actionPending()).toBe(true);
+    fixture.componentInstance.closeActionReview();
+    expect(fixture.componentInstance.actionReview()).not.toBeNull();
+
+    pending.error(new Error('offline'));
+    await tick(fixture);
+    expect(fixture.componentInstance.actionPending()).toBe(false);
+    expect(page.querySelector('[data-test="billing-action-review"]')).not.toBeNull();
+    expect(page.querySelector('[data-test="billing-action-error"]')?.textContent).toContain('safely retry');
+  });
+
+  it('names invoice, order and amount for payment, refuses a date before issue, and sends only the supported paidDate', async () => {
+    const pending = new Subject<unknown>();
+    const markPaid = vi.fn(() => pending);
+    const fixture = await actionFixture([INVOICED], { markBillingInvoicePaid: markPaid }, [ORDER]);
+    const page = host(fixture);
+
+    page.querySelector<HTMLButtonElement>('[aria-label="Review mark Phase 1 invoice as paid"]')!.click();
+    await tick(fixture);
+    const dialog = page.querySelector('[data-test="billing-action-review"]')!;
+    expect(markPaid).not.toHaveBeenCalled();
+    expect(dialog.textContent).toContain('Mark paid — INV-2026-0042');
+    expect(dialog.textContent).toContain('ORD-1');
+    expect(dialog.textContent).toContain('1,220.00');
+    expect(dialog.querySelector('[data-test="billing-reference-gap"]')?.textContent)
+      .toContain('no payment-reference field');
+
+    fixture.componentInstance.actionEffectiveDate.setValue('2026-08-04');
+    fixture.componentInstance.confirmActionReview();
+    await tick(fixture);
+    expect(markPaid).not.toHaveBeenCalled();
+    expect(dialog.textContent).toContain('cannot be before the invoice issue date');
+
+    fixture.componentInstance.actionEffectiveDate.setValue('2026-08-06');
+    fixture.componentInstance.confirmActionReview();
+    fixture.componentInstance.confirmActionReview();
+    expect(markPaid).toHaveBeenCalledTimes(1);
+    expect(markPaid).toHaveBeenCalledWith('BP-INVOICED', '2026-08-06');
+
+    pending.error(new Error('payment service offline'));
+    await tick(fixture);
+    expect(page.querySelector('[data-test="billing-action-review"]')).not.toBeNull();
+    expect(page.querySelector('[data-test="billing-action-error"]')?.textContent).toContain('Failed to mark');
+  });
+
+  it('reviews selected invoices as a batch and calls the existing batch endpoint only after confirmation', async () => {
+    const second: BillingPlanItem = { ...READY, id: 'BP-READY-2', label: 'Phase 2 acceptance', amount: 500 };
+    const pending = new Subject<{ results: unknown[]; failures: { id: string }[] }>();
+    const generateBatch = vi.fn(() => pending);
+    const fixture = await actionFixture([READY, second], { generateBillingInvoices: generateBatch });
+    const component = fixture.componentInstance;
+    component.selectedIds.set(new Set([READY.id, second.id]));
+
+    component.generateSelectedInvoices();
+    await tick(fixture);
+    expect(generateBatch).not.toHaveBeenCalled();
+    expect(component.actionReview()?.batch).toBe(true);
+    expect(host(fixture).querySelectorAll('[data-test="billing-action-record"]')).toHaveLength(2);
+
+    component.actionEffectiveDate.setValue('2026-08-09');
+    component.confirmActionReview();
+    component.confirmActionReview();
+    expect(generateBatch).toHaveBeenCalledTimes(1);
+    expect(generateBatch).toHaveBeenCalledWith(['BP-READY', 'BP-READY-2'], '2026-08-09');
+
+    pending.next({ results: [{}, {}], failures: [] });
+    pending.complete();
+    await tick(fixture);
+    expect(component.actionReview()).toBeNull();
+    expect(component.selectedIds().size).toBe(0);
+  });
+
+  it('uses shell spacing once and keeps wrapping, touch-sized actions visible without hover', async () => {
+    const fixture = await actionFixture([READY]);
+    const page = host(fixture);
+    const shell = page.querySelector('.command-page')!;
+
+    expect(shell.className).not.toContain('p-4');
+    expect(shell.className).not.toContain('sm:p-6');
+    expect(shell.className).not.toContain('lg:p-8');
+    expect(page.querySelector('[data-test="billing-header-actions"]')?.className).toContain('flex-col');
+    expect(page.querySelector('[data-test="billing-table-actions"]')?.className).toContain('sm:flex-wrap');
+    const actions = page.querySelector('[data-test="billing-row-actions"]')!;
+    expect(actions.closest('td')?.className).toContain('sticky');
+    for (const button of actions.querySelectorAll('button')) {
+      expect(button.className).toContain('min-h-11');
+      expect(button.className).not.toContain('opacity-0');
+    }
+  });
+});
+
 describe('Billing financial KPI completeness', () => {
   it('does not render financial KPI values while one required dependency is pending', async () => {
     const fxRates = new Subject<FxRate[]>();

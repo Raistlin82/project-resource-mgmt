@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, DestroyRef, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, ElementRef, computed, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { ReactiveFormsModule, FormsModule, FormControl, FormGroup, Validators } from '@angular/forms';
@@ -12,7 +12,7 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [MatIconModule, ReactiveFormsModule, FormsModule, ModalDialogDirective],
   template: `
-    <div class="max-w-5xl mx-auto space-y-8">
+    <div class="command-page max-w-5xl mx-auto space-y-8">
       <div class="flex items-center justify-between">
         <div>
           <div class="command-section-label">Configuration</div>
@@ -58,7 +58,16 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
             }
             @if (filtered().length === 0) {
               <tr>
-                <td colspan="2" class="text-center"><span class="text-[var(--cc-muted)]">No industries defined yet.</span></td>
+                <td colspan="2" class="text-center">
+                  @if (items().length === 0) {
+                    <span class="text-[var(--cc-muted)]">No industries defined yet.</span>
+                  } @else {
+                    <div class="inline-flex flex-col items-center gap-2">
+                      <span class="text-[var(--cc-muted)]">No industries match your search.</span>
+                      <button type="button" (click)="clearSearch()" class="command-button secondary">Clear filters</button>
+                    </div>
+                  }
+                </td>
               </tr>
             }
           </tbody>
@@ -81,22 +90,37 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
           <div data-test="industry-form-panel" class="command-card shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
             <div class="command-card-header">
               <h2 id="industryModalTitle" class="font-display text-xl font-bold text-[var(--cc-ink)]">{{ editingId() ? 'Edit Industry' : 'Add Industry' }}</h2>
-              <button type="button" (click)="closeForm()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary transition-colors">
+              <button type="button" (click)="closeForm()" [disabled]="saving()" aria-label="Close dialog" title="Close" class="text-ink-muted hover:text-ink-secondary transition-colors disabled:opacity-50">
                 <mat-icon>close</mat-icon>
               </button>
             </div>
             <!-- The <form> stays the submit boundary (so Enter still submits) and
                  becomes a column: the fields scroll, the footer is pinned. -->
-            <form [formGroup]="form" (ngSubmit)="save()" class="flex flex-col flex-1 min-h-0 overflow-hidden">
+            <form [formGroup]="form" (ngSubmit)="save()" [attr.aria-busy]="saving()" class="flex flex-col flex-1 min-h-0 overflow-hidden">
               <div class="p-6 space-y-4 overflow-y-auto flex-1 min-h-0">
                 <div>
-                  <label for="name" class="block text-sm font-medium text-ink-secondary mb-1">Name</label>
-                  <input id="name" type="text" formControlName="name" class="command-input" placeholder="e.g. Technology">
+                  <label for="industryName" class="block text-sm font-medium text-ink-secondary mb-1">
+                    Name <span aria-hidden="true">*</span><span class="sr-only"> required</span>
+                  </label>
+                  <input id="industryName" type="text" formControlName="name" class="command-input" placeholder="e.g. Technology"
+                         required aria-required="true"
+                         [attr.aria-invalid]="invalid('name') ? 'true' : null"
+                         [attr.aria-describedby]="invalid('name') ? 'industryNameError' : null">
+                  @if (invalid('name')) {
+                    <p id="industryNameError" role="alert" class="mt-1 text-xs text-critical-text">Name is required.</p>
+                  }
                 </div>
+                @if (saveError()) {
+                  <p id="industrySaveError" role="alert" class="rounded-lg border border-critical bg-critical-tint px-3 py-2 text-sm text-critical-text">
+                    {{ saveError() }} You can retry without re-entering the form.
+                  </p>
+                }
               </div>
               <div class="px-6 py-4 border-t border-[var(--cc-line)] bg-[var(--cc-panel-muted)] flex justify-end gap-3">
-                <button type="button" (click)="closeForm()" class="command-button secondary">Cancel</button>
-                <button type="submit" [disabled]="!form.valid" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">Save Industry</button>
+                <button type="button" (click)="closeForm()" [disabled]="saving()" class="command-button secondary disabled:opacity-50">Cancel</button>
+                <button type="submit" [disabled]="saving()" class="command-button disabled:opacity-50 disabled:cursor-not-allowed">
+                  {{ saving() ? 'Saving…' : 'Save Industry' }}
+                </button>
               </div>
             </form>
           </div>
@@ -133,6 +157,7 @@ import { authGatedResource } from '../services/auth-gated-resource.util';
 export class ManageIndustriesComponent {
   private api = inject(ApiService);
   private destroyRef = inject(DestroyRef);
+  private host = inject<ElementRef<HTMLElement>>(ElementRef);
   private notifications = inject(NotificationService);
 
   private itemsRes = authGatedResource(() => this.api.getIndustries(), [] as Industry[]);
@@ -147,15 +172,19 @@ export class ManageIndustriesComponent {
   showForm = signal(false);
   editingId = signal<string | null>(null);
   deletingId = signal<string | null>(null);
+  saving = signal(false);
+  saveError = signal<string | null>(null);
 
   form = new FormGroup({
     name: new FormControl('', Validators.required),
   });
 
   openForm(it?: Industry) {
+    this.saveError.set(null);
+    this.saving.set(false);
     if (it) {
       this.editingId.set(it.id);
-      this.form.patchValue({ name: it.name });
+      this.form.reset({ name: it.name });
     } else {
       this.editingId.set(null);
       this.form.reset({ name: '' });
@@ -163,22 +192,58 @@ export class ManageIndustriesComponent {
     this.showForm.set(true);
   }
 
-  closeForm() {
+  closeForm(force = false) {
+    if (this.saving()) return;
+    if (!force && this.form.dirty && typeof window !== 'undefined'
+        && !window.confirm('Discard your unsaved industry changes?')) return;
     this.showForm.set(false);
     this.editingId.set(null);
+    this.saveError.set(null);
     this.form.reset();
   }
 
+  clearSearch() { this.search.set(''); }
+
+  invalid(controlName: keyof typeof this.form.controls): boolean {
+    const control = this.form.controls[controlName];
+    return control.invalid && (control.touched || control.dirty);
+  }
+
+  private focusFirstInvalidControl() {
+    const id = this.form.controls.name.invalid ? 'industryName' : null;
+    if (id) queueMicrotask(() => this.host.nativeElement.querySelector<HTMLElement>(`#${id}`)?.focus());
+  }
+
+  private apiErrorMessage(error: unknown): string {
+    const response = error as { error?: { error?: unknown }; message?: unknown } | null;
+    const detail = response?.error?.error ?? response?.message;
+    return typeof detail === 'string' && detail.trim() ? detail : 'Unable to save the industry.';
+  }
+
   save() {
-    if (!this.form.valid) return;
+    if (this.saving()) return;
+    this.saveError.set(null);
+    if (this.form.invalid) {
+      this.form.markAllAsTouched();
+      this.focusFirstInvalidControl();
+      return;
+    }
     const payload: Partial<Industry> = { name: this.form.getRawValue().name ?? '' };
     const id = this.editingId();
-    const done = () => { this.itemsRes.reload(); this.closeForm(); this.notifications.show('Industry saved.', 'success'); };
-    if (id) {
-      this.api.updateIndustry(id, payload).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(done);
-    } else {
-      this.api.createIndustry(payload).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(done);
-    }
+    this.saving.set(true);
+    const request = id ? this.api.updateIndustry(id, payload) : this.api.createIndustry(payload);
+    request.pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {
+        this.saving.set(false);
+        this.itemsRes.reload();
+        this.closeForm(true);
+        this.notifications.show('Industry saved.', 'success');
+      },
+      error: error => {
+        this.saving.set(false);
+        this.saveError.set(this.apiErrorMessage(error));
+      },
+    });
   }
 
   deleteItem(id: string) { this.deletingId.set(id); }

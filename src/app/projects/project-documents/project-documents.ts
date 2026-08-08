@@ -71,7 +71,7 @@ function initialsOf(name: string): string {
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
           @for (doc of filteredDocuments(); track doc.id) {
             <!-- Document Card -->
-            <div class="command-card p-6 group">
+            <div class="command-card p-6">
               <div class="flex items-start justify-between mb-4">
                 <div class="w-12 h-12 rounded-xl flex items-center justify-center ring-1"
                      [class.bg-critical-tint]="doc.type === 'pdf'" [class.text-critical-text]="doc.type === 'pdf'" [class.ring-critical]="doc.type === 'pdf'"
@@ -79,7 +79,7 @@ function initialsOf(name: string): string {
                   <mat-icon>{{ doc.type === 'pdf' ? 'picture_as_pdf' : 'description' }}</mat-icon>
                 </div>
                 <!-- Arms the confirm below; nothing is destroyed from here. -->
-                <button type="button" (click)="askDelete(doc)" [attr.aria-label]="'Delete ' + doc.name" class="text-[var(--cc-muted)] hover:text-critical-text opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100">
+                <button type="button" (click)="askDelete(doc)" [attr.aria-label]="'Delete ' + doc.name" data-test="delete-document" class="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg text-[var(--cc-muted)] transition-colors hover:bg-critical-tint hover:text-critical-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-critical">
                   <mat-icon class="text-sm">delete</mat-icon>
                 </button>
               </div>
@@ -152,8 +152,8 @@ function initialsOf(name: string): string {
       }
 
       <!--
-        DELETE CONFIRMATION. The trash icon is hover-revealed (sm:opacity-0) and sat
-        directly on the DELETE: one mis-click removed the register entry outright.
+        DELETE CONFIRMATION. The always-visible trash action only arms this dialog:
+        a first click must never remove the register entry outright.
         Nothing in this app can restore it — the row is the only record of the
         document's name, size, filing date and author attribution, and the
         append-only audit trail that holds the real actor is admin /
